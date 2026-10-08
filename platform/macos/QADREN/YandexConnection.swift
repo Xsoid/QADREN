@@ -21,15 +21,18 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
 
     private var session: ASWebAuthenticationSession?
     private let service = "dev.qadren.yandex.oauth"
-    private let account = "default"
+    let connectionID: String
+    let enabled: Bool
     // Must match the exact registered redirect URI at Yandex OAuth.
     private let redirect = "qadren://oauth/callback"
 
-    override init() {
+    init(connectionID: String, enabled: Bool) {
+        self.connectionID = connectionID
+        self.enabled = enabled
         super.init()
-        connected = (try? readToken()) != nil
+        connected = (try? YandexKeychain.read(connectionID)) != nil
         status = connected ? "Token stored in Keychain" : "Not connected"
-        if connected { Task { await refreshAccount(); await refreshDisk() } }
+        if connected && enabled { Task { await refreshAccount(); await refreshDisk() } }
     }
 
     func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
@@ -42,7 +45,7 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
             status = "Enter registered Yandex OAuth Client ID"
             return
         }
-        guard !busy else { return }
+        guard enabled, !busy else { return }
         busy = true
 
         let verifier = Self.randomURLSafe(32)
@@ -125,7 +128,8 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
                 status = "Empty access token"
                 return
             }
-            try storeToken(token.access_token)
+            try YandexKeychain.store(token.access_token, for: connectionID)
+            try StorageRegistryBridge.setCredential(id: connectionID)
             connected = true
             status = "Connected; access token stored in Keychain"
             await refreshAccount()
@@ -140,9 +144,9 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
     /// Resolve the Yandex login for the existing token. No extra OAuth scopes required
     /// for basic account info. Never put OAuth tokens into query parameters or logs.
     func refreshAccount() async {
-        guard connected else { return }
+        guard connected && enabled else { return }
         do {
-            guard let token = try readToken() else {
+            guard let token = try YandexKeychain.read(connectionID) else {
                 connected = false
                 accountLabel = nil
                 status = "No token in Keychain"
@@ -154,26 +158,39 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let code = (response as? HTTPURLResponse)?.statusCode, code == 200 else {
                 accountLabel = nil
-                status = "Connected; could not read Yandex account identity"
+                let statusCode = (response as? HTTPURLResponse)?.statusCode
+                if statusCode == 401 || statusCode == 403 {
+                    connected = false
+                    try? StorageRegistryBridge.setStatus(id: connectionID, status: "requires_auth")
+                    status = "Yandex authorization requires renewal"
+                } else {
+                    try? StorageRegistryBridge.setStatus(id: connectionID, status: "error")
+                    status = "Could not read Yandex account identity"
+                }
                 return
             }
             let info = try JSONDecoder().decode(YandexAccountInfo.self, from: data)
             let label = info.login ?? info.display_name ?? info.id
+            if let providerID = info.id, !providerID.isEmpty {
+                try? StorageRegistryBridge.setProviderAccount(id: connectionID, providerID: providerID)
+            }
             accountLabel = label
+            try? StorageRegistryBridge.setStatus(id: connectionID, status: "connected")
             status = label == nil ? "Connected; account identity unavailable" : "Connected to Yandex Disk"
         } catch {
             accountLabel = nil
+            try? StorageRegistryBridge.setStatus(id: connectionID, status: "offline")
             status = "Connected; account identity request failed"
         }
     }
 
     func refreshDisk() async {
-        guard connected, !metadataBusy else { return }
+        guard connected && enabled && !metadataBusy else { return }
         metadataBusy = true
         metadataError = nil
         defer { metadataBusy = false }
         do {
-            guard let token = try readToken() else {
+            guard let token = try YandexKeychain.read(connectionID) else {
                 metadataError = "No token in Keychain"
                 return
             }
@@ -203,22 +220,25 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
             if let quotaError = result.2 { errors.append("Quota: " + quotaError) }
             if let listingError = result.3 { errors.append("Root listing: " + listingError) }
             self.metadataError = errors.isEmpty ? nil : errors.joined(separator: " / ")
+            if let issue = self.metadataError, issue.contains("unauthorized") {
+                try? StorageRegistryBridge.setStatus(id: connectionID, status: "requires_auth")
+                self.connected = false
+                self.status = "Yandex authorization requires renewal"
+            }
         } catch {
             metadataError = "Keychain credential unavailable"
         }
     }
 
     func disconnect() {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account
-        ]
-        let result = SecItemDelete(query as CFDictionary)
-        guard result == errSecSuccess || result == errSecItemNotFound else {
+        do {
+            try YandexKeychain.delete(connectionID)
+        } catch {
             status = "Could not remove credentials from Keychain"
             return
         }
+        try? StorageRegistryBridge.clearCredential(id: connectionID)
+        try? StorageRegistryBridge.setStatus(id: connectionID, status: "disconnected")
         connected = false
         accountLabel = nil
         quota = nil
@@ -226,50 +246,6 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
         rootTotal = 0
         metadataError = nil
         status = "Disconnected locally (Yandex token not revoked)"
-    }
-
-    private func readToken() throws -> String? {
-        var query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        var item: CFTypeRef?
-        let code = SecItemCopyMatching(query as CFDictionary, &item)
-        if code == errSecItemNotFound { return nil }
-        guard code == errSecSuccess, let data = item as? Data,
-              let token = String(data: data, encoding: .utf8) else {
-            throw OAuthError.keychain
-        }
-        query.removeAll()
-        return token
-    }
-
-    private func storeToken(_ token: String) throws {
-        let item: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecValueData as String: Data(token.utf8),
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        ]
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account
-        ]
-        let status = SecItemCopyMatching(query.merging([kSecReturnAttributes as String: true]) { _, newer in newer } as CFDictionary, nil)
-        let result: OSStatus
-        if status == errSecItemNotFound {
-            result = SecItemAdd(item as CFDictionary, nil)
-        } else if status == errSecSuccess {
-            result = SecItemUpdate(query as CFDictionary, [kSecValueData as String: Data(token.utf8)] as CFDictionary)
-        } else {
-            result = status
-        }
-        guard result == errSecSuccess else { throw OAuthError.keychain }
     }
 
     private static func randomURLSafe(_ count: Int) -> String {
@@ -288,10 +264,6 @@ private struct YandexAccountInfo: Decodable {
 
 private struct YandexToken: Decodable {
     let access_token: String
-}
-
-private enum OAuthError: Error {
-    case keychain
 }
 
 private extension Data {
