@@ -16,13 +16,6 @@ fn safe_error(error: YandexError) -> &'static str {
     }
 }
 
-fn result_json<T: serde::Serialize>(result: crate::yandex::Result<T>) -> Value {
-    match result {
-        Ok(data) => json!({"ok": true, "data": data}),
-        Err(error) => json!({"ok": false, "error": safe_error(error)}),
-    }
-}
-
 fn export(value: Value) -> *mut c_char {
     let bytes = value.to_string();
     CString::new(bytes).expect("JSON cannot contain NUL").into_raw()
