@@ -177,6 +177,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn same_provider_connections_persist_independently_through_ffi() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let file = std::env::temp_dir().join(format!("qadren-ffi-{}-{nanos}.sqlite3", std::process::id()));
+        let path = CString::new(file.to_str().unwrap()).unwrap();
+        let adapter = CString::new("yandex_disk").unwrap();
+        let name = CString::new("Personal").unwrap();
+        let account = CString::new("shared-account").unwrap();
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            let result = qadren_registry_add(path.as_ptr(), adapter.as_ptr(), name.as_ptr());
+            let json: Value = serde_json::from_str(
+                unsafe { CStr::from_ptr(result) }.to_str().unwrap()
+            ).unwrap();
+            unsafe { qadren_registry_free_string(result) };
+            ids.push(json["data"]["id"].as_str().unwrap().to_owned());
+        }
+        assert_ne!(ids[0], ids[1]);
+        let a = CString::new(ids[0].as_str()).unwrap();
+        let b = CString::new(ids[1].as_str()).unwrap();
+        for id in [&a, &b] {
+            let result = qadren_registry_set_provider_account(path.as_ptr(), id.as_ptr(), account.as_ptr());
+            unsafe { qadren_registry_free_string(result) };
+        }
+        let result = qadren_registry_remove(path.as_ptr(), a.as_ptr());
+        unsafe { qadren_registry_free_string(result) };
+        let result = qadren_registry_list(path.as_ptr());
+        let entries: Value = serde_json::from_str(
+            unsafe { CStr::from_ptr(result) }.to_str().unwrap()
+        ).unwrap();
+        unsafe { qadren_registry_free_string(result) };
+        assert_eq!(entries["data"].as_array().unwrap().len(), 1);
+        assert_eq!(entries["data"][0]["id"], ids[1]);
+        assert_eq!(entries["data"][0]["provider_account_id"], "shared-account");
+        std::fs::remove_file(file).unwrap();
+    }
+
+    #[test]
     fn rejects_missing_path_without_dereferencing_null_pointer() {
         let ptr = qadren_registry_list(std::ptr::null());
         let data = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_owned();
