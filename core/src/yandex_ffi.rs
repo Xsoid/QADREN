@@ -18,7 +18,9 @@ fn safe_error(error: YandexError) -> &'static str {
 
 fn export(value: Value) -> *mut c_char {
     let bytes = value.to_string();
-    CString::new(bytes).expect("JSON cannot contain NUL").into_raw()
+    CString::new(bytes)
+        .expect("JSON cannot contain NUL")
+        .into_raw()
 }
 
 fn parse_token(token: *const c_char) -> Option<String> {
@@ -50,7 +52,11 @@ pub extern "C" fn qadren_yandex_list_root(token: *const c_char) -> *mut c_char {
     };
     let result = YandexMetadataClient::new()
         .map_err(safe_error)
-        .and_then(|client| client.list_folder(&token, "disk:/", 0, 50).map_err(safe_error));
+        .and_then(|client| {
+            client
+                .list_folder(&token, "disk:/", 0, 50)
+                .map_err(safe_error)
+        });
     match result {
         Ok(folder) => export(json!({"ok": true, "data": folder})),
         Err(error) => export(json!({"ok": false, "error": error})),
