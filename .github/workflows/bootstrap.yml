@@ -28,6 +28,10 @@ jobs:
           targets: aarch64-apple-darwin
       - name: Build native macOS application
         run: bash scripts/build-macos.sh
+      - name: Test recoverable connection removal
+        run: |
+          swiftc platform/macos/QADREN/ConnectionRemoval.swift platform/macos/Tests/ConnectionRemovalTests.swift -o "$RUNNER_TEMP/qadren-removal-tests"
+          "$RUNNER_TEMP/qadren-removal-tests"
       - name: Verify app bundle
         run: |
           test -x dist/QADREN.app/Contents/MacOS/QADREN
