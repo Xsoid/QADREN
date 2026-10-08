@@ -23,6 +23,7 @@ pub type Result<T> = std::result::Result<T, RegistryError>;
 pub struct StorageConnection {
     pub id: String,
     pub adapter: String,
+    pub provider_account_id: Option<String>,
     pub name: String,
     pub enabled: bool,
     pub status: String,
@@ -54,7 +55,7 @@ impl Registry {
         }
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 1 {
+        if version > 2 {
             return Err(RegistryError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -72,6 +73,14 @@ impl Registry {
                 );
                 PRAGMA user_version = 1;
                 COMMIT;")?;
+        }
+        if version <= 1 {
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                ALTER TABLE storage_connections ADD COLUMN provider_account_id TEXT;
+                PRAGMA user_version = 2;
+                COMMIT;",
+            )?;
         }
         Ok(Self { db })
     }
@@ -95,7 +104,7 @@ impl Registry {
 
     pub fn list(&self) -> Result<Vec<StorageConnection>> {
         let mut stmt = self.db.prepare(
-            "SELECT id,adapter,name,enabled,status,credential_ref,last_checked_at,diagnosis
+            "SELECT id,adapter,name,enabled,status,credential_ref,last_checked_at,diagnosis,provider_account_id
              FROM storage_connections ORDER BY name COLLATE NOCASE, id",
         )?;
         let rows = stmt.query_map([], Self::decode)?;
@@ -110,7 +119,7 @@ impl Registry {
         Ok(self
             .db
             .query_row(
-                "SELECT id,adapter,name,enabled,status,credential_ref,last_checked_at,diagnosis
+                "SELECT id,adapter,name,enabled,status,credential_ref,last_checked_at,diagnosis,provider_account_id
              FROM storage_connections WHERE id=?1",
                 [id],
                 Self::decode,
@@ -128,7 +137,16 @@ impl Registry {
             credential_ref: row.get(5)?,
             last_checked_at: row.get(6)?,
             diagnosis: row.get(7)?,
+            provider_account_id: row.get(8)?,
         })
+    }
+
+    /// Provider account ID may repeat; connections are never deduplicated by it.
+    pub fn set_provider_account_id(&self, id: &str, account_id: Option<&str>) -> Result<()> {
+        self.changed(self.db.execute(
+            "UPDATE storage_connections SET provider_account_id=?1 WHERE id=?2",
+            params![account_id, id],
+        )?)
     }
 
     pub fn rename(&self, id: &str, name: &str) -> Result<()> {
@@ -290,6 +308,66 @@ mod tests {
         assert_eq!(
             db.get(&second).unwrap().unwrap().credential_ref.as_deref(),
             Some("keychain-connection-b")
+        );
+    }
+
+    #[test]
+    fn same_provider_account_allows_independent_connections() {
+        let db = Registry::in_memory().unwrap();
+        let a = db.add("yandex_disk", "Primary").unwrap();
+        let b = db.add("yandex_disk", "Second").unwrap();
+        db.set_provider_account_id(&a, Some("account-123")).unwrap();
+        db.set_provider_account_id(&b, Some("account-123")).unwrap();
+        assert_eq!(
+            db.get(&a).unwrap().unwrap().provider_account_id.as_deref(),
+            Some("account-123")
+        );
+        assert_eq!(
+            db.get(&b).unwrap().unwrap().provider_account_id.as_deref(),
+            Some("account-123")
+        );
+        db.remove(&a).unwrap();
+        assert!(db.get(&b).unwrap().is_some());
+    }
+
+    #[test]
+    fn migrate_existing_v1_keeps_connections() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE storage_connections (
+                id TEXT PRIMARY KEY NOT NULL,
+                adapter TEXT NOT NULL,
+                name TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                status TEXT NOT NULL DEFAULT 'disconnected',
+                credential_ref TEXT,
+                last_checked_at INTEGER,
+                diagnosis TEXT
+            );
+            INSERT INTO storage_connections(id, adapter, name, credential_ref)
+                VALUES('original-id', 'yandex_disk', 'Existing', 'legacy-credential-ref');
+            PRAGMA user_version = 1;",
+        )
+        .unwrap();
+        let registry = Registry::initialize(db).unwrap();
+        let record = registry.get("original-id").unwrap().unwrap();
+        assert_eq!(
+            record.credential_ref.as_deref(),
+            Some("legacy-credential-ref")
+        );
+        assert_eq!(record.name, "Existing");
+        assert!(record.provider_account_id.is_none());
+        registry
+            .set_provider_account_id("original-id", Some("123"))
+            .unwrap();
+        assert_eq!(
+            registry
+                .get("original-id")
+                .unwrap()
+                .unwrap()
+                .provider_account_id
+                .as_deref(),
+            Some("123")
         );
     }
 
