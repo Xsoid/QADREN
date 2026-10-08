@@ -7,8 +7,13 @@ use std::ffi::{c_char, CStr, CString};
 use std::path::Path;
 
 fn input(ptr: *const c_char) -> Option<String> {
-    if ptr.is_null() { return None; }
-    unsafe { CStr::from_ptr(ptr) }.to_str().ok().map(ToOwned::to_owned)
+    if ptr.is_null() {
+        return None;
+    }
+    unsafe { CStr::from_ptr(ptr) }
+        .to_str()
+        .ok()
+        .map(ToOwned::to_owned)
 }
 
 fn output(value: Value) -> *mut c_char {
@@ -36,17 +41,21 @@ where
 #[no_mangle]
 pub extern "C" fn qadren_registry_list(path: *const c_char) -> *mut c_char {
     with_registry(path, |db| {
-        let entries: Vec<Value> = db.list()?.into_iter().map(|entry| {
-            json!({
-                "id": entry.id,
-                "adapter": entry.adapter,
-                "name": entry.name,
-                "enabled": entry.enabled,
-                "status": entry.status,
-                "credential_ref": entry.credential_ref,
-                "provider_account_id": entry.provider_account_id
+        let entries: Vec<Value> = db
+            .list()?
+            .into_iter()
+            .map(|entry| {
+                json!({
+                    "id": entry.id,
+                    "adapter": entry.adapter,
+                    "name": entry.name,
+                    "enabled": entry.enabled,
+                    "status": entry.status,
+                    "credential_ref": entry.credential_ref,
+                    "provider_account_id": entry.provider_account_id
+                })
             })
-        }).collect();
+            .collect();
         Ok(json!(entries))
     })
 }
@@ -64,10 +73,7 @@ pub extern "C" fn qadren_registry_add(
 }
 
 #[no_mangle]
-pub extern "C" fn qadren_registry_remove(
-    path: *const c_char,
-    id: *const c_char,
-) -> *mut c_char {
+pub extern "C" fn qadren_registry_remove(path: *const c_char, id: *const c_char) -> *mut c_char {
     let Some(id) = input(id) else {
         return output(json!({"ok":false,"error":"invalid_input"}));
     };
