@@ -13,6 +13,8 @@ private func registrySetEnabled(_ path: UnsafePointer<CChar>?, _ id: UnsafePoint
 private func registryRemove(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_set_credential")
 private func registrySetCredential(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ ref: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_registry_set_status")
+private func registrySetStatus(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ status: UnsafePointer<CChar>?, _ timestamp: Int64) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_set_provider_account")
 private func registrySetAccount(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ account: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_free_string")
@@ -122,6 +124,27 @@ enum StorageRegistryBridge {
             try id.withCString { value in
                 try ("keychain:" + id).withCString { reference in
                     try unwrap(registrySetCredential(db, value, reference), as: Bool.self)
+                }
+            }
+        }
+    }
+
+    static func clearCredential(id: String) throws {
+        let database = try path
+        let _: Bool = try database.withCString { db in
+            try id.withCString { value in
+                try unwrap(registrySetCredential(db, value, nil), as: Bool.self)
+            }
+        }
+    }
+
+    static func setStatus(id: String, status: String) throws {
+        let database = try path
+        let timestamp = Int64(Date().timeIntervalSince1970)
+        let _: Bool = try database.withCString { db in
+            try id.withCString { value in
+                try status.withCString { state in
+                    try unwrap(registrySetStatus(db, value, state, timestamp), as: Bool.self)
                 }
             }
         }
