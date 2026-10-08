@@ -179,8 +179,12 @@ mod tests {
     #[test]
     fn same_provider_connections_persist_independently_through_ffi() {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let file = std::env::temp_dir().join(format!("qadren-ffi-{}-{nanos}.sqlite3", std::process::id()));
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let file =
+            std::env::temp_dir().join(format!("qadren-ffi-{}-{nanos}.sqlite3", std::process::id()));
         let path = CString::new(file.to_str().unwrap()).unwrap();
         let adapter = CString::new("yandex_disk").unwrap();
         let name = CString::new("Personal").unwrap();
@@ -188,9 +192,8 @@ mod tests {
         let mut ids = Vec::new();
         for _ in 0..2 {
             let result = qadren_registry_add(path.as_ptr(), adapter.as_ptr(), name.as_ptr());
-            let json: Value = serde_json::from_str(
-                unsafe { CStr::from_ptr(result) }.to_str().unwrap()
-            ).unwrap();
+            let json: Value =
+                serde_json::from_str(unsafe { CStr::from_ptr(result) }.to_str().unwrap()).unwrap();
             unsafe { qadren_registry_free_string(result) };
             ids.push(json["data"]["id"].as_str().unwrap().to_owned());
         }
@@ -198,15 +201,15 @@ mod tests {
         let a = CString::new(ids[0].as_str()).unwrap();
         let b = CString::new(ids[1].as_str()).unwrap();
         for id in [&a, &b] {
-            let result = qadren_registry_set_provider_account(path.as_ptr(), id.as_ptr(), account.as_ptr());
+            let result =
+                qadren_registry_set_provider_account(path.as_ptr(), id.as_ptr(), account.as_ptr());
             unsafe { qadren_registry_free_string(result) };
         }
         let result = qadren_registry_remove(path.as_ptr(), a.as_ptr());
         unsafe { qadren_registry_free_string(result) };
         let result = qadren_registry_list(path.as_ptr());
-        let entries: Value = serde_json::from_str(
-            unsafe { CStr::from_ptr(result) }.to_str().unwrap()
-        ).unwrap();
+        let entries: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(result) }.to_str().unwrap()).unwrap();
         unsafe { qadren_registry_free_string(result) };
         assert_eq!(entries["data"].as_array().unwrap().len(), 1);
         assert_eq!(entries["data"][0]["id"], ids[1]);
