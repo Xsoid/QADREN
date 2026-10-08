@@ -34,6 +34,40 @@ struct MainView: View {
                 LabeledContent("Yandex account", value: account)
             }
             Text(yandex.status).font(.caption).foregroundStyle(.secondary)
+            if yandex.connected {
+                Divider()
+                HStack {
+                    Text("Disk metadata").font(.headline)
+                    Button("Refresh") { Task { await yandex.refreshDisk() } }
+                        .disabled(yandex.metadataBusy)
+                }
+                if yandex.metadataBusy { ProgressView() }
+                if let quota = yandex.quota {
+                    LabeledContent("Total storage", value: ByteCountFormatter.string(fromByteCount: Int64(clamping: quota.total_space), countStyle: .file))
+                    LabeledContent("Used", value: ByteCountFormatter.string(fromByteCount: Int64(clamping: quota.used_space), countStyle: .file))
+                    LabeledContent("Free", value: ByteCountFormatter.string(fromByteCount: Int64(clamping: quota.total_space > quota.used_space ? quota.total_space - quota.used_space : 0), countStyle: .file))
+                }
+                if let error = yandex.metadataError {
+                    Text("Disk API: " + error).font(.caption).foregroundStyle(.orange)
+                }
+                Text("Root directory metadata (first 50 of \(yandex.rootTotal))").font(.subheadline)
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 6) {
+                        ForEach(yandex.rootItems) { item in
+                            HStack {
+                                Image(systemName: item.kind == "dir" ? "folder" : "doc")
+                                Text(item.name).lineLimit(1)
+                                Spacer()
+                                if let size = item.size {
+                                    Text(ByteCountFormatter.string(fromByteCount: Int64(clamping: size), countStyle: .file))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: 190)
+            }
             Spacer()
             Text("No file contents are downloaded or uploaded by QADREN.")
                 .font(.caption)
