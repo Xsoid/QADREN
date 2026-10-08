@@ -3,6 +3,7 @@
 
 pub mod registry;
 pub mod yandex;
+pub mod yandex_ffi;
 
 use std::ffi::c_char;
 
