@@ -1,0 +1,36 @@
+name: Bootstrap checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Rust formatting, lint and tests
+        run: bash scripts/test-core.sh
+
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - name: Build native macOS application
+        run: bash scripts/build-macos.sh
+      - name: Verify app bundle
+        run: |
+          test -x dist/QADREN.app/Contents/MacOS/QADREN
+          file dist/QADREN.app/Contents/MacOS/QADREN
+          plutil -lint dist/QADREN.app/Contents/Info.plist
+          du -sh dist/QADREN.app
