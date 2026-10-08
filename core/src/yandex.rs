@@ -149,7 +149,10 @@ mod tests {
     use super::*;
 
     // Local loopback mock: verifies HTTP status mapping and no content transfers.
-    fn mocked_client(status: u16, body: &str) -> (YandexMetadataClient, std::thread::JoinHandle<()>) {
+    fn mocked_client(
+        status: u16,
+        body: &str,
+    ) -> (YandexMetadataClient, std::thread::JoinHandle<()>) {
         use std::io::{Read, Write};
         use std::net::TcpListener;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -157,7 +160,9 @@ mod tests {
         let payload = body.to_owned();
         let thread = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
             let mut request = [0u8; 8192];
             let n = stream.read(&mut request).unwrap();
             let message = String::from_utf8_lossy(&request[..n]);
@@ -170,7 +175,10 @@ mod tests {
             stream.write_all(response.as_bytes()).unwrap();
         });
         let client = YandexMetadataClient {
-            http: Client::builder().timeout(Duration::from_secs(3)).build().unwrap(),
+            http: Client::builder()
+                .timeout(Duration::from_secs(3))
+                .build()
+                .unwrap(),
             api_base: format!("http://{addr}/v1/disk"),
         };
         (client, thread)
@@ -187,7 +195,12 @@ mod tests {
 
     #[test]
     fn mock_maps_authorization_rate_limit_and_server_errors() {
-        for (status, expected) in [(401, "unauthorized"), (403, "forbidden"), (429, "rate_limited"), (503, "provider")] {
+        for (status, expected) in [
+            (401, "unauthorized"),
+            (403, "forbidden"),
+            (429, "rate_limited"),
+            (503, "provider"),
+        ] {
             let (client, server) = mocked_client(status, r#"{"message":"provider error"}"#);
             let result = client.disk_info("test-token");
             server.join().unwrap();
