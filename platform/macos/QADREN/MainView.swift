@@ -26,7 +26,7 @@ struct MainView: View {
                 .foregroundStyle(.secondary)
             HStack {
                 Button("Connect") { yandex.connect() }
-                    .disabled(yandex.busy || yandex.connected)
+                    .disabled(yandex.busy || yandex.connected || yandex.clientID.isEmpty)
                 Button("Disconnect") { yandex.disconnect() }
                     .disabled(yandex.busy || !yandex.connected)
             }
