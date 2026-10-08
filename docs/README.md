@@ -1,9 +1,15 @@
 # Документация QADREN
 
-Версия архитектурной концепции: **v0.4** (2026-10-08). Эта версия описывает принятые принципы, а не готовую реализацию.
+Версия архитектурной концепции: **v0.5** (2026-10-08). Эта версия описывает принятые принципы, а не готовую реализацию.
 
 | Документ | Содержание |
 |---|---|
+| [Стек](architecture/technology-stack.md) | Rust, SwiftUI, Swift/iCloud, SQLite, поставка без runtime |
+| [Правила разработки](development/engineering-rules.md) | Минимализм, ответственность модулей, надёжность и безопасность |
+| [Тесты](development/testing-and-quality.md) | Проверки и критерии готовности |
+| [Сборка](development/build-and-release.md) | Нативная поставка и выпуск |
+| [Структура](development/repository-structure.md) | Организация кода и документации |
+| [AI-контекст](../AGENTS.md) | Правила для Codex и других агентов |
 | [Обзор](architecture/overview.md) | Цели, компоненты, границы |
 | [Резервирование](architecture/backup-model.md) | BackupSet, направления, версии и конфликты |
 | [Узлы](architecture/nodes-and-delegation.md) | Controller/Worker, делегирование |
