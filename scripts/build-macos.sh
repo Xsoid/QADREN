@@ -15,7 +15,7 @@ case "$ARCH" in
   *) echo "Unsupported macOS arch: $ARCH" >&2; exit 1 ;;
 esac
 
-cargo build --release --manifest-path core/Cargo.toml --target "$TARGET"
+# Apply one minimum deployment target to Rust, bundled C dependencies (SQLite) and Swift.\nexport MACOSX_DEPLOYMENT_TARGET=13.0\ncargo build --release --manifest-path core/Cargo.toml --target "$TARGET"
 APP="$ROOT/dist/QADREN.app"
 mkdir -p "$APP/Contents/MacOS"
 cp platform/macos/Info.plist "$APP/Contents/Info.plist"
