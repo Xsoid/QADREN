@@ -53,8 +53,8 @@ pub enum ValidationError {
 }
 
 impl ScenarioDraft {
-    /// Conservative admission policy: independent roots on the same connection
-    /// are allowed only if neither contains the other. No content is read.
+    /// Performs syntax-level checks without touching remote or local content.
+    /// Root overlaps must be resolved by the corresponding storage adapter.
     pub fn validate(&self) -> Result<(), ValidationError> {
         if self.name.trim().is_empty() {
             return Err(ValidationError::EmptyName);
@@ -94,7 +94,10 @@ mod tests {
     use super::*;
 
     fn endpoint(connection: &str, root: &str) -> StorageEndpoint {
-        StorageEndpoint { connection_id: connection.into(), root: root.into() }
+        StorageEndpoint {
+            connection_id: connection.into(),
+            root: root.into(),
+        }
     }
 
     fn draft() -> ScenarioDraft {
@@ -115,7 +118,10 @@ mod tests {
     fn allows_distinct_roots_on_the_same_connection_for_later_adapter_validation() {
         let mut scenario = draft();
         scenario.right = scenario.left.clone();
-        assert_eq!(scenario.validate(), Err(ValidationError::IdenticalEndpoints));
+        assert_eq!(
+            scenario.validate(),
+            Err(ValidationError::IdenticalEndpoints)
+        );
         scenario.right.root = "/other".into();
         assert_eq!(scenario.validate(), Ok(()));
     }
@@ -143,10 +149,16 @@ mod tests {
 
     #[test]
     fn manual_job_has_no_scenario_and_revision_is_explicit() {
-        let manual = JobIdentity { job_id: "manual-1".into(), scenario: None };
+        let manual = JobIdentity {
+            job_id: "manual-1".into(),
+            scenario: None,
+        };
         let planned = JobIdentity {
             job_id: "job-2".into(),
-            scenario: Some(ScenarioReference { scenario_id: "scenario-1".into(), revision: 3 }),
+            scenario: Some(ScenarioReference {
+                scenario_id: "scenario-1".into(),
+                revision: 3,
+            }),
         };
         assert_eq!(manual.scenario, None);
         assert_eq!(planned.scenario.unwrap().revision, 3);
