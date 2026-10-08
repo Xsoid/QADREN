@@ -84,6 +84,39 @@ pub extern "C" fn qadren_registry_remove(path: *const c_char, id: *const c_char)
 }
 
 #[no_mangle]
+pub extern "C" fn qadren_registry_rename(
+    path: *const c_char,
+    id: *const c_char,
+    name: *const c_char,
+) -> *mut c_char {
+    let (Some(id), Some(name)) = (input(id), input(name)) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    with_registry(path, |db| {
+        db.rename(&id, &name)?;
+        Ok(json!(true))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn qadren_registry_set_enabled(
+    path: *const c_char,
+    id: *const c_char,
+    enabled: u8,
+) -> *mut c_char {
+    let Some(id) = input(id) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    if enabled > 1 {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    }
+    with_registry(path, |db| {
+        db.set_enabled(&id, enabled == 1)?;
+        Ok(json!(true))
+    })
+}
+
+#[no_mangle]
 pub extern "C" fn qadren_registry_set_credential(
     path: *const c_char,
     id: *const c_char,
