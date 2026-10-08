@@ -264,13 +264,18 @@ mod tests {
     fn multiple_connections_to_same_adapter_and_account_remain_independent() {
         let db = Registry::in_memory().unwrap();
         let first = db.add("yandex_disk", "Personal").unwrap();
-        let second = db.add("yandex_disk", "Another connection to Personal").unwrap();
+        let second = db
+            .add("yandex_disk", "Another connection to Personal")
+            .unwrap();
         let third = db.add("yandex_disk", "Work").unwrap();
         assert_ne!(first, second);
         assert_ne!(second, third);
-        db.set_credential_ref(&first, Some("keychain-connection-a")).unwrap();
-        db.set_credential_ref(&second, Some("keychain-connection-b")).unwrap();
-        db.set_credential_ref(&third, Some("keychain-connection-c")).unwrap();
+        db.set_credential_ref(&first, Some("keychain-connection-a"))
+            .unwrap();
+        db.set_credential_ref(&second, Some("keychain-connection-b"))
+            .unwrap();
+        db.set_credential_ref(&third, Some("keychain-connection-c"))
+            .unwrap();
         db.mark_checked(&first, "connected", 10, None).unwrap();
         db.set_enabled(&second, false).unwrap();
         db.remove(&third).unwrap();
