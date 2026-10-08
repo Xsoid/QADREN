@@ -1,0 +1,10 @@
+# Rust
+**/target/
+# macOS build
+dist/
+.DS_Store
+*.xcuserstate
+# local secrets
+.env
+.env.*
+!.env.example
