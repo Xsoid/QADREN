@@ -1,26 +1,100 @@
 import SwiftUI
 
 struct MainView: View {
-    @StateObject private var yandex = YandexConnection()
+    @StateObject private var connections = StorageConnections()
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack(spacing: 12) {
-                Image(systemName: "externaldrive.badge.icloud")
-                    .font(.system(size: 36))
-                    .foregroundStyle(.tint)
-                VStack(alignment: .leading) {
-                    Text("QADREN")
-                        .font(.title.bold())
-                    Text("Native macOS bootstrap")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack(spacing: 12) {
+                    Image(systemName: "externaldrive.badge.icloud")
+                        .font(.system(size: 36))
+                        .foregroundStyle(.tint)
+                    VStack(alignment: .leading) {
+                        Text("QADREN")
+                            .font(.title.bold())
+                        Text("Native macOS bootstrap")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Divider()
+                LabeledContent("Core version", value: CoreBridge.version)
+                LabeledContent("Core status", value: CoreBridge.status)
+                LabeledContent("Local worker", value: CoreBridge.workerStatus)
+                Divider()
+                HStack {
+                    Text("Storage connections")
+                        .font(.headline)
+                    Spacer()
+                    Button("Add Yandex Disk") { connections.addYandex() }
+                    Button("Reload") { connections.refresh() }
+                }
+                Text("Each connection has separate credentials and its own identity.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if connections.hasLegacyYandexToken {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Existing Yandex Disk authorization found")
+                        Button("Import existing connection") {
+                            connections.importLegacyYandex()
+                        }
+                        Text("Your old token stays in Keychain until the copy has been verified.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if let error = connections.error {
+                    Text(error).font(.caption).foregroundStyle(.orange)
+                }
+                if connections.entries.isEmpty && !connections.hasLegacyYandexToken {
+                    Text("No storage connections. Use Add Yandex Disk to begin.")
                         .foregroundStyle(.secondary)
                 }
+                ForEach(connections.entries) { entry in
+                    if entry.adapter == "yandex_disk" {
+                        YandexConnectionCard(entry: entry) {
+                            connections.remove(entry.id)
+                        }
+                        Divider()
+                    } else {
+                        LabeledContent(entry.name, value: entry.adapter)
+                        Divider()
+                    }
+                }
+                Text("QADREN does not download or upload file contents in this prototype.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
-            Divider()
-            LabeledContent("Core version", value: CoreBridge.version)
-            LabeledContent("Core status", value: CoreBridge.status)
-            LabeledContent("Local worker", value: CoreBridge.workerStatus)
-            Divider()
-            Text("Yandex Disk (read-only authorization)").font(.headline)
+            .padding(24)
+        }
+    }
+}
+
+private struct YandexConnectionCard: View {
+    let entry: StorageEntry
+    let onRemove: () -> Void
+    @StateObject private var yandex: YandexConnection
+    @State private var confirmRemoval = false
+
+    init(entry: StorageEntry, onRemove: @escaping () -> Void) {
+        self.entry = entry
+        self.onRemove = onRemove
+        _yandex = StateObject(wrappedValue: YandexConnection(connectionID: entry.id))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(entry.name).font(.headline)
+                    Text("Yandex Disk · connection " + String(entry.id.prefix(8)))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Remove") { confirmRemoval = true }
+                    .disabled(yandex.busy || yandex.metadataBusy)
+            }
             Text(yandex.clientID.isEmpty ? "Client ID not configured for this build" : "OAuth application configured")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -34,10 +108,10 @@ struct MainView: View {
                 LabeledContent("Yandex account", value: account)
             }
             Text(yandex.status).font(.caption).foregroundStyle(.secondary)
+
             if yandex.connected {
-                Divider()
                 HStack {
-                    Text("Disk metadata").font(.headline)
+                    Text("Disk metadata").font(.subheadline.bold())
                     Button("Refresh") { Task { await yandex.refreshDisk() } }
                         .disabled(yandex.metadataBusy)
                 }
@@ -50,7 +124,8 @@ struct MainView: View {
                 if let error = yandex.metadataError {
                     Text("Disk API: " + error).font(.caption).foregroundStyle(.orange)
                 }
-                Text("Root directory metadata (first 50 of \(yandex.rootTotal))").font(.subheadline)
+                Text("Root directory metadata (first 50 of \(yandex.rootTotal))")
+                    .font(.subheadline)
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 6) {
                         ForEach(yandex.rootItems) { item in
@@ -66,13 +141,16 @@ struct MainView: View {
                         }
                     }
                 }
-                .frame(maxHeight: 190)
+                .frame(maxHeight: 160)
             }
-            Spacer()
-            Text("No file contents are downloaded or uploaded by QADREN.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
-        .padding(24)
+        .confirmationDialog(
+            "Remove this QADREN connection locally?",
+            isPresented: $confirmRemoval
+        ) {
+            Button("Remove connection", role: .destructive, action: onRemove)
+        } message: {
+            Text("This removes only this local connection and its Keychain token. Files in Yandex Disk are untouched.")
+        }
     }
 }
