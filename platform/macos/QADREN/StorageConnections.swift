@@ -55,17 +55,12 @@ final class StorageConnections: ObservableObject {
             guard let entry = try StorageRegistryBridge.list().first(where: { $0.id == id }) else {
                 throw StorageError.operation("Connection not found; credentials were not touched")
             }
-            guard entry.adapter == "yandex_disk" else {
-                throw StorageError.operation("Unsupported credential cleanup for this adapter")
-            }
-
-            // Fail closed: prevent new work before removing credentials. If
-            // Keychain deletion fails, the disabled record remains for retry.
-            try StorageRegistryBridge.setEnabled(id: id, enabled: false)
-            try YandexKeychain.delete(id) // Not-found is an idempotent success.
-            // If SQLite removal fails, the disabled record remains visible;
-            // retrying deletion is safe even though the token is already gone.
-            try StorageRegistryBridge.remove(id: id)
+            try ConnectionRemoval.run(
+                adapter: entry.adapter,
+                disable: { try StorageRegistryBridge.setEnabled(id: id, enabled: false) },
+                deleteCredential: { try YandexKeychain.delete(id) },
+                deleteRecord: { try StorageRegistryBridge.remove(id: id) }
+            )
             refresh()
         } catch {
             // Refresh the listing without discarding the failure message.
