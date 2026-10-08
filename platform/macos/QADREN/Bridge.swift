@@ -56,6 +56,11 @@ struct DiskItem: Decodable, Identifiable {
     let path: String
     let kind: String
     let size: UInt64?
+
+    enum CodingKeys: String, CodingKey {
+        case name, path, size
+        case kind = "type"
+    }
 }
 struct DiskListing: Decodable {
     let items: [DiskItem]
