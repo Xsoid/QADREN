@@ -50,15 +50,11 @@ final class StorageConnections: ObservableObject {
 
     func remove(_ id: String) {
         do {
-            // Restore secret if the registry refuses to remove the record.
-            let prior = try YandexKeychain.read(id)
+            // Remove metadata first. On successful delete, a Keychain failure
+            // leaves only an orphaned credential, never a live record without its token.
+            // A second removal attempt can safely clean the orphan.
+            try StorageRegistryBridge.remove(id: id)
             try YandexKeychain.delete(id)
-            do {
-                try StorageRegistryBridge.remove(id: id)
-            } catch {
-                if let prior { try? YandexKeychain.store(prior, for: id) }
-                throw error
-            }
             refresh()
         } catch {
             self.error = error.localizedDescription
@@ -83,12 +79,9 @@ final class StorageConnections: ObservableObject {
                     return
                 }
             }
-            let pending = current.first {
-                $0.adapter == "yandex_disk" &&
-                $0.name == "Imported Yandex Disk" &&
-                $0.credential_ref == nil
-            }
-            let id = try pending?.id ?? StorageRegistryBridge.addYandex(name: "Imported Yandex Disk")
+            // Never adopt an unrelated empty user-created connection by name.
+            // Interrupted migrations that already wrote a token are found above.
+            let id = try StorageRegistryBridge.addYandex(name: "Imported Yandex Disk")
             try YandexKeychain.store(legacyToken, for: id)
             guard try YandexKeychain.read(id) == legacyToken else {
                 throw StorageError.operation("Legacy token copy could not be verified")
