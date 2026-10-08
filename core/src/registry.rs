@@ -13,7 +13,9 @@ pub enum RegistryError {
     NotFound,
 }
 impl From<rusqlite::Error> for RegistryError {
-    fn from(error: rusqlite::Error) -> Self { Self::Database(error) }
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Database(error)
+    }
 }
 pub type Result<T> = std::result::Result<T, RegistryError>;
 
@@ -30,7 +32,9 @@ pub struct StorageConnection {
     pub diagnosis: Option<String>,
 }
 
-pub struct Registry { db: Connection }
+pub struct Registry {
+    db: Connection,
+}
 
 impl Registry {
     pub fn open(path: &Path) -> Result<Self> {
@@ -44,12 +48,15 @@ impl Registry {
 
     fn initialize(db: Connection) -> Result<Self> {
         db.pragma_update(None, "foreign_keys", "ON")?;
-        let integrity: String =
-            db.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
-        if integrity != "ok" { return Err(RegistryError::IntegrityFailed); }
+        let integrity: String = db.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+        if integrity != "ok" {
+            return Err(RegistryError::IntegrityFailed);
+        }
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 1 { return Err(RegistryError::UnsupportedSchema(version)); }
+        if version > 1 {
+            return Err(RegistryError::UnsupportedSchema(version));
+        }
         if version == 0 {
             db.execute_batch("BEGIN IMMEDIATE;
                 CREATE TABLE IF NOT EXISTS storage_connections (
@@ -70,11 +77,15 @@ impl Registry {
     }
 
     pub fn add(&self, adapter: &str, name: &str) -> Result<String> {
-        if !valid_adapter(adapter) { return Err(RegistryError::InvalidAdapter); }
-        if !valid_name(name) { return Err(RegistryError::InvalidName); }
-        let id: String = self.db.query_row(
-            "SELECT lower(hex(randomblob(16)))", [], |row| row.get(0)
-        )?;
+        if !valid_adapter(adapter) {
+            return Err(RegistryError::InvalidAdapter);
+        }
+        if !valid_name(name) {
+            return Err(RegistryError::InvalidName);
+        }
+        let id: String = self
+            .db
+            .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
         self.db.execute(
             "INSERT INTO storage_connections(id,adapter,name) VALUES (?1,?2,?3)",
             params![id, adapter, name.trim()],
@@ -85,32 +96,45 @@ impl Registry {
     pub fn list(&self) -> Result<Vec<StorageConnection>> {
         let mut stmt = self.db.prepare(
             "SELECT id,adapter,name,enabled,status,credential_ref,last_checked_at,diagnosis
-             FROM storage_connections ORDER BY name COLLATE NOCASE, id"
+             FROM storage_connections ORDER BY name COLLATE NOCASE, id",
         )?;
         let rows = stmt.query_map([], Self::decode)?;
         let mut result = Vec::new();
-        for row in rows { result.push(row?); }
+        for row in rows {
+            result.push(row?);
+        }
         Ok(result)
     }
 
     pub fn get(&self, id: &str) -> Result<Option<StorageConnection>> {
-        Ok(self.db.query_row(
-            "SELECT id,adapter,name,enabled,status,credential_ref,last_checked_at,diagnosis
-             FROM storage_connections WHERE id=?1", [id], Self::decode
-        ).optional()?)
+        Ok(self
+            .db
+            .query_row(
+                "SELECT id,adapter,name,enabled,status,credential_ref,last_checked_at,diagnosis
+             FROM storage_connections WHERE id=?1",
+                [id],
+                Self::decode,
+            )
+            .optional()?)
     }
 
     fn decode(row: &rusqlite::Row<'_>) -> rusqlite::Result<StorageConnection> {
         Ok(StorageConnection {
-            id: row.get(0)?, adapter: row.get(1)?, name: row.get(2)?,
-            enabled: row.get(3)?, status: row.get(4)?,
-            credential_ref: row.get(5)?, last_checked_at: row.get(6)?,
+            id: row.get(0)?,
+            adapter: row.get(1)?,
+            name: row.get(2)?,
+            enabled: row.get(3)?,
+            status: row.get(4)?,
+            credential_ref: row.get(5)?,
+            last_checked_at: row.get(6)?,
             diagnosis: row.get(7)?,
         })
     }
 
     pub fn rename(&self, id: &str, name: &str) -> Result<()> {
-        if !valid_name(name) { return Err(RegistryError::InvalidName); }
+        if !valid_name(name) {
+            return Err(RegistryError::InvalidName);
+        }
         self.changed(self.db.execute(
             "UPDATE storage_connections SET name=?1 WHERE id=?2",
             params![name.trim(), id],
@@ -127,11 +151,23 @@ impl Registry {
     /// Deletes *only* the local registry record. Never modifies remote cloud data.
     /// Credential revocation/removal is the platform credential store's responsibility.
     pub fn remove(&self, id: &str) -> Result<()> {
-        self.changed(self.db.execute("DELETE FROM storage_connections WHERE id=?1", [id])?)
+        self.changed(
+            self.db
+                .execute("DELETE FROM storage_connections WHERE id=?1", [id])?,
+        )
     }
 
-    pub fn mark_checked(&self, id: &str, status: &str, at: i64, diagnosis: Option<&str>) -> Result<()> {
-        if !matches!(status, "disconnected" | "connected" | "requires_auth" | "offline" | "error") {
+    pub fn mark_checked(
+        &self,
+        id: &str,
+        status: &str,
+        at: i64,
+        diagnosis: Option<&str>,
+    ) -> Result<()> {
+        if !matches!(
+            status,
+            "disconnected" | "connected" | "requires_auth" | "offline" | "error"
+        ) {
             return Err(RegistryError::InvalidAdapter);
         }
         self.changed(self.db.execute(
@@ -149,7 +185,11 @@ impl Registry {
     }
 
     fn changed(&self, count: usize) -> Result<()> {
-        if count == 0 { Err(RegistryError::NotFound) } else { Ok(()) }
+        if count == 0 {
+            Err(RegistryError::NotFound)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -160,7 +200,9 @@ fn valid_name(name: &str) -> bool {
 fn valid_adapter(adapter: &str) -> bool {
     !adapter.is_empty()
         && adapter.len() <= 64
-        && adapter.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_' || c == b'-')
+        && adapter
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_' || c == b'-')
 }
 
 #[cfg(test)]
@@ -186,19 +228,33 @@ mod tests {
     #[test]
     fn rejects_invalid_names_and_adapters() {
         let db = Registry::in_memory().unwrap();
-        assert!(matches!(db.add("bad adapter", "OK"), Err(RegistryError::InvalidAdapter)));
-        assert!(matches!(db.add("yandex_disk", "  "), Err(RegistryError::InvalidName)));
-        assert!(matches!(db.add("yandex_disk", "x\nsecret"), Err(RegistryError::InvalidName)));
+        assert!(matches!(
+            db.add("bad adapter", "OK"),
+            Err(RegistryError::InvalidAdapter)
+        ));
+        assert!(matches!(
+            db.add("yandex_disk", "  "),
+            Err(RegistryError::InvalidName)
+        ));
+        assert!(matches!(
+            db.add("yandex_disk", "x\nsecret"),
+            Err(RegistryError::InvalidName)
+        ));
     }
 
     #[test]
     fn diagnostic_metadata_and_keychain_reference_are_separate() {
         let db = Registry::in_memory().unwrap();
         let id = db.add("icloud_documents", "Backup").unwrap();
-        db.set_credential_ref(&id, Some("keychain-item-id")).unwrap();
-        db.mark_checked(&id, "offline", 1234, Some("No network")).unwrap();
+        db.set_credential_ref(&id, Some("keychain-item-id"))
+            .unwrap();
+        db.mark_checked(&id, "offline", 1234, Some("No network"))
+            .unwrap();
         let connection = db.get(&id).unwrap().unwrap();
-        assert_eq!(connection.credential_ref.as_deref(), Some("keychain-item-id"));
+        assert_eq!(
+            connection.credential_ref.as_deref(),
+            Some("keychain-item-id")
+        );
         assert_eq!(connection.last_checked_at, Some(1234));
         assert_eq!(connection.status, "offline");
         assert_eq!(connection.diagnosis.as_deref(), Some("No network"));
@@ -208,6 +264,9 @@ mod tests {
     fn refuses_newer_database_version() {
         let db = Connection::open_in_memory().unwrap();
         db.pragma_update(None, "user_version", 999).unwrap();
-        assert!(matches!(Registry::initialize(db), Err(RegistryError::UnsupportedSchema(999))));
+        assert!(matches!(
+            Registry::initialize(db),
+            Err(RegistryError::UnsupportedSchema(999))
+        ));
     }
 }
