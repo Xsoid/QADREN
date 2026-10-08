@@ -158,7 +158,15 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let code = (response as? HTTPURLResponse)?.statusCode, code == 200 else {
                 accountLabel = nil
-                status = "Connected; could not read Yandex account identity"
+                let statusCode = (response as? HTTPURLResponse)?.statusCode
+                if statusCode == 401 || statusCode == 403 {
+                    connected = false
+                    try? StorageRegistryBridge.setStatus(id: connectionID, status: "requires_auth")
+                    status = "Yandex authorization requires renewal"
+                } else {
+                    try? StorageRegistryBridge.setStatus(id: connectionID, status: "error")
+                    status = "Could not read Yandex account identity"
+                }
                 return
             }
             let info = try JSONDecoder().decode(YandexAccountInfo.self, from: data)
@@ -167,9 +175,11 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
                 try? StorageRegistryBridge.setProviderAccount(id: connectionID, providerID: providerID)
             }
             accountLabel = label
+            try? StorageRegistryBridge.setStatus(id: connectionID, status: "connected")
             status = label == nil ? "Connected; account identity unavailable" : "Connected to Yandex Disk"
         } catch {
             accountLabel = nil
+            try? StorageRegistryBridge.setStatus(id: connectionID, status: "offline")
             status = "Connected; account identity request failed"
         }
     }
@@ -210,6 +220,11 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
             if let quotaError = result.2 { errors.append("Quota: " + quotaError) }
             if let listingError = result.3 { errors.append("Root listing: " + listingError) }
             self.metadataError = errors.isEmpty ? nil : errors.joined(separator: " / ")
+            if let issue = self.metadataError, issue.contains("unauthorized") {
+                try? StorageRegistryBridge.setStatus(id: connectionID, status: "requires_auth")
+                self.connected = false
+                self.status = "Yandex authorization requires renewal"
+            }
         } catch {
             metadataError = "Keychain credential unavailable"
         }
@@ -222,6 +237,8 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
             status = "Could not remove credentials from Keychain"
             return
         }
+        try? StorageRegistryBridge.clearCredential(id: connectionID)
+        try? StorageRegistryBridge.setStatus(id: connectionID, status: "disconnected")
         connected = false
         accountLabel = nil
         quota = nil
