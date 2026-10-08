@@ -3,7 +3,7 @@ use crate::{AdapterCapabilities, StorageAdapter};
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderValue, AUTHORIZATION};
 use reqwest::StatusCode;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 const API: &str = "https://cloud-api.yandex.net/v1/disk";
@@ -26,7 +26,7 @@ impl From<reqwest::Error> for YandexError {
 }
 pub type Result<T> = std::result::Result<T, YandexError>;
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct DiskInfo {
     pub total_space: u64,
     pub used_space: u64,
@@ -34,7 +34,7 @@ pub struct DiskInfo {
     pub trash_size: u64,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Resource {
     pub name: String,
     pub path: String,
@@ -48,7 +48,7 @@ pub struct Resource {
     pub embedded: Option<ResourceList>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ResourceList {
     pub items: Vec<Resource>,
     pub limit: u32,
