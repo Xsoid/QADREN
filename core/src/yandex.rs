@@ -216,6 +216,32 @@ mod tests {
     }
 
     #[test]
+    fn mock_timeout_returns_transport_error_without_retrying_content() {
+        use std::io::Read;
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request);
+            std::thread::sleep(Duration::from_millis(250));
+        });
+        let client = YandexMetadataClient {
+            http: Client::builder()
+                .timeout(Duration::from_millis(50))
+                .build()
+                .unwrap(),
+            api_base: format!("http://{addr}/v1/disk"),
+        };
+        assert!(matches!(
+            client.disk_info("test-token"),
+            Err(YandexError::Transport(_))
+        ));
+        server.join().unwrap();
+    }
+
+    #[test]
     fn metadata_capabilities_exclude_contents() {
         let client = YandexMetadataClient::new().unwrap();
         let caps = client.capabilities();
