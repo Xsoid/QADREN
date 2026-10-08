@@ -39,6 +39,9 @@ func check(_ condition: @autoclosure () -> Bool, _ message: String) {
     }
 }
 
+@main
+struct ConnectionRemovalTests {
+static func main() throws {
 let normal = FakeConnection()
 try normal.attempt()
 check(!normal.present && !normal.credentialPresent, "normal removal")
@@ -80,3 +83,5 @@ let second = FakeConnection()
 try first.attempt()
 check(second.present && second.credentialPresent && second.enabled, "other connection remains independent")
 print("ConnectionRemoval: all injected-failure checks passed")
+}
+}
