@@ -179,22 +179,30 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
             }
             // Blocking Rust HTTP must execute off the main actor.
             let result = await Task.detached(priority: .userInitiated) {
-                () -> (DiskMetadata?, DiskListing?, String?) in
+                () -> (DiskMetadata?, DiskListing?, String?, String?) in
+                var quota: DiskMetadata?
+                var listing: DiskListing?
+                var quotaError: String?
+                var listingError: String?
                 do {
-                    let quota = try DiskMetadataBridge.quota(token: token)
-                    let files = try DiskMetadataBridge.root(token: token)
-                    return (quota, files, nil)
+                    quota = try DiskMetadataBridge.quota(token: token)
                 } catch {
-                    return (nil, nil, error.localizedDescription)
+                    quotaError = error.localizedDescription
                 }
+                do {
+                    listing = try DiskMetadataBridge.root(token: token)
+                } catch {
+                    listingError = error.localizedDescription
+                }
+                return (quota, listing, quotaError, listingError)
             }.value
-            if let quota = result.0, let listing = result.1 {
-                self.quota = quota
-                self.rootItems = listing.items
-                self.rootTotal = listing.total
-            } else {
-                self.metadataError = result.2 ?? "Disk API unavailable"
-            }
+            self.quota = result.0
+            self.rootItems = result.1?.items ?? []
+            self.rootTotal = result.1?.total ?? 0
+            var errors: [String] = []
+            if let quotaError = result.2 { errors.append("Quota: " + quotaError) }
+            if let listingError = result.3 { errors.append("Root listing: " + listingError) }
+            self.metadataError = errors.isEmpty ? nil : errors.joined(separator: " / ")
         } catch {
             metadataError = "Keychain credential unavailable"
         }
