@@ -10,3 +10,4 @@ name = "qadren_core"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
