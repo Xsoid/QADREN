@@ -84,7 +84,19 @@ enum DiskMetadataBridge {
         let pointer = token.withCString { function($0) }
         guard let pointer else { throw BridgeFailure.message("No response from Rust") }
         defer { yandexFree(pointer) }
-        let result = try JSONDecoder().decode(MetadataResult<T>.self, from: Data(String(cString: pointer).utf8))
+        let result: MetadataResult<T>
+        do {
+            result = try JSONDecoder().decode(MetadataResult<T>.self, from: Data(String(cString: pointer).utf8))
+        } catch let DecodingError.keyNotFound(key, context) {
+            let path = context.codingPath.map(\\.stringValue).joined(separator: ".")
+            throw BridgeFailure.message("Missing metadata field: " + (path.isEmpty ? key.stringValue : path + "." + key.stringValue))
+        } catch let DecodingError.typeMismatch(_, context) {
+            throw BridgeFailure.message("Metadata type mismatch at: " + context.codingPath.map(\\.stringValue).joined(separator: "."))
+        } catch let DecodingError.valueNotFound(_, context) {
+            throw BridgeFailure.message("Missing metadata value at: " + context.codingPath.map(\\.stringValue).joined(separator: "."))
+        } catch {
+            throw BridgeFailure.message("Invalid metadata response")
+        }
         guard result.ok, let value = result.data else {
             throw BridgeFailure.message(result.error ?? "Unknown provider error")
         }
