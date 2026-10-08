@@ -21,9 +21,9 @@ struct MainView: View {
             LabeledContent("Local worker", value: CoreBridge.workerStatus)
             Divider()
             Text("Yandex Disk (read-only authorization)").font(.headline)
-            TextField("Yandex OAuth Client ID", text: $yandex.clientID)
-                .textFieldStyle(.roundedBorder)
-                .disabled(yandex.busy)
+            Text(yandex.clientID.isEmpty ? "Client ID not configured for this build" : "OAuth application configured")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             HStack {
                 Button("Connect") { yandex.connect() }
                     .disabled(yandex.busy || yandex.connected)
