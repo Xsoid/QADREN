@@ -22,15 +22,17 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
     private var session: ASWebAuthenticationSession?
     private let service = "dev.qadren.yandex.oauth"
     let connectionID: String
+    let enabled: Bool
     // Must match the exact registered redirect URI at Yandex OAuth.
     private let redirect = "qadren://oauth/callback"
 
-    init(connectionID: String) {
+    init(connectionID: String, enabled: Bool) {
         self.connectionID = connectionID
+        self.enabled = enabled
         super.init()
         connected = (try? YandexKeychain.read(connectionID)) != nil
         status = connected ? "Token stored in Keychain" : "Not connected"
-        if connected { Task { await refreshAccount(); await refreshDisk() } }
+        if connected && enabled { Task { await refreshAccount(); await refreshDisk() } }
     }
 
     func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
@@ -43,7 +45,7 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
             status = "Enter registered Yandex OAuth Client ID"
             return
         }
-        guard !busy else { return }
+        guard enabled, !busy else { return }
         busy = true
 
         let verifier = Self.randomURLSafe(32)
@@ -142,7 +144,7 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
     /// Resolve the Yandex login for the existing token. No extra OAuth scopes required
     /// for basic account info. Never put OAuth tokens into query parameters or logs.
     func refreshAccount() async {
-        guard connected else { return }
+        guard connected && enabled else { return }
         do {
             guard let token = try YandexKeychain.read(connectionID) else {
                 connected = false
@@ -173,7 +175,7 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
     }
 
     func refreshDisk() async {
-        guard connected, !metadataBusy else { return }
+        guard connected && enabled && !metadataBusy else { return }
         metadataBusy = true
         metadataError = nil
         defer { metadataBusy = false }
