@@ -5,6 +5,10 @@ import Security
 private func registryList(_ path: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_add")
 private func registryAdd(_ path: UnsafePointer<CChar>?, _ adapter: UnsafePointer<CChar>?, _ name: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_registry_rename")
+private func registryRename(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ name: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_registry_set_enabled")
+private func registrySetEnabled(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ enabled: UInt8) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_remove")
 private func registryRemove(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_set_credential")
@@ -89,6 +93,26 @@ enum StorageRegistryBridge {
         let database = try path
         let _: Bool = try database.withCString { db in
             try id.withCString { value in try unwrap(registryRemove(db, value), as: Bool.self) }
+        }
+    }
+
+    static func rename(id: String, name: String) throws {
+        let database = try path
+        let _: Bool = try database.withCString { db in
+            try id.withCString { value in
+                try name.withCString { newName in
+                    try unwrap(registryRename(db, value, newName), as: Bool.self)
+                }
+            }
+        }
+    }
+
+    static func setEnabled(id: String, enabled: Bool) throws {
+        let database = try path
+        let _: Bool = try database.withCString { db in
+            try id.withCString { value in
+                try unwrap(registrySetEnabled(db, value, enabled ? 1 : 0), as: Bool.self)
+            }
         }
     }
 
