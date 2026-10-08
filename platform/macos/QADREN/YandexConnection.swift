@@ -13,6 +13,11 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
     @Published private(set) var connected = false
     @Published private(set) var busy = false
     @Published private(set) var accountLabel: String?
+    @Published private(set) var quota: DiskMetadata?
+    @Published private(set) var rootItems: [DiskItem] = []
+    @Published private(set) var rootTotal: UInt64 = 0
+    @Published private(set) var metadataError: String?
+    @Published private(set) var metadataBusy = false
 
     private var session: ASWebAuthenticationSession?
     private let service = "dev.qadren.yandex.oauth"
@@ -24,7 +29,7 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
         super.init()
         connected = (try? readToken()) != nil
         status = connected ? "Token stored in Keychain" : "Not connected"
-        if connected { Task { await refreshAccount() } }
+        if connected { Task { await refreshAccount(); await refreshDisk() } }
     }
 
     func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
@@ -124,6 +129,7 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
             connected = true
             status = "Connected; access token stored in Keychain"
             await refreshAccount()
+            await refreshDisk()
         } catch {
             // Do not print token, code, full response body or OAuth callback.
             status = "Authorization failed or Keychain unavailable"
@@ -161,6 +167,39 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
         }
     }
 
+    func refreshDisk() async {
+        guard connected, !metadataBusy else { return }
+        metadataBusy = true
+        metadataError = nil
+        defer { metadataBusy = false }
+        do {
+            guard let token = try readToken() else {
+                metadataError = "No token in Keychain"
+                return
+            }
+            // Blocking Rust HTTP must execute off the main actor.
+            let result = await Task.detached(priority: .userInitiated) {
+                () -> (DiskMetadata?, DiskListing?, String?) in
+                do {
+                    let quota = try DiskMetadataBridge.quota(token: token)
+                    let files = try DiskMetadataBridge.root(token: token)
+                    return (quota, files, nil)
+                } catch {
+                    return (nil, nil, error.localizedDescription)
+                }
+            }.value
+            if let quota = result.0, let listing = result.1 {
+                self.quota = quota
+                self.rootItems = listing.items
+                self.rootTotal = listing.total
+            } else {
+                self.metadataError = result.2 ?? "Disk API unavailable"
+            }
+        } catch {
+            metadataError = "Keychain credential unavailable"
+        }
+    }
+
     func disconnect() {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -174,6 +213,10 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
         }
         connected = false
         accountLabel = nil
+        quota = nil
+        rootItems = []
+        rootTotal = 0
+        metadataError = nil
         status = "Disconnected locally (Yandex token not revoked)"
     }
 
