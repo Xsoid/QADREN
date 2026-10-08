@@ -30,6 +30,9 @@ struct MainView: View {
                 Button("Disconnect") { yandex.disconnect() }
                     .disabled(yandex.busy || !yandex.connected)
             }
+            if let account = yandex.accountLabel {
+                LabeledContent("Yandex account", value: account)
+            }
             Text(yandex.status).font(.caption).foregroundStyle(.secondary)
             Spacer()
             Text("No file contents are downloaded or uploaded by QADREN.")
