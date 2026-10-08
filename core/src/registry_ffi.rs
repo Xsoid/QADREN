@@ -122,11 +122,28 @@ pub extern "C" fn qadren_registry_set_credential(
     id: *const c_char,
     credential_ref: *const c_char,
 ) -> *mut c_char {
-    let (Some(id), Some(reference)) = (input(id), input(credential_ref)) else {
+    let Some(id) = input(id) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    let reference = input(credential_ref);
+    with_registry(path, |db| {
+        db.set_credential_ref(&id, reference.as_deref())?;
+        Ok(json!(true))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn qadren_registry_set_status(
+    path: *const c_char,
+    id: *const c_char,
+    status: *const c_char,
+    at: i64,
+) -> *mut c_char {
+    let (Some(id), Some(status)) = (input(id), input(status)) else {
         return output(json!({"ok":false,"error":"invalid_input"}));
     };
     with_registry(path, |db| {
-        db.set_credential_ref(&id, Some(&reference))?;
+        db.mark_checked(&id, &status, at, None)?;
         Ok(json!(true))
     })
 }
