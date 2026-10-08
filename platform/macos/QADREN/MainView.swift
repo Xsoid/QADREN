@@ -52,9 +52,12 @@ struct MainView: View {
                 }
                 ForEach(connections.entries) { entry in
                     if entry.adapter == "yandex_disk" {
-                        YandexConnectionCard(entry: entry) {
-                            connections.remove(entry.id)
-                        }
+                        YandexConnectionCard(
+                            entry: entry,
+                            onRemove: { connections.remove(entry.id) },
+                            onRename: { name in connections.rename(entry.id, name: name) },
+                            onSetEnabled: { enabled in connections.setEnabled(entry.id, enabled: enabled) }
+                        )
                         Divider()
                     } else {
                         LabeledContent(entry.name, value: entry.adapter)
@@ -73,12 +76,23 @@ struct MainView: View {
 private struct YandexConnectionCard: View {
     let entry: StorageEntry
     let onRemove: () -> Void
+    let onRename: (String) -> Void
+    let onSetEnabled: (Bool) -> Void
     @StateObject private var yandex: YandexConnection
     @State private var confirmRemoval = false
+    @State private var draftName: String
 
-    init(entry: StorageEntry, onRemove: @escaping () -> Void) {
+    init(
+        entry: StorageEntry,
+        onRemove: @escaping () -> Void,
+        onRename: @escaping (String) -> Void,
+        onSetEnabled: @escaping (Bool) -> Void
+    ) {
         self.entry = entry
         self.onRemove = onRemove
+        self.onRename = onRename
+        self.onSetEnabled = onSetEnabled
+        _draftName = State(initialValue: entry.name)
         _yandex = StateObject(wrappedValue: YandexConnection(connectionID: entry.id))
     }
 
@@ -95,12 +109,27 @@ private struct YandexConnectionCard: View {
                 Button("Remove") { confirmRemoval = true }
                     .disabled(yandex.busy || yandex.metadataBusy)
             }
+            HStack {
+                TextField("Connection name", text: $draftName)
+                    .textFieldStyle(.roundedBorder)
+                Button("Rename") { onRename(draftName) }
+                    .disabled(draftName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draftName == entry.name)
+                Toggle("Enabled", isOn: Binding(
+                    get: { entry.enabled },
+                    set: { onSetEnabled($0) }
+                ))
+            }
+            if !entry.enabled {
+                Text("Disabled locally — no new operations will be started for this connection.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Text(yandex.clientID.isEmpty ? "Client ID not configured for this build" : "OAuth application configured")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             HStack {
                 Button("Connect") { yandex.connect() }
-                    .disabled(yandex.busy || yandex.connected || yandex.clientID.isEmpty)
+                    .disabled(!entry.enabled || yandex.busy || yandex.connected || yandex.clientID.isEmpty)
                 Button("Disconnect") { yandex.disconnect() }
                     .disabled(yandex.busy || !yandex.connected)
             }
@@ -113,7 +142,7 @@ private struct YandexConnectionCard: View {
                 HStack {
                     Text("Disk metadata").font(.subheadline.bold())
                     Button("Refresh") { Task { await yandex.refreshDisk() } }
-                        .disabled(yandex.metadataBusy)
+                        .disabled(!entry.enabled || yandex.metadataBusy)
                 }
                 if yandex.metadataBusy { ProgressView() }
                 if let quota = yandex.quota {
