@@ -346,15 +346,29 @@ mod tests {
             );
             INSERT INTO storage_connections(id, adapter, name, credential_ref)
                 VALUES('original-id', 'yandex_disk', 'Existing', 'legacy-credential-ref');
-            PRAGMA user_version = 1;"
-        ).unwrap();
+            PRAGMA user_version = 1;",
+        )
+        .unwrap();
         let registry = Registry::initialize(db).unwrap();
         let record = registry.get("original-id").unwrap().unwrap();
-        assert_eq!(record.credential_ref.as_deref(), Some("legacy-credential-ref"));
+        assert_eq!(
+            record.credential_ref.as_deref(),
+            Some("legacy-credential-ref")
+        );
         assert_eq!(record.name, "Existing");
         assert!(record.provider_account_id.is_none());
-        registry.set_provider_account_id("original-id", Some("123")).unwrap();
-        assert_eq!(registry.get("original-id").unwrap().unwrap().provider_account_id.as_deref(), Some("123"));
+        registry
+            .set_provider_account_id("original-id", Some("123"))
+            .unwrap();
+        assert_eq!(
+            registry
+                .get("original-id")
+                .unwrap()
+                .unwrap()
+                .provider_account_id
+                .as_deref(),
+            Some("123")
+        );
     }
 
     #[test]
