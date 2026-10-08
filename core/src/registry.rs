@@ -75,10 +75,12 @@ impl Registry {
                 COMMIT;")?;
         }
         if version <= 1 {
-            db.execute_batch("BEGIN IMMEDIATE;
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
                 ALTER TABLE storage_connections ADD COLUMN provider_account_id TEXT;
                 PRAGMA user_version = 2;
-                COMMIT;")?;
+                COMMIT;",
+            )?;
         }
         Ok(Self { db })
     }
@@ -316,8 +318,14 @@ mod tests {
         let b = db.add("yandex_disk", "Second").unwrap();
         db.set_provider_account_id(&a, Some("account-123")).unwrap();
         db.set_provider_account_id(&b, Some("account-123")).unwrap();
-        assert_eq!(db.get(&a).unwrap().unwrap().provider_account_id.as_deref(), Some("account-123"));
-        assert_eq!(db.get(&b).unwrap().unwrap().provider_account_id.as_deref(), Some("account-123"));
+        assert_eq!(
+            db.get(&a).unwrap().unwrap().provider_account_id.as_deref(),
+            Some("account-123")
+        );
+        assert_eq!(
+            db.get(&b).unwrap().unwrap().provider_account_id.as_deref(),
+            Some("account-123")
+        );
         db.remove(&a).unwrap();
         assert!(db.get(&b).unwrap().is_some());
     }
