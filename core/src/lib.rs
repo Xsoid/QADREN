@@ -1,6 +1,7 @@
 //! QADREN bootstrap: platform-independent core, with a tiny versioned C ABI.
 //! No network, disk or cloud activity is performed by this bootstrap core.
 
+pub mod capabilities;
 pub mod model;
 pub mod registry;
 pub mod registry_ffi;
