@@ -1,7 +1,7 @@
-pub mod registry;
-
 //! QADREN bootstrap: platform-independent core, with a tiny versioned C ABI.
-//! No network, disk or cloud activity is performed by this crate.
+//! No network, disk or cloud activity is performed by this bootstrap core.
+
+pub mod registry;
 
 use std::ffi::c_char;
 
