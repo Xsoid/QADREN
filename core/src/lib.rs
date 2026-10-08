@@ -2,6 +2,7 @@
 //! No network, disk or cloud activity is performed by this bootstrap core.
 
 pub mod registry;
+pub mod registry_ffi;
 pub mod yandex;
 pub mod yandex_ffi;
 
