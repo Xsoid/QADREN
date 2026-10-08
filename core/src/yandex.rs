@@ -148,6 +148,60 @@ impl YandexMetadataClient {
 mod tests {
     use super::*;
 
+    // Local loopback mock: verifies HTTP status mapping and no content transfers.
+    fn mocked_client(status: u16, body: &str) -> (YandexMetadataClient, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let payload = body.to_owned();
+        let thread = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut request = [0u8; 8192];
+            let n = stream.read(&mut request).unwrap();
+            let message = String::from_utf8_lossy(&request[..n]);
+            assert!(message.starts_with("GET /v1/disk/ HTTP/1.1"));
+            assert!(message.contains("OAuth test-token"));
+            let response = format!(
+                "HTTP/1.1 {status} Mock\\r\\nContent-Type: application/json\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n{}",
+                payload.len(), payload
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let client = YandexMetadataClient {
+            http: Client::builder().timeout(Duration::from_secs(3)).build().unwrap(),
+            api_base: format!("http://{addr}/v1/disk"),
+        };
+        (client, thread)
+    }
+
+    #[test]
+    fn mock_success_reads_quota_metadata() {
+        let (client, server) = mocked_client(200, r#"{"total_space":2048,"used_space":512}"#);
+        let quota = client.disk_info("test-token").unwrap();
+        server.join().unwrap();
+        assert_eq!(quota.total_space, 2048);
+        assert_eq!(quota.used_space, 512);
+    }
+
+    #[test]
+    fn mock_maps_authorization_rate_limit_and_server_errors() {
+        for (status, expected) in [(401, "unauthorized"), (403, "forbidden"), (429, "rate_limited"), (503, "provider")] {
+            let (client, server) = mocked_client(status, r#"{"message":"provider error"}"#);
+            let result = client.disk_info("test-token");
+            server.join().unwrap();
+            let category = match result {
+                Err(YandexError::Unauthorized) => "unauthorized",
+                Err(YandexError::Forbidden) => "forbidden",
+                Err(YandexError::RateLimited) => "rate_limited",
+                Err(YandexError::Provider(503)) => "provider",
+                other => panic!("unexpected result: {other:?}"),
+            };
+            assert_eq!(category, expected);
+        }
+    }
+
     #[test]
     fn metadata_capabilities_exclude_contents() {
         let client = YandexMetadataClient::new().unwrap();
