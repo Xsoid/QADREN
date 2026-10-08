@@ -50,14 +50,27 @@ final class StorageConnections: ObservableObject {
 
     func remove(_ id: String) {
         do {
-            // Remove metadata first. On successful delete, a Keychain failure
-            // leaves only an orphaned credential, never a live record without its token.
-            // A second removal attempt can safely clean the orphan.
+            // Verify the record before touching credentials. The connection must
+            // remain discoverable until Keychain cleanup has succeeded.
+            guard let entry = try StorageRegistryBridge.list().first(where: { $0.id == id }) else {
+                throw StorageError.operation("Connection not found; credentials were not touched")
+            }
+            guard entry.adapter == "yandex_disk" else {
+                throw StorageError.operation("Unsupported credential cleanup for this adapter")
+            }
+
+            // Fail closed: prevent new work before removing credentials. If
+            // Keychain deletion fails, the disabled record remains for retry.
+            try StorageRegistryBridge.setEnabled(id: id, enabled: false)
+            try YandexKeychain.delete(id) // Not-found is an idempotent success.
+            // If SQLite removal fails, the disabled record remains visible;
+            // retrying deletion is safe even though the token is already gone.
             try StorageRegistryBridge.remove(id: id)
-            try YandexKeychain.delete(id)
             refresh()
         } catch {
-            self.error = error.localizedDescription
+            // Refresh the listing without discarding the failure message.
+            entries = (try? StorageRegistryBridge.list()) ?? entries
+            self.error = "Connection removal incomplete; retry Remove: " + error.localizedDescription
         }
     }
 
