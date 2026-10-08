@@ -43,6 +43,7 @@ pub struct Resource {
     pub size: Option<u64>,
     pub modified: Option<String>,
     pub md5: Option<String>,
+    #[serde(default)]
     pub revision: Option<i64>,
     #[serde(rename = "_embedded")]
     pub embedded: Option<ResourceList>,
@@ -51,8 +52,11 @@ pub struct Resource {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ResourceList {
     pub items: Vec<Resource>,
+    #[serde(default)]
     pub limit: u32,
+    #[serde(default)]
     pub offset: u64,
+    #[serde(default)]
     pub total: u64,
 }
 
