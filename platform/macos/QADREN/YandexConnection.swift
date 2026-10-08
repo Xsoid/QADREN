@@ -178,7 +178,7 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
         metadataError = nil
         defer { metadataBusy = false }
         do {
-            guard let token = try readToken() else {
+            guard let token = try YandexKeychain.read(connectionID) else {
                 metadataError = "No token in Keychain"
                 return
             }
