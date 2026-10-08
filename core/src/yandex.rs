@@ -179,6 +179,17 @@ mod tests {
     }
 
     #[test]
+    fn permits_embedded_resource_list_without_optional_pagination_fields() {
+        let resource: Resource = serde_json::from_str(
+            r#"{"name":"disk","path":"disk:/","type":"dir","_embedded":{"items":[{"name":"Docs","path":"disk:/Docs","type":"dir"}]}}"#,
+        )
+        .unwrap();
+        let list = resource.embedded.unwrap();
+        assert_eq!(list.items.len(), 1);
+        assert_eq!(list.total, 0);
+    }
+
+    #[test]
     fn rejects_invalid_token_and_paths_before_request() {
         let client = YandexMetadataClient::new().unwrap();
         assert!(matches!(
