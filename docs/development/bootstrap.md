@@ -1,6 +1,6 @@
 # QADREN v0.1.0 Bootstrap
 
-Status: first prototype; no cloud integration or file operations.
+Status: historical description of the first prototype. Current `main` includes Yandex metadata-only integration; see README for current status.
 
 ## Included
 - Dependency-free Rust core with small, versioned C ABI.
@@ -34,4 +34,4 @@ The application shows core version/status from **real Rust FFI calls**, and the 
 The script builds only the host architecture (arm64 or x86_64), not universal binaries. It does not sign or notarize. Bundle identifier is temporary. SwiftUI launch, linker behavior and clean-Mac installation must be verified on macOS. Do not consider this a release, agent, live iCloud adapter or production backup engine.
 
 ## Next steps
-After validating the bootstrap on Mac: move to an Xcode project if needed for signing/entitlements, test iCloud Documents, establish production identity, and add jobs/backup policies incrementally. Do not introduce inter-node connection in this phase.
+See `docs/roadmap.md` and Release 1 Epic #12 for the current Scenario/Job development sequence. Earlier limitations document the bootstrap milestone, not the current entire product. Do not introduce inter-node connection in this phase.
