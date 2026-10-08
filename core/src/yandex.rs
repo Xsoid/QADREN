@@ -169,7 +169,7 @@ mod tests {
             assert!(message.starts_with("GET /v1/disk/ HTTP/1.1"));
             assert!(message.contains("OAuth test-token"));
             let response = format!(
-                "HTTP/1.1 {status} Mock\\r\\nContent-Type: application/json\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n{}",
+                "HTTP/1.1 {status} Mock\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 payload.len(), payload
             );
             stream.write_all(response.as_bytes()).unwrap();
