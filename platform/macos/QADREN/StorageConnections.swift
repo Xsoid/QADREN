@@ -30,6 +30,24 @@ final class StorageConnections: ObservableObject {
         }
     }
 
+    func rename(_ id: String, name: String) {
+        do {
+            try StorageRegistryBridge.rename(id: id, name: name)
+            refresh()
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    func setEnabled(_ id: String, enabled: Bool) {
+        do {
+            try StorageRegistryBridge.setEnabled(id: id, enabled: enabled)
+            refresh()
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
     func remove(_ id: String) {
         do {
             // Restore secret if the registry refuses to remove the record.
