@@ -50,7 +50,6 @@ pub enum ValidationError {
     EmptyConnectionId,
     EmptyRoot,
     IdenticalEndpoints,
-    AmbiguousOverlap,
 }
 
 impl ScenarioDraft {
@@ -69,11 +68,9 @@ impl ScenarioDraft {
         if self.left == self.right {
             return Err(ValidationError::IdenticalEndpoints);
         }
-        // Root canonicalization is the responsibility of the storage adapter.
-        // Do not attempt string-prefix filesystem safety checks here.
-        if self.left.connection_id == self.right.connection_id {
-            return Err(ValidationError::AmbiguousOverlap);
-        }
+        // Same-connection distinct roots may be valid; containment, aliases,
+        // symlinks and path canonicalization require adapter-level validation.
+        // Successful draft validation is not authorization to execute.
         Ok(())
     }
 }
@@ -115,12 +112,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_identical_and_same_connection_roots_until_adapter_can_prove_safety() {
+    fn allows_distinct_roots_on_the_same_connection_for_later_adapter_validation() {
         let mut scenario = draft();
         scenario.right = scenario.left.clone();
         assert_eq!(scenario.validate(), Err(ValidationError::IdenticalEndpoints));
         scenario.right.root = "/other".into();
-        assert_eq!(scenario.validate(), Err(ValidationError::AmbiguousOverlap));
+        assert_eq!(scenario.validate(), Ok(()));
     }
 
     #[test]
