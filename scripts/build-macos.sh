@@ -21,6 +21,25 @@ cargo build --release --manifest-path core/Cargo.toml --target "$TARGET"
 APP="$ROOT/dist/QADREN.app"
 mkdir -p "$APP/Contents/MacOS"
 cp platform/macos/Info.plist "$APP/Contents/Info.plist"
+# Embed public OAuth Client ID from an untracked local build config.
+CONFIG="$ROOT/config/oauth.local.env"
+if [[ -f "$CONFIG" ]]; then
+  CLIENT_ID=""
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+    if [[ "$line" =~ ^YANDEX_CLIENT_ID=([a-zA-Z0-9_-]+)$ ]]; then
+      CLIENT_ID="${BASH_REMATCH[1]}"
+    else
+      echo "Invalid local OAuth config line; expected YANDEX_CLIENT_ID=..." >&2
+      exit 1
+    fi
+  done < "$CONFIG"
+  if [[ -z "$CLIENT_ID" ]]; then
+    echo "Missing YANDEX_CLIENT_ID in $CONFIG" >&2
+    exit 1
+  fi
+  plutil -insert QADRENYandexClientID -string "$CLIENT_ID" "$APP/Contents/Info.plist"
+fi
 plutil -lint "$APP/Contents/Info.plist"
 
 xcrun swiftc -O -target "$ARCH-apple-macos13.0" \
