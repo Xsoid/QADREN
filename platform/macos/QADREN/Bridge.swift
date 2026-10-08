@@ -88,12 +88,12 @@ enum DiskMetadataBridge {
         do {
             result = try JSONDecoder().decode(MetadataResult<T>.self, from: Data(String(cString: pointer).utf8))
         } catch let DecodingError.keyNotFound(key, context) {
-            let path = context.codingPath.map(\\.stringValue).joined(separator: ".")
+            let path = context.codingPath.map(\.stringValue).joined(separator: ".")
             throw BridgeFailure.message("Missing metadata field: " + (path.isEmpty ? key.stringValue : path + "." + key.stringValue))
         } catch let DecodingError.typeMismatch(_, context) {
-            throw BridgeFailure.message("Metadata type mismatch at: " + context.codingPath.map(\\.stringValue).joined(separator: "."))
+            throw BridgeFailure.message("Metadata type mismatch at: " + context.codingPath.map(\.stringValue).joined(separator: "."))
         } catch let DecodingError.valueNotFound(_, context) {
-            throw BridgeFailure.message("Missing metadata value at: " + context.codingPath.map(\\.stringValue).joined(separator: "."))
+            throw BridgeFailure.message("Missing metadata value at: " + context.codingPath.map(\.stringValue).joined(separator: "."))
         } catch {
             throw BridgeFailure.message("Invalid metadata response")
         }
