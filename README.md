@@ -37,7 +37,6 @@
 - [Надёжность и целостность](docs/policies/data-safety.md)
 - [Принятые решения](docs/decisions/README.md)
 - [Открытые вопросы и дорожная карта](docs/roadmap.md)
-- [План и критерии приёмки](docs/roadmap.md)
 
 ## Технический контекст
 
