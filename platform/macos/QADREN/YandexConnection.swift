@@ -8,7 +8,7 @@ import SwiftUI
 // macOS-only OAuth boundary. Never persist access tokens in UserDefaults or SQLite.
 @MainActor
 final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPresentationContextProviding {
-    @Published var clientID = ""
+    let clientID = (Bundle.main.object(forInfoDictionaryKey: "QADRENYandexClientID") as? String) ?? ""
     @Published private(set) var status = "Not connected"
     @Published private(set) var connected = false
     @Published private(set) var busy = false
