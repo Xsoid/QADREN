@@ -121,7 +121,13 @@ impl YandexMetadataClient {
 
     /// Lists directory metadata without downloading file contents.
     /// Limit is deliberately capped to avoid large responses and memory usage.
-    pub fn list_folder(&self, token: &str, path: &str, offset: u64, limit: u32) -> Result<Resource> {
+    pub fn list_folder(
+        &self,
+        token: &str,
+        path: &str,
+        offset: u64,
+        limit: u32,
+    ) -> Result<Resource> {
         if path.is_empty() || path.contains(|ch: char| ch.is_control()) {
             return Err(YandexError::InvalidPath);
         }
@@ -149,10 +155,9 @@ mod tests {
 
     #[test]
     fn parses_disk_info_without_network() {
-        let disk: DiskInfo = serde_json::from_str(
-            r#"{"total_space":5000,"used_space":123,"trash_size":9}"#,
-        )
-        .unwrap();
+        let disk: DiskInfo =
+            serde_json::from_str(r#"{"total_space":5000,"used_space":123,"trash_size":9}"#)
+                .unwrap();
         assert_eq!(disk.total_space, 5000);
         assert_eq!(disk.used_space, 123);
     }
@@ -172,7 +177,13 @@ mod tests {
     #[test]
     fn rejects_invalid_token_and_paths_before_request() {
         let client = YandexMetadataClient::new().unwrap();
-        assert!(matches!(client.disk_info("bad\ntoken"), Err(YandexError::InvalidToken)));
-        assert!(matches!(client.list_folder("abc", "", 0, 10), Err(YandexError::InvalidPath)));
+        assert!(matches!(
+            client.disk_info("bad\ntoken"),
+            Err(YandexError::InvalidToken)
+        ));
+        assert!(matches!(
+            client.list_folder("abc", "", 0, 10),
+            Err(YandexError::InvalidPath)
+        ));
     }
 }
