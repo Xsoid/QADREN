@@ -58,6 +58,7 @@ struct MainView: View {
                             onRename: { name in connections.rename(entry.id, name: name) },
                             onSetEnabled: { enabled in connections.setEnabled(entry.id, enabled: enabled) }
                         )
+                        .id(entry.id + (entry.enabled ? ":enabled" : ":disabled"))
                         Divider()
                     } else {
                         LabeledContent(entry.name, value: entry.adapter)
@@ -93,7 +94,7 @@ private struct YandexConnectionCard: View {
         self.onRename = onRename
         self.onSetEnabled = onSetEnabled
         _draftName = State(initialValue: entry.name)
-        _yandex = StateObject(wrappedValue: YandexConnection(connectionID: entry.id))
+        _yandex = StateObject(wrappedValue: YandexConnection(connectionID: entry.id, enabled: entry.enabled))
     }
 
     var body: some View {
