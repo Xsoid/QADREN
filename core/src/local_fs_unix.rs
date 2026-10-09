@@ -280,6 +280,7 @@ pub(super) fn create_with_post_link_check<R: Read, F: FnOnce() -> io::Result<()>
             0o600 as c_int,
         )
     })?;
+    let mut published = false;
     let result = (|| -> Result<u64> {
         let bytes = io::copy(input, &mut output)?;
         output.flush()?;
@@ -301,13 +302,24 @@ pub(super) fn create_with_post_link_check<R: Read, F: FnOnce() -> io::Result<()>
                 Err(LocalError::Io(error))
             };
         }
+        published = true;
         post_link_check().map_err(LocalError::OutcomeUnknown)?;
         directory.sync_all().map_err(LocalError::OutcomeUnknown)?;
         Ok(bytes)
     })();
     let cleanup = unsafe { unlinkat(directory.as_raw_fd(), temporary.as_ptr(), 0) };
-    if cleanup != 0 && result.is_ok() {
-        return Err(LocalError::OutcomeUnknown(io::Error::last_os_error()));
+    if cleanup != 0 {
+        let error = io::Error::last_os_error();
+        if published {
+            return Err(LocalError::OutcomeUnknown(error));
+        }
+        if result.is_ok() {
+            return Err(LocalError::Io(error));
+        }
+        return result;
+    }
+    if published {
+        directory.sync_all().map_err(LocalError::OutcomeUnknown)?;
     }
     result
 }
