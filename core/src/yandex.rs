@@ -18,6 +18,7 @@ pub enum YandexError {
     NotFound,
     Provider(u16),
     InvalidPath,
+    InvalidAccountIdentity,
 }
 impl From<reqwest::Error> for YandexError {
     fn from(err: reqwest::Error) -> Self {
@@ -95,6 +96,16 @@ pub fn compare_resource_metadata(
     }
 }
 
+#[derive(Deserialize)]
+struct DiskAccountResponse {
+    user: DiskAccountUser,
+}
+
+#[derive(Deserialize)]
+struct DiskAccountUser {
+    uid: serde_json::Value,
+}
+
 pub struct YandexMetadataClient {
     http: Client,
     api_base: String,
@@ -151,6 +162,18 @@ impl YandexMetadataClient {
             return Err(YandexError::Provider(status.as_u16()));
         }
         Ok(response.json()?)
+    }
+
+    /// Identifies the account backing this OAuth token using the provider's
+    /// disk-info response. Missing or malformed UID always fails closed.
+    pub fn account_uid(&self, token: &str) -> Result<String> {
+        let response: DiskAccountResponse = self.get_json("/", token, &[])?;
+        let uid = match response.user.uid {
+            serde_json::Value::String(value) if !value.is_empty() => value,
+            serde_json::Value::Number(value) if value.is_u64() => value.to_string(),
+            _ => return Err(YandexError::InvalidAccountIdentity),
+        };
+        Ok(uid)
     }
 
     /// Disk quota metadata; never accesses file bytes.
@@ -318,6 +341,29 @@ mod tests {
             client.resource_metadata("token", "disk:/file\n"),
             Err(YandexError::InvalidPath)
         ));
+    }
+
+    #[test]
+    fn account_uid_is_observed_from_provider_disk_info() {
+        let (client, server) = mocked_client(
+            200,
+            r#"{"user":{"uid":"123456"},"total_space":2048,"used_space":512}"#,
+        );
+        assert_eq!(client.account_uid("test-token").unwrap(), "123456");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn absent_account_identity_fails_closed() {
+        let (client, server) = mocked_client(
+            200,
+            r#"{"user":{"uid":null},"total_space":2048,"used_space":512}"#,
+        );
+        assert!(matches!(
+            client.account_uid("test-token"),
+            Err(YandexError::InvalidAccountIdentity)
+        ));
+        server.join().unwrap();
     }
 
     #[test]
