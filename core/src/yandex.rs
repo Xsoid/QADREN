@@ -123,6 +123,15 @@ impl YandexMetadataClient {
         self.get_json("/", token, &[])
     }
 
+    /// Reads metadata for one cloud object; never requests file contents.
+    /// The returned metadata is an observation, not proof of an earlier write.
+    pub fn resource_metadata(&self, token: &str, path: &str) -> Result<Resource> {
+        if path.is_empty() || path.contains(|ch: char| ch.is_control()) {
+            return Err(YandexError::InvalidPath);
+        }
+        self.get_json("/resources", token, &[("path", path.to_owned())])
+    }
+
     /// Lists directory metadata without downloading file contents.
     /// Limit is deliberately capped to avoid large responses and memory usage.
     pub fn list_folder(
@@ -182,6 +191,19 @@ mod tests {
             api_base: format!("http://{addr}/v1/disk"),
         };
         (client, thread)
+    }
+
+    #[test]
+    fn invalid_resource_path_is_rejected_without_network_access() {
+        let client = YandexMetadataClient::new().unwrap();
+        assert!(matches!(
+            client.resource_metadata("token", ""),
+            Err(YandexError::InvalidPath)
+        ));
+        assert!(matches!(
+            client.resource_metadata("token", "disk:/file\\n"),
+            Err(YandexError::InvalidPath)
+        ));
     }
 
     #[test]
