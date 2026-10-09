@@ -32,6 +32,19 @@ impl From<rusqlite::Error> for JobStoreError {
 }
 pub type Result<T> = std::result::Result<T, JobStoreError>;
 
+#[derive(Debug)]
+pub enum YandexObservationError {
+    Job(JobStoreError),
+    Provider(crate::yandex::YandexError),
+}
+
+impl From<JobStoreError> for YandexObservationError {
+    fn from(value: JobStoreError) -> Self {
+        Self::Job(value)
+    }
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredJob {
     pub id: String,
@@ -652,6 +665,56 @@ impl JobStore {
             &expected_resource,
             observed,
         )))
+    }
+
+    /// Perform a read-only provider metadata lookup for this exact recorded target.
+    /// Credentials are supplied by the caller and are never persisted in JobStore.
+    /// This is observation only: no transfer, receipt, retry or Job transition.
+    pub fn observe_yandex_attempt(
+        &self,
+        job_id: &str,
+        attempt_id: &str,
+        target_connection_id: &str,
+        client: &crate::yandex::YandexMetadataClient,
+        token: &str,
+    ) -> std::result::Result<crate::yandex::MetadataMatch, YandexObservationError> {
+        self.check_storage_identity()?;
+        let expected = self
+            .expected_metadata(job_id, attempt_id)?
+            .ok_or(JobStoreError::MissingEvidence)?;
+        if expected.target_connection_id != target_connection_id {
+            return Err(JobStoreError::UntrustedEvidence.into());
+        }
+        if expected.operation_kind != "copy" {
+            return Err(JobStoreError::InvalidTransition.into());
+        }
+        let active: Option<String> = self
+            .db
+            .query_row(
+                "SELECT status FROM job_attempts WHERE job_id=?1 AND attempt_id=?2",
+                params![job_id, attempt_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if !matches!(active.as_deref(), Some("active" | "unknown")) {
+            return Err(JobStoreError::InvalidTransition.into());
+        }
+        let observed = match client.resource_metadata(token, &expected.target_path) {
+            Ok(resource) => resource,
+            Err(crate::yandex::YandexError::NotFound) => {
+                return Ok(crate::yandex::MetadataMatch::Mismatch);
+            }
+            Err(error) => return Err(YandexObservationError::Provider(error)),
+        };
+        let expected_resource = crate::yandex::ExpectedResourceMetadata {
+            path: expected.target_path,
+            size: expected.expected_size,
+            md5: expected.expected_md5,
+        };
+        Ok(crate::yandex::compare_resource_metadata(
+            &expected_resource,
+            &observed,
+        ))
     }
 
     /// Records explicit resolution without claiming the remote operation succeeded.
