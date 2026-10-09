@@ -61,6 +61,17 @@ impl UnresolvedAttempt {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredExpectation {
+    pub attempt_id: String,
+    pub job_id: String,
+    pub operation_kind: String,
+    pub target_connection_id: String,
+    pub target_path: String,
+    pub expected_size: u64,
+    pub expected_md5: String,
+}
+
 pub struct JobStore {
     db: Connection,
 }
@@ -380,6 +391,32 @@ impl JobStore {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Retrieve only a fully bound expectation; no disk content is read.
+    pub fn expected_metadata(&self, job_id: &str, attempt_id: &str) -> Result<Option<StoredExpectation>> {
+        self.db.query_row(
+            "SELECT a.attempt_id,a.job_id,a.operation_kind,a.target_connection_id,
+                    a.target_path,e.expected_size,e.expected_md5
+             FROM job_attempts a INNER JOIN attempt_expectations e
+               ON e.attempt_id=a.attempt_id
+             WHERE a.job_id=?1 AND a.attempt_id=?2
+               AND a.operation_kind IS NOT NULL AND a.target_connection_id IS NOT NULL
+               AND a.target_path IS NOT NULL",
+            params![job_id, attempt_id],
+            |row| {
+                let size: i64 = row.get(5)?;
+                Ok(StoredExpectation {
+                    attempt_id: row.get(0)?,
+                    job_id: row.get(1)?,
+                    operation_kind: row.get(2)?,
+                    target_connection_id: row.get(3)?,
+                    target_path: row.get(4)?,
+                    expected_size: size as u64,
+                    expected_md5: row.get(6)?,
+                })
+            },
+        ).optional().map_err(JobStoreError::from)
     }
 
     /// Records explicit resolution without claiming the remote operation succeeded.
@@ -963,6 +1000,11 @@ mod tests {
         let checksum = "abcdef0123456789abcdef0123456789";
         db.bind_expected_metadata("job", "attempt", 123, checksum)
             .unwrap();
+        let found = db.expected_metadata("job", "attempt").unwrap().unwrap();
+        assert_eq!(found.target_path, "/file");
+        assert_eq!(found.expected_size, 123);
+        assert_eq!(found.expected_md5, checksum);
+        assert!(db.expected_metadata("other", "attempt").unwrap().is_none());
         assert!(matches!(
             db.bind_expected_metadata("job", "attempt", 123, checksum),
             Err(JobStoreError::Sqlite(_))
