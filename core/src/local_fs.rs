@@ -262,6 +262,58 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn failed_partial_stream_removes_temp_and_never_publishes_target() {
+        struct PartialThenFailure(bool);
+        impl io::Read for PartialThenFailure {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if self.0 {
+                    return Err(io::Error::other("injected interrupted stream"));
+                }
+                self.0 = true;
+                buf[..4].copy_from_slice(b"part");
+                Ok(4)
+            }
+        }
+        let root = sandbox();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let result = adapter.create_from_reader(
+            Path::new("interrupted.bin"),
+            &mut PartialThenFailure(false),
+        );
+        assert!(result.is_err());
+        assert!(!root.join("interrupted.bin").exists());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn streaming_large_file_and_retry_preserve_committed_contents() {
+        let root = sandbox();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let length = 8 * 1024 * 1024_u64 + 19;
+        let bytes = adapter
+            .create_from_reader(
+                Path::new("large.bin"),
+                &mut io::repeat(0x5a).take(length),
+            )
+            .unwrap();
+        assert_eq!(bytes, length);
+        assert_eq!(adapter.stat(Path::new("large.bin")).unwrap().size, length);
+        assert!(matches!(
+            adapter.create_from_reader(
+                Path::new("large.bin"),
+                &mut Cursor::new(b"replacement"),
+            ),
+            Err(LocalError::AlreadyExists)
+        ));
+        assert_eq!(fs::metadata(root.join("large.bin")).unwrap().len(), length);
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn content_read_requires_explicit_operation_consent() {
         let root = sandbox();
