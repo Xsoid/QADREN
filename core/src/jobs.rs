@@ -198,6 +198,18 @@ impl JobStore {
             }
         }
         let tx = self.db.transaction()?;
+        // A Job must never be declared complete while an operation attempt
+        // is active or has an unresolved outcome.
+        if next == JobState::Completed {
+            let unresolved: i64 = tx.query_row(
+                "SELECT count(*) FROM job_attempts WHERE job_id=?1 AND status!='resolved'",
+                [id],
+                |row| row.get(0),
+            )?;
+            if unresolved > 0 {
+                return Err(JobStoreError::InvalidTransition);
+            }
+        }
         let changed = tx.execute(
             "UPDATE jobs SET state=?1 WHERE id=?2 AND state=?3",
             params![label(next), id, label(expected)],
@@ -464,6 +476,31 @@ mod tests {
         ));
         db.resolve_attempt("job", "attempt-1").unwrap();
         db.begin_attempt("job", "attempt-2").unwrap();
+    }
+
+    #[test]
+    fn unresolved_attempt_forbids_job_completion() {
+        let mut db = JobStore::in_memory().unwrap();
+        db.enqueue("j", None).unwrap();
+        db.advance(
+            "j",
+            JobState::Queued,
+            JobState::Running,
+            Confirmation::Unknown,
+        )
+        .unwrap();
+        db.begin_attempt("j", "attempt-a").unwrap();
+        assert!(matches!(
+            db.advance(
+                "j",
+                JobState::Running,
+                JobState::Completed,
+                Confirmation::Confirmed(EvidenceLevel::ContentVerified)
+            ),
+            Err(JobStoreError::InvalidTransition)
+        ));
+        db.resolve_attempt("j", "attempt-a").unwrap();
+        assert_eq!(db.state("j").unwrap(), Some(JobState::Running));
     }
 
     #[test]
