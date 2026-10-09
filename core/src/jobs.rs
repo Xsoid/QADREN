@@ -297,15 +297,14 @@ impl JobStore {
         target_connection_id: &str,
         target_path: &str,
     ) -> Result<()> {
-        if operation_kind.is_empty()
-            || target_connection_id.is_empty()
-            || target_path.is_empty()
-        {
+        if operation_kind.is_empty() || target_connection_id.is_empty() || target_path.is_empty() {
             return Err(JobStoreError::InvalidId);
         }
         let tx = self.db.transaction()?;
         let state: Option<String> = tx
-            .query_row("SELECT state FROM jobs WHERE id=?1", [job_id], |row| row.get(0))
+            .query_row("SELECT state FROM jobs WHERE id=?1", [job_id], |row| {
+                row.get(0)
+            })
             .optional()?;
         if state.as_deref() != Some("running") {
             return Err(JobStoreError::InvalidTransition);
@@ -322,7 +321,13 @@ impl JobStore {
             "INSERT INTO job_attempts
                (attempt_id,job_id,status,operation_kind,target_connection_id,target_path)
              VALUES (?1,?2,'active',?3,?4,?5)",
-            params![attempt_id, job_id, operation_kind, target_connection_id, target_path],
+            params![
+                attempt_id,
+                job_id,
+                operation_kind,
+                target_connection_id,
+                target_path
+            ],
         )?;
         tx.execute(
             "INSERT INTO job_events(job_id,state,kind) VALUES (?1,'running','attempt_started')",
@@ -344,15 +349,15 @@ impl JobStore {
         if receipt.attempt_id() != attempt_id {
             return Err(JobStoreError::UntrustedEvidence);
         }
-        let stored_binding: Option<(Option<String>, Option<String>, Option<String>)> =
-            self.db
-                .query_row(
-                    "SELECT operation_kind,target_connection_id,target_path
+        let stored_binding: Option<(Option<String>, Option<String>, Option<String>)> = self
+            .db
+            .query_row(
+                "SELECT operation_kind,target_connection_id,target_path
                      FROM job_attempts WHERE job_id=?1 AND attempt_id=?2",
-                    params![job_id, attempt_id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-                .optional()?;
+                params![job_id, attempt_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
         if let Some((Some(kind), Some(connection), Some(path))) = stored_binding {
             if receipt.operation_kind() != Some(kind.as_str())
                 || receipt.target_connection_id() != Some(connection.as_str())
@@ -776,22 +781,12 @@ mod tests {
         .unwrap();
         db.begin_bound_attempt("j", "a", "copy", "destination-1", "/safe")
             .unwrap();
-        let wrong = crate::verification::test_bound_receipt(
-            "a",
-            "copy",
-            "destination-1",
-            "/other",
-        );
+        let wrong = crate::verification::test_bound_receipt("a", "copy", "destination-1", "/other");
         assert!(matches!(
             db.resolve_attempt("j", "a", &wrong),
             Err(JobStoreError::UntrustedEvidence)
         ));
-        let right = crate::verification::test_bound_receipt(
-            "a",
-            "copy",
-            "destination-1",
-            "/safe",
-        );
+        let right = crate::verification::test_bound_receipt("a", "copy", "destination-1", "/safe");
         db.resolve_attempt("j", "a", &right).unwrap();
         assert_eq!(db.state("j").unwrap(), Some(JobState::Running));
     }
