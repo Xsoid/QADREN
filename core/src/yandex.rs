@@ -241,7 +241,7 @@ mod tests {
             Err(YandexError::InvalidPath)
         ));
         assert!(matches!(
-            client.resource_metadata("token", "disk:/file\\n"),
+            client.resource_metadata("token", "disk:/file\n"),
             Err(YandexError::InvalidPath)
         ));
     }
