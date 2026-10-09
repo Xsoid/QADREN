@@ -5,9 +5,9 @@ pub mod capabilities;
 pub mod confirmation;
 pub mod jobs;
 pub mod model;
-pub mod verification;
 pub mod registry;
 pub mod registry_ffi;
+pub mod verification;
 pub mod yandex;
 pub mod yandex_ffi;
 
