@@ -349,6 +349,32 @@ mod tests {
     }
 
     #[test]
+    fn migrates_v1_jobs_without_losing_records() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE jobs (
+                   id TEXT PRIMARY KEY NOT NULL,
+                   state TEXT NOT NULL,
+                   scenario_id TEXT,
+                   scenario_revision INTEGER
+                 );
+                 INSERT INTO jobs VALUES ('existing','running','scenario-a',3);
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        let store = JobStore::initialize(connection).unwrap();
+        let job = store.get("existing").unwrap().unwrap();
+        assert_eq!(job.state, JobState::Unknown);
+        assert_eq!(job.scenario_revision, Some(3));
+        let event_count: i64 = store
+            .db
+            .query_row("SELECT count(*) FROM job_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(event_count, 1);
+    }
+
+    #[test]
     fn newer_schema_is_not_downgraded() {
         let db = Connection::open_in_memory().unwrap();
         db.pragma_update(None, "user_version", 99).unwrap();
