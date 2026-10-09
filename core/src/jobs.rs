@@ -44,7 +44,6 @@ impl From<JobStoreError> for YandexObservationError {
     }
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredJob {
     pub id: String,
@@ -695,7 +694,8 @@ impl JobStore {
                 params![job_id, attempt_id],
                 |row| row.get(0),
             )
-            .optional()?;
+            .optional()
+            .map_err(JobStoreError::from)?;
         if !matches!(active.as_deref(), Some("active" | "unknown")) {
             return Err(JobStoreError::InvalidTransition.into());
         }
