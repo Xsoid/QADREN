@@ -1283,6 +1283,31 @@ mod tests {
     }
 
     #[test]
+    fn relative_alias_cannot_bypass_exclusive_owner_lock() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "qadren-alias-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let database = directory.join("jobs.sqlite");
+        let alias = directory.join(".").join("jobs.sqlite");
+        let first = JobStore::open(&database).unwrap();
+        assert!(matches!(
+            JobStore::open(&alias),
+            Err(JobStoreError::AlreadyOpen)
+        ));
+        drop(first);
+        std::fs::remove_file(&database).unwrap();
+        std::fs::remove_file(directory.join("jobs.sqlite.owner.sqlite")).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
     fn concurrent_open_does_not_mark_live_running_job_unknown() {
         use std::time::{SystemTime, UNIX_EPOCH};
         let unique = SystemTime::now()
