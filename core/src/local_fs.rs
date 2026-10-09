@@ -134,6 +134,19 @@ impl LocalFilesystem {
         Ok(entries.into_iter().skip(offset).take(limit).collect())
     }
 
+    /// Creates one child directory; fails closed on unsupported platforms.
+    pub fn create_directory(&self, path: &Path) -> Result<()> {
+        Self::relative(path)?;
+        #[cfg(unix)]
+        {
+            secure::create_directory(&self.root_fd, path)
+        }
+        #[cfg(not(unix))]
+        {
+            Err(LocalError::UnsafeEntry)
+        }
+    }
+
     /// Create a new file through directory descriptors, without following
     /// symlinks or replacing an existing target. Unsupported platforms fail closed.
     /// Reading cloud-backed local placeholders remains prohibited until guarded.
@@ -239,6 +252,26 @@ mod tests {
             .unwrap()
             .is_empty());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mkdir_is_scoped_and_does_not_follow_parent_symlinks() {
+        use std::os::unix::fs::symlink;
+        let root = sandbox();
+        let outside = sandbox();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        adapter.create_directory(Path::new("created")).unwrap();
+        assert!(root.join("created").is_dir());
+        assert!(matches!(
+            adapter.create_directory(Path::new("created")),
+            Err(LocalError::AlreadyExists)
+        ));
+        symlink(&outside, root.join("link")).unwrap();
+        assert!(adapter.create_directory(Path::new("link/escape")).is_err());
+        assert!(!outside.join("escape").exists());
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(outside).unwrap();
     }
 
     #[cfg(unix)]
