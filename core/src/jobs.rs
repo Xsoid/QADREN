@@ -1232,7 +1232,10 @@ mod tests {
             .unwrap();
         assert_eq!(db.unresolved_attempts().unwrap().len(), 1);
         assert_eq!(
-            db.expected_metadata("job", "a").unwrap().unwrap().expected_size,
+            db.expected_metadata("job", "a")
+                .unwrap()
+                .unwrap()
+                .expected_size,
             7
         );
         assert!(matches!(
