@@ -264,6 +264,30 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn metadata_rejects_symlinks_without_opening_contents() {
+        use std::os::unix::fs::symlink;
+        let root = sandbox();
+        fs::create_dir(root.join("entries")).unwrap();
+        fs::write(root.join("entries").join("file"), b"metadata").unwrap();
+        symlink("file", root.join("entries").join("alias")).unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert!(matches!(
+            adapter.stat(Path::new("entries/alias")),
+            Err(LocalError::UnsafeEntry)
+        ));
+        assert!(matches!(
+            adapter.list(Path::new("entries")),
+            Err(LocalError::UnsafeEntry)
+        ));
+        fs::remove_file(root.join("entries").join("alias")).unwrap();
+        let entries = adapter.list(Path::new("entries")).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].size, 8);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn failed_partial_stream_removes_temp_and_never_publishes_target() {
         struct PartialThenFailure(bool);
         impl io::Read for PartialThenFailure {
