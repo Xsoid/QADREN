@@ -1,6 +1,6 @@
 //! Verification receipts are constructed only by an adapter-side verifier.
 //! This prototype validates the shape; actual provider proof is not yet implemented.
-use crate::confirmation::{Confirmation, EvidenceLevel};
+use crate::confirmation::Confirmation;
 
 pub struct VerifiedReceipt {
     attempt_id: String,
@@ -27,6 +27,6 @@ pub trait OperationVerifier {
 pub(crate) fn test_receipt(attempt_id: &str) -> VerifiedReceipt {
     VerifiedReceipt {
         attempt_id: attempt_id.to_owned(),
-        confirmation: Confirmation::Confirmed(EvidenceLevel::MetadataVerified),
+        confirmation: Confirmation::Confirmed(crate::confirmation::EvidenceLevel::MetadataVerified),
     }
 }
