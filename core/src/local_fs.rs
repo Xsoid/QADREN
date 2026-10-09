@@ -90,16 +90,24 @@ impl LocalFilesystem {
     }
 
     pub fn stat(&self, path: &Path) -> Result<LocalEntry> {
-        let path = self.checked(path)?;
-        let m = fs::symlink_metadata(&path)?;
-        if m.file_type().is_symlink() {
-            return Err(LocalError::UnsafeEntry);
+        Self::relative(path)?;
+        #[cfg(unix)]
+        {
+            secure::stat(&self.root_fd, path)
         }
-        Ok(LocalEntry {
-            name: path.file_name().unwrap().to_string_lossy().into_owned(),
-            is_directory: m.is_dir(),
-            size: m.len(),
-        })
+        #[cfg(not(unix))]
+        {
+            let path = self.checked(path)?;
+            let m = fs::symlink_metadata(&path)?;
+            if m.file_type().is_symlink() {
+                return Err(LocalError::UnsafeEntry);
+            }
+            Ok(LocalEntry {
+                name: path.file_name().unwrap().to_string_lossy().into_owned(),
+                is_directory: m.is_dir(),
+                size: m.len(),
+            })
+        }
     }
 
     pub fn list(&self, path: &Path) -> Result<Vec<LocalEntry>> {
@@ -252,6 +260,23 @@ mod tests {
             .unwrap()
             .is_empty());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stat_does_not_follow_swapped_parent_directory() {
+        use std::os::unix::fs::symlink;
+        let root = sandbox();
+        let outside = sandbox();
+        fs::create_dir(root.join("child")).unwrap();
+        fs::write(outside.join("private"), b"secret").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        fs::rename(root.join("child"), root.join("moved")).unwrap();
+        symlink(&outside, root.join("child")).unwrap();
+        assert!(adapter.stat(Path::new("child/private")).is_err());
+        assert_eq!(fs::read(outside.join("private")).unwrap(), b"secret");
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(outside).unwrap();
     }
 
     #[cfg(unix)]
