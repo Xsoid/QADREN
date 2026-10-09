@@ -100,7 +100,6 @@ struct StoreIdentity {
     lock_inode: u64,
 }
 
-
 fn label(state: JobState) -> &'static str {
     match state {
         JobState::Queued => "queued",
@@ -1394,8 +1393,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let directory = std::env::temp_dir()
-            .join(format!("qadren-owner-removed-{}-{unique}", std::process::id()));
+        let directory = std::env::temp_dir().join(format!(
+            "qadren-owner-removed-{}-{unique}",
+            std::process::id()
+        ));
         std::fs::create_dir(&directory).unwrap();
         let database = directory.join("jobs.sqlite");
         let mut store = JobStore::open(&database).unwrap();
@@ -1419,8 +1420,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let directory = std::env::temp_dir()
-            .join(format!("qadren-dangling-{}-{unique}", std::process::id()));
+        let directory =
+            std::env::temp_dir().join(format!("qadren-dangling-{}-{unique}", std::process::id()));
         std::fs::create_dir(&directory).unwrap();
         let database = directory.join("missing.sqlite");
         let alias = directory.join("alias.sqlite");
@@ -1442,8 +1443,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let directory = std::env::temp_dir()
-            .join(format!("qadren-hardlink-{}-{unique}", std::process::id()));
+        let directory =
+            std::env::temp_dir().join(format!("qadren-hardlink-{}-{unique}", std::process::id()));
         std::fs::create_dir(&directory).unwrap();
         let database = directory.join("jobs.sqlite");
         let alias = directory.join("alias.sqlite");
