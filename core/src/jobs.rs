@@ -648,6 +648,46 @@ mod tests {
     }
 
     #[test]
+    fn migrates_v3_attempts_without_erasing_unknown_state() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE jobs (
+                   id TEXT PRIMARY KEY NOT NULL,
+                   state TEXT NOT NULL,
+                   scenario_id TEXT,
+                   scenario_revision INTEGER
+                 );
+                 CREATE TABLE job_events (
+                   sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                   job_id TEXT NOT NULL REFERENCES jobs(id),
+                   state TEXT NOT NULL,
+                   kind TEXT NOT NULL
+                 );
+                 CREATE TABLE job_attempts (
+                   attempt_id TEXT PRIMARY KEY NOT NULL,
+                   job_id TEXT NOT NULL REFERENCES jobs(id),
+                   status TEXT NOT NULL
+                 );
+                 INSERT INTO jobs(id,state) VALUES ('j','unknown');
+                 INSERT INTO job_attempts VALUES ('old-attempt','j','unknown');
+                 PRAGMA user_version = 3;",
+            )
+            .unwrap();
+        let store = JobStore::initialize(connection).unwrap();
+        assert_eq!(store.state("j").unwrap(), Some(JobState::Unknown));
+        let status: String = store
+            .db
+            .query_row(
+                "SELECT status FROM job_attempts WHERE attempt_id='old-attempt'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "unknown");
+    }
+
+    #[test]
     fn newer_schema_is_not_downgraded() {
         let db = Connection::open_in_memory().unwrap();
         db.pragma_update(None, "user_version", 99).unwrap();
