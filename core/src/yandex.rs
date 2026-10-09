@@ -212,7 +212,7 @@ mod tests {
             assert!(request.contains("OAuth test-token"));
             let body = r#"{"name":"check.txt","path":"disk:/check.txt","type":"file","size":5,"modified":"2026-10-09T00:00:00Z","md5":"abc"}"#;
             let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\\r\\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(), body
             );
             stream.write_all(response.as_bytes()).unwrap();
