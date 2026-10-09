@@ -642,7 +642,9 @@ mod tests {
         ));
         let total: i64 = db
             .db
-            .query_row("SELECT count(*) FROM attempt_verifications", [], |row| row.get(0))
+            .query_row("SELECT count(*) FROM attempt_verifications", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(total, 1);
     }
