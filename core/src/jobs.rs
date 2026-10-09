@@ -31,6 +31,18 @@ pub struct StoredJob {
     pub scenario_revision: Option<u64>,
 }
 
+/// Read-only reconciliation inventory; no content, credentials or side effects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnresolvedAttempt {
+    pub attempt_id: String,
+    pub job_id: String,
+    pub status: String,
+    pub operation_kind: Option<String>,
+    pub target_connection_id: Option<String>,
+    pub target_path: Option<String>,
+    pub is_legacy_unbound: bool,
+}
+
 pub struct JobStore {
     db: Connection,
 }
@@ -372,6 +384,33 @@ impl JobStore {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Inventory for operator investigation. Never changes or retries attempts.
+    pub fn unresolved_attempts(&self) -> Result<Vec<UnresolvedAttempt>> {
+        let mut statement = self.db.prepare(
+            "SELECT attempt_id,job_id,status,operation_kind,target_connection_id,target_path
+             FROM job_attempts WHERE status!='resolved' ORDER BY job_id,attempt_id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let operation_kind: Option<String> = row.get(3)?;
+            let target_connection_id: Option<String> = row.get(4)?;
+            let target_path: Option<String> = row.get(5)?;
+            let is_legacy_unbound = operation_kind.is_none()
+                || target_connection_id.is_none()
+                || target_path.is_none();
+            Ok(UnresolvedAttempt {
+                attempt_id: row.get(0)?,
+                job_id: row.get(1)?,
+                status: row.get(2)?,
+                operation_kind,
+                target_connection_id,
+                target_path,
+                is_legacy_unbound,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(JobStoreError::from)
     }
 
     pub fn state(&self, id: &str) -> Result<Option<JobState>> {
@@ -777,6 +816,27 @@ mod tests {
         let right = crate::verification::test_bound_receipt("a", "copy", "destination-1", "/safe");
         db.resolve_attempt("j", "a", &right).unwrap();
         assert_eq!(db.state("j").unwrap(), Some(JobState::Running));
+    }
+
+    #[test]
+    fn inventory_is_read_only_and_does_not_resolve_attempts() {
+        let mut db = JobStore::in_memory().unwrap();
+        db.enqueue("job", None).unwrap();
+        db.advance(
+            "job",
+            JobState::Queued,
+            JobState::Running,
+            Confirmation::Unknown,
+        )
+        .unwrap();
+        db.begin_bound_attempt("job", "a", "copy", "destination", "/object")
+            .unwrap();
+        let first = db.unresolved_attempts().unwrap();
+        assert_eq!(first.len(), 1);
+        assert!(!first[0].is_legacy_unbound);
+        assert_eq!(first[0].target_path.as_deref(), Some("/object"));
+        assert_eq!(db.unresolved_attempts().unwrap(), first);
+        assert_eq!(db.state("job").unwrap(), Some(JobState::Running));
     }
 
     #[test]
