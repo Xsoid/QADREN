@@ -263,11 +263,10 @@ impl JobStore {
         if updated == 0 {
             return Err(JobStoreError::InvalidTransition);
         }
-        let state: String = tx.query_row(
-            "SELECT state FROM jobs WHERE id=?1",
-            [job_id],
-            |row| row.get(0),
-        )?;
+        let state: String =
+            tx.query_row("SELECT state FROM jobs WHERE id=?1", [job_id], |row| {
+                row.get(0)
+            })?;
         tx.execute(
             "INSERT INTO job_events(job_id,state,kind) VALUES (?1,?2,'attempt_resolved')",
             params![job_id, state],
@@ -451,8 +450,13 @@ mod tests {
     fn unresolved_attempt_blocks_duplicate_and_survives_restart() {
         let mut db = JobStore::in_memory().unwrap();
         db.enqueue("job", None).unwrap();
-        db.advance("job", JobState::Queued, JobState::Running, Confirmation::Unknown)
-            .unwrap();
+        db.advance(
+            "job",
+            JobState::Queued,
+            JobState::Running,
+            Confirmation::Unknown,
+        )
+        .unwrap();
         db.begin_attempt("job", "attempt-1").unwrap();
         assert!(matches!(
             db.begin_attempt("job", "attempt-2"),
