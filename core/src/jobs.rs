@@ -115,7 +115,7 @@ impl JobStore {
         Ok(Self { db })
     }
 
-    pub fn enqueue(&self, id: &str, scenario: Option<(&str, u64)>) -> Result<()> {
+    pub fn enqueue(&mut self, id: &str, scenario: Option<(&str, u64)>) -> Result<()> {
         if id.is_empty()
             || scenario
                 .is_some_and(|(name, rev)| name.is_empty() || rev == 0 || rev > i64::MAX as u64)
@@ -126,7 +126,8 @@ impl JobStore {
             Some((name, rev)) => (Some(name), Some(rev as i64)),
             None => (None, None),
         };
-        let result = self.db.execute(
+        let tx = self.db.transaction()?;
+        let result = tx.execute(
             "INSERT OR IGNORE INTO jobs (id,state,scenario_id,scenario_revision)
              VALUES (?1,'queued',?2,?3)",
             params![id, scenario_id, revision],
@@ -134,10 +135,11 @@ impl JobStore {
         if result == 0 {
             return Err(JobStoreError::DuplicateJob);
         }
-        self.db.execute(
+        tx.execute(
             "INSERT INTO job_events(job_id,state,kind) VALUES (?1,'queued','enqueued')",
             [id],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -164,7 +166,7 @@ impl JobStore {
     /// Compare-and-set: only the expected persisted state may advance.
     /// The caller remains responsible for verifying the evidence's provenance.
     pub fn advance(
-        &self,
+        &mut self,
         id: &str,
         expected: JobState,
         next: JobState,
@@ -179,7 +181,8 @@ impl JobStore {
                 return Err(JobStoreError::MissingEvidence);
             }
         }
-        let changed = self.db.execute(
+        let tx = self.db.transaction()?;
+        let changed = tx.execute(
             "UPDATE jobs SET state=?1 WHERE id=?2 AND state=?3",
             params![label(next), id, label(expected)],
         )?;
@@ -190,10 +193,11 @@ impl JobStore {
                 Err(JobStoreError::InvalidTransition)
             }
         } else {
-            self.db.execute(
+            tx.execute(
                 "INSERT INTO job_events(job_id,state,kind) VALUES (?1,?2,'transition')",
                 params![id, label(next)],
             )?;
+            tx.commit()?;
             Ok(())
         }
     }
@@ -210,7 +214,7 @@ mod tests {
 
     #[test]
     fn manual_and_scenario_jobs_remain_separate() {
-        let db = JobStore::in_memory().unwrap();
+        let mut db = JobStore::in_memory().unwrap();
         db.enqueue("manual", None).unwrap();
         db.enqueue("sync", Some(("scenario-1", 4))).unwrap();
         assert_eq!(db.get("manual").unwrap().unwrap().scenario_id, None);
@@ -275,7 +279,7 @@ mod tests {
             std::process::id()
         ));
         {
-            let db = JobStore::open(&path).unwrap();
+            let mut db = JobStore::open(&path).unwrap();
             db.enqueue("interrupted", Some(("scenario", 2))).unwrap();
             db.enqueue("waiting", None).unwrap();
             db.advance(
@@ -301,6 +305,26 @@ mod tests {
             ));
         }
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn transitions_record_events_without_duplicates() {
+        let mut db = JobStore::in_memory().unwrap();
+        db.enqueue("job", None).unwrap();
+        db.advance("job", JobState::Queued, JobState::Running, Confirmation::Unknown)
+            .unwrap();
+        let count: i64 = db.db.query_row(
+            "SELECT count(*) FROM job_events WHERE job_id='job'", [], |row| row.get(0)
+        ).unwrap();
+        assert_eq!(count, 2);
+        assert!(matches!(
+            db.advance("job", JobState::Queued, JobState::Paused, Confirmation::Unknown),
+            Err(JobStoreError::InvalidTransition)
+        ));
+        let after: i64 = db.db.query_row(
+            "SELECT count(*) FROM job_events WHERE job_id='job'", [], |row| row.get(0)
+        ).unwrap();
+        assert_eq!(after, 2);
     }
 
     #[test]
