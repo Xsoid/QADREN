@@ -2,12 +2,16 @@
 //! Initial safe slice: metadata and non-overwriting atomic creation only.
 //! Content reads on macOS are intentionally not exposed until iCloud placeholder
 //! detection and per-transfer consent can be enforced.
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::fs::{self, File};
+use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(unix)]
+#[path = "local_fs_unix.rs"]
+mod secure;
 
 #[derive(Debug)]
 pub enum LocalError {
@@ -33,6 +37,8 @@ pub struct LocalEntry {
 
 pub struct LocalFilesystem {
     root: PathBuf,
+    #[cfg(unix)]
+    root_fd: File,
 }
 
 impl LocalFilesystem {
@@ -44,8 +50,13 @@ impl LocalFilesystem {
         if !meta.is_dir() {
             return Err(LocalError::NotDirectory);
         }
+        let canonical = fs::canonicalize(root)?;
+        #[cfg(unix)]
+        let root_fd = secure::root(&canonical)?;
         Ok(Self {
-            root: fs::canonicalize(root)?,
+            root: canonical,
+            #[cfg(unix)]
+            root_fd,
         })
     }
 
@@ -120,42 +131,21 @@ impl LocalFilesystem {
         Ok(entries.into_iter().skip(offset).take(limit).collect())
     }
 
-    /// Create a NEW file from a stream; never replace an existing destination.
-    /// Temporary data is synced before its final hard-link commit.
-    /// Parent must already exist and be a real directory.
+    /// Create a new file through directory descriptors, without following
+    /// symlinks or replacing an existing target. Unsupported platforms fail closed.
+    /// Reading cloud-backed local placeholders remains prohibited until guarded.
     pub fn create_from_reader<R: io::Read>(&self, target: &Path, input: &mut R) -> Result<u64> {
-        let destination = self.checked(target)?;
-        let parent = destination.parent().ok_or(LocalError::InvalidPath)?;
-        if !fs::symlink_metadata(parent)?.is_dir() {
-            return Err(LocalError::NotDirectory);
+        Self::relative(target)?;
+        #[cfg(unix)]
+        {
+            let serial = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            secure::create(&self.root_fd, target, input, serial)
         }
-        if fs::symlink_metadata(&destination).is_ok() {
-            return Err(LocalError::AlreadyExists);
+        #[cfg(not(unix))]
+        {
+            let _ = (target, input);
+            Err(LocalError::UnsafeEntry)
         }
-        let suffix = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let temp = parent.join(format!(".qadren-{}-{}.tmp", std::process::id(), suffix));
-        let mut output = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)?;
-        let result = (|| -> Result<u64> {
-            let copied = io::copy(input, &mut output)?;
-            output.flush()?;
-            output.sync_all()?;
-            drop(output);
-            // Hard-link to a new destination atomically; cannot overwrite existing data.
-            fs::hard_link(&temp, &destination).map_err(|e| {
-                if e.kind() == io::ErrorKind::AlreadyExists {
-                    LocalError::AlreadyExists
-                } else {
-                    LocalError::Io(e)
-                }
-            })?;
-            File::open(parent)?.sync_all()?;
-            Ok(copied)
-        })();
-        let _ = fs::remove_file(&temp);
-        result
     }
 }
 
