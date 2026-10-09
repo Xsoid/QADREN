@@ -100,7 +100,16 @@ fn parent(root: &File, relative: &Path) -> Result<(File, CString)> {
 /// Open the requested directory without resolving an untrusted pathname.
 fn directory(root: &File, relative: &Path) -> Result<File> {
     if relative.as_os_str().is_empty() {
-        return Ok(root.try_clone()?);
+        // dup/try_clone shares a directory offset with root_fd. Reopen "."
+        // relative to the pinned descriptor to give each scan its own offset.
+        let dot = CString::new(".").map_err(|_| LocalError::InvalidPath)?;
+        return opened(unsafe {
+            openat(
+                root.as_raw_fd(),
+                dot.as_ptr(),
+                RDONLY | DIRECTORY | NOFOLLOW | CLOEXEC,
+            )
+        });
     }
     let (parent, leaf) = parent(root, relative)?;
     opened(unsafe {
