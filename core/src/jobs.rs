@@ -700,7 +700,10 @@ impl JobStore {
         if connection.adapter != "yandex_disk"
             || !connection.enabled
             || connection.status != "connected"
-            || connection.provider_account_id.as_deref().is_none_or(str::is_empty)
+            || connection
+                .provider_account_id
+                .as_deref()
+                .is_none_or(str::is_empty)
         {
             return Err(YandexObservationError::ConnectionNotAuthorized);
         }
@@ -712,13 +715,7 @@ impl JobStore {
         let token = resolve_credential(credential_ref)
             .filter(|value| !value.is_empty())
             .ok_or(YandexObservationError::CredentialUnavailable)?;
-        self.observe_yandex_attempt(
-            job_id,
-            attempt_id,
-            &connection.id,
-            client,
-            &token,
-        )
+        self.observe_yandex_attempt(job_id, attempt_id, &connection.id, client, &token)
     }
 
     /// Perform a read-only provider metadata lookup for this exact recorded target.
