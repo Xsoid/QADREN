@@ -890,8 +890,7 @@ mod tests {
             items[0].disposition(),
             ReconciliationDisposition::NeedsManualInvestigation
         );
-        let receipt =
-            crate::verification::test_bound_receipt("old", "copy", "target", "/file");
+        let receipt = crate::verification::test_bound_receipt("old", "copy", "target", "/file");
         assert!(matches!(
             db.resolve_attempt("legacy", "old", &receipt),
             Err(JobStoreError::UntrustedEvidence)
