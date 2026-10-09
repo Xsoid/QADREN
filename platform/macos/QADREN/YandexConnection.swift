@@ -128,10 +128,25 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
                 status = "Empty access token"
                 return
             }
+            // Establish identity before storing or replacing any existing credential.
+            let verifiedID = try await Self.diskAccountID(token: token.access_token)
+            guard let entry = try StorageRegistryBridge.list().first(where: { $0.id == connectionID }),
+                  entry.adapter == "yandex_disk", entry.enabled else {
+                status = "Connection is unavailable or disabled"
+                return
+            }
+            if let existingID = entry.provider_account_id, !existingID.isEmpty,
+               existingID != verifiedID {
+                status = "Different Yandex account; create a separate connection"
+                return
+            }
             try YandexKeychain.store(token.access_token, for: connectionID)
+            // A failed registry update must never promote the connection to active.
             try StorageRegistryBridge.setCredential(id: connectionID)
+            try StorageRegistryBridge.setProviderAccount(id: connectionID, providerID: verifiedID)
+            try StorageRegistryBridge.setStatus(id: connectionID, status: "connected")
             connected = true
-            status = "Connected; access token stored in Keychain"
+            status = "Connected; account verified"
             await refreshAccount()
             await refreshDisk()
         } catch {
@@ -171,17 +186,44 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
             }
             let info = try JSONDecoder().decode(YandexAccountInfo.self, from: data)
             let label = info.login ?? info.display_name ?? info.id
-            if let providerID = info.id, !providerID.isEmpty {
-                try? StorageRegistryBridge.setProviderAccount(id: connectionID, providerID: providerID)
+            // Passport display data is not authority to silently rebind a connection.
+            // The disk API UID is the identity used by the Rust Job Engine.
+            let verifiedID = try await Self.diskAccountID(token: token)
+            guard let entry = try StorageRegistryBridge.list().first(where: { $0.id == connectionID }),
+                  entry.adapter == "yandex_disk", entry.enabled,
+                  entry.provider_account_id == nil || entry.provider_account_id == verifiedID else {
+                accountLabel = nil
+                try? StorageRegistryBridge.setStatus(id: connectionID, status: "requires_auth")
+                status = "Yandex account mismatch; connection blocked"
+                return
             }
+            if entry.provider_account_id == nil {
+                try StorageRegistryBridge.setProviderAccount(id: connectionID, providerID: verifiedID)
+            }
+            try StorageRegistryBridge.setCredential(id: connectionID)
+            try StorageRegistryBridge.setStatus(id: connectionID, status: "connected")
             accountLabel = label
-            try? StorageRegistryBridge.setStatus(id: connectionID, status: "connected")
-            status = label == nil ? "Connected; account identity unavailable" : "Connected to Yandex Disk"
+            status = "Connected to Yandex Disk"
         } catch {
             accountLabel = nil
             try? StorageRegistryBridge.setStatus(id: connectionID, status: "offline")
             status = "Connected; account identity request failed"
         }
+    }
+
+    private static func diskAccountID(token: String) async throws -> String {
+        var request = URLRequest(url: URL(string: "https://cloud-api.yandex.net/v1/disk/")!)
+        request.timeoutInterval = 15
+        request.setValue("OAuth " + token, forHTTPHeaderField: "Authorization")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+            throw StorageError.operation("Yandex account identity verification failed")
+        }
+        let identity = try JSONDecoder().decode(YandexDiskIdentity.self, from: data)
+        guard !identity.user.uid.isEmpty else {
+            throw StorageError.operation("Yandex account identity missing")
+        }
+        return identity.user.uid
     }
 
     func refreshDisk() async {
@@ -272,5 +314,23 @@ private extension Data {
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
+    }
+}
+
+private struct YandexDiskIdentity: Decodable {
+    let user: User
+
+    struct User: Decodable {
+        let uid: String
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.singleValueContainer()
+            if let string = try? container.decode(String.self) {
+                guard !string.isEmpty else { throw StorageError.operation("Empty Yandex UID") }
+                uid = string
+            } else {
+                uid = String(try container.decode(UInt64.self))
+            }
+        }
     }
 }
