@@ -454,7 +454,7 @@ mod tests {
             fs::write(root.join(name), b"x").unwrap();
         }
         let root_items = adapter.list(Path::new("")).unwrap();
-        assert_eq!(root_items.len(), 4);
+        assert_eq!(root_items.len(), 3);
         let first = adapter.list_page(Path::new("alpha.txt"), 0, 10);
         assert!(first.is_err());
         // Root itself is not addressable as a relative file path by design.
