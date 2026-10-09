@@ -488,7 +488,11 @@ mod tests {
         .unwrap();
         db.begin_attempt("job", "attempt-1").unwrap();
         assert!(matches!(
-            db.resolve_attempt("job", "attempt-1", &crate::verification::test_receipt("other")),
+            db.resolve_attempt(
+                "job",
+                "attempt-1",
+                &crate::verification::test_receipt("other")
+            ),
             Err(JobStoreError::UntrustedEvidence)
         ));
 
