@@ -292,7 +292,7 @@ mod tests {
             .unwrap();
         }
         {
-            let db = JobStore::open(&path).unwrap();
+            let mut db = JobStore::open(&path).unwrap();
             assert_eq!(db.state("interrupted").unwrap(), Some(JobState::Unknown));
             assert_eq!(db.state("waiting").unwrap(), Some(JobState::Queued));
             assert!(matches!(
