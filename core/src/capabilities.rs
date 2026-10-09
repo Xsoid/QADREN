@@ -119,6 +119,7 @@ mod tests {
                 ..Operations::default()
             },
             prerequisites_verified: true,
+            metadata_confidence: MetadataConfidence::Unknown,
         };
         assert_eq!(
             declaration.allows(Platform::Linux, RequestedOperation::ListMetadata),
