@@ -114,6 +114,14 @@ fn parse_state(value: &str) -> rusqlite::Result<JobState> {
 
 impl JobStore {
     pub fn open(path: &Path) -> Result<Self> {
+        // A dangling symlink must not be treated as a new database path.
+        // Otherwise its alias would have an independent owner-lock name.
+        #[cfg(unix)]
+        if let Ok(metadata) = std::fs::symlink_metadata(path) {
+            if metadata.file_type().is_symlink() && !path.exists() {
+                return Err(JobStoreError::UnsafeDatabaseLink);
+            }
+        }
         // Canonicalize the actual database if present; otherwise resolve its
         // existing parent so relative paths and symlinked directories converge.
         let canonical = if path.exists() {
@@ -1315,6 +1323,30 @@ mod tests {
         drop(first);
         std::fs::remove_file(&database).unwrap();
         std::fs::remove_file(directory.join("jobs.sqlite.owner.sqlite")).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_database_symlink_is_rejected() {
+        use std::os::unix::fs::symlink;
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir()
+            .join(format!("qadren-dangling-{}-{unique}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let database = directory.join("missing.sqlite");
+        let alias = directory.join("alias.sqlite");
+        symlink(&database, &alias).unwrap();
+        assert!(matches!(
+            JobStore::open(&alias),
+            Err(JobStoreError::UnsafeDatabaseLink)
+        ));
+        assert!(!database.exists());
+        std::fs::remove_file(alias).unwrap();
         std::fs::remove_dir(directory).unwrap();
     }
 
