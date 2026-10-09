@@ -222,7 +222,10 @@ impl JobStore {
              UPDATE jobs SET state='unknown' WHERE state='running';
              COMMIT;",
         )?;
-        Ok(Self { db, _owner_lock: owner_lock })
+        Ok(Self {
+            db,
+            _owner_lock: owner_lock,
+        })
     }
 
     pub fn enqueue(&mut self, id: &str, scenario: Option<(&str, u64)>) -> Result<()> {
@@ -1267,12 +1270,28 @@ mod tests {
     #[test]
     fn concurrent_open_does_not_mark_live_running_job_unknown() {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let path = std::env::temp_dir().join(format!("qadren-owner-{}-{unique}.sqlite", std::process::id()));
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "qadren-owner-{}-{unique}.sqlite",
+            std::process::id()
+        ));
         let mut first = JobStore::open(&path).unwrap();
         first.enqueue("live", None).unwrap();
-        first.advance("live", JobState::Queued, JobState::Running, Confirmation::Unknown).unwrap();
-        assert!(matches!(JobStore::open(&path), Err(JobStoreError::AlreadyOpen)));
+        first
+            .advance(
+                "live",
+                JobState::Queued,
+                JobState::Running,
+                Confirmation::Unknown,
+            )
+            .unwrap();
+        assert!(matches!(
+            JobStore::open(&path),
+            Err(JobStoreError::AlreadyOpen)
+        ));
         assert_eq!(first.state("live").unwrap(), Some(JobState::Running));
         drop(first);
         let recovered = JobStore::open(&path).unwrap();
