@@ -36,6 +36,15 @@ pub type Result<T> = std::result::Result<T, JobStoreError>;
 pub enum YandexObservationError {
     Job(JobStoreError),
     Provider(crate::yandex::YandexError),
+    Registry(crate::registry::RegistryError),
+    ConnectionNotAuthorized,
+    CredentialUnavailable,
+}
+
+impl From<crate::registry::RegistryError> for YandexObservationError {
+    fn from(value: crate::registry::RegistryError) -> Self {
+        Self::Registry(value)
+    }
 }
 
 impl From<JobStoreError> for YandexObservationError {
@@ -666,10 +675,56 @@ impl JobStore {
         )))
     }
 
+    /// Resolve credentials only through the registered connection's secure-store reference.
+    /// The resolver must be backed by macOS Keychain or equivalent platform storage.
+    /// The provider account identity must have been independently established during
+    /// connection authorization; this method does not authenticate account ownership.
+    pub fn observe_registered_yandex_attempt<F>(
+        &self,
+        job_id: &str,
+        attempt_id: &str,
+        registry: &crate::registry::Registry,
+        client: &crate::yandex::YandexMetadataClient,
+        resolve_credential: F,
+    ) -> std::result::Result<crate::yandex::MetadataMatch, YandexObservationError>
+    where
+        F: FnOnce(&str) -> Option<String>,
+    {
+        self.check_storage_identity()?;
+        let expected = self
+            .expected_metadata(job_id, attempt_id)?
+            .ok_or(JobStoreError::MissingEvidence)?;
+        let connection = registry
+            .get(&expected.target_connection_id)?
+            .ok_or(YandexObservationError::ConnectionNotAuthorized)?;
+        if connection.adapter != "yandex_disk"
+            || !connection.enabled
+            || connection.status != "connected"
+            || connection.provider_account_id.as_deref().is_none_or(str::is_empty)
+        {
+            return Err(YandexObservationError::ConnectionNotAuthorized);
+        }
+        let credential_ref = connection
+            .credential_ref
+            .as_deref()
+            .filter(|reference| !reference.is_empty())
+            .ok_or(YandexObservationError::CredentialUnavailable)?;
+        let token = resolve_credential(credential_ref)
+            .filter(|value| !value.is_empty())
+            .ok_or(YandexObservationError::CredentialUnavailable)?;
+        self.observe_yandex_attempt(
+            job_id,
+            attempt_id,
+            &connection.id,
+            client,
+            &token,
+        )
+    }
+
     /// Perform a read-only provider metadata lookup for this exact recorded target.
     /// Credentials are supplied by the caller and are never persisted in JobStore.
     /// This is observation only: no transfer, receipt, retry or Job transition.
-    pub fn observe_yandex_attempt(
+    fn observe_yandex_attempt(
         &self,
         job_id: &str,
         attempt_id: &str,
