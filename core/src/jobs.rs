@@ -186,10 +186,7 @@ mod tests {
         db.enqueue("manual", None).unwrap();
         db.enqueue("sync", Some(("scenario-1", 4))).unwrap();
         assert_eq!(db.get("manual").unwrap().unwrap().scenario_id, None);
-        assert_eq!(
-            db.get("sync").unwrap().unwrap().scenario_revision,
-            Some(4)
-        );
+        assert_eq!(db.get("sync").unwrap().unwrap().scenario_revision, Some(4));
         assert!(matches!(
             db.enqueue("sync", Some(("other", 8))),
             Err(JobStoreError::DuplicateJob)
@@ -212,7 +209,12 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            db.advance("j", JobState::Running, JobState::Completed, Confirmation::Unknown),
+            db.advance(
+                "j",
+                JobState::Running,
+                JobState::Completed,
+                Confirmation::Unknown
+            ),
             Err(JobStoreError::MissingEvidence)
         ));
         db.advance(
@@ -223,7 +225,12 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            db.advance("j", JobState::Running, JobState::Failed, Confirmation::Unknown),
+            db.advance(
+                "j",
+                JobState::Running,
+                JobState::Failed,
+                Confirmation::Unknown
+            ),
             Err(JobStoreError::InvalidTransition)
         ));
     }
@@ -235,8 +242,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("qadren-jobs-{}-{unique}.sqlite", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "qadren-jobs-{}-{unique}.sqlite",
+            std::process::id()
+        ));
         {
             let db = JobStore::open(&path).unwrap();
             db.enqueue("interrupted", Some(("scenario", 2))).unwrap();
@@ -254,7 +263,12 @@ mod tests {
             assert_eq!(db.state("interrupted").unwrap(), Some(JobState::Unknown));
             assert_eq!(db.state("waiting").unwrap(), Some(JobState::Queued));
             assert!(matches!(
-                db.advance("interrupted", JobState::Unknown, JobState::Running, Confirmation::Unknown),
+                db.advance(
+                    "interrupted",
+                    JobState::Unknown,
+                    JobState::Running,
+                    Confirmation::Unknown
+                ),
                 Err(JobStoreError::InvalidTransition)
             ));
         }
