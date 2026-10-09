@@ -71,7 +71,7 @@ impl JobStore {
 
     fn initialize(db: Connection) -> Result<Self> {
         let version: i32 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 3 {
+        if version > 4 {
             return Err(JobStoreError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -115,6 +115,18 @@ impl JobStore {
                  CREATE UNIQUE INDEX one_active_attempt_per_job
                    ON job_attempts(job_id) WHERE status='active';
                  PRAGMA user_version = 3;
+                 COMMIT;",
+            )?;
+        }
+        if version <= 3 {
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE attempt_verifications (
+                   attempt_id TEXT PRIMARY KEY NOT NULL REFERENCES job_attempts(attempt_id),
+                   evidence_level TEXT NOT NULL CHECK (evidence_level IN
+                     ('metadata_verified','content_verified'))
+                 );
+                 PRAGMA user_version = 4;
                  COMMIT;",
             )?;
         }
@@ -292,6 +304,16 @@ impl JobStore {
         if updated == 0 {
             return Err(JobStoreError::InvalidTransition);
         }
+        let level = match evidence {
+            Confirmation::Confirmed(crate::confirmation::EvidenceLevel::ContentVerified) => {
+                "content_verified"
+            }
+            _ => "metadata_verified",
+        };
+        tx.execute(
+            "INSERT INTO attempt_verifications(attempt_id,evidence_level) VALUES (?1,?2)",
+            params![attempt_id, level],
+        )?;
         let state: String =
             tx.query_row("SELECT state FROM jobs WHERE id=?1", [job_id], |row| {
                 row.get(0)
@@ -589,6 +611,40 @@ mod tests {
             assert_eq!(store.state("job").unwrap(), Some(JobState::Unknown));
         }
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn verification_is_persisted_atomically_with_attempt_resolution() {
+        let mut db = JobStore::in_memory().unwrap();
+        db.enqueue("j", None).unwrap();
+        db.advance(
+            "j",
+            JobState::Queued,
+            JobState::Running,
+            Confirmation::Unknown,
+        )
+        .unwrap();
+        db.begin_attempt("j", "a").unwrap();
+        db.resolve_attempt("j", "a", &crate::verification::test_receipt("a"))
+            .unwrap();
+        let level: String = db
+            .db
+            .query_row(
+                "SELECT evidence_level FROM attempt_verifications WHERE attempt_id='a'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(level, "metadata_verified");
+        assert!(matches!(
+            db.resolve_attempt("j", "a", &crate::verification::test_receipt("a")),
+            Err(JobStoreError::InvalidTransition)
+        ));
+        let total: i64 = db
+            .db
+            .query_row("SELECT count(*) FROM attempt_verifications", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total, 1);
     }
 
     #[test]
