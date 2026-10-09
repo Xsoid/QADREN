@@ -225,6 +225,50 @@ pub fn open_content(root: &File, target: &Path) -> Result<File> {
     }
 }
 
+/// Rename a regular file inside the scoped tree. The destination must not exist.
+/// Directory moves, replacements and destructive deletion are deliberately excluded.
+pub fn move_new(root: &File, source: &Path, destination: &Path) -> Result<()> {
+    let (source_dir, source_name) = parent(root, source)?;
+    let (dest_dir, dest_name) = parent(root, destination)?;
+    let source_file = opened(unsafe {
+        openat(
+            source_dir.as_raw_fd(),
+            source_name.as_ptr(),
+            RDONLY | NOFOLLOW | NONBLOCK | CLOEXEC,
+        )
+    })?;
+    if !source_file.metadata()?.is_file() {
+        return Err(LocalError::UnsafeEntry);
+    }
+    // Link-first gives atomic no-overwrite semantics on the same filesystem.
+    // If unlink fails, two names reference the same data; report UNKNOWN via Io
+    // rather than retrying an unsafe move.
+    let linked = unsafe {
+        linkat(
+            source_dir.as_raw_fd(),
+            source_name.as_ptr(),
+            dest_dir.as_raw_fd(),
+            dest_name.as_ptr(),
+            0,
+        )
+    };
+    if linked != 0 {
+        let error = io::Error::last_os_error();
+        return if error.kind() == io::ErrorKind::AlreadyExists {
+            Err(LocalError::AlreadyExists)
+        } else {
+            Err(LocalError::Io(error))
+        };
+    }
+    dest_dir.sync_all()?;
+    let removed = unsafe { unlinkat(source_dir.as_raw_fd(), source_name.as_ptr(), 0) };
+    if removed != 0 {
+        return Err(LocalError::Io(io::Error::last_os_error()));
+    }
+    source_dir.sync_all()?;
+    Ok(())
+}
+
 /// Creates one directory without following symlinks or replacing existing entries.
 pub fn create_directory(root: &File, target: &Path) -> Result<()> {
     let (directory, destination) = parent(root, target)?;
