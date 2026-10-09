@@ -191,6 +191,10 @@ pub fn list(root: &File, relative: &Path) -> Result<Vec<LocalEntry>> {
         });
     }
     entries.sort_by(|a, b| a.name.cmp(&b.name));
+    if entries.windows(2).any(|pair| pair[0].name == pair[1].name) {
+        // Distinct non-UTF8 names must not silently collapse after lossy conversion.
+        return Err(LocalError::UnsafeEntry);
+    }
     Ok(entries)
 }
 
