@@ -124,14 +124,20 @@ impl LocalFilesystem {
     }
 
     pub fn list(&self, path: &Path) -> Result<Vec<LocalEntry>> {
-        Self::relative(path)?;
+        if !path.as_os_str().is_empty() {
+            Self::relative(path)?;
+        }
         #[cfg(unix)]
         {
             secure::list(&self.root_fd, path)
         }
         #[cfg(not(unix))]
         {
-            let dir = self.checked(path)?;
+            let dir = if path.as_os_str().is_empty() {
+                self.root.clone()
+            } else {
+                self.checked(path)?
+            };
             if !fs::symlink_metadata(&dir)?.is_dir() {
                 return Err(LocalError::NotDirectory);
             }
@@ -259,6 +265,28 @@ mod tests {
         assert!(root.join("from.txt").exists());
         assert!(!root.join("to.txt").exists());
         assert_eq!(fs::read(root.join("occupied.txt")).unwrap(), b"existing");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_listing_uses_pinned_directory_and_stable_pagination() {
+        let root = sandbox();
+        fs::write(root.join("z.txt"), b"last").unwrap();
+        fs::write(root.join("a.txt"), b"first").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let entries = adapter.list(Path::new("")).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "a.txt");
+        assert_eq!(entries[1].name, "z.txt");
+        assert_eq!(
+            adapter.list_page(Path::new(""), 1, 1).unwrap(),
+            vec![entries[1].clone()]
+        );
+        assert!(matches!(
+            adapter.stat(Path::new("")),
+            Err(LocalError::InvalidPath)
+        ));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -425,8 +453,8 @@ mod tests {
         for name in ["ёж.txt", "alpha.txt", "b.txt"] {
             fs::write(root.join(name), b"x").unwrap();
         }
-        let all = adapter.list(Path::new("")).err();
-        assert!(matches!(all, Some(LocalError::InvalidPath)));
+        let root_items = adapter.list(Path::new("")).unwrap();
+        assert_eq!(root_items.len(), 4);
         let first = adapter.list_page(Path::new("alpha.txt"), 0, 10);
         assert!(first.is_err());
         // Root itself is not addressable as a relative file path by design.
