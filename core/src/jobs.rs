@@ -489,7 +489,7 @@ mod tests {
         db.begin_attempt("job", "attempt-1").unwrap();
         assert!(matches!(
             db.resolve_attempt("job", "attempt-1", &crate::verification::test_receipt("other")),
-            Err(JobStoreError::MissingEvidence)
+            Err(JobStoreError::UntrustedEvidence)
         ));
 
         assert!(matches!(
