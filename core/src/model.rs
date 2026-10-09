@@ -103,7 +103,9 @@ impl ScenarioDraft {
             return Err(ValidationError::IdenticalEndpoints);
         }
         if self.filters.excluded_patterns.iter().any(|pattern| {
-            pattern.is_empty() || pattern.starts_with('/') || pattern.contains("..")
+            pattern.is_empty()
+                || pattern.starts_with('/')
+                || pattern.contains("..")
                 || pattern.chars().any(char::is_control)
         }) {
             return Err(ValidationError::InvalidFilter);
