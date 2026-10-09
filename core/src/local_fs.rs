@@ -24,6 +24,9 @@ pub enum LocalError {
     UnsafeEntry,
     NotDirectory,
     AlreadyExists,
+    /// Destination may already exist after a failed durability/cleanup step.
+    /// Caller must reconcile state before any retry.
+    OutcomeUnknown(io::Error),
     Io(io::Error),
 }
 impl From<io::Error> for LocalError {
