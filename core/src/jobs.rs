@@ -101,7 +101,7 @@ impl JobStore {
 
     fn initialize(db: Connection) -> Result<Self> {
         let version: i32 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 5 {
+        if version > 6 {
             return Err(JobStoreError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -167,6 +167,18 @@ impl JobStore {
                  ALTER TABLE job_attempts ADD COLUMN target_connection_id TEXT;
                  ALTER TABLE job_attempts ADD COLUMN target_path TEXT;
                  PRAGMA user_version = 5;
+                 COMMIT;",
+            )?;
+        }
+        if version <= 5 {
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE attempt_expectations (
+                   attempt_id TEXT PRIMARY KEY NOT NULL REFERENCES job_attempts(attempt_id),
+                   expected_size INTEGER NOT NULL CHECK(expected_size >= 0),
+                   expected_md5 TEXT NOT NULL CHECK(length(expected_md5) = 32)
+                 );
+                 PRAGMA user_version = 6;
                  COMMIT;",
             )?;
         }
@@ -329,6 +341,42 @@ impl JobStore {
         tx.execute(
             "INSERT INTO job_events(job_id,state,kind) VALUES (?1,'running','attempt_started')",
             [job_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Store expected metadata before any effect. This operation is write-once
+    /// and only permitted for an active attempt bound to the exact target.
+    pub fn bind_expected_metadata(
+        &mut self,
+        job_id: &str,
+        attempt_id: &str,
+        expected_size: u64,
+        expected_md5: &str,
+    ) -> Result<()> {
+        if expected_size > i64::MAX as u64
+            || expected_md5.len() != 32
+            || !expected_md5.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err(JobStoreError::InvalidId);
+        }
+        let tx = self.db.transaction()?;
+        let eligible: i64 = tx.query_row(
+            "SELECT count(*) FROM job_attempts
+             WHERE job_id=?1 AND attempt_id=?2 AND status='active'
+             AND operation_kind IS NOT NULL AND target_connection_id IS NOT NULL
+             AND target_path IS NOT NULL",
+            params![job_id, attempt_id],
+            |row| row.get(0),
+        )?;
+        if eligible != 1 {
+            return Err(JobStoreError::InvalidTransition);
+        }
+        tx.execute(
+            "INSERT INTO attempt_expectations(attempt_id,expected_size,expected_md5)
+             VALUES (?1,?2,?3)",
+            params![attempt_id, expected_size as i64, expected_md5.to_ascii_lowercase()],
         )?;
         tx.commit()?;
         Ok(())
@@ -897,6 +945,32 @@ mod tests {
         ));
         assert_eq!(db.unresolved_attempts().unwrap(), items);
         assert_eq!(db.state("legacy").unwrap(), Some(JobState::Unknown));
+    }
+
+    #[test]
+    fn expected_metadata_is_write_once_and_bound_to_attempt() {
+        let mut db = JobStore::in_memory().unwrap();
+        db.enqueue("job", None).unwrap();
+        db.advance(
+            "job",
+            JobState::Queued,
+            JobState::Running,
+            Confirmation::Unknown,
+        )
+        .unwrap();
+        db.begin_bound_attempt("job", "attempt", "copy", "target", "/file")
+            .unwrap();
+        let checksum = "abcdef0123456789abcdef0123456789";
+        db.bind_expected_metadata("job", "attempt", 123, checksum)
+            .unwrap();
+        assert!(matches!(
+            db.bind_expected_metadata("job", "attempt", 123, checksum),
+            Err(JobStoreError::Sqlite(_))
+        ));
+        assert!(matches!(
+            db.bind_expected_metadata("other", "attempt", 123, checksum),
+            Err(JobStoreError::InvalidTransition)
+        ));
     }
 
     #[test]
