@@ -18,6 +18,7 @@ pub enum JobStoreError {
     DuplicateJob,
     AlreadyOpen,
     UnsafeDatabaseLink,
+    StorageIdentityChanged,
 }
 impl From<std::io::Error> for JobStoreError {
     fn from(value: std::io::Error) -> Self {
@@ -85,7 +86,20 @@ pub struct JobStore {
     // Separate SQLite file holds a process-lifetime write transaction.
     // SQLite releases this owner lock on crashes without stale PID files.
     _owner_lock: Option<Connection>,
+    #[cfg(unix)]
+    identity: Option<StoreIdentity>,
 }
+
+#[cfg(unix)]
+struct StoreIdentity {
+    database: std::path::PathBuf,
+    lock: std::path::PathBuf,
+    database_device: u64,
+    database_inode: u64,
+    lock_device: u64,
+    lock_inode: u64,
+}
+
 
 fn label(state: JobState) -> &'static str {
     match state {
@@ -157,7 +171,22 @@ impl JobStore {
             }
             Err(error) => return Err(JobStoreError::Sqlite(error)),
         }
-        Self::initialize(Connection::open(&canonical)?, Some(owner))
+        let mut store = Self::initialize(Connection::open(&canonical)?, Some(owner))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let database_metadata = std::fs::metadata(&canonical)?;
+            let lock_metadata = std::fs::metadata(Path::new(&lock_path))?;
+            store.identity = Some(StoreIdentity {
+                database: canonical,
+                lock: Path::new(&lock_path).to_path_buf(),
+                database_device: database_metadata.dev(),
+                database_inode: database_metadata.ino(),
+                lock_device: lock_metadata.dev(),
+                lock_inode: lock_metadata.ino(),
+            });
+        }
+        Ok(store)
     }
 
     pub fn in_memory() -> Result<Self> {
@@ -261,10 +290,36 @@ impl JobStore {
         Ok(Self {
             db,
             _owner_lock: owner_lock,
+            #[cfg(unix)]
+            identity: None,
         })
     }
 
+    /// Refuse state mutations when an external actor replaces or unlinks the
+    /// database or its lifetime lock. This does not replace directory isolation.
+    fn check_storage_identity(&self) -> Result<()> {
+        #[cfg(unix)]
+        if let Some(identity) = &self.identity {
+            use std::os::unix::fs::MetadataExt;
+            let database = std::fs::metadata(&identity.database)
+                .map_err(|_| JobStoreError::StorageIdentityChanged)?;
+            let lock = std::fs::metadata(&identity.lock)
+                .map_err(|_| JobStoreError::StorageIdentityChanged)?;
+            if database.dev() != identity.database_device
+                || database.ino() != identity.database_inode
+                || database.nlink() != 1
+                || lock.dev() != identity.lock_device
+                || lock.ino() != identity.lock_inode
+                || lock.nlink() != 1
+            {
+                return Err(JobStoreError::StorageIdentityChanged);
+            }
+        }
+        Ok(())
+    }
+
     pub fn enqueue(&mut self, id: &str, scenario: Option<(&str, u64)>) -> Result<()> {
+        self.check_storage_identity()?;
         if id.is_empty()
             || scenario
                 .is_some_and(|(name, rev)| name.is_empty() || rev == 0 || rev > i64::MAX as u64)
@@ -321,6 +376,7 @@ impl JobStore {
         next: JobState,
         evidence: Confirmation,
     ) -> Result<()> {
+        self.check_storage_identity()?;
         match expected.transition(next, evidence) {
             Ok(_) => {}
             Err(crate::confirmation::StateTransitionError::InvalidTransition) => {
@@ -377,6 +433,7 @@ impl JobStore {
         expected_size: u64,
         expected_md5: &str,
     ) -> Result<()> {
+        self.check_storage_identity()?;
         if job_id.is_empty()
             || attempt_id.is_empty()
             || operation_kind.is_empty()
@@ -445,6 +502,7 @@ impl JobStore {
         target_connection_id: &str,
         target_path: &str,
     ) -> Result<()> {
+        self.check_storage_identity()?;
         if operation_kind.is_empty() || target_connection_id.is_empty() || target_path.is_empty() {
             return Err(JobStoreError::InvalidId);
         }
@@ -495,6 +553,7 @@ impl JobStore {
         expected_size: u64,
         expected_md5: &str,
     ) -> Result<()> {
+        self.check_storage_identity()?;
         if expected_size > i64::MAX as u64
             || expected_md5.len() != 32
             || !expected_md5.bytes().all(|b| b.is_ascii_hexdigit())
@@ -605,6 +664,7 @@ impl JobStore {
         attempt_id: &str,
         receipt: &crate::verification::VerifiedReceipt,
     ) -> Result<()> {
+        self.check_storage_identity()?;
         if receipt.attempt_id() != attempt_id {
             return Err(JobStoreError::UntrustedEvidence);
         }
