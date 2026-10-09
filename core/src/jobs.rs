@@ -17,6 +17,7 @@ pub enum JobStoreError {
     NotFound,
     DuplicateJob,
     AlreadyOpen,
+    UnsafeDatabaseLink,
 }
 impl From<std::io::Error> for JobStoreError {
     fn from(value: std::io::Error) -> Self {
@@ -125,6 +126,15 @@ impl JobStore {
                 .unwrap_or(Path::new("."));
             std::fs::canonicalize(parent)?.join(filename)
         };
+        // Two hard links can name the same SQLite inode but produce distinct
+        // owner lock paths. Refuse that layout rather than risking two writers.
+        #[cfg(unix)]
+        if canonical.exists() {
+            use std::os::unix::fs::MetadataExt;
+            if std::fs::metadata(&canonical)?.nlink() > 1 {
+                return Err(JobStoreError::UnsafeDatabaseLink);
+            }
+        }
         let mut lock_path = canonical.as_os_str().to_os_string();
         lock_path.push(".owner.sqlite");
         let owner = Connection::open(Path::new(&lock_path))?;
@@ -1303,6 +1313,32 @@ mod tests {
             Err(JobStoreError::AlreadyOpen)
         ));
         drop(first);
+        std::fs::remove_file(&database).unwrap();
+        std::fs::remove_file(directory.join("jobs.sqlite.owner.sqlite")).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hardlinked_database_is_rejected_before_recovery() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir()
+            .join(format!("qadren-hardlink-{}-{unique}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let database = directory.join("jobs.sqlite");
+        let alias = directory.join("alias.sqlite");
+        let first = JobStore::open(&database).unwrap();
+        std::fs::hard_link(&database, &alias).unwrap();
+        assert!(matches!(
+            JobStore::open(&alias),
+            Err(JobStoreError::UnsafeDatabaseLink)
+        ));
+        drop(first);
+        std::fs::remove_file(&alias).unwrap();
         std::fs::remove_file(&database).unwrap();
         std::fs::remove_file(directory.join("jobs.sqlite.owner.sqlite")).unwrap();
         std::fs::remove_dir(directory).unwrap();
