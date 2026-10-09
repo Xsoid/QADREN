@@ -1016,6 +1016,44 @@ mod tests {
     }
 
     #[test]
+    fn migrates_v5_attempts_without_synthesizing_expectations() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE jobs (
+                   id TEXT PRIMARY KEY NOT NULL, state TEXT NOT NULL,
+                   scenario_id TEXT, scenario_revision INTEGER
+                 );
+                 CREATE TABLE job_events (
+                   sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                   job_id TEXT NOT NULL REFERENCES jobs(id),
+                   state TEXT NOT NULL, kind TEXT NOT NULL
+                 );
+                 CREATE TABLE job_attempts (
+                   attempt_id TEXT PRIMARY KEY NOT NULL,
+                   job_id TEXT NOT NULL REFERENCES jobs(id),
+                   status TEXT NOT NULL, operation_kind TEXT,
+                   target_connection_id TEXT, target_path TEXT
+                 );
+                 CREATE TABLE attempt_verifications (
+                   attempt_id TEXT PRIMARY KEY NOT NULL REFERENCES job_attempts(attempt_id),
+                   evidence_level TEXT NOT NULL
+                 );
+                 INSERT INTO jobs(id,state) VALUES ('job','unknown');
+                 INSERT INTO job_attempts VALUES
+                   ('old','job','unknown','copy','target','/file');
+                 PRAGMA user_version = 5;",
+            )
+            .unwrap();
+        let store = JobStore::initialize(connection).unwrap();
+        assert!(store.expected_metadata("job", "old").unwrap().is_none());
+        let attempts = store.unresolved_attempts().unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].status, "unknown");
+        assert!(!attempts[0].is_legacy_unbound);
+    }
+
+    #[test]
     fn newer_schema_is_not_downgraded() {
         let db = Connection::open_in_memory().unwrap();
         db.pragma_update(None, "user_version", 99).unwrap();
