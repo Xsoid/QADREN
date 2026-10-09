@@ -715,6 +715,12 @@ impl JobStore {
         let token = resolve_credential(credential_ref)
             .filter(|value| !value.is_empty())
             .ok_or(YandexObservationError::CredentialUnavailable)?;
+        let actual_uid = client
+            .account_uid(&token)
+            .map_err(YandexObservationError::Provider)?;
+        if connection.provider_account_id.as_deref() != Some(actual_uid.as_str()) {
+            return Err(YandexObservationError::ConnectionNotAuthorized);
+        }
         self.observe_yandex_attempt(job_id, attempt_id, &connection.id, client, &token)
     }
 
