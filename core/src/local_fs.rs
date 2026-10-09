@@ -187,19 +187,12 @@ impl LocalFilesystem {
         }
     }
 
-    /// Move an existing regular file to an unused name within the same filesystem.
-    /// Never overwrites. Partial operations must be reconciled before retry.
+    /// Moving by pathname cannot guarantee source identity under concurrent mutation.
+    /// Reject until an identity-preserving platform implementation is available.
     pub fn move_file_new(&self, from: &Path, to: &Path) -> Result<()> {
         Self::relative(from)?;
         Self::relative(to)?;
-        #[cfg(unix)]
-        {
-            secure::move_new(&self.root_fd, from, to)
-        }
-        #[cfg(not(unix))]
-        {
-            Err(LocalError::UnsafeEntry)
-        }
+        Err(LocalError::UnsafeEntry)
     }
 
     /// Creates one child directory; fails closed on unsupported platforms.
@@ -249,27 +242,23 @@ mod tests {
         p
     }
 
-    #[cfg(unix)]
     #[test]
-    fn move_file_without_overwrite_or_escape() {
+    fn unverified_move_is_rejected_without_changes() {
         let root = sandbox();
         let adapter = LocalFilesystem::open(&root).unwrap();
         fs::write(root.join("from.txt"), b"data").unwrap();
         fs::write(root.join("occupied.txt"), b"existing").unwrap();
         assert!(matches!(
             adapter.move_file_new(Path::new("from.txt"), Path::new("occupied.txt")),
-            Err(LocalError::AlreadyExists)
+            Err(LocalError::UnsafeEntry)
         ));
-        assert_eq!(fs::read(root.join("occupied.txt")).unwrap(), b"existing");
-        adapter
-            .move_file_new(Path::new("from.txt"), Path::new("to.txt"))
-            .unwrap();
-        assert!(!root.join("from.txt").exists());
-        assert_eq!(fs::read(root.join("to.txt")).unwrap(), b"data");
         assert!(matches!(
-            adapter.move_file_new(Path::new("to.txt"), Path::new("../outside")),
-            Err(LocalError::InvalidPath)
+            adapter.move_file_new(Path::new("from.txt"), Path::new("to.txt")),
+            Err(LocalError::UnsafeEntry)
         ));
+        assert!(root.join("from.txt").exists());
+        assert!(!root.join("to.txt").exists());
+        assert_eq!(fs::read(root.join("occupied.txt")).unwrap(), b"existing");
         fs::remove_dir_all(root).unwrap();
     }
 
