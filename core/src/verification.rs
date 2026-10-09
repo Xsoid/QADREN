@@ -5,11 +5,26 @@ use crate::confirmation::Confirmation;
 pub struct VerifiedReceipt {
     attempt_id: String,
     confirmation: Confirmation,
+    operation_kind: Option<String>,
+    target_connection_id: Option<String>,
+    target_path: Option<String>,
 }
 
 impl VerifiedReceipt {
     pub fn attempt_id(&self) -> &str {
         &self.attempt_id
+    }
+
+    pub fn operation_kind(&self) -> Option<&str> {
+        self.operation_kind.as_deref()
+    }
+
+    pub fn target_connection_id(&self) -> Option<&str> {
+        self.target_connection_id.as_deref()
+    }
+
+    pub fn target_path(&self) -> Option<&str> {
+        self.target_path.as_deref()
     }
 
     pub fn confirmation(&self) -> Confirmation {
@@ -28,5 +43,24 @@ pub(crate) fn test_receipt(attempt_id: &str) -> VerifiedReceipt {
     VerifiedReceipt {
         attempt_id: attempt_id.to_owned(),
         confirmation: Confirmation::Confirmed(crate::confirmation::EvidenceLevel::MetadataVerified),
+        operation_kind: None,
+        target_connection_id: None,
+        target_path: None,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_bound_receipt(
+    attempt_id: &str,
+    kind: &str,
+    connection: &str,
+    path: &str,
+) -> VerifiedReceipt {
+    VerifiedReceipt {
+        attempt_id: attempt_id.to_owned(),
+        confirmation: Confirmation::Confirmed(crate::confirmation::EvidenceLevel::MetadataVerified),
+        operation_kind: Some(kind.to_owned()),
+        target_connection_id: Some(connection.to_owned()),
+        target_path: Some(path.to_owned()),
     }
 }
