@@ -254,40 +254,6 @@ impl JobStore {
         }
     }
 
-    /// Persist an attempt identity BEFORE any external effect may be started.
-    /// A caller must not create a second attempt while any prior one is unresolved.
-    #[cfg(test)]
-    pub fn begin_attempt(&mut self, job_id: &str, attempt_id: &str) -> Result<()> {
-        if attempt_id.is_empty() || job_id.is_empty() {
-            return Err(JobStoreError::InvalidId);
-        }
-        let tx = self.db.transaction()?;
-        let state: Option<String> = tx
-            .query_row("SELECT state FROM jobs WHERE id=?1", [job_id], |r| r.get(0))
-            .optional()?;
-        if state.as_deref() != Some("running") {
-            return Err(JobStoreError::InvalidTransition);
-        }
-        let pending: i64 = tx.query_row(
-            "SELECT count(*) FROM job_attempts WHERE job_id=?1 AND status!='resolved'",
-            [job_id],
-            |row| row.get(0),
-        )?;
-        if pending > 0 {
-            return Err(JobStoreError::InvalidTransition);
-        }
-        tx.execute(
-            "INSERT INTO job_attempts(attempt_id,job_id,status) VALUES (?1,?2,'active')",
-            params![attempt_id, job_id],
-        )?;
-        tx.execute(
-            "INSERT INTO job_events(job_id,state,kind) VALUES (?1,'running','attempt_started')",
-            [job_id],
-        )?;
-        tx.commit()?;
-        Ok(())
-    }
-
     /// Bind the operation before it may produce an external side effect.
     /// Legacy attempts have no binding and remain ineligible for bound receipts.
     pub fn begin_bound_attempt(
