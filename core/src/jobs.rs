@@ -312,19 +312,39 @@ mod tests {
     fn transitions_record_events_without_duplicates() {
         let mut db = JobStore::in_memory().unwrap();
         db.enqueue("job", None).unwrap();
-        db.advance("job", JobState::Queued, JobState::Running, Confirmation::Unknown)
+        db.advance(
+            "job",
+            JobState::Queued,
+            JobState::Running,
+            Confirmation::Unknown,
+        )
+        .unwrap();
+        let count: i64 = db
+            .db
+            .query_row(
+                "SELECT count(*) FROM job_events WHERE job_id='job'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
-        let count: i64 = db.db.query_row(
-            "SELECT count(*) FROM job_events WHERE job_id='job'", [], |row| row.get(0)
-        ).unwrap();
         assert_eq!(count, 2);
         assert!(matches!(
-            db.advance("job", JobState::Queued, JobState::Paused, Confirmation::Unknown),
+            db.advance(
+                "job",
+                JobState::Queued,
+                JobState::Paused,
+                Confirmation::Unknown
+            ),
             Err(JobStoreError::InvalidTransition)
         ));
-        let after: i64 = db.db.query_row(
-            "SELECT count(*) FROM job_events WHERE job_id='job'", [], |row| row.get(0)
-        ).unwrap();
+        let after: i64 = db
+            .db
+            .query_row(
+                "SELECT count(*) FROM job_events WHERE job_id='job'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(after, 2);
     }
 
