@@ -307,8 +307,78 @@ impl JobStore {
         }
     }
 
-    /// Bind the operation before it may produce an external side effect.
-    /// Legacy attempts have no binding and remain ineligible for bound receipts.
+    /// Atomically prepare an operation and its immutable expected metadata.
+    /// Persist this transaction BEFORE initiating any external effect.
+    pub fn prepare_bound_attempt(
+        &mut self,
+        job_id: &str,
+        attempt_id: &str,
+        operation_kind: &str,
+        target_connection_id: &str,
+        target_path: &str,
+        expected_size: u64,
+        expected_md5: &str,
+    ) -> Result<()> {
+        if job_id.is_empty()
+            || attempt_id.is_empty()
+            || operation_kind.is_empty()
+            || target_connection_id.is_empty()
+            || target_path.is_empty()
+            || expected_size > i64::MAX as u64
+            || expected_md5.len() != 32
+            || !expected_md5.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err(JobStoreError::InvalidId);
+        }
+        let tx = self.db.transaction()?;
+        let state: Option<String> = tx
+            .query_row("SELECT state FROM jobs WHERE id=?1", [job_id], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        if state.as_deref() != Some("running") {
+            return Err(JobStoreError::InvalidTransition);
+        }
+        let pending: i64 = tx.query_row(
+            "SELECT count(*) FROM job_attempts WHERE job_id=?1 AND status!='resolved'",
+            [job_id],
+            |row| row.get(0),
+        )?;
+        if pending != 0 {
+            return Err(JobStoreError::InvalidTransition);
+        }
+        tx.execute(
+            "INSERT INTO job_attempts
+               (attempt_id,job_id,status,operation_kind,target_connection_id,target_path)
+             VALUES (?1,?2,'active',?3,?4,?5)",
+            params![
+                attempt_id,
+                job_id,
+                operation_kind,
+                target_connection_id,
+                target_path
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO attempt_expectations(attempt_id,expected_size,expected_md5)
+             VALUES (?1,?2,?3)",
+            params![
+                attempt_id,
+                expected_size as i64,
+                expected_md5.to_ascii_lowercase()
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO job_events(job_id,state,kind) VALUES (?1,'running','attempt_started')",
+            [job_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    // Historical split helpers exist only for migration/regression tests.
+    // Production callers must use prepare_bound_attempt.
+    #[cfg(test)]
     pub fn begin_bound_attempt(
         &mut self,
         job_id: &str,
@@ -359,6 +429,7 @@ impl JobStore {
 
     /// Store expected metadata before any effect. This operation is write-once
     /// and only permitted for an active attempt bound to the exact target.
+    #[cfg(test)]
     pub fn bind_expected_metadata(
         &mut self,
         job_id: &str,
@@ -1138,6 +1209,37 @@ mod tests {
         ));
         assert_eq!(db.state("job").unwrap(), Some(JobState::Running));
         assert_eq!(db.unresolved_attempts().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn atomic_prepare_persists_expectation_and_rejects_incomplete_input() {
+        let mut db = JobStore::in_memory().unwrap();
+        db.enqueue("job", None).unwrap();
+        db.advance(
+            "job",
+            JobState::Queued,
+            JobState::Running,
+            Confirmation::Unknown,
+        )
+        .unwrap();
+        let checksum = "abcdef0123456789abcdef0123456789";
+        assert!(matches!(
+            db.prepare_bound_attempt("job", "a", "copy", "dest", "/file", 7, "invalid"),
+            Err(JobStoreError::InvalidId)
+        ));
+        assert!(db.unresolved_attempts().unwrap().is_empty());
+        db.prepare_bound_attempt("job", "a", "copy", "dest", "/file", 7, checksum)
+            .unwrap();
+        assert_eq!(db.unresolved_attempts().unwrap().len(), 1);
+        assert_eq!(
+            db.expected_metadata("job", "a").unwrap().unwrap().expected_size,
+            7
+        );
+        assert!(matches!(
+            db.prepare_bound_attempt("job", "b", "copy", "dest", "/file", 7, checksum),
+            Err(JobStoreError::InvalidTransition)
+        ));
+        assert!(db.expected_metadata("job", "b").unwrap().is_none());
     }
 
     #[test]
