@@ -336,7 +336,8 @@ mod tests {
         let ids: Vec<String> = (0..3)
             .map(|n| {
                 let id = db.add("yandex_disk", &format!("Connection {n}")).unwrap();
-                db.set_provider_account_id(&id, Some("shared-account")).unwrap();
+                db.set_provider_account_id(&id, Some("shared-account"))
+                    .unwrap();
                 db.set_credential_ref(&id, Some(&format!("keychain:{id}")))
                     .unwrap();
                 id
