@@ -331,6 +331,39 @@ mod tests {
     }
 
     #[test]
+    fn three_connections_to_same_account_keep_independent_ids_and_credentials() {
+        let db = Registry::in_memory().unwrap();
+        let ids: Vec<String> = (0..3)
+            .map(|n| {
+                let id = db.add("yandex_disk", &format!("Connection {n}")).unwrap();
+                db.set_provider_account_id(&id, Some("shared-account")).unwrap();
+                db.set_credential_ref(&id, Some(&format!("keychain:{id}")))
+                    .unwrap();
+                id
+            })
+            .collect();
+        assert_ne!(ids[0], ids[1]);
+        assert_ne!(ids[1], ids[2]);
+        assert_ne!(ids[0], ids[2]);
+
+        db.set_enabled(&ids[1], false).unwrap();
+        db.remove(&ids[0]).unwrap();
+        let entries = db.list().unwrap();
+        assert_eq!(entries.len(), 2);
+        for id in [&ids[1], &ids[2]] {
+            let entry = db.get(id).unwrap().unwrap();
+            assert_eq!(entry.provider_account_id.as_deref(), Some("shared-account"));
+            assert_eq!(
+                entry.credential_ref.as_deref(),
+                Some(format!("keychain:{id}").as_str())
+            );
+        }
+        assert!(!db.get(&ids[1]).unwrap().unwrap().enabled);
+        assert!(db.get(&ids[2]).unwrap().unwrap().enabled);
+        assert!(db.get(&ids[0]).unwrap().is_none());
+    }
+
+    #[test]
     fn migrate_existing_v1_keeps_connections() {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch(
