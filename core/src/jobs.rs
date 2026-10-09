@@ -256,6 +256,7 @@ impl JobStore {
 
     /// Persist an attempt identity BEFORE any external effect may be started.
     /// A caller must not create a second attempt while any prior one is unresolved.
+    #[cfg(test)]
     pub fn begin_attempt(&mut self, job_id: &str, attempt_id: &str) -> Result<()> {
         if attempt_id.is_empty() || job_id.is_empty() {
             return Err(JobStoreError::InvalidId);
@@ -365,7 +366,9 @@ impl JobStore {
             {
                 return Err(JobStoreError::UntrustedEvidence);
             }
-        } else if receipt.operation_kind().is_some() {
+        } else {
+            // Legacy attempts have no trusted operation/target binding.
+            // Preserve them for investigation, but never resolve blindly.
             return Err(JobStoreError::UntrustedEvidence);
         }
         let evidence = receipt.confirmation();
