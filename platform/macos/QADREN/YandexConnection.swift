@@ -187,6 +187,11 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
                 status = "Authorization incomplete; reconnect required"
                 return
             }
+            guard registered.credential_ref == "keychain:" + connectionID else {
+                connected = false
+                status = "Credential reference mismatch; reconnect required"
+                return
+            }
             guard let token = try YandexKeychain.read(connectionID) else {
                 connected = false
                 accountLabel = nil
@@ -251,6 +256,20 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
 
     func refreshDisk() async {
         guard connected && enabled && !metadataBusy else { return }
+        // Recheck the live Registry before reading Keychain or issuing requests.
+        // A connection may have been disabled or removed by another view.
+        guard let registered = try? StorageRegistryBridge.list().first(where: { $0.id == connectionID }),
+              ConnectionAuthorization.mayRefresh(
+                enabled: registered.enabled,
+                status: registered.status,
+                accountID: registered.provider_account_id,
+                credentialReference: registered.credential_ref
+              ),
+              registered.credential_ref == "keychain:" + connectionID else {
+            connected = false
+            metadataError = "Connection disabled, removed or authorization incomplete"
+            return
+        }
         metadataBusy = true
         metadataError = nil
         defer { metadataBusy = false }
