@@ -1,6 +1,6 @@
 //! Durable Job metadata. No content bytes, credentials or transfer side effects.
 //! Stored independently from StorageConnection Registry until cross-links are specified.
-use crate::confirmation::{Confirmation, EvidenceLevel};
+use crate::confirmation::Confirmation;
 use crate::model::JobState;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
@@ -91,20 +91,14 @@ impl JobStore {
         }
         // A previous process may have written remote effects before dying.
         // Reconciliation is required; never resubmit these Jobs blindly.
-        db.execute(
-            "UPDATE jobs SET state='unknown' WHERE state='running'",
-            [],
-        )?;
+        db.execute("UPDATE jobs SET state='unknown' WHERE state='running'", [])?;
         Ok(Self { db })
     }
 
-    pub fn enqueue(
-        &self,
-        id: &str,
-        scenario: Option<(&str, u64)>,
-    ) -> Result<()> {
+    pub fn enqueue(&self, id: &str, scenario: Option<(&str, u64)>) -> Result<()> {
         if id.is_empty()
-            || scenario.is_some_and(|(name, rev)| name.is_empty() || rev == 0 || rev > i64::MAX as u64)
+            || scenario
+                .is_some_and(|(name, rev)| name.is_empty() || rev == 0 || rev > i64::MAX as u64)
         {
             return Err(JobStoreError::InvalidId);
         }
@@ -184,6 +178,7 @@ impl JobStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::confirmation::EvidenceLevel;
 
     #[test]
     fn manual_and_scenario_jobs_remain_separate() {
@@ -191,16 +186,31 @@ mod tests {
         db.enqueue("manual", None).unwrap();
         db.enqueue("sync", Some(("scenario-1", 4))).unwrap();
         assert_eq!(db.get("manual").unwrap().unwrap().scenario_id, None);
-        assert_eq!(db.get("sync").unwrap().unwrap().scenario_revision, Some(4));
-        assert!(matches!(db.enqueue("sync", Some(("other", 8))), Err(JobStoreError::DuplicateJob)));
-        assert_eq!(db.get("sync").unwrap().unwrap().scenario_id.as_deref(), Some("scenario-1"));
+        assert_eq!(
+            db.get("sync").unwrap().unwrap().scenario_revision,
+            Some(4)
+        );
+        assert!(matches!(
+            db.enqueue("sync", Some(("other", 8))),
+            Err(JobStoreError::DuplicateJob)
+        ));
+        assert_eq!(
+            db.get("sync").unwrap().unwrap().scenario_id.as_deref(),
+            Some("scenario-1")
+        );
     }
 
     #[test]
     fn completion_requires_evidence_and_cas() {
         let db = JobStore::in_memory().unwrap();
         db.enqueue("j", None).unwrap();
-        db.advance("j", JobState::Queued, JobState::Running, Confirmation::Unknown).unwrap();
+        db.advance(
+            "j",
+            JobState::Queued,
+            JobState::Running,
+            Confirmation::Unknown,
+        )
+        .unwrap();
         assert!(matches!(
             db.advance("j", JobState::Running, JobState::Completed, Confirmation::Unknown),
             Err(JobStoreError::MissingEvidence)
@@ -210,7 +220,8 @@ mod tests {
             JobState::Running,
             JobState::Completed,
             Confirmation::Confirmed(EvidenceLevel::ProviderAcknowledged),
-        ).unwrap();
+        )
+        .unwrap();
         assert!(matches!(
             db.advance("j", JobState::Running, JobState::Failed, Confirmation::Unknown),
             Err(JobStoreError::InvalidTransition)
@@ -220,13 +231,23 @@ mod tests {
     #[test]
     fn restart_marks_running_unknown_and_never_resubmits() {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let path = std::env::temp_dir().join(format!("qadren-jobs-{}-{unique}.sqlite", std::process::id()));
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("qadren-jobs-{}-{unique}.sqlite", std::process::id()));
         {
             let db = JobStore::open(&path).unwrap();
             db.enqueue("interrupted", Some(("scenario", 2))).unwrap();
             db.enqueue("waiting", None).unwrap();
-            db.advance("interrupted", JobState::Queued, JobState::Running, Confirmation::Unknown).unwrap();
+            db.advance(
+                "interrupted",
+                JobState::Queued,
+                JobState::Running,
+                Confirmation::Unknown,
+            )
+            .unwrap();
         }
         {
             let db = JobStore::open(&path).unwrap();
@@ -244,6 +265,9 @@ mod tests {
     fn newer_schema_is_not_downgraded() {
         let db = Connection::open_in_memory().unwrap();
         db.pragma_update(None, "user_version", 99).unwrap();
-        assert!(matches!(JobStore::initialize(db), Err(JobStoreError::UnsupportedSchema(99))));
+        assert!(matches!(
+            JobStore::initialize(db),
+            Err(JobStoreError::UnsupportedSchema(99))
+        ));
     }
 }
