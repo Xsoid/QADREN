@@ -24,3 +24,33 @@ enum ConnectionRemoval {
         try deleteRecord()
     }
 }
+
+ 
+/// Fail-closed authorization commit across Registry and Keychain.
+/// Interrupted commits remain requires_auth; automatic refresh must not promote them.
+enum ConnectionAuthorization {
+    static func commit(
+        markRequiresAuth: () throws -> Void,
+        storeCredential: () throws -> Void,
+        persistIdentity: () throws -> Void,
+        persistCredentialReference: () throws -> Void,
+        markConnected: () throws -> Void
+    ) throws {
+        try markRequiresAuth()
+        try storeCredential()
+        try persistIdentity()
+        try persistCredentialReference()
+        try markConnected()
+    }
+
+    static func mayRefresh(
+        enabled: Bool,
+        status: String,
+        accountID: String?,
+        credentialReference: String?
+    ) -> Bool {
+        enabled && status == "connected"
+            && !(accountID ?? "").isEmpty
+            && !(credentialReference ?? "").isEmpty
+    }
+}
