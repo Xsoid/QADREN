@@ -89,6 +89,41 @@ pub struct JobIdentity {
     pub scenario: Option<ScenarioReference>,
 }
 
+/// The last *confirmed* state of one object across an endpoint pair.
+/// A scan result or a requested transfer must never overwrite this baseline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileSyncState {
+    pub scenario: ScenarioReference,
+    pub relative_path: String,
+    pub left: Option<ConfirmedFileVersion>,
+    pub right: Option<ConfirmedFileVersion>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmedFileVersion {
+    pub object_revision: Option<String>,
+    pub size: u64,
+    /// Hex digest of content, present only when established by a trusted source.
+    pub checksum_md5: Option<String>,
+}
+
+/// An executor's report is descriptive; it never grants completion by itself.
+/// Confirmation requires the independent evidence contract in confirmation.rs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionReport {
+    pub job_id: String,
+    pub attempt_id: String,
+    pub outcome: ExecutionOutcome,
+    pub message_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionOutcome {
+    SucceededClaimed,
+    FailedClaimed,
+    Uncertain,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,6 +180,33 @@ mod tests {
         assert!(JobState::Completed.is_terminal());
         assert!(JobState::Failed.is_terminal());
         assert!(!JobState::WaitingForDecision.is_terminal());
+    }
+
+    #[test]
+    fn last_confirmed_state_is_separate_from_worker_claims() {
+        let baseline = FileSyncState {
+            scenario: ScenarioReference {
+                scenario_id: "s".into(),
+                revision: 2,
+            },
+            relative_path: "docs/a.txt".into(),
+            left: Some(ConfirmedFileVersion {
+                object_revision: Some("v1".into()),
+                size: 3,
+                checksum_md5: None,
+            }),
+            right: None,
+        };
+        let report = ExecutionReport {
+            job_id: "job".into(),
+            attempt_id: "attempt".into(),
+            outcome: ExecutionOutcome::SucceededClaimed,
+            message_code: None,
+        };
+        assert_eq!(baseline.scenario.revision, 2);
+        assert!(baseline.right.is_none());
+        assert_eq!(report.outcome, ExecutionOutcome::SucceededClaimed);
+        // No method converts a claimed report into a confirmed baseline.
     }
 
     #[test]
