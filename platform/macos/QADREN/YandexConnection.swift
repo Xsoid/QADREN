@@ -140,10 +140,13 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
                 status = "Different Yandex account; create a separate connection"
                 return
             }
+            // Fail closed before mutating Keychain: an interrupted write must not
+            // leave a newly replaced token authorized by the old registry state.
+            try StorageRegistryBridge.setStatus(id: connectionID, status: "requires_auth")
             try YandexKeychain.store(token.access_token, for: connectionID)
-            // A failed registry update must never promote the connection to active.
-            try StorageRegistryBridge.setCredential(id: connectionID)
+            // Keep requires_auth until identity and credential reference are durable.
             try StorageRegistryBridge.setProviderAccount(id: connectionID, providerID: verifiedID)
+            try StorageRegistryBridge.setCredential(id: connectionID)
             try StorageRegistryBridge.setStatus(id: connectionID, status: "connected")
             connected = true
             status = "Connected; account verified"
