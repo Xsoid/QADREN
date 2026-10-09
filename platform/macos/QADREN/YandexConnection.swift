@@ -30,8 +30,19 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
         self.connectionID = connectionID
         self.enabled = enabled
         super.init()
-        connected = (try? YandexKeychain.read(connectionID)) != nil
-        status = connected ? "Token stored in Keychain" : "Not connected"
+        let entry = (try? StorageRegistryBridge.list())?.first(where: { $0.id == connectionID })
+        connected = entry.map {
+            ConnectionAuthorization.mayRefresh(
+                enabled: $0.enabled,
+                status: $0.status,
+                accountID: $0.provider_account_id,
+                credentialReference: $0.credential_ref
+            )
+        } ?? false
+        if connected {
+            connected = (try? YandexKeychain.read(connectionID)) != nil
+        }
+        status = connected ? "Registered connection" : "Authorization required or incomplete"
         if connected && enabled { Task { await refreshAccount(); await refreshDisk() } }
     }
 
@@ -142,12 +153,13 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
             }
             // Fail closed before mutating Keychain: an interrupted write must not
             // leave a newly replaced token authorized by the old registry state.
-            try StorageRegistryBridge.setStatus(id: connectionID, status: "requires_auth")
-            try YandexKeychain.store(token.access_token, for: connectionID)
-            // Keep requires_auth until identity and credential reference are durable.
-            try StorageRegistryBridge.setProviderAccount(id: connectionID, providerID: verifiedID)
-            try StorageRegistryBridge.setCredential(id: connectionID)
-            try StorageRegistryBridge.setStatus(id: connectionID, status: "connected")
+            try ConnectionAuthorization.commit(
+                markRequiresAuth: { try StorageRegistryBridge.setStatus(id: connectionID, status: "requires_auth") },
+                storeCredential: { try YandexKeychain.store(token.access_token, for: connectionID) },
+                persistIdentity: { try StorageRegistryBridge.setProviderAccount(id: connectionID, providerID: verifiedID) },
+                persistCredentialReference: { try StorageRegistryBridge.setCredential(id: connectionID) },
+                markConnected: { try StorageRegistryBridge.setStatus(id: connectionID, status: "connected") }
+            )
             connected = true
             status = "Connected; account verified"
             await refreshAccount()
@@ -164,6 +176,17 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
     func refreshAccount() async {
         guard connected && enabled else { return }
         do {
+            guard let registered = try StorageRegistryBridge.list().first(where: { $0.id == connectionID }),
+                  ConnectionAuthorization.mayRefresh(
+                    enabled: registered.enabled,
+                    status: registered.status,
+                    accountID: registered.provider_account_id,
+                    credentialReference: registered.credential_ref
+                  ) else {
+                connected = false
+                status = "Authorization incomplete; reconnect required"
+                return
+            }
             guard let token = try YandexKeychain.read(connectionID) else {
                 connected = false
                 accountLabel = nil
