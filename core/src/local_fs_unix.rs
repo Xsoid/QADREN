@@ -289,11 +289,12 @@ pub fn create<R: Read>(root: &File, target: &Path, input: &mut R, serial: u64) -
                 Err(LocalError::Io(error))
             };
         }
-        directory.sync_all()?;
+        directory.sync_all().map_err(LocalError::OutcomeUnknown)?;
         Ok(bytes)
     })();
-    unsafe {
-        unlinkat(directory.as_raw_fd(), temporary.as_ptr(), 0);
+    let cleanup = unsafe { unlinkat(directory.as_raw_fd(), temporary.as_ptr(), 0) };
+    if cleanup != 0 && result.is_ok() {
+        return Err(LocalError::OutcomeUnknown(io::Error::last_os_error()));
     }
     result
 }
