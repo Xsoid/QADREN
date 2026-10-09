@@ -1408,6 +1408,44 @@ mod tests {
     }
 
     #[test]
+    fn unregistered_yandex_connection_never_resolves_credentials() {
+        let mut store = JobStore::in_memory().unwrap();
+        let registry = crate::registry::Registry::in_memory().unwrap();
+        store.enqueue("job", None).unwrap();
+        store
+            .advance(
+                "job",
+                JobState::Queued,
+                JobState::Running,
+                Confirmation::Unknown,
+            )
+            .unwrap();
+        store
+            .prepare_bound_attempt(
+                "job",
+                "attempt",
+                "copy",
+                "missing-connection",
+                "disk:/file",
+                7,
+                "abcdef0123456789abcdef0123456789",
+            )
+            .unwrap();
+        let client = crate::yandex::YandexMetadataClient::new().unwrap();
+        assert!(matches!(
+            store.observe_registered_yandex_attempt(
+                "job",
+                "attempt",
+                &registry,
+                &client,
+                |_| panic!("credential resolver must not be called"),
+            ),
+            Err(YandexObservationError::ConnectionNotAuthorized)
+        ));
+        assert_eq!(store.state("job").unwrap(), Some(JobState::Running));
+    }
+
+    #[test]
     fn read_only_yandex_inspection_cannot_resolve_job() {
         let mut db = JobStore::in_memory().unwrap();
         db.enqueue("job", None).unwrap();
