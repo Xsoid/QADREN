@@ -251,6 +251,28 @@ mod tests {
         p
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn lossy_name_collisions_fail_instead_of_conflating_distinct_files() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let root = sandbox();
+        let first = OsStr::from_bytes(b"invalid-\xff");
+        let second = OsStr::from_bytes(b"invalid-\xfe");
+        fs::write(root.join(first), b"one").unwrap();
+        fs::write(root.join(second), b"two").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert!(matches!(
+            adapter.list(Path::new("")),
+            Err(LocalError::UnsafeEntry)
+        ));
+        assert!(matches!(
+            adapter.list_page(Path::new(""), 0, 10),
+            Err(LocalError::UnsafeEntry)
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn zero_limit_pagination_does_not_bypass_path_validation() {
         let root = sandbox();
