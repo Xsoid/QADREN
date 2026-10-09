@@ -361,6 +361,29 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn post_publication_failure_is_unknown_and_requires_reconciliation() {
+        let root = sandbox();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let result = secure::create_with_post_link_check(
+            &adapter.root_fd,
+            Path::new("published.txt"),
+            &mut Cursor::new(b"committed"),
+            9001,
+            || Err(io::Error::other("simulated sync failure after link")),
+        );
+        assert!(matches!(result, Err(LocalError::OutcomeUnknown(_))));
+        assert_eq!(fs::read(root.join("published.txt")).unwrap(), b"committed");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        assert!(matches!(
+            adapter.create_from_reader(Path::new("published.txt"), &mut Cursor::new(b"retry")),
+            Err(LocalError::AlreadyExists)
+        ));
+        assert_eq!(fs::read(root.join("published.txt")).unwrap(), b"committed");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn failed_partial_stream_removes_temp_and_never_publishes_target() {
         struct PartialThenFailure(bool);
         impl io::Read for PartialThenFailure {
