@@ -251,7 +251,8 @@ mod tests {
         p
     }
 
-    #[cfg(unix)]
+    // macOS rejects invalid UTF-8 path bytes with EILSEQ before listing.
+    #[cfg(target_os = "linux")]
     #[test]
     fn lossy_name_collisions_fail_instead_of_conflating_distinct_files() {
         use std::ffi::OsStr;
