@@ -99,6 +99,9 @@ fn parent(root: &File, relative: &Path) -> Result<(File, CString)> {
 
 /// Open the requested directory without resolving an untrusted pathname.
 fn directory(root: &File, relative: &Path) -> Result<File> {
+    if relative.as_os_str().is_empty() {
+        return Ok(root.try_clone()?);
+    }
     let (parent, leaf) = parent(root, relative)?;
     opened(unsafe {
         openat(
