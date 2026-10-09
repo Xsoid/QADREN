@@ -8,6 +8,7 @@ use std::path::Path;
 #[derive(Debug)]
 pub enum JobStoreError {
     Sqlite(rusqlite::Error),
+    Io(std::io::Error),
     UnsupportedSchema(i32),
     InvalidId,
     InvalidTransition,
@@ -16,6 +17,11 @@ pub enum JobStoreError {
     NotFound,
     DuplicateJob,
     AlreadyOpen,
+}
+impl From<std::io::Error> for JobStoreError {
+    fn from(value: std::io::Error) -> Self {
+        Self::Io(value)
+    }
 }
 impl From<rusqlite::Error> for JobStoreError {
     fn from(value: rusqlite::Error) -> Self {
@@ -107,7 +113,16 @@ fn parse_state(value: &str) -> rusqlite::Result<JobState> {
 
 impl JobStore {
     pub fn open(path: &Path) -> Result<Self> {
-        let mut lock_path = path.as_os_str().to_os_string();
+        // Canonicalize the actual database if present; otherwise resolve its
+        // existing parent so relative paths and symlinked directories converge.
+        let canonical = if path.exists() {
+            std::fs::canonicalize(path)?
+        } else {
+            let filename = path.file_name().ok_or(JobStoreError::InvalidId)?;
+            let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+            std::fs::canonicalize(parent)?.join(filename)
+        };
+        let mut lock_path = canonical.as_os_str().to_os_string();
         lock_path.push(".owner.sqlite");
         let owner = Connection::open(Path::new(&lock_path))?;
         owner.busy_timeout(std::time::Duration::from_millis(0))?;
@@ -121,7 +136,7 @@ impl JobStore {
             }
             Err(error) => return Err(JobStoreError::Sqlite(error)),
         }
-        Self::initialize(Connection::open(path)?, Some(owner))
+        Self::initialize(Connection::open(&canonical)?, Some(owner))
     }
 
     pub fn in_memory() -> Result<Self> {
@@ -1025,7 +1040,7 @@ mod tests {
                  PRAGMA user_version = 3;",
             )
             .unwrap();
-        let store = JobStore::initialize(connection).unwrap();
+        let store = JobStore::initialize(connection, None).unwrap();
         assert_eq!(store.state("j").unwrap(), Some(JobState::Unknown));
         let status: String = store
             .db
@@ -1109,7 +1124,7 @@ mod tests {
                  PRAGMA user_version = 3;",
             )
             .unwrap();
-        let mut db = JobStore::initialize(connection).unwrap();
+        let mut db = JobStore::initialize(connection, None).unwrap();
         let items = db.unresolved_attempts().unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(
@@ -1186,7 +1201,7 @@ mod tests {
                  PRAGMA user_version = 5;",
             )
             .unwrap();
-        let store = JobStore::initialize(connection).unwrap();
+        let store = JobStore::initialize(connection, None).unwrap();
         assert!(store.expected_metadata("job", "old").unwrap().is_none());
         let attempts = store.unresolved_attempts().unwrap();
         assert_eq!(attempts.len(), 1);
@@ -1308,7 +1323,7 @@ mod tests {
         let db = Connection::open_in_memory().unwrap();
         db.pragma_update(None, "user_version", 99).unwrap();
         assert!(matches!(
-            JobStore::initialize(db),
+            JobStore::initialize(db, None),
             Err(JobStoreError::UnsupportedSchema(99))
         ));
     }
