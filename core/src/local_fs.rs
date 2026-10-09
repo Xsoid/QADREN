@@ -6,9 +6,9 @@ use std::fs;
 #[cfg(unix)]
 use std::fs::File;
 use std::io;
-#[cfg(not(unix))]
-use std::path::Component;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path};
+#[cfg(any(not(unix), test))]
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(unix)]
