@@ -1388,6 +1388,30 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn removing_owner_lock_fails_closed_before_next_mutation() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir()
+            .join(format!("qadren-owner-removed-{}-{unique}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let database = directory.join("jobs.sqlite");
+        let mut store = JobStore::open(&database).unwrap();
+        let lock = directory.join("jobs.sqlite.owner.sqlite");
+        std::fs::remove_file(&lock).unwrap();
+        assert!(matches!(
+            store.enqueue("must-not-appear", None),
+            Err(JobStoreError::StorageIdentityChanged)
+        ));
+        drop(store);
+        std::fs::remove_file(database).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn dangling_database_symlink_is_rejected() {
         use std::os::unix::fs::symlink;
         use std::time::{SystemTime, UNIX_EPOCH};
