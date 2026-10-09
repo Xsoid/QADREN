@@ -15,6 +15,7 @@ pub enum JobStoreError {
     UntrustedEvidence,
     NotFound,
     DuplicateJob,
+    AlreadyOpen,
 }
 impl From<rusqlite::Error> for JobStoreError {
     fn from(value: rusqlite::Error) -> Self {
@@ -74,6 +75,9 @@ pub struct StoredExpectation {
 
 pub struct JobStore {
     db: Connection,
+    // Separate SQLite file holds a process-lifetime write transaction.
+    // SQLite releases this owner lock on crashes without stale PID files.
+    _owner_lock: Option<Connection>,
 }
 
 fn label(state: JobState) -> &'static str {
@@ -103,14 +107,28 @@ fn parse_state(value: &str) -> rusqlite::Result<JobState> {
 
 impl JobStore {
     pub fn open(path: &Path) -> Result<Self> {
-        Self::initialize(Connection::open(path)?)
+        let mut lock_path = path.as_os_str().to_os_string();
+        lock_path.push(".owner.sqlite");
+        let owner = Connection::open(Path::new(&lock_path))?;
+        owner.busy_timeout(std::time::Duration::from_millis(0))?;
+        match owner.execute_batch("BEGIN IMMEDIATE;") {
+            Ok(()) => {}
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if error.code == rusqlite::ErrorCode::DatabaseBusy
+                    || error.code == rusqlite::ErrorCode::DatabaseLocked =>
+            {
+                return Err(JobStoreError::AlreadyOpen);
+            }
+            Err(error) => return Err(JobStoreError::Sqlite(error)),
+        }
+        Self::initialize(Connection::open(path)?, Some(owner))
     }
 
     pub fn in_memory() -> Result<Self> {
-        Self::initialize(Connection::open_in_memory()?)
+        Self::initialize(Connection::open_in_memory()?, None)
     }
 
-    fn initialize(db: Connection) -> Result<Self> {
+    fn initialize(db: Connection, owner_lock: Option<Connection>) -> Result<Self> {
         let version: i32 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if version > 6 {
             return Err(JobStoreError::UnsupportedSchema(version));
@@ -204,7 +222,7 @@ impl JobStore {
              UPDATE jobs SET state='unknown' WHERE state='running';
              COMMIT;",
         )?;
-        Ok(Self { db })
+        Ok(Self { db, _owner_lock: owner_lock })
     }
 
     pub fn enqueue(&mut self, id: &str, scenario: Option<(&str, u64)>) -> Result<()> {
@@ -309,6 +327,7 @@ impl JobStore {
 
     /// Atomically prepare an operation and its immutable expected metadata.
     /// Persist this transaction BEFORE initiating any external effect.
+    #[allow(clippy::too_many_arguments)] // Atomic preparation takes a complete operation identity.
     pub fn prepare_bound_attempt(
         &mut self,
         job_id: &str,
@@ -794,7 +813,7 @@ mod tests {
                  PRAGMA user_version = 1;",
             )
             .unwrap();
-        let store = JobStore::initialize(connection).unwrap();
+        let store = JobStore::initialize(connection, None).unwrap();
         let job = store.get("existing").unwrap().unwrap();
         assert_eq!(job.state, JobState::Unknown);
         assert_eq!(job.scenario_revision, Some(3));
@@ -1243,6 +1262,26 @@ mod tests {
             Err(JobStoreError::InvalidTransition)
         ));
         assert!(db.expected_metadata("job", "b").unwrap().is_none());
+    }
+
+    #[test]
+    fn concurrent_open_does_not_mark_live_running_job_unknown() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("qadren-owner-{}-{unique}.sqlite", std::process::id()));
+        let mut first = JobStore::open(&path).unwrap();
+        first.enqueue("live", None).unwrap();
+        first.advance("live", JobState::Queued, JobState::Running, Confirmation::Unknown).unwrap();
+        assert!(matches!(JobStore::open(&path), Err(JobStoreError::AlreadyOpen)));
+        assert_eq!(first.state("live").unwrap(), Some(JobState::Running));
+        drop(first);
+        let recovered = JobStore::open(&path).unwrap();
+        assert_eq!(recovered.state("live").unwrap(), Some(JobState::Unknown));
+        drop(recovered);
+        std::fs::remove_file(&path).unwrap();
+        let mut lock_path = path.as_os_str().to_os_string();
+        lock_path.push(".owner.sqlite");
+        std::fs::remove_file(std::path::Path::new(&lock_path)).unwrap();
     }
 
     #[test]
