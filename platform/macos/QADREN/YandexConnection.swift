@@ -220,10 +220,7 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
             throw StorageError.operation("Yandex account identity verification failed")
         }
         let identity = try JSONDecoder().decode(YandexDiskIdentity.self, from: data)
-        guard !identity.user.uid.isEmpty else {
-            throw StorageError.operation("Yandex account identity missing")
-        }
-        return identity.user.uid
+        return identity.user.uid.value
     }
 
     func refreshDisk() async {
@@ -321,15 +318,19 @@ private struct YandexDiskIdentity: Decodable {
     let user: User
 
     struct User: Decodable {
-        let uid: String
+        let uid: UID
+    }
+
+    struct UID: Decodable {
+        let value: String
 
         init(from decoder: Decoder) throws {
             let container = try decoder.singleValueContainer()
             if let string = try? container.decode(String.self) {
                 guard !string.isEmpty else { throw StorageError.operation("Empty Yandex UID") }
-                uid = string
+                value = string
             } else {
-                uid = String(try container.decode(UInt64.self))
+                value = String(try container.decode(UInt64.self))
             }
         }
     }
