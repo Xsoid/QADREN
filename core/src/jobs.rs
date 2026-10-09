@@ -387,36 +387,47 @@ impl JobStore {
         tx.execute(
             "INSERT INTO attempt_expectations(attempt_id,expected_size,expected_md5)
              VALUES (?1,?2,?3)",
-            params![attempt_id, expected_size as i64, expected_md5.to_ascii_lowercase()],
+            params![
+                attempt_id,
+                expected_size as i64,
+                expected_md5.to_ascii_lowercase()
+            ],
         )?;
         tx.commit()?;
         Ok(())
     }
 
     /// Retrieve only a fully bound expectation; no disk content is read.
-    pub fn expected_metadata(&self, job_id: &str, attempt_id: &str) -> Result<Option<StoredExpectation>> {
-        self.db.query_row(
-            "SELECT a.attempt_id,a.job_id,a.operation_kind,a.target_connection_id,
+    pub fn expected_metadata(
+        &self,
+        job_id: &str,
+        attempt_id: &str,
+    ) -> Result<Option<StoredExpectation>> {
+        self.db
+            .query_row(
+                "SELECT a.attempt_id,a.job_id,a.operation_kind,a.target_connection_id,
                     a.target_path,e.expected_size,e.expected_md5
              FROM job_attempts a INNER JOIN attempt_expectations e
                ON e.attempt_id=a.attempt_id
              WHERE a.job_id=?1 AND a.attempt_id=?2
                AND a.operation_kind IS NOT NULL AND a.target_connection_id IS NOT NULL
                AND a.target_path IS NOT NULL",
-            params![job_id, attempt_id],
-            |row| {
-                let size: i64 = row.get(5)?;
-                Ok(StoredExpectation {
-                    attempt_id: row.get(0)?,
-                    job_id: row.get(1)?,
-                    operation_kind: row.get(2)?,
-                    target_connection_id: row.get(3)?,
-                    target_path: row.get(4)?,
-                    expected_size: size as u64,
-                    expected_md5: row.get(6)?,
-                })
-            },
-        ).optional().map_err(JobStoreError::from)
+                params![job_id, attempt_id],
+                |row| {
+                    let size: i64 = row.get(5)?;
+                    Ok(StoredExpectation {
+                        attempt_id: row.get(0)?,
+                        job_id: row.get(1)?,
+                        operation_kind: row.get(2)?,
+                        target_connection_id: row.get(3)?,
+                        target_path: row.get(4)?,
+                        expected_size: size as u64,
+                        expected_md5: row.get(6)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(JobStoreError::from)
     }
 
     /// Records explicit resolution without claiming the remote operation succeeded.
