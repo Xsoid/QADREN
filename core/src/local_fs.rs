@@ -229,7 +229,7 @@ impl LocalFilesystem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+    use std::io::{Cursor, Read};
 
     fn sandbox() -> PathBuf {
         static N: AtomicU64 = AtomicU64::new(0);
