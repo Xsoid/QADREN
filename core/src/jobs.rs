@@ -43,6 +43,24 @@ pub struct UnresolvedAttempt {
     pub is_legacy_unbound: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconciliationDisposition {
+    /// The recorded target and operation exist; an adapter verifier is still required.
+    NeedsAdapterVerification,
+    /// Missing legacy binding prevents trustworthy automatic verification.
+    NeedsManualInvestigation,
+}
+
+impl UnresolvedAttempt {
+    pub fn disposition(&self) -> ReconciliationDisposition {
+        if self.is_legacy_unbound {
+            ReconciliationDisposition::NeedsManualInvestigation
+        } else {
+            ReconciliationDisposition::NeedsAdapterVerification
+        }
+    }
+}
+
 pub struct JobStore {
     db: Connection,
 }
@@ -836,6 +854,50 @@ mod tests {
         assert_eq!(first[0].target_path.as_deref(), Some("/object"));
         assert_eq!(db.unresolved_attempts().unwrap(), first);
         assert_eq!(db.state("job").unwrap(), Some(JobState::Running));
+    }
+
+    #[test]
+    fn legacy_v3_unknown_is_preserved_and_requires_manual_investigation() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE jobs (
+                   id TEXT PRIMARY KEY NOT NULL,
+                   state TEXT NOT NULL,
+                   scenario_id TEXT,
+                   scenario_revision INTEGER
+                 );
+                 CREATE TABLE job_events (
+                   sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                   job_id TEXT NOT NULL REFERENCES jobs(id),
+                   state TEXT NOT NULL,
+                   kind TEXT NOT NULL
+                 );
+                 CREATE TABLE job_attempts (
+                   attempt_id TEXT PRIMARY KEY NOT NULL,
+                   job_id TEXT NOT NULL REFERENCES jobs(id),
+                   status TEXT NOT NULL
+                 );
+                 INSERT INTO jobs(id,state) VALUES ('legacy','unknown');
+                 INSERT INTO job_attempts VALUES ('old','legacy','unknown');
+                 PRAGMA user_version = 3;",
+            )
+            .unwrap();
+        let mut db = JobStore::initialize(connection).unwrap();
+        let items = db.unresolved_attempts().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].disposition(),
+            ReconciliationDisposition::NeedsManualInvestigation
+        );
+        let receipt =
+            crate::verification::test_bound_receipt("old", "copy", "target", "/file");
+        assert!(matches!(
+            db.resolve_attempt("legacy", "old", &receipt),
+            Err(JobStoreError::UntrustedEvidence)
+        ));
+        assert_eq!(db.unresolved_attempts().unwrap(), items);
+        assert_eq!(db.state("legacy").unwrap(), Some(JobState::Unknown));
     }
 
     #[test]
