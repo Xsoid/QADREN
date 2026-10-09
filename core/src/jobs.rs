@@ -70,7 +70,7 @@ impl JobStore {
 
     fn initialize(db: Connection) -> Result<Self> {
         let version: i32 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 1 {
+        if version > 2 {
             return Err(JobStoreError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -89,9 +89,29 @@ impl JobStore {
                  COMMIT;",
             )?;
         }
+        if version <= 1 {
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE job_events (
+                   sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                   job_id TEXT NOT NULL REFERENCES jobs(id),
+                   state TEXT NOT NULL,
+                   kind TEXT NOT NULL
+                 );
+                 PRAGMA user_version = 2;
+                 COMMIT;",
+            )?;
+        }
+        db.pragma_update(None, "foreign_keys", "ON")?;
         // A previous process may have written remote effects before dying.
         // Reconciliation is required; never resubmit these Jobs blindly.
-        db.execute("UPDATE jobs SET state='unknown' WHERE state='running'", [])?;
+        db.execute_batch(
+            "BEGIN IMMEDIATE;
+             INSERT INTO job_events(job_id,state,kind)
+               SELECT id,'unknown','restart_uncertain' FROM jobs WHERE state='running';
+             UPDATE jobs SET state='unknown' WHERE state='running';
+             COMMIT;",
+        )?;
         Ok(Self { db })
     }
 
@@ -114,6 +134,10 @@ impl JobStore {
         if result == 0 {
             return Err(JobStoreError::DuplicateJob);
         }
+        self.db.execute(
+            "INSERT INTO job_events(job_id,state,kind) VALUES (?1,'queued','enqueued')",
+            [id],
+        )?;
         Ok(())
     }
 
@@ -166,6 +190,10 @@ impl JobStore {
                 Err(JobStoreError::InvalidTransition)
             }
         } else {
+            self.db.execute(
+                "INSERT INTO job_events(job_id,state,kind) VALUES (?1,?2,'transition')",
+                params![id, label(next)],
+            )?;
             Ok(())
         }
     }
