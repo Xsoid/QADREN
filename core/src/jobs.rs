@@ -556,7 +556,8 @@ mod tests {
             Confirmation::Unknown,
         )
         .unwrap();
-        db.begin_bound_attempt("job", "attempt-1", "copy", "destination-1", "/safe").unwrap();
+        db.begin_bound_attempt("job", "attempt-1", "copy", "destination-1", "/safe")
+            .unwrap();
         assert!(matches!(
             db.resolve_attempt(
                 "job",
@@ -576,7 +577,8 @@ mod tests {
             &crate::verification::test_bound_receipt("attempt-1", "copy", "destination-1", "/safe"),
         )
         .unwrap();
-        db.begin_bound_attempt("job", "attempt-2", "copy", "destination-1", "/safe").unwrap();
+        db.begin_bound_attempt("job", "attempt-2", "copy", "destination-1", "/safe")
+            .unwrap();
     }
 
     #[test]
@@ -590,7 +592,8 @@ mod tests {
             Confirmation::Unknown,
         )
         .unwrap();
-        db.begin_bound_attempt("j", "attempt-a", "copy", "destination-1", "/safe").unwrap();
+        db.begin_bound_attempt("j", "attempt-a", "copy", "destination-1", "/safe")
+            .unwrap();
         assert!(matches!(
             db.advance(
                 "j",
@@ -631,7 +634,9 @@ mod tests {
                     Confirmation::Unknown,
                 )
                 .unwrap();
-            store.begin_bound_attempt("job", "attempt-one", "copy", "destination-1", "/safe").unwrap();
+            store
+                .begin_bound_attempt("job", "attempt-one", "copy", "destination-1", "/safe")
+                .unwrap();
         }
         {
             let mut store = JobStore::open(&path).unwrap();
@@ -653,7 +658,12 @@ mod tests {
                 .resolve_attempt(
                     "job",
                     "attempt-one",
-                    &crate::verification::test_bound_receipt("attempt-one", "copy", "destination-1", "/safe"),
+                    &crate::verification::test_bound_receipt(
+                        "attempt-one",
+                        "copy",
+                        "destination-1",
+                        "/safe",
+                    ),
                 )
                 .unwrap();
             assert_eq!(store.state("job").unwrap(), Some(JobState::Unknown));
@@ -672,9 +682,14 @@ mod tests {
             Confirmation::Unknown,
         )
         .unwrap();
-        db.begin_bound_attempt("j", "a", "copy", "destination-1", "/safe").unwrap();
-        db.resolve_attempt("j", "a", &crate::verification::test_bound_receipt("a", "copy", "destination-1", "/safe"))
+        db.begin_bound_attempt("j", "a", "copy", "destination-1", "/safe")
             .unwrap();
+        db.resolve_attempt(
+            "j",
+            "a",
+            &crate::verification::test_bound_receipt("a", "copy", "destination-1", "/safe"),
+        )
+        .unwrap();
         let level: String = db
             .db
             .query_row(
@@ -685,7 +700,11 @@ mod tests {
             .unwrap();
         assert_eq!(level, "metadata_verified");
         assert!(matches!(
-            db.resolve_attempt("j", "a", &crate::verification::test_bound_receipt("a", "copy", "destination-1", "/safe")),
+            db.resolve_attempt(
+                "j",
+                "a",
+                &crate::verification::test_bound_receipt("a", "copy", "destination-1", "/safe")
+            ),
             Err(JobStoreError::InvalidTransition)
         ));
         let total: i64 = db
