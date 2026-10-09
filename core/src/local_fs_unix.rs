@@ -59,7 +59,14 @@ fn name(path: &std::ffi::OsStr) -> Result<CString> {
 
 fn opened(fd: c_int) -> Result<File> {
     if fd < 0 {
-        return Err(LocalError::Io(io::Error::last_os_error()));
+        let error = io::Error::last_os_error();
+        // O_NOFOLLOW rejects final symlinks with ELOOP. O_DIRECTORY may
+        // report ENOTDIR for a symlink in an intermediate component.
+        // Both cases must remain a hard failure without traversal.
+        if matches!(error.raw_os_error(), Some(40 | 20)) {
+            return Err(LocalError::UnsafeEntry);
+        }
+        return Err(LocalError::Io(error));
     }
     Ok(unsafe { File::from_raw_fd(fd) })
 }
