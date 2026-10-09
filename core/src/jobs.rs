@@ -396,9 +396,8 @@ impl JobStore {
             let operation_kind: Option<String> = row.get(3)?;
             let target_connection_id: Option<String> = row.get(4)?;
             let target_path: Option<String> = row.get(5)?;
-            let is_legacy_unbound = operation_kind.is_none()
-                || target_connection_id.is_none()
-                || target_path.is_none();
+            let is_legacy_unbound =
+                operation_kind.is_none() || target_connection_id.is_none() || target_path.is_none();
             Ok(UnresolvedAttempt {
                 attempt_id: row.get(0)?,
                 job_id: row.get(1)?,
