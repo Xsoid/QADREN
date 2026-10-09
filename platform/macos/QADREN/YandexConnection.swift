@@ -20,6 +20,7 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
     @Published private(set) var metadataBusy = false
 
     private var session: ASWebAuthenticationSession?
+    private var metadataGeneration = 0
     private let service = "dev.qadren.yandex.oauth"
     let connectionID: String
     let enabled: Bool
@@ -271,6 +272,8 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
             return
         }
         metadataBusy = true
+        metadataGeneration += 1
+        let generation = metadataGeneration
         metadataError = nil
         defer { metadataBusy = false }
         do {
@@ -297,6 +300,23 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
                 }
                 return (quota, listing, quotaError, listingError)
             }.value
+            // Blocking Rust HTTP cannot be cancelled here. Discard its result
+            // if the connection was revoked, reauthorized or changed meanwhile.
+            guard generation == metadataGeneration,
+                  let current = try? StorageRegistryBridge.list().first(where: { $0.id == connectionID }),
+                  current.provider_account_id == registered.provider_account_id,
+                  current.credential_ref == registered.credential_ref,
+                  ConnectionAuthorization.mayRefresh(
+                    enabled: current.enabled,
+                    status: current.status,
+                    accountID: current.provider_account_id,
+                    credentialReference: current.credential_ref
+                  ),
+                  let currentToken = try? YandexKeychain.read(connectionID),
+                  currentToken == token else {
+                metadataError = "Connection changed during request; results discarded"
+                return
+            }
             self.quota = result.0
             self.rootItems = result.1?.items ?? []
             self.rootTotal = result.1?.total ?? 0
@@ -315,6 +335,7 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
     }
 
     func disconnect() {
+        metadataGeneration += 1
         do {
             try YandexKeychain.delete(connectionID)
         } catch {
