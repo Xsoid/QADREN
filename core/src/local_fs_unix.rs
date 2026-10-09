@@ -111,6 +111,29 @@ fn directory(root: &File, relative: &Path) -> Result<File> {
     })
 }
 
+/// Read leaf metadata without opening file content. This avoids triggering
+/// placeholder materialization through metadata-only list/stat calls.
+fn leaf_metadata(directory: &File, leaf: &CStr) -> Result<(bool, u64)> {
+    let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let result = unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            leaf.as_ptr(),
+            info.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result != 0 {
+        return Err(LocalError::Io(io::Error::last_os_error()));
+    }
+    let info = unsafe { info.assume_init() };
+    let kind = info.st_mode & libc::S_IFMT;
+    if kind != libc::S_IFREG && kind != libc::S_IFDIR {
+        return Err(LocalError::UnsafeEntry);
+    }
+    Ok((kind == libc::S_IFDIR, info.st_size.max(0) as u64))
+}
+
 /// Enumerate via fdopendir/readdir. On macOS /dev/fd/N is not a
 /// directory pathname usable by read_dir, so enumeration must use the fd.
 pub fn list(root: &File, relative: &Path) -> Result<Vec<LocalEntry>> {
@@ -149,44 +172,22 @@ pub fn list(root: &File, relative: &Path) -> Result<Vec<LocalEntry>> {
             continue;
         }
         let leaf = CString::new(bytes).map_err(|_| LocalError::InvalidPath)?;
-        let file = opened(unsafe {
-            openat(
-                dir.as_raw_fd(),
-                leaf.as_ptr(),
-                RDONLY | NOFOLLOW | NONBLOCK | CLOEXEC,
-            )
-        })?;
-        let meta = file.metadata()?;
-        if !meta.is_file() && !meta.is_dir() {
-            return Err(LocalError::UnsafeEntry);
-        }
+        let (is_directory, size) = leaf_metadata(&dir, &leaf)?;
         let name = std::ffi::OsStr::from_bytes(bytes);
         entries.push(LocalEntry {
             name: name.to_string_lossy().into_owned(),
-            is_directory: meta.is_dir(),
-            size: meta.len(),
+            is_directory,
+            size,
         });
     }
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(entries)
 }
 
-/// Metadata from a file descriptor opened relative to the pinned parent.
-/// O_NOFOLLOW rejects a final symlink, including one swapped in during lookup.
-/// O_NONBLOCK avoids hanging on FIFO/device-like entries.
+/// Metadata lookup without opening the final file or resolving symlinks.
 pub fn stat(root: &File, target: &Path) -> Result<LocalEntry> {
     let (directory, name) = parent(root, target)?;
-    let entry = opened(unsafe {
-        openat(
-            directory.as_raw_fd(),
-            name.as_ptr(),
-            RDONLY | NOFOLLOW | NONBLOCK | CLOEXEC,
-        )
-    })?;
-    let metadata = entry.metadata()?;
-    if !metadata.is_file() && !metadata.is_dir() {
-        return Err(LocalError::UnsafeEntry);
-    }
+    let (is_directory, size) = leaf_metadata(&directory, &name)?;
     let display_name = target
         .file_name()
         .ok_or(LocalError::InvalidPath)?
@@ -194,8 +195,8 @@ pub fn stat(root: &File, target: &Path) -> Result<LocalEntry> {
         .into_owned();
     Ok(LocalEntry {
         name: display_name,
-        is_directory: metadata.is_dir(),
-        size: metadata.len(),
+        is_directory,
+        size,
     })
 }
 
