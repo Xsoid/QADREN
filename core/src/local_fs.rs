@@ -2,11 +2,14 @@
 //! Initial safe slice: metadata and non-overwriting atomic creation only.
 //! Content reads on macOS are intentionally not exposed until iCloud placeholder
 //! detection and per-transfer consent can be enforced.
-use std::fs::{self, File};
+use std::fs;
+#[cfg(unix)]
+use std::fs::File;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(unix)]
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(unix)]
@@ -236,6 +239,24 @@ mod tests {
             .unwrap()
             .is_empty());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn swapped_parent_symlink_cannot_redirect_creation() {
+        use std::os::unix::fs::symlink;
+        let root = sandbox();
+        let outside = sandbox();
+        fs::create_dir(root.join("child")).unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        fs::rename(root.join("child"), root.join("moved")).unwrap();
+        symlink(&outside, root.join("child")).unwrap();
+        assert!(adapter
+            .create_from_reader(Path::new("child/escape.txt"), &mut Cursor::new(b"secret"))
+            .is_err());
+        assert!(!outside.join("escape.txt").exists());
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(outside).unwrap();
     }
 
     #[cfg(unix)]
