@@ -1,10 +1,10 @@
 //! Descriptor-relative, symlink-resistant non-overwriting file creation.
 //! Unix only. Every intermediate directory is opened with O_NOFOLLOW.
 use super::{LocalEntry, LocalError, Result};
-use std::ffi::{c_char, c_int, CString};
+use std::ffi::{c_char, c_int, CStr, CString};
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path};
 
@@ -111,20 +111,44 @@ fn directory(root: &File, relative: &Path) -> Result<File> {
     })
 }
 
-/// Enumerate through the already opened directory descriptor, not the original
-/// user pathname. Metadata for every entry is also obtained descriptor-relative.
+/// Enumerate via fdopendir/readdir. On macOS /dev/fd/N is not a
+/// directory pathname usable by read_dir, so enumeration must use the fd.
 pub fn list(root: &File, relative: &Path) -> Result<Vec<LocalEntry>> {
     let dir = directory(root, relative)?;
-    #[cfg(target_os = "macos")]
-    let descriptor_path = format!("/dev/fd/{}", dir.as_raw_fd());
-    #[cfg(target_os = "linux")]
-    let descriptor_path = format!("/proc/self/fd/{}", dir.as_raw_fd());
-
+    let owned_fd = dir.try_clone()?.into_raw_fd();
+    let stream = unsafe { libc::fdopendir(owned_fd) };
+    if stream.is_null() {
+        unsafe { libc::close(owned_fd) };
+        return Err(LocalError::Io(io::Error::last_os_error()));
+    }
+    struct DirectoryStream(*mut libc::DIR);
+    impl Drop for DirectoryStream {
+        fn drop(&mut self) {
+            unsafe { libc::closedir(self.0) };
+        }
+    }
+    let stream = DirectoryStream(stream);
     let mut entries = Vec::new();
-    for item in std::fs::read_dir(descriptor_path)? {
-        let item = item?;
-        let raw_name = item.file_name();
-        let leaf = name(&raw_name)?;
+    loop {
+        #[cfg(target_os = "macos")]
+        let errno = unsafe { libc::__error() };
+        #[cfg(target_os = "linux")]
+        let errno = unsafe { libc::__errno_location() };
+        unsafe { *errno = 0 };
+        let entry = unsafe { libc::readdir(stream.0) };
+        if entry.is_null() {
+            let code = unsafe { *errno };
+            if code != 0 {
+                return Err(LocalError::Io(io::Error::from_raw_os_error(code)));
+            }
+            break;
+        }
+        let raw_name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+        let bytes = raw_name.to_bytes();
+        if bytes == b"." || bytes == b".." {
+            continue;
+        }
+        let leaf = CString::new(bytes).map_err(|_| LocalError::InvalidPath)?;
         let file = opened(unsafe {
             openat(
                 dir.as_raw_fd(),
@@ -136,8 +160,9 @@ pub fn list(root: &File, relative: &Path) -> Result<Vec<LocalEntry>> {
         if !meta.is_file() && !meta.is_dir() {
             return Err(LocalError::UnsafeEntry);
         }
+        let name = std::ffi::OsStr::from_bytes(bytes);
         entries.push(LocalEntry {
-            name: raw_name.to_string_lossy().into_owned(),
+            name: name.to_string_lossy().into_owned(),
             is_directory: meta.is_dir(),
             size: meta.len(),
         });
