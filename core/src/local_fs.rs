@@ -162,6 +162,9 @@ impl LocalFilesystem {
     /// Stable lexical pagination over a snapshot of directory metadata.
     /// Callers must rescan if the directory changes between page requests.
     pub fn list_page(&self, path: &Path, offset: usize, limit: usize) -> Result<Vec<LocalEntry>> {
+        if !path.as_os_str().is_empty() {
+            Self::relative(path)?;
+        }
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -246,6 +249,22 @@ mod tests {
         ));
         fs::create_dir(&p).unwrap();
         p
+    }
+
+    #[test]
+    fn zero_limit_pagination_does_not_bypass_path_validation() {
+        let root = sandbox();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert!(matches!(
+            adapter.list_page(Path::new("../escape"), 0, 0),
+            Err(LocalError::InvalidPath)
+        ));
+        assert!(matches!(
+            adapter.list_page(Path::new("/absolute"), 0, 0),
+            Err(LocalError::InvalidPath)
+        ));
+        assert!(adapter.list_page(Path::new(""), 0, 0).unwrap().is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
