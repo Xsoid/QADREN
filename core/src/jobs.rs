@@ -119,7 +119,10 @@ impl JobStore {
             std::fs::canonicalize(path)?
         } else {
             let filename = path.file_name().ok_or(JobStoreError::InvalidId)?;
-            let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+            let parent = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
             std::fs::canonicalize(parent)?.join(filename)
         };
         let mut lock_path = canonical.as_os_str().to_os_string();
@@ -1289,10 +1292,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let directory = std::env::temp_dir().join(format!(
-            "qadren-alias-{}-{unique}",
-            std::process::id()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("qadren-alias-{}-{unique}", std::process::id()));
         std::fs::create_dir(&directory).unwrap();
         let database = directory.join("jobs.sqlite");
         let alias = directory.join(".").join("jobs.sqlite");
