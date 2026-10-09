@@ -219,22 +219,16 @@ mod tests {
 
     #[test]
     fn invalid_ffi_inputs_have_stable_json_errors() {
-        let add = qadren_registry_add(
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-        );
-        let json: Value = serde_json::from_str(
-            unsafe { CStr::from_ptr(add) }.to_str().unwrap()
-        ).unwrap();
+        let add = qadren_registry_add(std::ptr::null(), std::ptr::null(), std::ptr::null());
+        let json: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(add) }.to_str().unwrap()).unwrap();
         unsafe { qadren_registry_free_string(add) };
         assert_eq!(json["ok"], false);
         assert_eq!(json["error"], "invalid_input");
 
         let list = qadren_registry_list(std::ptr::null());
-        let json: Value = serde_json::from_str(
-            unsafe { CStr::from_ptr(list) }.to_str().unwrap()
-        ).unwrap();
+        let json: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(list) }.to_str().unwrap()).unwrap();
         unsafe { qadren_registry_free_string(list) };
         assert_eq!(json["ok"], false);
         assert_eq!(json["error"], "invalid_path");
