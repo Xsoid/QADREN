@@ -39,17 +39,6 @@ pub trait OperationVerifier {
 }
 
 #[cfg(test)]
-pub(crate) fn test_receipt(attempt_id: &str) -> VerifiedReceipt {
-    VerifiedReceipt {
-        attempt_id: attempt_id.to_owned(),
-        confirmation: Confirmation::Confirmed(crate::confirmation::EvidenceLevel::MetadataVerified),
-        operation_kind: None,
-        target_connection_id: None,
-        target_path: None,
-    }
-}
-
-#[cfg(test)]
 pub(crate) fn test_bound_receipt(
     attempt_id: &str,
     kind: &str,
