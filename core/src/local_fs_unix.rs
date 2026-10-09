@@ -38,7 +38,13 @@ const EXCLUSIVE_FLAG: c_int = EXCL;
 unsafe extern "C" {
     fn open(path: *const c_char, flags: c_int, ...) -> c_int;
     fn openat(fd: c_int, path: *const c_char, flags: c_int, ...) -> c_int;
-    fn linkat(from_fd: c_int, from: *const c_char, to_fd: c_int, to: *const c_char, flags: c_int) -> c_int;
+    fn linkat(
+        from_fd: c_int,
+        from: *const c_char,
+        to_fd: c_int,
+        to: *const c_char,
+        flags: c_int,
+    ) -> c_int;
     fn unlinkat(fd: c_int, path: *const c_char, flags: c_int) -> c_int;
 }
 
