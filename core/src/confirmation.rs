@@ -85,7 +85,15 @@ mod tests {
     #[test]
     fn property_transition_invariants_hold_for_all_states_and_evidence() {
         use JobState::{Completed, Failed, Paused, Queued, Running, Unknown, WaitingForDecision};
-        let states = [Queued, Running, Paused, WaitingForDecision, Completed, Failed, Unknown];
+        let states = [
+            Queued,
+            Running,
+            Paused,
+            WaitingForDecision,
+            Completed,
+            Failed,
+            Unknown,
+        ];
         let evidence = [
             Confirmation::Unknown,
             Confirmation::Confirmed(EvidenceLevel::Requested),
