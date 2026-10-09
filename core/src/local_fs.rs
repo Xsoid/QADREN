@@ -33,6 +33,14 @@ impl From<io::Error> for LocalError {
 }
 pub type Result<T> = std::result::Result<T, LocalError>;
 
+/// Caller-provided decision for this exact content-reading operation.
+/// Never infer consent from a successful metadata query or a previous job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentReadConsent {
+    Denied,
+    GrantedForThisOperation,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalEntry {
     pub name: String,
@@ -155,6 +163,30 @@ impl LocalFilesystem {
         Ok(entries.into_iter().skip(offset).take(limit).collect())
     }
 
+    /// Stream content only after explicit per-operation authorization.
+    /// macOS remains disabled until trustworthy placeholder detection exists.
+    pub fn read_to_writer<W: io::Write>(
+        &self,
+        path: &Path,
+        output: &mut W,
+        consent: ContentReadConsent,
+    ) -> Result<u64> {
+        Self::relative(path)?;
+        if consent != ContentReadConsent::GrantedForThisOperation {
+            return Err(LocalError::UnsafeEntry);
+        }
+        #[cfg(unix)]
+        {
+            let mut input = secure::open_content(&self.root_fd, path)?;
+            Ok(io::copy(&mut input, output)?)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = output;
+            Err(LocalError::UnsafeEntry)
+        }
+    }
+
     /// Creates one child directory; fails closed on unsupported platforms.
     pub fn create_directory(&self, path: &Path) -> Result<()> {
         Self::relative(path)?;
@@ -200,6 +232,48 @@ mod tests {
         ));
         fs::create_dir(&p).unwrap();
         p
+    }
+
+    #[test]
+    fn content_read_requires_explicit_operation_consent() {
+        let root = sandbox();
+        fs::write(root.join("local.txt"), b"private").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let mut output = Vec::new();
+        assert!(adapter
+            .read_to_writer(
+                Path::new("local.txt"),
+                &mut output,
+                ContentReadConsent::Denied,
+            )
+            .is_err());
+        assert!(output.is_empty());
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(
+                adapter
+                    .read_to_writer(
+                        Path::new("local.txt"),
+                        &mut output,
+                        ContentReadConsent::GrantedForThisOperation,
+                    )
+                    .unwrap(),
+                7
+            );
+            assert_eq!(output, b"private");
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert!(adapter
+                .read_to_writer(
+                    Path::new("local.txt"),
+                    &mut output,
+                    ContentReadConsent::GrantedForThisOperation,
+                )
+                .is_err());
+            assert!(output.is_empty());
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
