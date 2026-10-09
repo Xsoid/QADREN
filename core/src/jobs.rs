@@ -504,6 +504,52 @@ mod tests {
     }
 
     #[test]
+    fn restart_preserves_attempt_identity_and_blocks_duplicate() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "qadren-attempt-{}-{unique}.sqlite",
+            std::process::id()
+        ));
+        {
+            let mut store = JobStore::open(&path).unwrap();
+            store.enqueue("job", None).unwrap();
+            store
+                .advance(
+                    "job",
+                    JobState::Queued,
+                    JobState::Running,
+                    Confirmation::Unknown,
+                )
+                .unwrap();
+            store.begin_attempt("job", "attempt-one").unwrap();
+        }
+        {
+            let mut store = JobStore::open(&path).unwrap();
+            assert_eq!(store.state("job").unwrap(), Some(JobState::Unknown));
+            let status: String = store
+                .db
+                .query_row(
+                    "SELECT status FROM job_attempts WHERE attempt_id='attempt-one'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(status, "unknown");
+            assert!(matches!(
+                store.begin_attempt("job", "attempt-two"),
+                Err(JobStoreError::InvalidTransition)
+            ));
+            store.resolve_attempt("job", "attempt-one").unwrap();
+            assert_eq!(store.state("job").unwrap(), Some(JobState::Unknown));
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn newer_schema_is_not_downgraded() {
         let db = Connection::open_in_memory().unwrap();
         db.pragma_update(None, "user_version", 99).unwrap();
