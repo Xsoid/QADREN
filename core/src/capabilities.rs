@@ -21,6 +21,14 @@ pub struct Operations {
     pub change_listing: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MetadataConfidence {
+    #[default]
+    Unknown,
+    ProviderReported,
+    LocallyVerified,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityDeclaration {
     pub supported_platforms: Vec<Platform>,
@@ -28,6 +36,8 @@ pub struct CapabilityDeclaration {
     /// A capability is not operationally available until the adapter validates
     /// current authorization, OS permissions and provider availability.
     pub prerequisites_verified: bool,
+    /// Reported confidence is descriptive, not evidence of successful I/O.
+    pub metadata_confidence: MetadataConfidence,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,6 +98,7 @@ mod tests {
                 ..Operations::default()
             },
             prerequisites_verified: true,
+            metadata_confidence: MetadataConfidence::Unknown,
         };
         assert_eq!(
             declaration.allows(Platform::MacOS, RequestedOperation::ListMetadata),
@@ -124,6 +135,7 @@ mod tests {
                 ..Operations::default()
             },
             prerequisites_verified: false,
+            metadata_confidence: MetadataConfidence::Unknown,
         };
         assert_eq!(
             declaration.allows(Platform::MacOS, RequestedOperation::Delete),
