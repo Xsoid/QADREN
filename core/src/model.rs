@@ -149,6 +149,25 @@ pub struct ConfirmedFileVersion {
     pub checksum_md5: Option<String>,
 }
 
+/// Descriptive event emitted during an execution attempt. Not a verified receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionEvent {
+    pub job_id: String,
+    pub attempt_id: String,
+    /// Ordered within one attempt. Persistence assigns and validates ordering.
+    pub sequence: u64,
+    pub kind: ExecutionEventKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionEventKind {
+    Started,
+    ProgressObserved,
+    AwaitingDecision,
+    FinishedClaimed,
+    OutcomeUnknown,
+}
+
 /// An executor's report is descriptive; it never grants completion by itself.
 /// Confirmation requires the independent evidence contract in confirmation.rs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -262,6 +281,24 @@ mod tests {
         assert!(baseline.right.is_none());
         assert_eq!(report.outcome, ExecutionOutcome::SucceededClaimed);
         // No method converts a claimed report into a confirmed baseline.
+    }
+
+    #[test]
+    fn execution_event_is_not_completion_evidence() {
+        let event = ExecutionEvent {
+            job_id: "j".into(),
+            attempt_id: "a".into(),
+            sequence: 1,
+            kind: ExecutionEventKind::FinishedClaimed,
+        };
+        assert_eq!(event.kind, ExecutionEventKind::FinishedClaimed);
+        assert_eq!(
+            JobState::Running.transition(
+                JobState::Completed,
+                crate::confirmation::Confirmation::Unknown
+            ),
+            Err(crate::confirmation::StateTransitionError::InsufficientEvidence)
+        );
     }
 
     #[test]
