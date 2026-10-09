@@ -60,6 +60,41 @@ pub struct ResourceList {
     pub total: u64,
 }
 
+/// A metadata observation can support reconciliation but never proves content delivery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MetadataMatch {
+    MatchesExpectedMetadata,
+    Mismatch,
+    InsufficientEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpectedResourceMetadata {
+    pub path: String,
+    pub size: u64,
+    pub md5: String,
+}
+
+pub fn compare_resource_metadata(
+    expected: &ExpectedResourceMetadata,
+    observed: &Resource,
+) -> MetadataMatch {
+    if expected.path.is_empty() || expected.md5.is_empty() {
+        return MetadataMatch::InsufficientEvidence;
+    }
+    if observed.path != expected.path || observed.kind != "file" {
+        return MetadataMatch::Mismatch;
+    }
+    let (Some(size), Some(md5)) = (observed.size, observed.md5.as_deref()) else {
+        return MetadataMatch::InsufficientEvidence;
+    };
+    if size == expected.size && md5.eq_ignore_ascii_case(&expected.md5) {
+        MetadataMatch::MatchesExpectedMetadata
+    } else {
+        MetadataMatch::Mismatch
+    }
+}
+
 pub struct YandexMetadataClient {
     http: Client,
     api_base: String,
@@ -231,6 +266,45 @@ mod tests {
         assert_eq!(found.size, Some(5));
         assert_eq!(found.md5.as_deref(), Some("abc"));
         server.join().unwrap();
+    }
+
+    #[test]
+    fn metadata_comparison_fails_closed_on_missing_or_mismatched_fields() {
+        let expected = ExpectedResourceMetadata {
+            path: "disk:/check.txt".into(),
+            size: 5,
+            md5: "ABCD".into(),
+        };
+        let mut observed = Resource {
+            name: "check.txt".into(),
+            path: "disk:/check.txt".into(),
+            kind: "file".into(),
+            size: Some(5),
+            modified: None,
+            md5: Some("abcd".into()),
+            revision: None,
+            embedded: None,
+        };
+        assert_eq!(
+            compare_resource_metadata(&expected, &observed),
+            MetadataMatch::MatchesExpectedMetadata
+        );
+        observed.md5 = None;
+        assert_eq!(
+            compare_resource_metadata(&expected, &observed),
+            MetadataMatch::InsufficientEvidence
+        );
+        observed.md5 = Some("bad".into());
+        assert_eq!(
+            compare_resource_metadata(&expected, &observed),
+            MetadataMatch::Mismatch
+        );
+        observed.md5 = Some("abcd".into());
+        observed.path = "disk:/different.txt".into();
+        assert_eq!(
+            compare_resource_metadata(&expected, &observed),
+            MetadataMatch::Mismatch
+        );
     }
 
     #[test]
