@@ -82,6 +82,45 @@ let first = FakeConnection()
 let second = FakeConnection()
 try first.attempt()
 check(second.present && second.credentialPresent && second.enabled, "other connection remains independent")
+// Inject failure at each step: never mark the record connected prematurely.
+for failureAt in 0..<5 {
+    var events: [String] = []
+    var status = "connected"
+    var credentialWritten = false
+    let step: (Int, String) throws -> Void = { index, name in
+        events.append(name)
+        if index == failureAt { throw SimulatedFailure.injected }
+    }
+    do {
+        try ConnectionAuthorization.commit(
+            markRequiresAuth: {
+                try step(0, "requires_auth")
+                status = "requires_auth"
+            },
+            storeCredential: {
+                try step(1, "keychain")
+                credentialWritten = true
+            },
+            persistIdentity: { try step(2, "identity") },
+            persistCredentialReference: { try step(3, "reference") },
+            markConnected: {
+                try step(4, "connected")
+                status = "connected"
+            }
+        )
+        fatalError("injected failure must throw")
+    } catch SimulatedFailure.injected {}
+    if failureAt == 0 {
+        check(!credentialWritten && status == "connected", "preflight failure cannot write Keychain")
+    } else {
+        check(status == "requires_auth", "interrupted authorization must stay blocked")
+    }
+    check(events.count == failureAt + 1, "no operation after injected failure")
+}
+check(!ConnectionAuthorization.mayRefresh(enabled: true, status: "requires_auth", accountID: "1", credentialReference: "keychain:a"), "incomplete transaction blocked after restart")
+check(!ConnectionAuthorization.mayRefresh(enabled: true, status: "connected", accountID: nil, credentialReference: "keychain:a"), "missing account binding blocked")
+check(!ConnectionAuthorization.mayRefresh(enabled: true, status: "connected", accountID: "1", credentialReference: nil), "missing credential reference blocked")
+check(ConnectionAuthorization.mayRefresh(enabled: true, status: "connected", accountID: "1", credentialReference: "keychain:a"), "complete record can refresh")
 print("ConnectionRemoval: all injected-failure checks passed")
 }
 }
