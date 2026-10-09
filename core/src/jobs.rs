@@ -70,7 +70,7 @@ impl JobStore {
 
     fn initialize(db: Connection) -> Result<Self> {
         let version: i32 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 2 {
+        if version > 3 {
             return Err(JobStoreError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -102,6 +102,21 @@ impl JobStore {
                  COMMIT;",
             )?;
         }
+        if version <= 2 {
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE job_attempts (
+                   attempt_id TEXT PRIMARY KEY NOT NULL,
+                   job_id TEXT NOT NULL REFERENCES jobs(id),
+                   status TEXT NOT NULL CHECK (status IN ('active','unknown','resolved')),
+                   UNIQUE(job_id, attempt_id)
+                 );
+                 CREATE UNIQUE INDEX one_active_attempt_per_job
+                   ON job_attempts(job_id) WHERE status='active';
+                 PRAGMA user_version = 3;
+                 COMMIT;",
+            )?;
+        }
         db.pragma_update(None, "foreign_keys", "ON")?;
         // A previous process may have written remote effects before dying.
         // Reconciliation is required; never resubmit these Jobs blindly.
@@ -109,6 +124,7 @@ impl JobStore {
             "BEGIN IMMEDIATE;
              INSERT INTO job_events(job_id,state,kind)
                SELECT id,'unknown','restart_uncertain' FROM jobs WHERE state='running';
+             UPDATE job_attempts SET status='unknown' WHERE status='active';
              UPDATE jobs SET state='unknown' WHERE state='running';
              COMMIT;",
         )?;
@@ -201,6 +217,63 @@ impl JobStore {
             tx.commit()?;
             Ok(())
         }
+    }
+
+    /// Persist an attempt identity BEFORE any external effect may be started.
+    /// A caller must not create a second attempt while any prior one is unresolved.
+    pub fn begin_attempt(&mut self, job_id: &str, attempt_id: &str) -> Result<()> {
+        if attempt_id.is_empty() || job_id.is_empty() {
+            return Err(JobStoreError::InvalidId);
+        }
+        let tx = self.db.transaction()?;
+        let state: Option<String> = tx
+            .query_row("SELECT state FROM jobs WHERE id=?1", [job_id], |r| r.get(0))
+            .optional()?;
+        if state.as_deref() != Some("running") {
+            return Err(JobStoreError::InvalidTransition);
+        }
+        let pending: i64 = tx.query_row(
+            "SELECT count(*) FROM job_attempts WHERE job_id=?1 AND status!='resolved'",
+            [job_id],
+            |row| row.get(0),
+        )?;
+        if pending > 0 {
+            return Err(JobStoreError::InvalidTransition);
+        }
+        tx.execute(
+            "INSERT INTO job_attempts(attempt_id,job_id,status) VALUES (?1,?2,'active')",
+            params![attempt_id, job_id],
+        )?;
+        tx.execute(
+            "INSERT INTO job_events(job_id,state,kind) VALUES (?1,'running','attempt_started')",
+            [job_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Records explicit resolution without claiming the remote operation succeeded.
+    pub fn resolve_attempt(&mut self, job_id: &str, attempt_id: &str) -> Result<()> {
+        let tx = self.db.transaction()?;
+        let updated = tx.execute(
+            "UPDATE job_attempts SET status='resolved'
+             WHERE job_id=?1 AND attempt_id=?2 AND status IN ('active','unknown')",
+            params![job_id, attempt_id],
+        )?;
+        if updated == 0 {
+            return Err(JobStoreError::InvalidTransition);
+        }
+        let state: String = tx.query_row(
+            "SELECT state FROM jobs WHERE id=?1",
+            [job_id],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO job_events(job_id,state,kind) VALUES (?1,?2,'attempt_resolved')",
+            params![job_id, state],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn state(&self, id: &str) -> Result<Option<JobState>> {
@@ -372,6 +445,21 @@ mod tests {
             .query_row("SELECT count(*) FROM job_events", [], |row| row.get(0))
             .unwrap();
         assert_eq!(event_count, 1);
+    }
+
+    #[test]
+    fn unresolved_attempt_blocks_duplicate_and_survives_restart() {
+        let mut db = JobStore::in_memory().unwrap();
+        db.enqueue("job", None).unwrap();
+        db.advance("job", JobState::Queued, JobState::Running, Confirmation::Unknown)
+            .unwrap();
+        db.begin_attempt("job", "attempt-1").unwrap();
+        assert!(matches!(
+            db.begin_attempt("job", "attempt-2"),
+            Err(JobStoreError::InvalidTransition)
+        ));
+        db.resolve_attempt("job", "attempt-1").unwrap();
+        db.begin_attempt("job", "attempt-2").unwrap();
     }
 
     #[test]
