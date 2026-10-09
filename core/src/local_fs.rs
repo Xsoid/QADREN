@@ -111,25 +111,33 @@ impl LocalFilesystem {
     }
 
     pub fn list(&self, path: &Path) -> Result<Vec<LocalEntry>> {
-        let dir = self.checked(path)?;
-        if !fs::symlink_metadata(&dir)?.is_dir() {
-            return Err(LocalError::NotDirectory);
+        Self::relative(path)?;
+        #[cfg(unix)]
+        {
+            secure::list(&self.root_fd, path)
         }
-        let mut items = Vec::new();
-        for item in fs::read_dir(dir)? {
-            let item = item?;
-            let meta = fs::symlink_metadata(item.path())?;
-            if meta.file_type().is_symlink() {
-                return Err(LocalError::UnsafeEntry);
+        #[cfg(not(unix))]
+        {
+            let dir = self.checked(path)?;
+            if !fs::symlink_metadata(&dir)?.is_dir() {
+                return Err(LocalError::NotDirectory);
             }
-            items.push(LocalEntry {
-                name: item.file_name().to_string_lossy().into_owned(),
-                is_directory: meta.is_dir(),
-                size: meta.len(),
-            });
+            let mut items = Vec::new();
+            for item in fs::read_dir(dir)? {
+                let item = item?;
+                let meta = fs::symlink_metadata(item.path())?;
+                if meta.file_type().is_symlink() {
+                    return Err(LocalError::UnsafeEntry);
+                }
+                items.push(LocalEntry {
+                    name: item.file_name().to_string_lossy().into_owned(),
+                    is_directory: meta.is_dir(),
+                    size: meta.len(),
+                });
+            }
+            items.sort_by(|a, b| a.name.cmp(&b.name));
+            Ok(items)
         }
-        items.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(items)
     }
 
     /// Stable lexical pagination over a snapshot of directory metadata.
@@ -260,6 +268,23 @@ mod tests {
             .unwrap()
             .is_empty());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_does_not_follow_swapped_parent_directory() {
+        use std::os::unix::fs::symlink;
+        let root = sandbox();
+        let outside = sandbox();
+        fs::create_dir(root.join("child")).unwrap();
+        fs::write(outside.join("private"), b"secret").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        fs::rename(root.join("child"), root.join("moved")).unwrap();
+        symlink(&outside, root.join("child")).unwrap();
+        assert!(adapter.list(Path::new("child")).is_err());
+        assert_eq!(adapter.list(Path::new("moved")).unwrap().len(), 0);
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(outside).unwrap();
     }
 
     #[cfg(unix)]
