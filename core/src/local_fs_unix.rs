@@ -257,6 +257,18 @@ pub fn create_directory(root: &File, target: &Path) -> Result<()> {
 }
 
 pub fn create<R: Read>(root: &File, target: &Path, input: &mut R, serial: u64) -> Result<u64> {
+    create_with_post_link_check(root, target, input, serial, || Ok(()))
+}
+
+/// Fault-injection seam: invoked strictly after publishing the destination.
+/// Production always passes a no-op; tests can simulate a durability failure.
+pub(super) fn create_with_post_link_check<R: Read, F: FnOnce() -> io::Result<()>>(
+    root: &File,
+    target: &Path,
+    input: &mut R,
+    serial: u64,
+    post_link_check: F,
+) -> Result<u64> {
     let (directory, destination) = parent(root, target)?;
     let temporary = CString::new(format!(".qadren-{}-{serial}.tmp", std::process::id()))
         .map_err(|_| LocalError::InvalidPath)?;
@@ -289,6 +301,7 @@ pub fn create<R: Read>(root: &File, target: &Path, input: &mut R, serial: u64) -
                 Err(LocalError::Io(error))
             };
         }
+        post_link_check().map_err(LocalError::OutcomeUnknown)?;
         directory.sync_all().map_err(LocalError::OutcomeUnknown)?;
         Ok(bytes)
     })();
