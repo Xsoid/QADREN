@@ -243,6 +243,49 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn parent_replaced_during_streaming_write_stays_on_opened_directory() {
+        use std::os::unix::fs::symlink;
+
+        struct SwapOnRead {
+            child: PathBuf,
+            moved: PathBuf,
+            outside: PathBuf,
+            swapped: bool,
+        }
+        impl io::Read for SwapOnRead {
+            fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+                if !self.swapped {
+                    fs::rename(&self.child, &self.moved)?;
+                    symlink(&self.outside, &self.child)?;
+                    self.swapped = true;
+                    output[0] = b'x';
+                    return Ok(1);
+                }
+                Ok(0)
+            }
+        }
+
+        let root = sandbox();
+        let outside = sandbox();
+        fs::create_dir(root.join("child")).unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let mut reader = SwapOnRead {
+            child: root.join("child"),
+            moved: root.join("moved"),
+            outside: outside.clone(),
+            swapped: false,
+        };
+        let result = adapter.create_from_reader(Path::new("child/file.txt"), &mut reader);
+        assert!(result.is_ok());
+        assert!(reader.swapped);
+        assert_eq!(fs::read(root.join("moved/file.txt")).unwrap(), b"x");
+        assert!(!outside.join("file.txt").exists());
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn swapped_parent_symlink_cannot_redirect_creation() {
         use std::os::unix::fs::symlink;
         let root = sandbox();
