@@ -590,27 +590,27 @@ mod tests {
             Confirmation::Unknown,
         )
         .unwrap();
-        db.begin_attempt("job", "attempt-1").unwrap();
+        db.begin_bound_attempt("job", "attempt-1", "copy", "destination-1", "/safe").unwrap();
         assert!(matches!(
             db.resolve_attempt(
                 "job",
                 "attempt-1",
-                &crate::verification::test_receipt("other")
+                &crate::verification::test_bound_receipt("other", "copy", "destination-1", "/safe")
             ),
             Err(JobStoreError::UntrustedEvidence)
         ));
 
         assert!(matches!(
-            db.begin_attempt("job", "attempt-2"),
+            db.begin_bound_attempt("job", "attempt-2", "copy", "destination-1", "/safe"),
             Err(JobStoreError::InvalidTransition)
         ));
         db.resolve_attempt(
             "job",
             "attempt-1",
-            &crate::verification::test_receipt("attempt-1"),
+            &crate::verification::test_bound_receipt("attempt-1", "copy", "destination-1", "/safe"),
         )
         .unwrap();
-        db.begin_attempt("job", "attempt-2").unwrap();
+        db.begin_bound_attempt("job", "attempt-2", "copy", "destination-1", "/safe").unwrap();
     }
 
     #[test]
@@ -624,7 +624,7 @@ mod tests {
             Confirmation::Unknown,
         )
         .unwrap();
-        db.begin_attempt("j", "attempt-a").unwrap();
+        db.begin_bound_attempt("j", "attempt-a", "copy", "destination-1", "/safe").unwrap();
         assert!(matches!(
             db.advance(
                 "j",
@@ -637,7 +637,7 @@ mod tests {
         db.resolve_attempt(
             "j",
             "attempt-a",
-            &crate::verification::test_receipt("attempt-a"),
+            &crate::verification::test_bound_receipt("attempt-a", "copy", "destination-1", "/safe"),
         )
         .unwrap();
         assert_eq!(db.state("j").unwrap(), Some(JobState::Running));
@@ -665,7 +665,7 @@ mod tests {
                     Confirmation::Unknown,
                 )
                 .unwrap();
-            store.begin_attempt("job", "attempt-one").unwrap();
+            store.begin_bound_attempt("job", "attempt-one", "copy", "destination-1", "/safe").unwrap();
         }
         {
             let mut store = JobStore::open(&path).unwrap();
@@ -680,14 +680,14 @@ mod tests {
                 .unwrap();
             assert_eq!(status, "unknown");
             assert!(matches!(
-                store.begin_attempt("job", "attempt-two"),
+                store.begin_bound_attempt("job", "attempt-two", "copy", "destination-1", "/safe"),
                 Err(JobStoreError::InvalidTransition)
             ));
             store
                 .resolve_attempt(
                     "job",
                     "attempt-one",
-                    &crate::verification::test_receipt("attempt-one"),
+                    &crate::verification::test_bound_receipt("attempt-one", "copy", "destination-1", "/safe"),
                 )
                 .unwrap();
             assert_eq!(store.state("job").unwrap(), Some(JobState::Unknown));
@@ -706,8 +706,8 @@ mod tests {
             Confirmation::Unknown,
         )
         .unwrap();
-        db.begin_attempt("j", "a").unwrap();
-        db.resolve_attempt("j", "a", &crate::verification::test_receipt("a"))
+        db.begin_bound_attempt("j", "a", "copy", "destination-1", "/safe").unwrap();
+        db.resolve_attempt("j", "a", &crate::verification::test_bound_receipt("a", "copy", "destination-1", "/safe"))
             .unwrap();
         let level: String = db
             .db
@@ -719,7 +719,7 @@ mod tests {
             .unwrap();
         assert_eq!(level, "metadata_verified");
         assert!(matches!(
-            db.resolve_attempt("j", "a", &crate::verification::test_receipt("a")),
+            db.resolve_attempt("j", "a", &crate::verification::test_bound_receipt("a", "copy", "destination-1", "/safe")),
             Err(JobStoreError::InvalidTransition)
         ));
         let total: i64 = db
