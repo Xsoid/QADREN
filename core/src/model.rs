@@ -42,6 +42,39 @@ pub struct ScenarioDraft {
     pub left: StorageEndpoint,
     pub right: StorageEndpoint,
     pub direction: SyncDirection,
+    pub filters: ScenarioFilters,
+    pub policies: ScenarioPolicies,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ScenarioFilters {
+    /// Relative paths ignored by the scenario; interpreted by the adapter.
+    pub excluded_patterns: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictPolicy {
+    RequireDecision,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeletionPolicy {
+    RequireDecision,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScenarioPolicies {
+    pub conflicts: ConflictPolicy,
+    pub deletions: DeletionPolicy,
+}
+
+impl Default for ScenarioPolicies {
+    fn default() -> Self {
+        Self {
+            conflicts: ConflictPolicy::RequireDecision,
+            deletions: DeletionPolicy::RequireDecision,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +83,7 @@ pub enum ValidationError {
     EmptyConnectionId,
     EmptyRoot,
     IdenticalEndpoints,
+    InvalidFilter,
 }
 
 impl ScenarioDraft {
@@ -67,6 +101,12 @@ impl ScenarioDraft {
         }
         if self.left == self.right {
             return Err(ValidationError::IdenticalEndpoints);
+        }
+        if self.filters.excluded_patterns.iter().any(|pattern| {
+            pattern.is_empty() || pattern.starts_with('/') || pattern.contains("..")
+                || pattern.chars().any(char::is_control)
+        }) {
+            return Err(ValidationError::InvalidFilter);
         }
         // Same-connection distinct roots may be valid; containment, aliases,
         // symlinks and path canonicalization require adapter-level validation.
@@ -141,6 +181,8 @@ mod tests {
             left: endpoint("yandex-1", "/docs"),
             right: endpoint("icloud-1", "/QADREN"),
             direction: SyncDirection::Bidirectional,
+            filters: ScenarioFilters::default(),
+            policies: ScenarioPolicies::default(),
         }
     }
 
@@ -172,6 +214,17 @@ mod tests {
         scenario = draft();
         scenario.right.root.clear();
         assert_eq!(scenario.validate(), Err(ValidationError::EmptyRoot));
+    }
+
+    #[test]
+    fn scenario_filters_reject_unsafe_patterns_and_policies_default_to_decisions() {
+        let mut scenario = draft();
+        scenario.filters.excluded_patterns.push("../escape".into());
+        assert_eq!(scenario.validate(), Err(ValidationError::InvalidFilter));
+        scenario.filters.excluded_patterns = vec!["logs/*.tmp".into()];
+        assert_eq!(scenario.validate(), Ok(()));
+        assert_eq!(scenario.policies.conflicts, ConflictPolicy::RequireDecision);
+        assert_eq!(scenario.policies.deletions, DeletionPolicy::RequireDecision);
     }
 
     #[test]
