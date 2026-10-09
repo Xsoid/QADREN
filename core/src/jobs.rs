@@ -265,7 +265,17 @@ impl JobStore {
     }
 
     /// Records explicit resolution without claiming the remote operation succeeded.
-    pub fn resolve_attempt(&mut self, job_id: &str, attempt_id: &str) -> Result<()> {
+    pub fn resolve_attempt(
+        &mut self,
+        job_id: &str,
+        attempt_id: &str,
+        evidence: Confirmation,
+    ) -> Result<()> {
+        // Acknowledging a prompt or requesting an operation is not proof of outcome.
+        // This is a minimum guard, not a substitute for adapter-side verification.
+        if !evidence.meets(crate::confirmation::EvidenceLevel::MetadataVerified) {
+            return Err(JobStoreError::MissingEvidence);
+        }
         let tx = self.db.transaction()?;
         let updated = tx.execute(
             "UPDATE job_attempts SET status='resolved'
@@ -471,10 +481,20 @@ mod tests {
         .unwrap();
         db.begin_attempt("job", "attempt-1").unwrap();
         assert!(matches!(
+            db.resolve_attempt("job", "attempt-1", Confirmation::Unknown),
+            Err(JobStoreError::MissingEvidence)
+        ));
+
+        assert!(matches!(
             db.begin_attempt("job", "attempt-2"),
             Err(JobStoreError::InvalidTransition)
         ));
-        db.resolve_attempt("job", "attempt-1").unwrap();
+        db.resolve_attempt(
+            "job",
+            "attempt-1",
+            Confirmation::Confirmed(EvidenceLevel::MetadataVerified),
+        )
+        .unwrap();
         db.begin_attempt("job", "attempt-2").unwrap();
     }
 
@@ -499,7 +519,12 @@ mod tests {
             ),
             Err(JobStoreError::InvalidTransition)
         ));
-        db.resolve_attempt("j", "attempt-a").unwrap();
+        db.resolve_attempt(
+            "j",
+            "attempt-a",
+            Confirmation::Confirmed(EvidenceLevel::MetadataVerified),
+        )
+        .unwrap();
         assert_eq!(db.state("j").unwrap(), Some(JobState::Running));
     }
 
@@ -543,7 +568,13 @@ mod tests {
                 store.begin_attempt("job", "attempt-two"),
                 Err(JobStoreError::InvalidTransition)
             ));
-            store.resolve_attempt("job", "attempt-one").unwrap();
+            store
+                .resolve_attempt(
+                    "job",
+                    "attempt-one",
+                    Confirmation::Confirmed(EvidenceLevel::MetadataVerified),
+                )
+                .unwrap();
             assert_eq!(store.state("job").unwrap(), Some(JobState::Unknown));
         }
         std::fs::remove_file(path).unwrap();
