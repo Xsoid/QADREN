@@ -99,6 +99,53 @@ fn parent(root: &File, relative: &Path) -> Result<(File, CString)> {
     Err(LocalError::InvalidPath)
 }
 
+/// Open the requested directory without resolving an untrusted pathname.
+fn directory(root: &File, relative: &Path) -> Result<File> {
+    let (parent, leaf) = parent(root, relative)?;
+    opened(unsafe {
+        openat(
+            parent.as_raw_fd(),
+            leaf.as_ptr(),
+            RDONLY | DIRECTORY | NOFOLLOW | CLOEXEC,
+        )
+    })
+}
+
+/// Enumerate through the already opened directory descriptor, not the original
+/// user pathname. Metadata for every entry is also obtained descriptor-relative.
+pub fn list(root: &File, relative: &Path) -> Result<Vec<LocalEntry>> {
+    let dir = directory(root, relative)?;
+    #[cfg(target_os = "macos")]
+    let descriptor_path = format!("/dev/fd/{}", dir.as_raw_fd());
+    #[cfg(target_os = "linux")]
+    let descriptor_path = format!("/proc/self/fd/{}", dir.as_raw_fd());
+
+    let mut entries = Vec::new();
+    for item in std::fs::read_dir(descriptor_path)? {
+        let item = item?;
+        let raw_name = item.file_name();
+        let leaf = name(&raw_name)?;
+        let file = opened(unsafe {
+            openat(
+                dir.as_raw_fd(),
+                leaf.as_ptr(),
+                RDONLY | NOFOLLOW | NONBLOCK | CLOEXEC,
+            )
+        })?;
+        let meta = file.metadata()?;
+        if !meta.is_file() && !meta.is_dir() {
+            return Err(LocalError::UnsafeEntry);
+        }
+        entries.push(LocalEntry {
+            name: raw_name.to_string_lossy().into_owned(),
+            is_directory: meta.is_dir(),
+            size: meta.len(),
+        });
+    }
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(entries)
+}
+
 /// Metadata from a file descriptor opened relative to the pinned parent.
 /// O_NOFOLLOW rejects a final symlink, including one swapped in during lookup.
 /// O_NONBLOCK avoids hanging on FIFO/device-like entries.
