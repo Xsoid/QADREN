@@ -187,6 +187,7 @@ impl JobStore {
             params![label(next), id, label(expected)],
         )?;
         if changed == 0 {
+            drop(tx);
             if self.get(id)?.is_none() {
                 Err(JobStoreError::NotFound)
             } else {
@@ -231,7 +232,7 @@ mod tests {
 
     #[test]
     fn completion_requires_evidence_and_cas() {
-        let db = JobStore::in_memory().unwrap();
+        let mut db = JobStore::in_memory().unwrap();
         db.enqueue("j", None).unwrap();
         db.advance(
             "j",
