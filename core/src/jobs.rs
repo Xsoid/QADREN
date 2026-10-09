@@ -764,6 +764,39 @@ mod tests {
     }
 
     #[test]
+    fn bound_attempt_rejects_evidence_for_another_target() {
+        let mut db = JobStore::in_memory().unwrap();
+        db.enqueue("j", None).unwrap();
+        db.advance(
+            "j",
+            JobState::Queued,
+            JobState::Running,
+            Confirmation::Unknown,
+        )
+        .unwrap();
+        db.begin_bound_attempt("j", "a", "copy", "destination-1", "/safe")
+            .unwrap();
+        let wrong = crate::verification::test_bound_receipt(
+            "a",
+            "copy",
+            "destination-1",
+            "/other",
+        );
+        assert!(matches!(
+            db.resolve_attempt("j", "a", &wrong),
+            Err(JobStoreError::UntrustedEvidence)
+        ));
+        let right = crate::verification::test_bound_receipt(
+            "a",
+            "copy",
+            "destination-1",
+            "/safe",
+        );
+        db.resolve_attempt("j", "a", &right).unwrap();
+        assert_eq!(db.state("j").unwrap(), Some(JobState::Running));
+    }
+
+    #[test]
     fn newer_schema_is_not_downgraded() {
         let db = Connection::open_in_memory().unwrap();
         db.pragma_update(None, "user_version", 99).unwrap();
