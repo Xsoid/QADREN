@@ -194,6 +194,46 @@ mod tests {
     }
 
     #[test]
+    fn single_resource_metadata_uses_read_only_get() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut bytes = [0u8; 8192];
+            let size = stream.read(&mut bytes).unwrap();
+            let request = String::from_utf8_lossy(&bytes[..size]);
+            assert!(request.starts_with("GET /v1/disk/resources?"));
+            assert!(request.contains("path=disk%3A%2Fcheck.txt"));
+            assert!(request.contains("OAuth test-token"));
+            let body = r#"{"name":"check.txt","path":"disk:/check.txt","type":"file","size":5,"modified":"2026-10-09T00:00:00Z","md5":"abc"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\\r\\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let client = YandexMetadataClient {
+            http: Client::builder()
+                .timeout(Duration::from_secs(3))
+                .build()
+                .unwrap(),
+            api_base: format!("http://{address}/v1/disk"),
+        };
+        let found = client
+            .resource_metadata("test-token", "disk:/check.txt")
+            .unwrap();
+        assert_eq!(found.path, "disk:/check.txt");
+        assert_eq!(found.size, Some(5));
+        assert_eq!(found.md5.as_deref(), Some("abc"));
+        server.join().unwrap();
+    }
+
+    #[test]
     fn invalid_resource_path_is_rejected_without_network_access() {
         let client = YandexMetadataClient::new().unwrap();
         assert!(matches!(
