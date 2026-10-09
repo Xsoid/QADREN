@@ -46,6 +46,7 @@ unsafe extern "C" {
         flags: c_int,
     ) -> c_int;
     fn unlinkat(fd: c_int, path: *const c_char, flags: c_int) -> c_int;
+    fn mkdirat(fd: c_int, path: *const c_char, mode: u32) -> c_int;
 }
 
 fn name(path: &std::ffi::OsStr) -> Result<CString> {
@@ -84,6 +85,22 @@ fn parent(root: &File, relative: &Path) -> Result<(File, CString)> {
         })?;
     }
     Err(LocalError::InvalidPath)
+}
+
+/// Creates one directory without following symlinks or replacing existing entries.
+pub fn create_directory(root: &File, target: &Path) -> Result<()> {
+    let (directory, destination) = parent(root, target)?;
+    let result = unsafe { mkdirat(directory.as_raw_fd(), destination.as_ptr(), 0o700) };
+    if result != 0 {
+        let error = io::Error::last_os_error();
+        return if error.kind() == io::ErrorKind::AlreadyExists {
+            Err(LocalError::AlreadyExists)
+        } else {
+            Err(LocalError::Io(error))
+        };
+    }
+    directory.sync_all()?;
+    Ok(())
 }
 
 pub fn create<R: Read>(root: &File, target: &Path, input: &mut R, serial: u64) -> Result<u64> {
