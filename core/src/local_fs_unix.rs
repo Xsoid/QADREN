@@ -1,6 +1,6 @@
 //! Descriptor-relative, symlink-resistant non-overwriting file creation.
 //! Unix only. Every intermediate directory is opened with O_NOFOLLOW.
-use super::{LocalError, Result};
+use super::{LocalEntry, LocalError, Result};
 use std::ffi::{c_char, c_int, CString};
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -21,6 +21,10 @@ const NOFOLLOW: c_int = 0x20000;
 #[cfg(target_os = "linux")]
 const CLOEXEC: c_int = 0x80000;
 const RDONLY: c_int = 0;
+#[cfg(target_os = "macos")]
+const NONBLOCK: c_int = 0x4;
+#[cfg(target_os = "linux")]
+const NONBLOCK: c_int = 0x800;
 const WRONLY: c_int = 1;
 #[cfg(target_os = "macos")]
 const CREAT: c_int = 0x200;
@@ -85,6 +89,34 @@ fn parent(root: &File, relative: &Path) -> Result<(File, CString)> {
         })?;
     }
     Err(LocalError::InvalidPath)
+}
+
+/// Metadata from a file descriptor opened relative to the pinned parent.
+/// O_NOFOLLOW rejects a final symlink, including one swapped in during lookup.
+/// O_NONBLOCK avoids hanging on FIFO/device-like entries.
+pub fn stat(root: &File, target: &Path) -> Result<LocalEntry> {
+    let (directory, name) = parent(root, target)?;
+    let entry = opened(unsafe {
+        openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            RDONLY | NOFOLLOW | NONBLOCK | CLOEXEC,
+        )
+    })?;
+    let metadata = entry.metadata()?;
+    if !metadata.is_file() && !metadata.is_dir() {
+        return Err(LocalError::UnsafeEntry);
+    }
+    let display_name = target
+        .file_name()
+        .ok_or(LocalError::InvalidPath)?
+        .to_string_lossy()
+        .into_owned();
+    Ok(LocalEntry {
+        name: display_name,
+        is_directory: metadata.is_dir(),
+        size: metadata.len(),
+    })
 }
 
 /// Creates one directory without following symlinks or replacing existing entries.
