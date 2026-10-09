@@ -1105,8 +1105,13 @@ mod tests {
     fn read_only_yandex_inspection_cannot_resolve_job() {
         let mut db = JobStore::in_memory().unwrap();
         db.enqueue("job", None).unwrap();
-        db.advance("job", JobState::Queued, JobState::Running, Confirmation::Unknown)
-            .unwrap();
+        db.advance(
+            "job",
+            JobState::Queued,
+            JobState::Running,
+            Confirmation::Unknown,
+        )
+        .unwrap();
         db.begin_bound_attempt("job", "attempt", "copy", "dest", "disk:/file")
             .unwrap();
         let checksum = "abcdef0123456789abcdef0123456789";
