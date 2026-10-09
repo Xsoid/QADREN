@@ -361,6 +361,35 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn disk_full_during_stream_stays_before_publication() {
+        struct DiskFullAfterFirstChunk(bool);
+        impl io::Read for DiskFullAfterFirstChunk {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if self.0 {
+                    return Err(io::Error::from_raw_os_error(libc::ENOSPC));
+                }
+                self.0 = true;
+                buf[0] = b'a';
+                Ok(1)
+            }
+        }
+        let root = sandbox();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let result = adapter.create_from_reader(
+            Path::new("disk-full.bin"),
+            &mut DiskFullAfterFirstChunk(false),
+        );
+        assert!(matches!(
+            result,
+            Err(LocalError::Io(ref e)) if e.raw_os_error() == Some(libc::ENOSPC)
+        ));
+        assert!(!root.join("disk-full.bin").exists());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn post_publication_failure_is_unknown_and_requires_reconciliation() {
         let root = sandbox();
         let adapter = LocalFilesystem::open(&root).unwrap();
