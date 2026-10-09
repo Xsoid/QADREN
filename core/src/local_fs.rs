@@ -6,7 +6,9 @@ use std::fs;
 #[cfg(unix)]
 use std::fs::File;
 use std::io;
-use std::path::{Component, Path, PathBuf};
+#[cfg(not(unix))]
+use std::path::Component;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(unix)]
@@ -39,6 +41,7 @@ pub struct LocalEntry {
 }
 
 pub struct LocalFilesystem {
+    #[cfg(not(unix))]
     root: PathBuf,
     #[cfg(unix)]
     root_fd: File,
@@ -57,6 +60,7 @@ impl LocalFilesystem {
         #[cfg(unix)]
         let root_fd = secure::root(&canonical)?;
         Ok(Self {
+            #[cfg(not(unix))]
             root: canonical,
             #[cfg(unix)]
             root_fd,
@@ -74,6 +78,7 @@ impl LocalFilesystem {
     }
 
     // No symlink traversal, including intermediate components.
+    #[cfg(not(unix))]
     fn checked(&self, path: &Path) -> Result<PathBuf> {
         Self::relative(path)?;
         let mut current = self.root.clone();
