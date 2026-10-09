@@ -94,6 +94,16 @@ impl LocalFilesystem {
         Ok(items)
     }
 
+    /// Stable lexical pagination over a snapshot of directory metadata.
+    /// Callers must rescan if the directory changes between page requests.
+    pub fn list_page(&self, path: &Path, offset: usize, limit: usize) -> Result<Vec<LocalEntry>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let entries = self.list(path)?;
+        Ok(entries.into_iter().skip(offset).take(limit).collect())
+    }
+
     /// Create a NEW file from a stream; never replace an existing destination.
     /// Temporary data is synced before its final hard-link commit.
     /// Parent must already exist and be a real directory.
@@ -162,6 +172,30 @@ mod tests {
         assert!(adapter.create_from_reader(Path::new("bad"), &mut Broken).is_err());
         assert!(adapter.list(Path::new("bad")).is_err());
         assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn list_page_orders_unicode_entries_without_duplicates() {
+        let root = sandbox();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        for name in ["ёж.txt", "alpha.txt", "b.txt"] {
+            fs::write(root.join(name), b"x").unwrap();
+        }
+        let all = adapter.list(Path::new("")).err();
+        assert!(matches!(all, Some(LocalError::InvalidPath)));
+        let first = adapter.list_page(Path::new("alpha.txt"), 0, 10);
+        assert!(matches!(first, Err(LocalError::NotDirectory)));
+        // Root itself is not addressable as a relative file path by design.
+        fs::create_dir(root.join("folder")).unwrap();
+        for name in ["ёж.txt", "alpha.txt", "b.txt"] {
+            fs::write(root.join("folder").join(name), b"x").unwrap();
+        }
+        let page1 = adapter.list_page(Path::new("folder"), 0, 2).unwrap();
+        let page2 = adapter.list_page(Path::new("folder"), 2, 2).unwrap();
+        let full = adapter.list(Path::new("folder")).unwrap();
+        assert_eq!([page1, page2].concat(), full);
+        assert!(adapter.list_page(Path::new("folder"), 0, 0).unwrap().is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 
