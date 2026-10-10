@@ -317,3 +317,9 @@
 - `2dfcb58`, `f98ae93`, `f36afa1`: добавлены четыре Unix-регрессионных теста для `stage_move_link_new` и `reconcile_staged_link`: сбой после успешного linkat классифицируется как `OutcomeUnknown` и не удаляет ни source, ни destination; повтор с занятым destination отклоняется; directory-source и symlink-destination не изменяются; замена inode destination обнаруживается без удаления файлов.
 - Новая матрица проверяет **сохранность данных**, но не даёт гарантии атомарного rename/delete при конкурентной подмене. Не включать реальное удаление источника и автоматические повторы по итогам этих тестов.
 - Новый пакет не проходил локальный fmt/clippy/tests; ожидаемый итог 147 тестов. Готовность #15 ≈62%: существенные блокеры rename/move/delete и File Provider hydration ещё открыты.
+
+### Safe move preflight case collisions and directory guards (2026-10-11)
+
+- Пользователь подтвердил успешный локальный прогон предыдущего патча (`f9e49f7`, 147 тестов).
+- `400625a`, `33d5139`: metadata-only `preview_move_new` при отсутствующем destination проверяет через закреплённый descriptor родителя, нет ли case-insensitive alias назначения, и возвращает `AlreadyExists` вместо ложного разрешения. `revalidate_move_new` наследует защиту. Добавлены 3 Unix-теста: case alias destination/revalidate, успешная preview в существующий каталог без записи, отказ на symlink parent или отсутствующий parent.
+- Это не разрешает реальный move/rename/delete, не устраняет TOCTOU после preflight и не инициирует cloud content read. Новый патч ожидает локальной macOS проверки: 150 тестов. Готовность #15 ~62%; крупные блокеры сохраняются.
