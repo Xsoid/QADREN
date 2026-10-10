@@ -52,6 +52,18 @@ unsafe extern "C" {
     fn mkdirat(fd: c_int, path: *const c_char, mode: u32) -> c_int;
 }
 
+/// Classify syscall failure without treating an interrupted rename as
+/// safely retryable: a namespace mutation may already have occurred.
+fn rename_failure(error: io::Error) -> LocalError {
+    if error.kind() == io::ErrorKind::AlreadyExists {
+        LocalError::AlreadyExists
+    } else if error.kind() == io::ErrorKind::Interrupted {
+        LocalError::OutcomeUnknown(error)
+    } else {
+        LocalError::Io(error)
+    }
+}
+
 /// Rename a regular file without replacing the destination. This moves
 /// a directory entry atomically, but path-to-inode races still require
 /// post-operation reconciliation before any job reports success.
@@ -97,15 +109,7 @@ pub fn rename_file_noreplace(root: &File, from: &Path, to: &Path) -> Result<()> 
     };
     if outcome != 0 {
         let error = io::Error::last_os_error();
-        return if error.kind() == io::ErrorKind::AlreadyExists {
-            Err(LocalError::AlreadyExists)
-        } else if error.kind() == io::ErrorKind::Interrupted {
-            // A syscall interrupted around commit may have changed the namespace.
-            // Never retry a potentially destructive rename without inspection.
-            Err(LocalError::OutcomeUnknown(error))
-        } else {
-            Err(LocalError::Io(error))
-        };
+        return Err(rename_failure(error));
     }
     let current = file_identity(root, to);
     if !matches!(current, Ok(identity) if identity == source) {
