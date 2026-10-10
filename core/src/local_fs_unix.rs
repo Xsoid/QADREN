@@ -77,9 +77,8 @@ pub fn root(path: &Path) -> Result<File> {
     // ancestors of the configured root, to reject intermediate symlinks.
     let anchor = if path.is_absolute() { "/" } else { "." };
     let anchor = name(std::ffi::OsStr::new(anchor))?;
-    let mut current = opened(unsafe {
-        open(anchor.as_ptr(), RDONLY | DIRECTORY | NOFOLLOW | CLOEXEC)
-    })?;
+    let mut current =
+        opened(unsafe { open(anchor.as_ptr(), RDONLY | DIRECTORY | NOFOLLOW | CLOEXEC) })?;
     for component in path.components() {
         let part = match component {
             Component::RootDir | Component::CurDir => continue,
