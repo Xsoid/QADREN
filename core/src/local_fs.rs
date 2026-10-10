@@ -596,9 +596,7 @@ impl LocalFilesystem {
     ) -> Result<bool> {
         match self.inspect_content(path) {
             Ok(current) => Ok(current == expected),
-            Err(LocalError::Io(ref error)) if error.kind() == io::ErrorKind::NotFound => {
-                Ok(false)
-            }
+            Err(LocalError::Io(ref error)) if error.kind() == io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(error),
         }
     }
@@ -1918,12 +1916,18 @@ mod tests {
         let adapter = LocalFilesystem::open(&root).unwrap();
         let path = Path::new("item.bin");
         let observed = adapter.inspect_content(path).unwrap();
-        assert!(adapter.revalidate_content_inspection(path, observed).unwrap());
+        assert!(adapter
+            .revalidate_content_inspection(path, observed)
+            .unwrap());
         fs::rename(root.join("item.bin"), root.join("retained.bin")).unwrap();
         fs::write(root.join("item.bin"), b"new").unwrap();
-        assert!(!adapter.revalidate_content_inspection(path, observed).unwrap());
+        assert!(!adapter
+            .revalidate_content_inspection(path, observed)
+            .unwrap());
         fs::remove_file(root.join("item.bin")).unwrap();
-        assert!(!adapter.revalidate_content_inspection(path, observed).unwrap());
+        assert!(!adapter
+            .revalidate_content_inspection(path, observed)
+            .unwrap());
         assert_eq!(fs::read(root.join("retained.bin")).unwrap(), b"original");
         fs::remove_dir_all(root).unwrap();
     }
