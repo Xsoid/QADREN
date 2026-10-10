@@ -1514,20 +1514,13 @@ mod tests {
         let adapter = LocalFilesystem::open(&root).unwrap();
         let expected = adapter.file_identity(Path::new("source.bin")).unwrap();
         assert!(adapter
-            .revalidate_move_new(
-                Path::new("source.bin"),
-                Path::new("target.bin"),
-                expected,
-            )
+            .revalidate_move_new(Path::new("source.bin"), Path::new("target.bin"), expected,)
             .is_ok());
         fs::rename(root.join("source.bin"), root.join("old.bin")).unwrap();
         fs::write(root.join("source.bin"), b"replacement").unwrap();
         assert!(matches!(
-            adapter.revalidate_move_new(
-                Path::new("source.bin"),
-                Path::new("target.bin"),
-                expected,
-            ),
+            adapter
+                .revalidate_move_new(Path::new("source.bin"), Path::new("target.bin"), expected,),
             Err(LocalError::UnsafeEntry)
         ));
         assert!(!root.join("target.bin").exists());
