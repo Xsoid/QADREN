@@ -323,3 +323,10 @@
 - Пользователь подтвердил успешный локальный прогон предыдущего патча (`f9e49f7`, 147 тестов).
 - `400625a`, `33d5139`: metadata-only `preview_move_new` при отсутствующем destination проверяет через закреплённый descriptor родителя, нет ли case-insensitive alias назначения, и возвращает `AlreadyExists` вместо ложного разрешения. `revalidate_move_new` наследует защиту. Добавлены 3 Unix-теста: case alias destination/revalidate, успешная preview в существующий каталог без записи, отказ на symlink parent или отсутствующий parent.
 - Это не разрешает реальный move/rename/delete, не устраняет TOCTOU после preflight и не инициирует cloud content read. Новый патч ожидает локальной macOS проверки: 150 тестов. Готовность #15 ~62%; крупные блокеры сохраняются.
+
+### POSIX permissions metadata (2026-10-11)
+
+- Пользователь подтвердил успешную локальную проверку предыдущего пакета `9677f8c` (150 тестов).
+- `6e8e8d2`, `760b2b2`: добавлена `LocalFilesystem::mode_bits(path)`, основанная на descriptor-relative `fstatat(AT_SYMLINK_NOFOLLOW)`. Возвращает POSIX bits `0o7777` для regular files/directories, отказывает на symlink и недопустимых путях. Не открывает содержимое и не инициирует iCloud hydration.
+- Эти биты информативны и не доказывают эффективный доступ: ACL, процессный UID/GID, sandbox, TCC и файловые политики проверяются непосредственно при выполнении операции. Добавлены два Unix-теста: режимы 0640/0750, отказ на symlink и traversal.
+- Текущий патч ещё не проверен на Mac; ожидаются 152 теста. Готовность #15 ≈62%, безопасные rename/move/delete и полный placeholder guard остаются незавершёнными.
