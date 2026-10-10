@@ -283,3 +283,10 @@
 - `8a736f2`, `ecf2a61`: добавлены `inspect_content()` и `inspect_content_batch()` — составной metadata-only preflight с проверкой inode/size до и после запроса residency. Сбор данных из нескольких файлов атомарности/консистентного snapshot не гарантирует. Если любой элемент отсутствует, является symlink или выходит за пределы root — полный вызов возвращает ошибку без частичного успешного результата.
 - Три новых Unix-теста: batch для двух regular files, отказ на symlink и traversal, отказ на missing entry без создания данных. Ожидаемый локальный тестовый итог на macOS: 133 теста, ещё не проверено.
 - Отсутствие `SF_DATALESS` не разрешает hydration или чтение содержимого. macOS content reads остаются запрещены. Расширенные File Provider statuses и безопасные rename/move/delete ещё не реализованы. Оценка #15: ~58%.
+
+### Metadata batch revalidation after preflight (2026-10-11)
+
+- Пользователь подтвердил успешный локальный прогон предыдущего пакета (`10faf08`; 133 теста).
+- `db03c69`: добавлены `revalidate_content_inspection(path, expected)` и `revalidate_content_batch(paths, expected)` для повторной metadata-only проверки устаревших результатов preflight перед следующим шагом. Сверяются inode/device/size и residency. Отсутствующий файл возвращает `Ok(false)`, symlink/небезопасные пути возвращают ошибку; несоответствие длины массивов — `InvalidPath`. Пакет не объявляется консистентным снимком, операции проверки не дают права чтения и не устраняют TOCTOU.
+- 3 Unix-теста: успешное повторное наблюдение, замена inode и удаление, stale batch и неверная длина, подмена symlink и сохранность данных. Новый код требует локального запуска macOS; ожидаются 136 тестов.
+- Готовность #15 около 60%; полноценные безопасные move/rename/delete и File Provider statuses ещё не реализованы.
