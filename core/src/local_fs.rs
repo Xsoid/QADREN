@@ -546,7 +546,10 @@ impl LocalFilesystem {
             }
             self.preview_move_new(from, to)?;
             let bytes = self.copy_file_new(from, to, consent)?;
-            if !self.revalidate_content_inspection(from, expected).unwrap_or(false) {
+            if !self
+                .revalidate_content_inspection(from, expected)
+                .unwrap_or(false)
+            {
                 return Err(LocalError::OutcomeUnknown(io::Error::other(
                     "source changed during non-destructive move preparation",
                 )));
@@ -2578,7 +2581,10 @@ mod tests {
         assert_eq!(fs::read(root.join("new.bin")).unwrap(), b"original");
         assert!(matches!(
             adapter.prepare_move_copy_new(
-                src, dst, expected, ContentReadConsent::GrantedForThisOperation
+                src,
+                dst,
+                expected,
+                ContentReadConsent::GrantedForThisOperation
             ),
             Err(LocalError::AlreadyExists)
         ));
@@ -2601,7 +2607,10 @@ mod tests {
         fs::write(root.join("src.bin"), b"replacement").unwrap();
         assert!(matches!(
             adapter.prepare_move_copy_new(
-                src, dst, expected, ContentReadConsent::GrantedForThisOperation
+                src,
+                dst,
+                expected,
+                ContentReadConsent::GrantedForThisOperation
             ),
             Err(LocalError::UnsafeEntry)
         ));
