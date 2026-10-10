@@ -2618,6 +2618,30 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn verified_copy_reader_rejects_mutation_before_publication() {
+        let root = sandbox();
+        let source_path = root.join("source.bin");
+        fs::write(&source_path, b"original").unwrap();
+        let mut source = fs::File::open(&source_path).unwrap();
+        let baseline = source.metadata().unwrap();
+        let mut reader = VerifiedCopyReader {
+            inner: ExactSizeReader {
+                inner: &mut source,
+                remaining: baseline.len(),
+            },
+            baseline,
+        };
+        let mut output = [0u8; 8];
+        reader.read_exact(&mut output).unwrap();
+        fs::write(&source_path, b"changed!").unwrap();
+        let mut extra = [0u8; 1];
+        assert!(reader.read(&mut extra).is_err());
+        assert_eq!(&output, b"original");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn exact_size_move_stream_rejects_truncation_and_growth() {
         let root = sandbox();
         let adapter = LocalFilesystem::open(&root).unwrap();
