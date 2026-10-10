@@ -227,6 +227,30 @@ pub fn file_identity(root: &File, target: &Path) -> Result<LocalFileIdentity> {
     })
 }
 
+/// Inspect POSIX mode bits without accessing file content. These bits
+/// are not an effective-access decision (ACLs and sandbox rules also apply).
+pub fn file_mode(root: &File, target: &Path) -> Result<u32> {
+    let (directory, leaf) = parent(root, target)?;
+    let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            leaf.as_ptr(),
+            info.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return Err(LocalError::Io(io::Error::last_os_error()));
+    }
+    let info = unsafe { info.assume_init() };
+    let kind = info.st_mode & libc::S_IFMT;
+    if kind != libc::S_IFREG && kind != libc::S_IFDIR {
+        return Err(LocalError::UnsafeEntry);
+    }
+    Ok((info.st_mode & 0o7777) as u32)
+}
+
 /// Metadata-only modification signature. Timestamps are best-effort,
 /// not a cryptographic integrity proof or immutable snapshot.
 pub fn file_change_stamp(root: &File, target: &Path) -> Result<(i64, i64, i64, i64)> {
