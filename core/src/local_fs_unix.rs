@@ -233,9 +233,9 @@ pub fn list(root: &File, relative: &Path) -> Result<Vec<LocalEntry>> {
         }
         let leaf = CString::new(bytes).map_err(|_| LocalError::InvalidPath)?;
         let (is_directory, size) = leaf_metadata(&dir, &leaf)?;
-        let name = std::ffi::OsStr::from_bytes(bytes);
+        let name = std::str::from_utf8(bytes).map_err(|_| LocalError::UnsafeEntry)?;
         entries.push(LocalEntry {
-            name: name.to_string_lossy().into_owned(),
+            name: name.to_owned(),
             is_directory,
             size,
         });
@@ -265,8 +265,9 @@ pub fn stat(root: &File, target: &Path) -> Result<LocalEntry> {
     let display_name = target
         .file_name()
         .ok_or(LocalError::InvalidPath)?
-        .to_string_lossy()
-        .into_owned();
+        .to_str()
+        .ok_or(LocalError::UnsafeEntry)?
+        .to_owned();
     Ok(LocalEntry {
         name: display_name,
         is_directory,
