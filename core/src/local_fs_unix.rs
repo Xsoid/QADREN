@@ -194,6 +194,31 @@ pub fn file_identity(root: &File, target: &Path) -> Result<LocalFileIdentity> {
     })
 }
 
+/// Inspect macOS SF_DATALESS without opening the file or its content.
+/// No flag does not prove that the object cannot be materialized later.
+#[cfg(target_os = "macos")]
+pub fn is_dataless(root: &File, target: &Path) -> Result<bool> {
+    const SF_DATALESS: u32 = 0x4000_0000;
+    let (directory, leaf) = parent(root, target)?;
+    let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let status = unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            leaf.as_ptr(),
+            info.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if status != 0 {
+        return Err(LocalError::Io(io::Error::last_os_error()));
+    }
+    let info = unsafe { info.assume_init() };
+    if info.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Err(LocalError::UnsafeEntry);
+    }
+    Ok(info.st_flags & SF_DATALESS != 0)
+}
+
 /// Enumerate via fdopendir/readdir. On macOS /dev/fd/N is not a
 /// directory pathname usable by read_dir, so enumeration must use the fd.
 pub fn list(root: &File, relative: &Path) -> Result<Vec<LocalEntry>> {
