@@ -2505,6 +2505,41 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn atomic_rename_new_rejects_source_symlink_without_mutation() {
+        let root = sandbox();
+        fs::write(root.join("real.bin"), b"protected").unwrap();
+        std::os::unix::fs::symlink("real.bin", root.join("source.bin")).unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert!(adapter
+            .rename_file_new(Path::new("source.bin"), Path::new("destination.bin"))
+            .is_err());
+        assert_eq!(fs::read(root.join("real.bin")).unwrap(), b"protected");
+        assert!(!root.join("destination.bin").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_rename_new_rejects_stale_source_after_preflight() {
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"original").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let source = Path::new("source.bin");
+        let destination = Path::new("destination.bin");
+        let previous = adapter.preview_move_identity(source, destination).unwrap();
+        fs::rename(root.join("source.bin"), root.join("preserved.bin")).unwrap();
+        fs::write(root.join("source.bin"), b"replacement").unwrap();
+        assert!(matches!(
+            adapter.revalidate_move_new(source, destination, previous),
+            Err(LocalError::UnsafeEntry)
+        ));
+        assert!(!root.join("destination.bin").exists());
+        assert_eq!(fs::read(root.join("preserved.bin")).unwrap(), b"original");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn atomic_rename_new_rejects_hardlinked_source() {
         let root = sandbox();
         fs::write(root.join("source.bin"), b"source").unwrap();
