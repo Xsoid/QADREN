@@ -346,3 +346,9 @@
 - `968e4a3`, `f9482b7`: source name recreated after `renameat*` is classified `OutcomeUnknown`, plus adversarial tests for hardlinked source, Unicode-independent case collision and intermediate symlink outside root. Added six total Unix rename tests. The rename API is available for isolated test use, but remains **not advertised in adapter capabilities** due unresolved concurrent source-swap race; this is not acceptance of deletion or general-purpose automatic move.
 
 - `effb541`: `reconcile_renamed_file(from,to,expected)` делает только metadata-only проверку результата ранее неоднозначного rename: ожидаемый destination inode совпадает, source name отсутствует; ничего не восстанавливает и не удаляет. Тест покрывает before/after rename и destination swap. Это observational, не транзакционная гарантия.
+
+### Interrupted rename handling (2026-10-11)
+
+- `43e37c6`, `0385e93`, `c4492b6`: rename syscall failures with `Interrupted` now return `OutcomeUnknown` (not retryable `Io`); `AlreadyExists` stays a known collision; other error classes continue as `Io`. Three deterministic unit tests cover these classifications without performing destructive filesystem operations.
+- Safety review: `renameat2(RENAME_NOREPLACE)` / `renameatx_np(RENAME_EXCL)` atomically protects **destination no-overwrite**, but it does **not** atomically bind the source inode observed before syscall. A hostile concurrent source pathname replacement can cause rename of a different inode. Postflight reconciliation detects many such outcomes only **after** mutation. Therefore keep this API out of automatic Jobs/capabilities until a stronger trust/concurrency model or source-binding design is agreed and tested. macOS placeholder policy remains fail closed for content reads.
+- Full-stage local validation still outstanding, by agreement do not ask for per-commit testing. No change to percentage of issue #15.
