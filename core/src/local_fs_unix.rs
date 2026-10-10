@@ -6,6 +6,7 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path};
 
 #[cfg(target_os = "macos")]
@@ -266,6 +267,29 @@ pub(super) fn create_directory_with_post_mkdir_check<F: FnOnce() -> io::Result<(
     Ok(())
 }
 
+/// Ensure a temporary directory entry still refers to the inode opened by
+/// this operation. This detects replaced names; it is not an atomic guarantee
+/// against a malicious process with write access to the same directory.
+fn same_temporary_inode(directory: &File, temporary: &CStr, output: &File) -> bool {
+    let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            temporary.as_ptr(),
+            info.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return false;
+    }
+    let info = unsafe { info.assume_init() };
+    let Ok(opened) = output.metadata() else {
+        return false;
+    };
+    info.st_dev == opened.dev() && info.st_ino == opened.ino() && info.st_nlink == 1
+}
+
 pub fn create<R: Read>(root: &File, target: &Path, input: &mut R, serial: u64) -> Result<u64> {
     create_with_post_link_check(root, target, input, serial, || Ok(()))
 }
@@ -295,6 +319,9 @@ pub(super) fn create_with_post_link_check<R: Read, F: FnOnce() -> io::Result<()>
         let bytes = io::copy(input, &mut output)?;
         output.flush()?;
         output.sync_all()?;
+        if !same_temporary_inode(&directory, &temporary, &output) {
+            return Err(LocalError::UnsafeEntry);
+        }
         let linked = unsafe {
             linkat(
                 directory.as_raw_fd(),
@@ -317,6 +344,10 @@ pub(super) fn create_with_post_link_check<R: Read, F: FnOnce() -> io::Result<()>
         directory.sync_all().map_err(LocalError::OutcomeUnknown)?;
         Ok(bytes)
     })();
+    // A changed temporary name must never be deleted as if it were ours.
+    if !same_temporary_inode(&directory, &temporary, &output) && !published {
+        return Err(LocalError::UnsafeEntry);
+    }
     let cleanup = unsafe { unlinkat(directory.as_raw_fd(), temporary.as_ptr(), 0) };
     if cleanup != 0 {
         let error = io::Error::last_os_error();
