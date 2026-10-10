@@ -187,6 +187,20 @@ impl LocalFilesystem {
             metadata_confidence: MetadataConfidence::LocallyVerified,
         }
     }
+    /// Detect identical or nested local roots using pinned directory inodes.
+    /// Cross-root jobs must reject overlap unless specifically designed for it.
+    pub fn overlaps_root(&self, other: &Self) -> Result<bool> {
+        #[cfg(unix)]
+        {
+            secure::roots_overlap(&self.root_fd, &other.root_fd)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = other;
+            Err(LocalError::UnsafeEntry)
+        }
+    }
+
     /// Query filesystem capacity without reading any file contents.
     /// This must not be interpreted as a reservation of free space.
     pub fn storage_space(&self) -> Result<LocalStorageSpace> {
@@ -2053,6 +2067,33 @@ mod tests {
         assert_eq!(result[0].identity.size, 3);
         assert_eq!(result[1].identity.size, 3);
         assert_ne!(result[0].identity.inode, result[1].identity.inode);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_roots_detect_same_and_nested_directories() {
+        let root = sandbox();
+        fs::create_dir(root.join("nested")).unwrap();
+        let a = LocalFilesystem::open(&root).unwrap();
+        let b = LocalFilesystem::open(&root).unwrap();
+        let nested = LocalFilesystem::open(&root.join("nested")).unwrap();
+        assert!(a.overlaps_root(&b).unwrap());
+        assert!(a.overlaps_root(&nested).unwrap());
+        assert!(nested.overlaps_root(&a).unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_roots_reject_sibling_overlap_without_content_reads() {
+        let root = sandbox();
+        fs::create_dir(root.join("alpha")).unwrap();
+        fs::create_dir(root.join("beta")).unwrap();
+        let a = LocalFilesystem::open(&root.join("alpha")).unwrap();
+        let b = LocalFilesystem::open(&root.join("beta")).unwrap();
+        assert!(!a.overlaps_root(&b).unwrap());
+        assert!(!b.overlaps_root(&a).unwrap());
         fs::remove_dir_all(root).unwrap();
     }
 
