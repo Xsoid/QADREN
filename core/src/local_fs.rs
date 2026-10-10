@@ -835,6 +835,58 @@ mod tests {
     }
 
     #[test]
+    fn copy_rejects_unsafe_sources_and_destination_paths() {
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"original").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let consent = ContentReadConsent::GrantedForThisOperation;
+
+        assert!(matches!(
+            adapter.copy_file_new(
+                Path::new("../source.bin"),
+                Path::new("escaped.bin"),
+                consent,
+            ),
+            Err(LocalError::InvalidPath)
+        ));
+        assert!(matches!(
+            adapter.copy_file_new(
+                Path::new("source.bin"),
+                Path::new("../escaped.bin"),
+                consent,
+            ),
+            Err(LocalError::InvalidPath)
+        ));
+        assert!(!root.join("escaped.bin").exists());
+        assert!(matches!(
+            adapter.copy_file_new(
+                Path::new("missing.bin"),
+                Path::new("missing-copy.bin"),
+                consent,
+            ),
+            Err(LocalError::Io(_)) | Err(LocalError::UnsafeEntry)
+        ));
+        assert!(!root.join("missing-copy.bin").exists());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            symlink("source.bin", root.join("source-link")).unwrap();
+            assert!(matches!(
+                adapter.copy_file_new(
+                    Path::new("source-link"),
+                    Path::new("linked-copy.bin"),
+                    consent,
+                ),
+                Err(LocalError::Io(_)) | Err(LocalError::UnsafeEntry)
+            ));
+            assert!(!root.join("linked-copy.bin").exists());
+        }
+        assert_eq!(fs::read(root.join("source.bin")).unwrap(), b"original");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn copy_requires_consent_and_never_overwrites() {
         let root = sandbox();
         fs::write(root.join("source.bin"), b"source").unwrap();
