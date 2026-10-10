@@ -72,8 +72,32 @@ fn opened(fd: c_int) -> Result<File> {
 }
 
 pub fn root(path: &Path) -> Result<File> {
-    let raw = name(path.as_os_str())?;
-    opened(unsafe { open(raw.as_ptr(), RDONLY | DIRECTORY | NOFOLLOW | CLOEXEC) })
+    // O_NOFOLLOW protects only the final component of a pathname.
+    // Walk every component relative to a pinned descriptor, including the
+    // ancestors of the configured root, to reject intermediate symlinks.
+    let anchor = if path.is_absolute() { "/" } else { "." };
+    let anchor = name(std::ffi::OsStr::new(anchor))?;
+    let mut current = opened(unsafe {
+        open(anchor.as_ptr(), RDONLY | DIRECTORY | NOFOLLOW | CLOEXEC)
+    })?;
+    for component in path.components() {
+        let part = match component {
+            Component::RootDir | Component::CurDir => continue,
+            Component::Normal(part) => part,
+            Component::ParentDir | Component::Prefix(_) => {
+                return Err(LocalError::InvalidPath);
+            }
+        };
+        let part = name(part)?;
+        current = opened(unsafe {
+            openat(
+                current.as_raw_fd(),
+                part.as_ptr(),
+                RDONLY | DIRECTORY | NOFOLLOW | CLOEXEC,
+            )
+        })?;
+    }
+    Ok(current)
 }
 
 fn parent(root: &File, relative: &Path) -> Result<(File, CString)> {
