@@ -878,3 +878,26 @@ pub(super) fn create_with_post_link_check<R: Read, F: FnOnce() -> io::Result<()>
     }
     result
 }
+
+#[cfg(test)]
+mod rename_error_tests {
+    use super::*;
+
+    #[test]
+    fn interrupted_rename_is_ambiguous_and_must_not_be_retried() {
+        let classified = rename_failure(io::Error::from(io::ErrorKind::Interrupted));
+        assert!(matches!(classified, LocalError::OutcomeUnknown(_)));
+    }
+
+    #[test]
+    fn occupied_rename_destination_is_a_known_collision() {
+        let classified = rename_failure(io::Error::from(io::ErrorKind::AlreadyExists));
+        assert!(matches!(classified, LocalError::AlreadyExists));
+    }
+
+    #[test]
+    fn ordinary_pre_commit_rename_error_stays_io() {
+        let classified = rename_failure(io::Error::from(io::ErrorKind::PermissionDenied));
+        assert!(matches!(classified, LocalError::Io(_)));
+    }
+}
