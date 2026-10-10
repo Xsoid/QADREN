@@ -588,6 +588,9 @@ impl LocalFilesystem {
                         .file_name()
                         .and_then(|name| name.to_str())
                         .ok_or(LocalError::UnsafeEntry)?;
+                    #[cfg(unix)]
+                    let exact = secure::has_exact_directory(&self.root_fd, parent, expected)?;
+                    #[cfg(not(unix))]
                     let exact = self.list(parent)?.iter().any(|item| item.name == expected);
                     if !exact {
                         return Err(LocalError::AlreadyExists);
@@ -623,8 +626,12 @@ impl LocalFilesystem {
                         .file_name()
                         .and_then(|name| name.to_str())
                         .ok_or(LocalError::UnsafeEntry)?;
-                    let entries = self.list(parent)?;
-                    let same_spelling = entries
+                    #[cfg(unix)]
+                    let same_spelling =
+                        secure::has_exact_directory(&self.root_fd, parent, expected)?;
+                    #[cfg(not(unix))]
+                    let same_spelling = self
+                        .list(parent)?
                         .iter()
                         .any(|item| item.name == expected && item.is_directory);
                     if !same_spelling
@@ -1730,6 +1737,27 @@ mod tests {
             Err(LocalError::AlreadyExists)
         ));
         assert_eq!(fs::read(root.join("occupied.bin")).unwrap(), b"protected");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mkdir_tree_accepts_existing_directory_with_unrelated_symlink() {
+        let root = sandbox();
+        fs::create_dir(root.join("existing")).unwrap();
+        std::os::unix::fs::symlink("missing", root.join("unrelated")).unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert_eq!(
+            adapter
+                .create_directory_tree(Path::new("existing/child"))
+                .unwrap(),
+            1
+        );
+        assert!(root.join("existing/child").is_dir());
+        assert!(fs::symlink_metadata(root.join("unrelated"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
         fs::remove_dir_all(root).unwrap();
     }
 
