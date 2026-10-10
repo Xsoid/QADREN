@@ -242,6 +242,15 @@ pub fn open_content(root: &File, target: &Path) -> Result<File> {
 
 /// Creates one directory without following symlinks or replacing existing entries.
 pub fn create_directory(root: &File, target: &Path) -> Result<()> {
+    create_directory_with_post_mkdir_check(root, target, || Ok(()))
+}
+
+/// Test seam after mkdirat succeeds, before the parent directory is synced.
+pub(super) fn create_directory_with_post_mkdir_check<F: FnOnce() -> io::Result<()>>(
+    root: &File,
+    target: &Path,
+    post_mkdir_check: F,
+) -> Result<()> {
     let (directory, destination) = parent(root, target)?;
     let result = unsafe { mkdirat(directory.as_raw_fd(), destination.as_ptr(), 0o700) };
     if result != 0 {
@@ -252,6 +261,7 @@ pub fn create_directory(root: &File, target: &Path) -> Result<()> {
             Err(LocalError::Io(error))
         };
     }
+    post_mkdir_check().map_err(LocalError::OutcomeUnknown)?;
     directory.sync_all().map_err(LocalError::OutcomeUnknown)?;
     Ok(())
 }
