@@ -2017,7 +2017,10 @@ mod tests {
         let paths = [Path::new("one.bin"), Path::new("two.bin")];
         let earlier = adapter.inspect_content_batch(&paths).unwrap();
         fs::write(root.join("two.bin"), b"UPDATED_").unwrap();
-        assert_eq!(adapter.file_identity(paths[1]).unwrap(), earlier[1].identity);
+        assert_eq!(
+            adapter.file_identity(paths[1]).unwrap(),
+            earlier[1].identity
+        );
         assert!(!adapter.revalidate_content_batch(&paths, &earlier).unwrap());
         fs::remove_dir_all(root).unwrap();
     }
