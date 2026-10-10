@@ -421,6 +421,38 @@ impl LocalFilesystem {
         }
     }
 
+    /// Read-only preview for a proposed no-overwrite move. This does not
+    /// authorize execution: a different process may change either entry
+    /// immediately after inspection, so move_file_new stays fail-closed.
+    pub fn preview_move_new(&self, from: &Path, to: &Path) -> Result<LocalEntry> {
+        Self::relative(from)?;
+        Self::relative(to)?;
+        if from == to {
+            return Err(LocalError::AlreadyExists);
+        }
+        let source = self.stat(from)?;
+        if source.is_directory {
+            // Recursive directory moves need separate cycle checks.
+            return Err(LocalError::UnsafeEntry);
+        }
+        match self.stat(to) {
+            Ok(_) => Err(LocalError::AlreadyExists),
+            Err(LocalError::Io(ref error)) if error.kind() == io::ErrorKind::NotFound => {
+                // Also verify the destination parent exists and is a real
+                // directory, without opening file contents.
+                let parent = to.parent().ok_or(LocalError::InvalidPath)?;
+                if !parent.as_os_str().is_empty() {
+                    let entry = self.stat(parent)?;
+                    if !entry.is_directory {
+                        return Err(LocalError::NotDirectory);
+                    }
+                }
+                Ok(source)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Moving by pathname cannot guarantee source identity under concurrent mutation.
     /// Reject until an identity-preserving platform implementation is available.
     pub fn move_file_new(&self, from: &Path, to: &Path) -> Result<()> {
@@ -1407,6 +1439,40 @@ mod tests {
         #[cfg(not(target_os = "linux"))]
         assert!(matches!(result, Err(LocalError::UnsafeEntry)));
         assert_eq!(fs::read(root.join("occupied.bin")).unwrap(), b"preserved");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn move_preview_is_read_only_and_rejects_collisions() {
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"original").unwrap();
+        fs::write(root.join("existing.bin"), b"protected").unwrap();
+        fs::create_dir(root.join("folder")).unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let preview = adapter
+            .preview_move_new(Path::new("source.bin"), Path::new("folder/target.bin"))
+            .unwrap();
+        assert_eq!(preview.size, 8);
+        assert!(!preview.is_directory);
+        assert!(!root.join("folder/target.bin").exists());
+        assert!(matches!(
+            adapter.preview_move_new(Path::new("source.bin"), Path::new("existing.bin")),
+            Err(LocalError::AlreadyExists)
+        ));
+        assert!(matches!(
+            adapter.preview_move_new(Path::new("source.bin"), Path::new("source.bin")),
+            Err(LocalError::AlreadyExists)
+        ));
+        assert!(matches!(
+            adapter.preview_move_new(Path::new("source.bin"), Path::new("../escape")),
+            Err(LocalError::InvalidPath)
+        ));
+        assert!(matches!(
+            adapter.preview_move_new(Path::new("source.bin"), Path::new("missing/target")),
+            Err(LocalError::Io(_))
+        ));
+        assert_eq!(fs::read(root.join("source.bin")).unwrap(), b"original");
+        assert_eq!(fs::read(root.join("existing.bin")).unwrap(), b"protected");
         fs::remove_dir_all(root).unwrap();
     }
 
