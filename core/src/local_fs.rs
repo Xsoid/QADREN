@@ -618,13 +618,24 @@ impl LocalFilesystem {
                 // Accept only an actual directory within the pinned root;
                 // never treat an unexpected file or symlink as success.
                 Err(LocalError::AlreadyExists) => {
-                    if !matches!(self.stat(&prefix), Ok(entry) if entry.is_directory) {
+                    let parent = prefix.parent().ok_or(LocalError::InvalidPath)?;
+                    let expected = prefix
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .ok_or(LocalError::UnsafeEntry)?;
+                    let same_spelling = self
+                        .list(parent)?
+                        .iter()
+                        .any(|item| item.name == expected && item.is_directory);
+                    if !same_spelling
+                        || !matches!(self.stat(&prefix), Ok(entry) if entry.is_directory)
+                    {
                         if created > 0 {
                             return Err(LocalError::OutcomeUnknown(io::Error::other(
                                 "directory tree partially created after concurrent collision",
                             )));
                         }
-                        return Err(LocalError::UnsafeEntry);
+                        return Err(LocalError::AlreadyExists);
                     }
                 }
                 Err(err) => {
