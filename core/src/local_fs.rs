@@ -2,11 +2,11 @@
 //! Initial safe slice: metadata and non-overwriting atomic creation only.
 //! Content reads on macOS are intentionally not exposed until iCloud placeholder
 //! detection and per-transfer consent can be enforced.
+use crate::capabilities::{CapabilityDeclaration, MetadataConfidence, Operations, Platform};
 #[cfg(any(not(unix), test))]
 use std::fs;
 #[cfg(unix)]
 use std::fs::File;
-use crate::capabilities::{CapabilityDeclaration, MetadataConfidence, Operations, Platform};
 use std::io;
 #[cfg(any(not(unix), test))]
 use std::path::PathBuf;
@@ -323,7 +323,10 @@ mod tests {
         assert!(capabilities.operations.list_metadata);
         assert!(!capabilities.operations.rename);
         assert!(!capabilities.operations.delete);
-        assert_eq!(capabilities.operations.read_content, cfg!(target_os = "linux"));
+        assert_eq!(
+            capabilities.operations.read_content,
+            cfg!(target_os = "linux")
+        );
         assert_eq!(capabilities.operations.write_content, cfg!(unix));
         assert_eq!(capabilities.operations.create_directory, cfg!(unix));
         fs::remove_dir_all(root).unwrap();
