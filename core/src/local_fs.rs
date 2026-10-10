@@ -1791,8 +1791,14 @@ mod tests {
         assert_eq!(fs::read(root.join("staged.bin")).unwrap(), b"original");
         assert_eq!(fs::read(root.join("occupied.bin")).unwrap(), b"protected");
         assert_eq!(
-            adapter.file_identity(Path::new("source.bin")).unwrap().inode,
-            adapter.file_identity(Path::new("staged.bin")).unwrap().inode
+            adapter
+                .file_identity(Path::new("source.bin"))
+                .unwrap()
+                .inode,
+            adapter
+                .file_identity(Path::new("staged.bin"))
+                .unwrap()
+                .inode
         );
         fs::remove_dir_all(root).unwrap();
     }
