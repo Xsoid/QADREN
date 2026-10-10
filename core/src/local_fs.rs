@@ -2291,10 +2291,17 @@ mod tests {
         let path = Path::new("source.bin");
         let inspected = adapter.inspect_content(path).unwrap();
         assert_eq!(inspected.identity.size, 8);
-        assert_eq!(inspected.residency, LocalContentResidency::NotDatalessFlagged);
+        assert_eq!(
+            inspected.residency,
+            LocalContentResidency::NotDatalessFlagged
+        );
         let mut bytes = Vec::new();
         assert!(matches!(
-            adapter.read_to_writer(path, &mut bytes, ContentReadConsent::GrantedForThisOperation),
+            adapter.read_to_writer(
+                path,
+                &mut bytes,
+                ContentReadConsent::GrantedForThisOperation
+            ),
             Err(LocalError::UnsafeEntry)
         ));
         assert!(bytes.is_empty());
@@ -2394,8 +2401,14 @@ mod tests {
         fs::set_permissions(root.join("file.bin"), fs::Permissions::from_mode(0o640)).unwrap();
         fs::set_permissions(root.join("folder"), fs::Permissions::from_mode(0o750)).unwrap();
         let adapter = LocalFilesystem::open(&root).unwrap();
-        assert_eq!(adapter.mode_bits(Path::new("file.bin")).unwrap() & 0o777, 0o640);
-        assert_eq!(adapter.mode_bits(Path::new("folder")).unwrap() & 0o777, 0o750);
+        assert_eq!(
+            adapter.mode_bits(Path::new("file.bin")).unwrap() & 0o777,
+            0o640
+        );
+        assert_eq!(
+            adapter.mode_bits(Path::new("folder")).unwrap() & 0o777,
+            0o750
+        );
         assert_eq!(fs::read(root.join("file.bin")).unwrap(), b"content");
         fs::remove_dir_all(root).unwrap();
     }
@@ -2425,7 +2438,9 @@ mod tests {
         fs::write(root.join("source.bin"), b"original").unwrap();
         fs::create_dir(root.join("target")).unwrap();
         let adapter = LocalFilesystem::open(&root).unwrap();
-        adapter.rename_file_new(Path::new("source.bin"), Path::new("target/new.bin")).unwrap();
+        adapter
+            .rename_file_new(Path::new("source.bin"), Path::new("target/new.bin"))
+            .unwrap();
         assert!(!root.join("source.bin").exists());
         assert_eq!(fs::read(root.join("target/new.bin")).unwrap(), b"original");
         fs::remove_dir_all(root).unwrap();
