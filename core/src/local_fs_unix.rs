@@ -99,6 +99,10 @@ pub fn rename_file_noreplace(root: &File, from: &Path, to: &Path) -> Result<()> 
         let error = io::Error::last_os_error();
         return if error.kind() == io::ErrorKind::AlreadyExists {
             Err(LocalError::AlreadyExists)
+        } else if error.kind() == io::ErrorKind::Interrupted {
+            // A syscall interrupted around commit may have changed the namespace.
+            // Never retry a potentially destructive rename without inspection.
+            Err(LocalError::OutcomeUnknown(error))
         } else {
             Err(LocalError::Io(error))
         };
