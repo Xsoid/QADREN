@@ -270,7 +270,7 @@ pub(super) fn create_directory_with_post_mkdir_check<F: FnOnce() -> io::Result<(
 /// Ensure a temporary directory entry still refers to the inode opened by
 /// this operation. This detects replaced names; it is not an atomic guarantee
 /// against a malicious process with write access to the same directory.
-fn same_temporary_inode(directory: &File, temporary: &CStr, output: &File) -> bool {
+fn same_temporary_inode(directory: &File, temporary: &CStr, output: &File, expected_links: u64) -> bool {
     let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
     if unsafe {
         libc::fstatat(
@@ -291,7 +291,7 @@ fn same_temporary_inode(directory: &File, temporary: &CStr, output: &File) -> bo
     let same_device = u64::try_from(info.st_dev).ok() == Some(opened.dev());
     #[cfg(target_os = "linux")]
     let same_device = info.st_dev == opened.dev();
-    same_device && info.st_ino == opened.ino() && info.st_nlink == 1
+    same_device && info.st_ino == opened.ino() && (info.st_nlink as u64) == expected_links
 }
 
 pub fn create<R: Read>(root: &File, target: &Path, input: &mut R, serial: u64) -> Result<u64> {
@@ -323,7 +323,7 @@ pub(super) fn create_with_post_link_check<R: Read, F: FnOnce() -> io::Result<()>
         let bytes = io::copy(input, &mut output)?;
         output.flush()?;
         output.sync_all()?;
-        if !same_temporary_inode(&directory, &temporary, &output) {
+        if !same_temporary_inode(&directory, &temporary, &output, if published { 2 } else { 1 }) {
             return Err(LocalError::UnsafeEntry);
         }
         let linked = unsafe {
@@ -350,7 +350,7 @@ pub(super) fn create_with_post_link_check<R: Read, F: FnOnce() -> io::Result<()>
     })();
     // Even after publication, never unlink a staging pathname replaced
     // by another writer. The published destination requires reconciliation.
-    if !same_temporary_inode(&directory, &temporary, &output) {
+    if !same_temporary_inode(&directory, &temporary, &output, if published { 2 } else { 1 }) {
         return if published {
             Err(LocalError::OutcomeUnknown(io::Error::other(
                 "temporary file identity changed after publication",
