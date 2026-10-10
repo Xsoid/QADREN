@@ -860,6 +860,15 @@ impl LocalFilesystem {
         Err(LocalError::UnsafeEntry)
     }
 
+    /// Deletion is deliberately unavailable on untrusted concurrent paths.
+    /// An inode check followed by unlinkat is not a conditional unlink:
+    /// another process could replace the directory entry between calls.
+    /// Preserve user data until a truly source-bound delete exists.
+    pub fn delete_file(&self, path: &Path) -> Result<()> {
+        Self::relative(path)?;
+        Err(LocalError::UnsafeEntry)
+    }
+
     /// Creates one child directory; fails closed on unsupported platforms.
     pub fn create_directory(&self, path: &Path) -> Result<()> {
         Self::relative(path)?;
@@ -2514,6 +2523,36 @@ mod tests {
         assert!(!root.join("destination.bin").exists());
         assert_eq!(fs::read(root.join("source.bin")).unwrap(), b"original");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_file_fails_closed_and_preserves_original() {
+        let root = sandbox();
+        fs::write(root.join("file.bin"), b"keep").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert!(matches!(
+            adapter.delete_file(Path::new("file.bin")),
+            Err(LocalError::UnsafeEntry)
+        ));
+        assert_eq!(fs::read(root.join("file.bin")).unwrap(), b"keep");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_file_rejects_traversal_without_touching_outside() {
+        let root = sandbox();
+        let outside = sandbox();
+        fs::write(outside.join("protected.bin"), b"keep").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert!(matches!(
+            adapter.delete_file(Path::new("../protected.bin")),
+            Err(LocalError::InvalidPath)
+        ));
+        assert_eq!(fs::read(outside.join("protected.bin")).unwrap(), b"keep");
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(outside).unwrap();
     }
 
     #[cfg(unix)]
