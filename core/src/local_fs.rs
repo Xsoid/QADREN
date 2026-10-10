@@ -1775,6 +1775,22 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn stage_move_rejects_symlink_source_without_publishing() {
+        let root = sandbox();
+        fs::write(root.join("real.bin"), b"protected").unwrap();
+        std::os::unix::fs::symlink("real.bin", root.join("alias.bin")).unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert!(matches!(
+            adapter.stage_move_link_new(Path::new("alias.bin"), Path::new("staged.bin")),
+            Err(LocalError::UnsafeEntry)
+        ));
+        assert!(!root.join("staged.bin").exists());
+        assert_eq!(fs::read(root.join("real.bin")).unwrap(), b"protected");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn stage_move_preserves_source_and_never_overwrites() {
         let root = sandbox();
         fs::write(root.join("source.bin"), b"original").unwrap();
