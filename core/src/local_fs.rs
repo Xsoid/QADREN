@@ -380,10 +380,7 @@ mod tests {
                 let barrier = Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     barrier.wait();
-                    adapter.create_from_reader(
-                        Path::new("shared.bin"),
-                        &mut Cursor::new(payload),
-                    )
+                    adapter.create_from_reader(Path::new("shared.bin"), &mut Cursor::new(payload))
                 })
             })
             .collect();
