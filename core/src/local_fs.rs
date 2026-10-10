@@ -597,6 +597,31 @@ impl LocalFilesystem {
         self.create_from_reader(target, &mut exact)
     }
 
+    /// Conservative case-collision guard for user-visible file creation.
+    /// Checks the destination directory before invoking the atomic no-overwrite
+    /// writer. This does not replace the filesystem's final collision check.
+    pub fn create_from_reader_case_guarded<R: io::Read>(
+        &self,
+        target: &Path,
+        input: &mut R,
+    ) -> Result<u64> {
+        Self::relative(target)?;
+        let parent = target.parent().ok_or(LocalError::InvalidPath)?;
+        let leaf = target
+            .file_name()
+            .ok_or(LocalError::InvalidPath)?
+            .to_string_lossy()
+            .to_lowercase();
+        if self
+            .list(parent)?
+            .iter()
+            .any(|entry| entry.name.to_lowercase() == leaf)
+        {
+            return Err(LocalError::AlreadyExists);
+        }
+        self.create_from_reader(target, input)
+    }
+
     /// Create a new file through directory descriptors, without following
     /// symlinks or replacing an existing target. Unsupported platforms fail closed.
     /// Reading cloud-backed local placeholders remains prohibited until guarded.
@@ -1525,6 +1550,39 @@ mod tests {
         ));
         assert!(!root.join("target.bin").exists());
         assert_eq!(fs::read(root.join("old.bin")).unwrap(), b"original");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn guarded_create_rejects_case_collision_before_reading() {
+        struct PanicReader;
+        impl io::Read for PanicReader {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                panic!("case collision must be detected before content is read")
+            }
+        }
+        let root = sandbox();
+        fs::write(root.join("Report.TXT"), b"protected").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert!(matches!(
+            adapter.create_from_reader_case_guarded(
+                Path::new("report.txt"),
+                &mut PanicReader,
+            ),
+            Err(LocalError::AlreadyExists)
+        ));
+        assert_eq!(fs::read(root.join("Report.TXT")).unwrap(), b"protected");
+        assert_eq!(
+            adapter
+                .create_from_reader_case_guarded(
+                    Path::new("new-file.bin"),
+                    &mut io::Cursor::new(b"payload"),
+                )
+                .unwrap(),
+            7
+        );
+        assert_eq!(fs::read(root.join("new-file.bin")).unwrap(), b"payload");
         fs::remove_dir_all(root).unwrap();
     }
 
