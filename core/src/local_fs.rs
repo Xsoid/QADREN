@@ -368,6 +368,61 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn staging_name_replacement_is_rejected_without_publishing() {
+        struct SwapReader {
+            root: PathBuf,
+            serial: u64,
+            done: bool,
+        }
+        impl io::Read for SwapReader {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if self.done {
+                    return Ok(0);
+                }
+                self.done = true;
+                let temporary = self.root.join(format!(
+                    ".qadren-{}-{}.tmp",
+                    std::process::id(),
+                    self.serial
+                ));
+                fs::rename(&temporary, self.root.join("moved-staging")).unwrap();
+                fs::write(&temporary, b"foreign contents").unwrap();
+                buf[0] = b'x';
+                Ok(1)
+            }
+        }
+        let root = sandbox();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let serial = 940003;
+        let mut reader = SwapReader {
+            root: root.clone(),
+            serial,
+            done: false,
+        };
+        assert!(matches!(
+            secure::create_with_post_link_check(
+                &adapter.root_fd,
+                Path::new("destination"),
+                &mut reader,
+                serial,
+                || Ok(())
+            ),
+            Err(LocalError::UnsafeEntry)
+        ));
+        assert!(!root.join("destination").exists());
+        assert_eq!(
+            fs::read(root.join(format!(
+                ".qadren-{}-{serial}.tmp",
+                std::process::id()
+            )))
+            .unwrap(),
+            b"foreign contents"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn concurrent_creates_of_same_target_never_overwrite() {
         use std::sync::{Arc, Barrier};
         let root = sandbox();
