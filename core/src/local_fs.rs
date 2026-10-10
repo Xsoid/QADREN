@@ -252,7 +252,21 @@ impl LocalFilesystem {
         #[cfg(target_os = "linux")]
         {
             let mut source = secure::open_content(&self.root_fd, from)?;
-            self.create_from_reader(to, &mut source)
+            let before = source.metadata()?;
+            let bytes = self.create_from_reader(to, &mut source)?;
+            let after = source.metadata().map_err(LocalError::OutcomeUnknown)?;
+            // This detects a source changing during transfer, but is not a
+            // transactional snapshot: a same-size rewrite may evade metadata.
+            // The destination may exist, so do not retry automatically.
+            if before.len() != after.len()
+                || before.modified().ok() != after.modified().ok()
+                || bytes != before.len()
+            {
+                return Err(LocalError::OutcomeUnknown(io::Error::other(
+                    "source metadata changed during local copy",
+                )));
+            }
+            Ok(bytes)
         }
         #[cfg(not(target_os = "linux"))]
         {
