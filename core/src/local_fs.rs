@@ -476,6 +476,29 @@ impl LocalFilesystem {
         }
     }
 
+    /// Confirm that a previewed regular-file inode is still at its original
+    /// path and that the destination remains absent. This is observational:
+    /// no filesystem mutation is authorized by this method.
+    pub fn revalidate_move_new(
+        &self,
+        from: &Path,
+        to: &Path,
+        expected: LocalFileIdentity,
+    ) -> Result<()> {
+        Self::relative(from)?;
+        Self::relative(to)?;
+        if from == to {
+            return Err(LocalError::AlreadyExists);
+        }
+        if self.file_identity(from)? != expected {
+            return Err(LocalError::UnsafeEntry);
+        }
+        match self.preview_move_new(from, to) {
+            Ok(_) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Moving by pathname cannot guarantee source identity under concurrent mutation.
     /// Reject until an identity-preserving platform implementation is available.
     pub fn move_file_new(&self, from: &Path, to: &Path) -> Result<()> {
@@ -1480,6 +1503,35 @@ mod tests {
             adapter.file_identity(Path::new("../outside")),
             Err(LocalError::InvalidPath)
         ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn move_revalidation_detects_replaced_source_without_mutation() {
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"original").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let expected = adapter.file_identity(Path::new("source.bin")).unwrap();
+        assert!(adapter
+            .revalidate_move_new(
+                Path::new("source.bin"),
+                Path::new("target.bin"),
+                expected,
+            )
+            .is_ok());
+        fs::rename(root.join("source.bin"), root.join("old.bin")).unwrap();
+        fs::write(root.join("source.bin"), b"replacement").unwrap();
+        assert!(matches!(
+            adapter.revalidate_move_new(
+                Path::new("source.bin"),
+                Path::new("target.bin"),
+                expected,
+            ),
+            Err(LocalError::UnsafeEntry)
+        ));
+        assert!(!root.join("target.bin").exists());
+        assert_eq!(fs::read(root.join("old.bin")).unwrap(), b"original");
         fs::remove_dir_all(root).unwrap();
     }
 
