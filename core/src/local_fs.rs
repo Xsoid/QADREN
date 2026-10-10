@@ -541,11 +541,11 @@ impl LocalFilesystem {
         Self::relative(path)?;
         #[cfg(target_os = "macos")]
         {
-            return if secure::is_dataless(&self.root_fd, path)? {
+            if secure::is_dataless(&self.root_fd, path)? {
                 Ok(LocalContentResidency::DatalessPlaceholder)
             } else {
                 Ok(LocalContentResidency::NotDatalessFlagged)
-            };
+            }
         }
         #[cfg(not(target_os = "macos"))]
         {
