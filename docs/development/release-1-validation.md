@@ -330,3 +330,9 @@
 - `6e8e8d2`, `760b2b2`: добавлена `LocalFilesystem::mode_bits(path)`, основанная на descriptor-relative `fstatat(AT_SYMLINK_NOFOLLOW)`. Возвращает POSIX bits `0o7777` для regular files/directories, отказывает на symlink и недопустимых путях. Не открывает содержимое и не инициирует iCloud hydration.
 - Эти биты информативны и не доказывают эффективный доступ: ACL, процессный UID/GID, sandbox, TCC и файловые политики проверяются непосредственно при выполнении операции. Добавлены два Unix-теста: режимы 0640/0750, отказ на symlink и traversal.
 - Текущий патч ещё не проверен на Mac; ожидаются 152 теста. Готовность #15 ≈62%, безопасные rename/move/delete и полный placeholder guard остаются незавершёнными.
+
+### Full-stage acceptance pass: macOS no-hydration contract (2026-10-11)
+
+- По согласованию с пользователем далее проверяем #15 как единый этап, а не отправляем на Mac каждое небольшое изменение. Последний подтверждённый локальный прогон относится к предыдущему состоянию `7f3527f` (152 теста по ожидаемому счётчику; пользователь ещё не прислал вывод текущего прогона).
+- `d063bb7` добавляет два macOS contract tests: оба entry point для локального копирования (`copy_file_new`, `copy_file_new_with_reserve`) возвращают `UnsafeEntry` и не создают destination как при Denied, так и при GrantedForThisOperation; metadata-only `inspect_content` не разрешает `read_to_writer`, а capabilities не обещают read_content. Это не проверка на реальном iCloud placeholder и не реализация безопасной materialization.
+- До финальной приёмки #15 обязательно выполнить единый fmt/clippy/tests на macOS и отдельную ручную проверку placeholder в разрешённом тестовом контейнере, без QADREN-инициированного скачивания. Функции rename/move/delete пока небезопасны для публичного включения и должны либо получить доказуемо безопасный механизм, либо остаться явным блокером закрытия issue.
