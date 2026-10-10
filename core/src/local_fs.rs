@@ -1775,6 +1775,23 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn stage_move_rejects_existing_hardlinked_source() {
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"original").unwrap();
+        fs::hard_link(root.join("source.bin"), root.join("shared.bin")).unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert!(matches!(
+            adapter.stage_move_link_new(Path::new("source.bin"), Path::new("staged.bin")),
+            Err(LocalError::UnsafeEntry)
+        ));
+        assert!(!root.join("staged.bin").exists());
+        assert_eq!(fs::read(root.join("source.bin")).unwrap(), b"original");
+        assert_eq!(fs::read(root.join("shared.bin")).unwrap(), b"original");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn stage_move_rejects_case_alias_without_changing_source() {
         let root = sandbox();
         fs::write(root.join("source.bin"), b"original").unwrap();
