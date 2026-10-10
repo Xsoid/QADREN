@@ -2560,6 +2560,75 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn move_copy_preparation_keeps_original_and_refuses_overwrite() {
+        let root = sandbox();
+        fs::write(root.join("src.bin"), b"original").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let src = Path::new("src.bin");
+        let dst = Path::new("new.bin");
+        let expected = adapter.inspect_content(src).unwrap();
+        let copied = adapter.prepare_move_copy_new(
+            src, dst, expected, ContentReadConsent::GrantedForThisOperation,
+        ).unwrap();
+        assert_eq!(copied, 8);
+        assert_eq!(fs::read(root.join("src.bin")).unwrap(), b"original");
+        assert_eq!(fs::read(root.join("new.bin")).unwrap(), b"original");
+        assert!(matches!(
+            adapter.prepare_move_copy_new(
+                src, dst, expected, ContentReadConsent::GrantedForThisOperation
+            ),
+            Err(LocalError::AlreadyExists)
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn move_copy_preparation_rejects_stale_source_and_denied_consent() {
+        let root = sandbox();
+        fs::write(root.join("src.bin"), b"original").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let src = Path::new("src.bin");
+        let dst = Path::new("new.bin");
+        let expected = adapter.inspect_content(src).unwrap();
+        assert!(matches!(
+            adapter.prepare_move_copy_new(src, dst, expected, ContentReadConsent::Denied),
+            Err(LocalError::UnsafeEntry)
+        ));
+        fs::write(root.join("src.bin"), b"replacement").unwrap();
+        assert!(matches!(
+            adapter.prepare_move_copy_new(
+                src, dst, expected, ContentReadConsent::GrantedForThisOperation
+            ),
+            Err(LocalError::UnsafeEntry)
+        ));
+        assert!(!root.join("new.bin").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn move_copy_preparation_fails_closed_on_mac_even_with_consent() {
+        let root = sandbox();
+        fs::write(root.join("src.bin"), b"original").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let src = Path::new("src.bin");
+        let expected = adapter.inspect_content(src).unwrap();
+        assert!(matches!(
+            adapter.prepare_move_copy_new(
+                src,
+                Path::new("new.bin"),
+                expected,
+                ContentReadConsent::GrantedForThisOperation
+            ),
+            Err(LocalError::UnsafeEntry)
+        ));
+        assert!(!root.join("new.bin").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn delete_file_fails_closed_and_preserves_original() {
