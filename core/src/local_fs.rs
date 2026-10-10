@@ -712,6 +712,26 @@ impl LocalFilesystem {
         }
     }
 
+    /// Atomically relocate a regular file only when the destination is absent.
+    /// The operation never overwrites another entry. A concurrent source swap
+    /// may still lead to OutcomeUnknown; callers MUST reconcile rather than retry.
+    pub fn rename_file_new(&self, from: &Path, to: &Path) -> Result<()> {
+        Self::relative(from)?;
+        Self::relative(to)?;
+        if from == to {
+            return Err(LocalError::AlreadyExists);
+        }
+        #[cfg(unix)]
+        {
+            self.preview_move_new(from, to)?;
+            secure::rename_file_noreplace(&self.root_fd, from, to)
+        }
+        #[cfg(not(unix))]
+        {
+            Err(LocalError::UnsafeEntry)
+        }
+    }
+
     /// Non-destructive hard-link staging for a future move. The source stays
     /// untouched; do not confuse this with a completed move or delete.
     pub fn stage_move_link_new(&self, from: &Path, to: &Path) -> Result<()> {
@@ -2366,6 +2386,51 @@ mod tests {
             adapter.mode_bits(Path::new("../file.bin")),
             Err(LocalError::InvalidPath)
         ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_rename_new_moves_regular_file_without_overwrite() {
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"original").unwrap();
+        fs::create_dir(root.join("target")).unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        adapter.rename_file_new(Path::new("source.bin"), Path::new("target/new.bin")).unwrap();
+        assert!(!root.join("source.bin").exists());
+        assert_eq!(fs::read(root.join("target/new.bin")).unwrap(), b"original");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_rename_new_never_overwrites_existing_destination() {
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"source").unwrap();
+        fs::write(root.join("target.bin"), b"protected").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert!(matches!(
+            adapter.rename_file_new(Path::new("source.bin"), Path::new("target.bin")),
+            Err(LocalError::AlreadyExists)
+        ));
+        assert_eq!(fs::read(root.join("source.bin")).unwrap(), b"source");
+        assert_eq!(fs::read(root.join("target.bin")).unwrap(), b"protected");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_rename_new_does_not_follow_destination_symlink() {
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"source").unwrap();
+        fs::write(root.join("protected.bin"), b"protected").unwrap();
+        std::os::unix::fs::symlink("protected.bin", root.join("target.bin")).unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert!(adapter
+            .rename_file_new(Path::new("source.bin"), Path::new("target.bin"))
+            .is_err());
+        assert_eq!(fs::read(root.join("source.bin")).unwrap(), b"source");
+        assert_eq!(fs::read(root.join("protected.bin")).unwrap(), b"protected");
         fs::remove_dir_all(root).unwrap();
     }
 
