@@ -1711,6 +1711,25 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn mkdir_rejects_case_alias_and_preserves_existing_directory() {
+        let root = sandbox();
+        fs::create_dir(root.join("Assets")).unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert!(matches!(
+            adapter.create_directory(Path::new("assets")),
+            Err(LocalError::AlreadyExists)
+        ));
+        assert!(root.join("Assets").is_dir());
+        assert!(matches!(
+            adapter.create_directory_tree(Path::new("assets/subdirectory")),
+            Err(LocalError::AlreadyExists)
+        ));
+        assert!(!root.join("Assets/subdirectory").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn default_creation_allows_unrelated_symlink_in_directory() {
         let root = sandbox();
         std::os::unix::fs::symlink("missing-target", root.join("unrelated-link")).unwrap();
