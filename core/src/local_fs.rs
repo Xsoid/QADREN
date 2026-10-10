@@ -2640,6 +2640,30 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn move_copy_preparation_rejects_same_size_rewrite_before_publication() {
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"original").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let source = Path::new("source.bin");
+        let destination = Path::new("destination.bin");
+        let expected = adapter.inspect_content(source).unwrap();
+        fs::write(root.join("source.bin"), b"modified").unwrap();
+        let actual = adapter.file_identity(source).unwrap();
+        assert_eq!(actual, expected.identity);
+        let outcome = adapter.prepare_move_copy_new(
+            source,
+            destination,
+            expected,
+            ContentReadConsent::GrantedForThisOperation,
+        );
+        assert!(matches!(outcome, Err(LocalError::UnsafeEntry)));
+        assert!(!root.join("destination.bin").exists());
+        assert_eq!(fs::read(root.join("source.bin")).unwrap(), b"modified");
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn move_copy_preparation_fails_closed_on_mac_even_with_consent() {
