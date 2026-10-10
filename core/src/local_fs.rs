@@ -361,6 +361,25 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn mkdir_after_creation_failure_is_unknown_and_preserves_directory() {
+        let root = sandbox();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let result = secure::create_directory_with_post_mkdir_check(
+            &adapter.root_fd,
+            Path::new("created-before-failure"),
+            || Err(io::Error::other("simulated durability failure")),
+        );
+        assert!(matches!(result, Err(LocalError::OutcomeUnknown(_))));
+        assert!(root.join("created-before-failure").is_dir());
+        assert!(matches!(
+            adapter.create_directory(Path::new("created-before-failure")),
+            Err(LocalError::AlreadyExists)
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn mkdir_existing_directory_is_not_treated_as_new_success() {
         let root = sandbox();
         let adapter = LocalFilesystem::open(&root).unwrap();
