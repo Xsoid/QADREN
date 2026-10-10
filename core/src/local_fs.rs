@@ -323,6 +323,51 @@ impl LocalFilesystem {
         }
     }
 
+    /// Create missing directories within this root, one component at a time.
+    /// Existing real directories are accepted; symlinks are never followed.
+    /// If any directory was created before an error, return OutcomeUnknown:
+    /// the caller must inspect partial effects rather than blindly retry.
+    pub fn create_directory_tree(&self, path: &Path) -> Result<usize> {
+        Self::relative(path)?;
+        let mut prefix = std::path::PathBuf::new();
+        let mut created = 0;
+        for component in path.components() {
+            prefix.push(component.as_os_str());
+            match self.stat(&prefix) {
+                Ok(entry) if entry.is_directory => continue,
+                Ok(_) => {
+                    if created > 0 {
+                        return Err(LocalError::OutcomeUnknown(io::Error::other(
+                            "partial directory tree exists before a non-directory",
+                        )));
+                    }
+                    return Err(LocalError::NotDirectory);
+                }
+                Err(LocalError::Io(ref err)) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    if created > 0 {
+                        return Err(LocalError::OutcomeUnknown(io::Error::other(
+                            "directory tree may be partially created",
+                        )));
+                    }
+                    return Err(err);
+                }
+            }
+            match self.create_directory(&prefix) {
+                Ok(()) => created += 1,
+                Err(err) => {
+                    if created > 0 {
+                        return Err(LocalError::OutcomeUnknown(io::Error::other(
+                            "directory tree may be partially created",
+                        )));
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        Ok(created)
+    }
+
     /// Create a new file through directory descriptors, without following
     /// symlinks or replacing an existing target. Unsupported platforms fail closed.
     /// Reading cloud-backed local placeholders remains prohibited until guarded.
@@ -998,6 +1043,45 @@ mod tests {
             Err(LocalError::OutcomeUnknown(_))
         ));
         assert!(output.changed);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_tree_creates_missing_parents_without_replacing_entries() {
+        let root = sandbox();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert_eq!(
+            adapter.create_directory_tree(Path::new("one/two/three")).unwrap(),
+            3
+        );
+        assert!(root.join("one/two/three").is_dir());
+        assert_eq!(
+            adapter.create_directory_tree(Path::new("one/two/three")).unwrap(),
+            0
+        );
+        fs::write(root.join("one/file"), b"protected").unwrap();
+        assert!(matches!(
+            adapter.create_directory_tree(Path::new("one/file/child")),
+            Err(LocalError::NotDirectory) | Err(LocalError::UnsafeEntry)
+        ));
+        assert_eq!(fs::read(root.join("one/file")).unwrap(), b"protected");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_tree_partial_failure_is_unknown_without_rollback() {
+        let root = sandbox();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert!(matches!(
+            adapter.create_directory_tree(Path::new("first/second/too-long")),
+            Ok(_)
+        ));
+        assert!(matches!(
+            adapter.create_directory_tree(Path::new("../escape")),
+            Err(LocalError::InvalidPath)
+        ));
         fs::remove_dir_all(root).unwrap();
     }
 
