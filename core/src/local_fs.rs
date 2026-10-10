@@ -175,10 +175,12 @@ impl LocalFilesystem {
         if !path.as_os_str().is_empty() {
             Self::relative(path)?;
         }
+        // Even an empty page must validate the directory and its confinement.
+        // Otherwise callers can mistake a missing or unsafe path for success.
+        let entries = self.list(path)?;
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let entries = self.list(path)?;
         Ok(entries.into_iter().skip(offset).take(limit).collect())
     }
 
@@ -297,6 +299,15 @@ mod tests {
             Err(LocalError::InvalidPath)
         ));
         assert!(adapter.list_page(Path::new(""), 0, 0).unwrap().is_empty());
+        assert!(adapter.list_page(Path::new("missing"), 0, 0).is_err());
+        fs::write(root.join("file.txt"), b"file").unwrap();
+        assert!(adapter.list_page(Path::new("file.txt"), 0, 0).is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            symlink("file.txt", root.join("alias")).unwrap();
+            assert!(adapter.list_page(Path::new("alias"), 0, 0).is_err());
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
