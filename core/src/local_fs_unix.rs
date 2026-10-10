@@ -344,9 +344,16 @@ pub(super) fn create_with_post_link_check<R: Read, F: FnOnce() -> io::Result<()>
         directory.sync_all().map_err(LocalError::OutcomeUnknown)?;
         Ok(bytes)
     })();
-    // A changed temporary name must never be deleted as if it were ours.
-    if !same_temporary_inode(&directory, &temporary, &output) && !published {
-        return Err(LocalError::UnsafeEntry);
+    // Even after publication, never unlink a staging pathname replaced
+    // by another writer. The published destination requires reconciliation.
+    if !same_temporary_inode(&directory, &temporary, &output) {
+        return if published {
+            Err(LocalError::OutcomeUnknown(io::Error::other(
+                "temporary file identity changed after publication",
+            )))
+        } else {
+            Err(LocalError::UnsafeEntry)
+        };
     }
     let cleanup = unsafe { unlinkat(directory.as_raw_fd(), temporary.as_ptr(), 0) };
     if cleanup != 0 {
