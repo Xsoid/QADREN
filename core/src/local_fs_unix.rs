@@ -420,6 +420,71 @@ pub(super) fn create_directory_with_post_mkdir_check<F: FnOnce() -> io::Result<(
     Ok(())
 }
 
+/// Publish a second hard link without reading content or deleting the source.
+/// This is a non-destructive move staging primitive, NOT a completed move.
+/// A racing source replacement is detected after publication as OutcomeUnknown.
+pub fn link_file_new(root: &File, from: &Path, to: &Path) -> Result<()> {
+    let (source_dir, source_name) = parent(root, from)?;
+    let (target_dir, target_name) = parent(root, to)?;
+    let mut source_info = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe {
+        libc::fstatat(
+            source_dir.as_raw_fd(),
+            source_name.as_ptr(),
+            source_info.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return Err(LocalError::Io(io::Error::last_os_error()));
+    }
+    let source_info = unsafe { source_info.assume_init() };
+    if source_info.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Err(LocalError::UnsafeEntry);
+    }
+    if unsafe {
+        linkat(
+            source_dir.as_raw_fd(),
+            source_name.as_ptr(),
+            target_dir.as_raw_fd(),
+            target_name.as_ptr(),
+            0,
+        )
+    } != 0
+    {
+        let error = io::Error::last_os_error();
+        return if error.kind() == io::ErrorKind::AlreadyExists {
+            Err(LocalError::AlreadyExists)
+        } else {
+            Err(LocalError::Io(error))
+        };
+    }
+    // Published; all subsequent failures are ambiguous and MUST NOT retry.
+    target_dir.sync_all().map_err(LocalError::OutcomeUnknown)?;
+    let mut target_info = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe {
+        libc::fstatat(
+            target_dir.as_raw_fd(),
+            target_name.as_ptr(),
+            target_info.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return Err(LocalError::OutcomeUnknown(io::Error::last_os_error()));
+    }
+    let target_info = unsafe { target_info.assume_init() };
+    if target_info.st_dev != source_info.st_dev
+        || target_info.st_ino != source_info.st_ino
+        || target_info.st_mode & libc::S_IFMT != libc::S_IFREG
+    {
+        return Err(LocalError::OutcomeUnknown(io::Error::other(
+            "published hard link does not match inspected source",
+        )));
+    }
+    Ok(())
+}
+
 /// Ensure a temporary directory entry still refers to the inode opened by
 /// this operation. This detects replaced names; it is not an atomic guarantee
 /// against a malicious process with write access to the same directory.
