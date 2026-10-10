@@ -167,3 +167,9 @@
 - Пользователь подтвердил `8c8d9e0` на macOS: fmt/Clippy без ошибок, **111/111** Rust tests passed, 0 doc-tests.
 - `dd04ce5` добавляет read-only `revalidate_move_new(from, to, expected)` — повторная проверка идентичности inode source и отсутствия destination, без открытия содержимого и без изменения файлов. Unix-тест заменяет source после предпросмотра и проверяет отказ с сохранением данных.
 - Повторная проверка сама по себе не устраняет TOCTOU после возврата. `move_file_new` и destructive operations остаются заблокированными. Новые изменения пока не проверены на Mac.
+
+### Case-collision guarded creation (2026-10-11)
+
+- Пользователь подтвердил `3085447` на Mac: fmt, Clippy и **112/112** unit tests без ошибок.
+- `112b2f9` добавляет отдельный `create_from_reader_case_guarded`: перед атомарной записью новый метод сканирует каталог назначения (через descriptor-relative Unix list) и консервативно отклоняет имена, совпадающие после Unicode lowercase. Тест проверяет `Report.TXT` против `report.txt` до чтения Reader, неизменность исходного объекта и создание свободного имени.
+- Это **дополнительная проверка, не доказательство отсутствия всех Unicode/locale/case-folding коллизий**; финальную защиту от перезаписи по-прежнему обеспечивает атомарный no-overwrite writer. При небезопасных объектах в каталоге list может вернуть отказ; 기존 `create_from_reader` не изменён. Патч не проверен на Mac; move/rename/delete остаются fail-closed.
