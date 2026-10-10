@@ -7,6 +7,8 @@ use crate::capabilities::{CapabilityDeclaration, MetadataConfidence, Operations,
 use std::fs;
 #[cfg(unix)]
 use std::fs::File;
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::io;
 #[cfg(any(not(unix), test))]
 use std::path::PathBuf;
@@ -51,6 +53,14 @@ pub struct LocalEntry {
     pub name: String,
     pub is_directory: bool,
     pub size: u64,
+}
+
+/// Filesystem capacity reported by the OS for the pinned local root.
+/// This is informational: other processes may consume space immediately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalStorageSpace {
+    pub total_bytes: u64,
+    pub available_bytes: u64,
 }
 
 #[cfg(target_os = "linux")]
@@ -113,6 +123,31 @@ impl LocalFilesystem {
             metadata_confidence: MetadataConfidence::LocallyVerified,
         }
     }
+    /// Query filesystem capacity without reading any file contents.
+    /// This must not be interpreted as a reservation of free space.
+    pub fn storage_space(&self) -> Result<LocalStorageSpace> {
+        #[cfg(unix)]
+        {
+            let mut info = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+            let status = unsafe { libc::fstatvfs(self.root_fd.as_raw_fd(), info.as_mut_ptr()) };
+            if status != 0 {
+                return Err(LocalError::Io(io::Error::last_os_error()));
+            }
+            let info = unsafe { info.assume_init() };
+            let block_size = info.f_frsize as u128;
+            let total = (info.f_blocks as u128).saturating_mul(block_size);
+            let available = (info.f_bavail as u128).saturating_mul(block_size);
+            Ok(LocalStorageSpace {
+                total_bytes: u64::try_from(total).unwrap_or(u64::MAX),
+                available_bytes: u64::try_from(available).unwrap_or(u64::MAX),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Err(LocalError::UnsafeEntry)
+        }
+    }
+
     pub fn open(root: &Path) -> Result<Self> {
         #[cfg(unix)]
         {
@@ -1059,6 +1094,21 @@ mod tests {
         ));
         assert!(output.changed);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn storage_space_is_metadata_only_and_uses_open_root() {
+        let root = sandbox();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let space = adapter.storage_space().unwrap();
+        assert!(space.total_bytes > 0);
+        assert!(space.available_bytes <= space.total_bytes);
+        fs::remove_dir_all(root).unwrap();
+        // The pinned descriptor remains valid even after the directory
+        // pathname disappears; capacity inspection never opens content.
+        let pinned = adapter.storage_space().unwrap();
+        assert!(pinned.total_bytes > 0);
     }
 
     #[cfg(unix)]
