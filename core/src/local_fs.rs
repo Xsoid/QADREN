@@ -330,10 +330,21 @@ impl LocalFilesystem {
         }
         let mut pending = vec![(path.to_path_buf(), 0usize)];
         let mut result = Vec::new();
+        // An inode can be reached via more than one directory entry on some
+        // filesystems. Never revisit it and accidentally scan a cycle.
+        #[cfg(unix)]
+        let mut visited = std::collections::HashSet::new();
         // A malicious or unexpectedly deep tree should never trigger
         // unbounded traversal work even if the entry limit is very high.
         const MAX_DIRECTORY_DEPTH: usize = 256;
         while let Some((directory, depth)) = pending.pop() {
+            #[cfg(unix)]
+            {
+                let identity = secure::directory_identity(&self.root_fd, &directory)?;
+                if !visited.insert(identity) {
+                    return Err(LocalError::UnsafeEntry);
+                }
+            }
             let entries = self.list(&directory)?;
             for entry in entries {
                 if result.len() >= max_entries {
