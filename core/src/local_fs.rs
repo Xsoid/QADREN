@@ -548,6 +548,39 @@ impl LocalFilesystem {
         }
     }
 
+    /// Non-destructive hard-link staging for a future move. The source stays
+    /// untouched; do not confuse this with a completed move or delete.
+    pub fn stage_move_link_new(&self, from: &Path, to: &Path) -> Result<()> {
+        Self::relative(from)?;
+        Self::relative(to)?;
+        if from == to {
+            return Err(LocalError::AlreadyExists);
+        }
+        #[cfg(unix)]
+        {
+            let source = self.file_identity(from)?;
+            let parent = to.parent().ok_or(LocalError::InvalidPath)?;
+            let leaf = to
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or(LocalError::UnsafeEntry)?;
+            if secure::has_case_collision(&self.root_fd, parent, leaf)? {
+                return Err(LocalError::AlreadyExists);
+            }
+            secure::link_file_new(&self.root_fd, from, to)?;
+            match self.file_identity(to) {
+                Ok(found) if found.device == source.device && found.inode == source.inode => Ok(()),
+                _ => Err(LocalError::OutcomeUnknown(io::Error::other(
+                    "staged hard link requires reconciliation",
+                ))),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            Err(LocalError::UnsafeEntry)
+        }
+    }
+
     /// Moving by pathname cannot guarantee source identity under concurrent mutation.
     /// Reject until an identity-preserving platform implementation is available.
     pub fn move_file_new(&self, from: &Path, to: &Path) -> Result<()> {
@@ -1737,6 +1770,30 @@ mod tests {
             Err(LocalError::AlreadyExists)
         ));
         assert_eq!(fs::read(root.join("occupied.bin")).unwrap(), b"protected");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stage_move_preserves_source_and_never_overwrites() {
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"original").unwrap();
+        fs::write(root.join("occupied.bin"), b"protected").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert!(matches!(
+            adapter.stage_move_link_new(Path::new("source.bin"), Path::new("occupied.bin")),
+            Err(LocalError::AlreadyExists)
+        ));
+        adapter
+            .stage_move_link_new(Path::new("source.bin"), Path::new("staged.bin"))
+            .unwrap();
+        assert_eq!(fs::read(root.join("source.bin")).unwrap(), b"original");
+        assert_eq!(fs::read(root.join("staged.bin")).unwrap(), b"original");
+        assert_eq!(fs::read(root.join("occupied.bin")).unwrap(), b"protected");
+        assert_eq!(
+            adapter.file_identity(Path::new("source.bin")).unwrap().inode,
+            adapter.file_identity(Path::new("staged.bin")).unwrap().inode
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
