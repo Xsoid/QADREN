@@ -361,6 +361,20 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn mkdir_existing_directory_is_not_treated_as_new_success() {
+        let root = sandbox();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        adapter.create_directory(Path::new("new-folder")).unwrap();
+        assert!(matches!(
+            adapter.create_directory(Path::new("new-folder")),
+            Err(LocalError::AlreadyExists)
+        ));
+        assert!(root.join("new-folder").is_dir());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn disk_full_during_stream_stays_before_publication() {
         struct DiskFullAfterFirstChunk(bool);
         impl io::Read for DiskFullAfterFirstChunk {
