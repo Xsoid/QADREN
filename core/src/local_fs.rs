@@ -234,6 +234,32 @@ impl LocalFilesystem {
         }
     }
 
+    /// Copy a local regular file to a new destination without overwriting.
+    /// Linux uses the pinned source descriptor and atomic no-overwrite publish.
+    /// On macOS this fails closed: opening a File Provider placeholder could
+    /// materialize cloud content even when an operation has user consent.
+    pub fn copy_file_new(
+        &self,
+        from: &Path,
+        to: &Path,
+        consent: ContentReadConsent,
+    ) -> Result<u64> {
+        Self::relative(from)?;
+        Self::relative(to)?;
+        if consent != ContentReadConsent::GrantedForThisOperation {
+            return Err(LocalError::UnsafeEntry);
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let mut source = secure::open_content(&self.root_fd, from)?;
+            self.create_from_reader(to, &mut source)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(LocalError::UnsafeEntry)
+        }
+    }
+
     /// Moving by pathname cannot guarantee source identity under concurrent mutation.
     /// Reject until an identity-preserving platform implementation is available.
     pub fn move_file_new(&self, from: &Path, to: &Path) -> Result<()> {
@@ -805,6 +831,49 @@ mod tests {
         ));
         assert_eq!(fs::metadata(root.join("large.bin")).unwrap().len(), length);
         assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn copy_requires_consent_and_never_overwrites() {
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"source").unwrap();
+        fs::write(root.join("occupied.bin"), b"occupied").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert!(matches!(
+            adapter.copy_file_new(
+                Path::new("source.bin"),
+                Path::new("new.bin"),
+                ContentReadConsent::Denied
+            ),
+            Err(LocalError::UnsafeEntry)
+        ));
+        assert!(!root.join("new.bin").exists());
+        let result = adapter.copy_file_new(
+            Path::new("source.bin"),
+            Path::new("occupied.bin"),
+            ContentReadConsent::GrantedForThisOperation,
+        );
+        #[cfg(target_os = "linux")]
+        assert!(matches!(result, Err(LocalError::AlreadyExists)));
+        #[cfg(not(target_os = "linux"))]
+        assert!(matches!(result, Err(LocalError::UnsafeEntry)));
+        assert_eq!(fs::read(root.join("occupied.bin")).unwrap(), b"occupied");
+        let result = adapter.copy_file_new(
+            Path::new("source.bin"),
+            Path::new("new.bin"),
+            ContentReadConsent::GrantedForThisOperation,
+        );
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(result.unwrap(), 6);
+            assert_eq!(fs::read(root.join("new.bin")).unwrap(), b"source");
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert!(matches!(result, Err(LocalError::UnsafeEntry)));
+            assert!(!root.join("new.bin").exists());
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
