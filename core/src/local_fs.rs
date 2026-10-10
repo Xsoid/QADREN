@@ -154,6 +154,28 @@ impl<R: io::Read> io::Read for ExactSizeReader<'_, R> {
     }
 }
 
+/// Validate the opened source descriptor at EOF, before the atomic
+/// writer can publish its temporary output. The source remains pinned.
+#[cfg(target_os = "linux")]
+struct VerifiedCopyReader<'a> {
+    inner: ExactSizeReader<'a, std::fs::File>,
+    baseline: std::fs::Metadata,
+}
+
+#[cfg(target_os = "linux")]
+impl io::Read for VerifiedCopyReader<'_> {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        let count = self.inner.read(output)?;
+        if count == 0 && !output.is_empty() {
+            let current = self.inner.inner.metadata()?;
+            let actual = self.baseline.len();
+            validate_copy_source(&self.baseline, &current, actual)
+                .map_err(|_| io::Error::other("source changed before copy publication"))?;
+        }
+        Ok(count)
+    }
+}
+
 pub struct LocalFilesystem {
     #[cfg(not(unix))]
     root: PathBuf,
@@ -567,11 +589,14 @@ impl LocalFilesystem {
             }
             // Reject short or growing streams before publishing the staged
             // destination; metadata after publication remains a second guard.
-            let mut exact = ExactSizeReader {
-                inner: &mut source,
-                remaining: before.len(),
+            let mut verified = VerifiedCopyReader {
+                inner: ExactSizeReader {
+                    inner: &mut source,
+                    remaining: before.len(),
+                },
+                baseline: before.clone(),
             };
-            let bytes = self.create_from_reader(to, &mut exact)?;
+            let bytes = self.create_from_reader(to, &mut verified)?;
             let after = source.metadata().map_err(LocalError::OutcomeUnknown)?;
             validate_copy_source(&before, &after, bytes)?;
             if !self
