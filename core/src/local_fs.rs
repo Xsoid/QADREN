@@ -368,6 +368,29 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn filesystem_root_remains_pinned_after_path_is_replaced() {
+        let parent = sandbox();
+        let original = parent.join("original");
+        let moved = parent.join("moved");
+        fs::create_dir(&original).unwrap();
+        fs::write(original.join("original.txt"), b"first").unwrap();
+        let adapter = LocalFilesystem::open(&original).unwrap();
+        fs::rename(&original, &moved).unwrap();
+        fs::create_dir(&original).unwrap();
+        fs::write(original.join("replacement.txt"), b"second").unwrap();
+        let entries = adapter.list(Path::new("")).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "original.txt");
+        adapter
+            .create_from_reader(Path::new("created.txt"), &mut Cursor::new(b"pinned"))
+            .unwrap();
+        assert_eq!(fs::read(moved.join("created.txt")).unwrap(), b"pinned");
+        assert!(!original.join("created.txt").exists());
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn symlink_root_is_rejected_before_any_content_access() {
         use std::os::unix::fs::symlink;
         let root = sandbox();
