@@ -112,7 +112,8 @@ impl<R: io::Read> io::Read for ExactSizeReader<'_, R> {
             };
         }
         let max = usize::try_from(self.remaining).unwrap_or(usize::MAX);
-        let read = self.inner.read(&mut output[..output.len().min(max)])?;
+        let limit = output.len().min(max);
+        let read = self.inner.read(&mut output[..limit])?;
         if read == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
