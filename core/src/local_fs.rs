@@ -588,10 +588,7 @@ impl LocalFilesystem {
                         .file_name()
                         .and_then(|name| name.to_str())
                         .ok_or(LocalError::UnsafeEntry)?;
-                    let exact = self
-                        .list(parent)?
-                        .iter()
-                        .any(|item| item.name == expected);
+                    let exact = self.list(parent)?.iter().any(|item| item.name == expected);
                     if !exact {
                         return Err(LocalError::AlreadyExists);
                     }
