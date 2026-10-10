@@ -214,24 +214,12 @@ pub fn file_change_stamp(root: &File, target: &Path) -> Result<(i64, i64, i64, i
     if info.st_mode & libc::S_IFMT != libc::S_IFREG {
         return Err(LocalError::UnsafeEntry);
     }
-    #[cfg(target_os = "macos")]
-    {
-        Ok((
-            info.st_mtimespec.tv_sec,
-            info.st_mtimespec.tv_nsec,
-            info.st_ctimespec.tv_sec,
-            info.st_ctimespec.tv_nsec,
-        ))
-    }
-    #[cfg(target_os = "linux")]
-    {
-        Ok((
-            info.st_mtime,
-            info.st_mtime_nsec,
-            info.st_ctime,
-            info.st_ctime_nsec,
-        ))
-    }
+    Ok((
+        info.st_mtime,
+        info.st_mtime_nsec,
+        info.st_ctime,
+        info.st_ctime_nsec,
+    ))
 }
 
 /// Inspect macOS SF_DATALESS without opening the file or its content.
