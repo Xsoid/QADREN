@@ -1809,10 +1809,14 @@ mod tests {
             .unwrap();
         let source = Path::new("source.bin");
         let staged = Path::new("staged.bin");
-        assert!(adapter.reconcile_staged_link(source, staged, expected).unwrap());
+        assert!(adapter
+            .reconcile_staged_link(source, staged, expected)
+            .unwrap());
         fs::rename(root.join("source.bin"), root.join("old.bin")).unwrap();
         fs::write(root.join("source.bin"), b"replacement").unwrap();
-        assert!(!adapter.reconcile_staged_link(source, staged, expected).unwrap());
+        assert!(!adapter
+            .reconcile_staged_link(source, staged, expected)
+            .unwrap());
         assert_eq!(fs::read(root.join("old.bin")).unwrap(), b"original");
         assert_eq!(fs::read(root.join("staged.bin")).unwrap(), b"original");
         fs::remove_dir_all(root).unwrap();
