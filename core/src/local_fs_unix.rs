@@ -424,6 +424,16 @@ pub(super) fn create_directory_with_post_mkdir_check<F: FnOnce() -> io::Result<(
 /// This is a non-destructive move staging primitive, NOT a completed move.
 /// A racing source replacement is detected after publication as OutcomeUnknown.
 pub fn link_file_new(root: &File, from: &Path, to: &Path) -> Result<()> {
+    link_file_new_with_post_link_check(root, from, to, || Ok(()))
+}
+
+/// Fault injection after publication, before source identity reconciliation.
+pub(super) fn link_file_new_with_post_link_check<F: FnOnce() -> io::Result<()>>(
+    root: &File,
+    from: &Path,
+    to: &Path,
+    post_link_check: F,
+) -> Result<()> {
     let (source_dir, source_name) = parent(root, from)?;
     let (target_dir, target_name) = parent(root, to)?;
     let mut source_info = std::mem::MaybeUninit::<libc::stat>::uninit();
@@ -466,6 +476,7 @@ pub fn link_file_new(root: &File, from: &Path, to: &Path) -> Result<()> {
         };
     }
     // Published; all subsequent failures are ambiguous and MUST NOT retry.
+    post_link_check().map_err(LocalError::OutcomeUnknown)?;
     // The source pathname must still resolve to the inspected inode.
     // This is a best-effort race detector, not an atomic source guard.
     let mut current_source = std::mem::MaybeUninit::<libc::stat>::uninit();
