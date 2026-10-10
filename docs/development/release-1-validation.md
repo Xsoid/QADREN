@@ -344,3 +344,5 @@
 - Следующий шаг: локальная сборка полного пакета и review API/негативных race-тестов, но по договорённости не запрашиваем Mac прогон после каждого коммита; окончательное закрытие #15 требует всех контрактов и тестов.
 
 - `968e4a3`, `f9482b7`: source name recreated after `renameat*` is classified `OutcomeUnknown`, plus adversarial tests for hardlinked source, Unicode-independent case collision and intermediate symlink outside root. Added six total Unix rename tests. The rename API is available for isolated test use, but remains **not advertised in adapter capabilities** due unresolved concurrent source-swap race; this is not acceptance of deletion or general-purpose automatic move.
+
+- `effb541`: `reconcile_renamed_file(from,to,expected)` делает только metadata-only проверку результата ранее неоднозначного rename: ожидаемый destination inode совпадает, source name отсутствует; ничего не восстанавливает и не удаляет. Тест покрывает before/after rename и destination swap. Это observational, не транзакционная гарантия.
