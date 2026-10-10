@@ -417,6 +417,14 @@ pub(super) fn create_with_post_link_check<R: Read, F: FnOnce() -> io::Result<()>
     }
     if published {
         directory.sync_all().map_err(LocalError::OutcomeUnknown)?;
+        // The staging link has been removed; the published name must now be
+        // the sole link to our opened inode. A concurrent replacement after
+        // cleanup cannot be reported as a confirmed successful creation.
+        if !same_temporary_inode(&directory, &destination, &output, 1) {
+            return Err(LocalError::OutcomeUnknown(io::Error::other(
+                "destination file identity changed after staging cleanup",
+            )));
+        }
     }
     result
 }
