@@ -732,6 +732,37 @@ impl LocalFilesystem {
         }
     }
 
+    /// Observe the outcome of an ambiguous rename without changing files.
+    /// Returns true only when the source name is missing and destination has
+    /// the expected inode. This is not proof against subsequent mutations.
+    pub fn reconcile_renamed_file(
+        &self,
+        from: &Path,
+        to: &Path,
+        expected: LocalFileIdentity,
+    ) -> Result<bool> {
+        Self::relative(from)?;
+        Self::relative(to)?;
+        if from == to {
+            return Err(LocalError::AlreadyExists);
+        }
+        let current = match self.file_identity(to) {
+            Ok(identity) => identity,
+            Err(LocalError::Io(ref error)) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        };
+        if current != expected {
+            return Ok(false);
+        }
+        match self.file_identity(from) {
+            Err(LocalError::Io(ref error)) if error.kind() == io::ErrorKind::NotFound => Ok(true),
+            Ok(_) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Non-destructive hard-link staging for a future move. The source stays
     /// untouched; do not confuse this with a completed move or delete.
     pub fn stage_move_link_new(&self, from: &Path, to: &Path) -> Result<()> {
@@ -2415,6 +2446,25 @@ mod tests {
         ));
         assert_eq!(fs::read(root.join("source.bin")).unwrap(), b"source");
         assert_eq!(fs::read(root.join("target.bin")).unwrap(), b"protected");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rename_reconciliation_tracks_expected_inode_without_mutation() {
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"original").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let from = Path::new("source.bin");
+        let to = Path::new("target.bin");
+        let expected = adapter.file_identity(from).unwrap();
+        assert!(!adapter.reconcile_renamed_file(from, to, expected).unwrap());
+        adapter.rename_file_new(from, to).unwrap();
+        assert!(adapter.reconcile_renamed_file(from, to, expected).unwrap());
+        fs::rename(root.join("target.bin"), root.join("retained.bin")).unwrap();
+        fs::write(root.join("target.bin"), b"foreign").unwrap();
+        assert!(!adapter.reconcile_renamed_file(from, to, expected).unwrap());
+        assert_eq!(fs::read(root.join("retained.bin")).unwrap(), b"original");
         fs::remove_dir_all(root).unwrap();
     }
 
