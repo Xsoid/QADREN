@@ -317,6 +317,33 @@ impl LocalFilesystem {
         }
     }
 
+    /// Traverse a local subtree using metadata only, with a hard entry limit.
+    /// Paths are relative to the adapter root. No file content is opened.
+    /// A symlink or unsafe entry anywhere in the subtree fails closed.
+    pub fn list_tree(&self, path: &Path, max_entries: usize) -> Result<Vec<(std::path::PathBuf, LocalEntry)>> {
+        if !path.as_os_str().is_empty() {
+            Self::relative(path)?;
+        }
+        let mut pending = vec![path.to_path_buf()];
+        let mut result = Vec::new();
+        while let Some(directory) = pending.pop() {
+            let entries = self.list(&directory)?;
+            for entry in entries {
+                if result.len() >= max_entries {
+                    return Err(LocalError::UnsafeEntry);
+                }
+                let relative = directory.join(&entry.name);
+                Self::relative(&relative)?;
+                if entry.is_directory {
+                    pending.push(relative.clone());
+                }
+                result.push((relative, entry));
+            }
+        }
+        result.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(result)
+    }
+
     /// Stable lexical pagination over a snapshot of directory metadata.
     /// Callers must rescan if the directory changes between page requests.
     pub fn list_page(&self, path: &Path, offset: usize, limit: usize) -> Result<Vec<LocalEntry>> {
@@ -1550,6 +1577,35 @@ mod tests {
         ));
         assert!(!root.join("target.bin").exists());
         assert_eq!(fs::read(root.join("old.bin")).unwrap(), b"original");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_tree_is_metadata_only_bounded_and_nested() {
+        let root = sandbox();
+        fs::create_dir(root.join("nested")).unwrap();
+        fs::create_dir(root.join("nested/deep")).unwrap();
+        fs::write(root.join("nested/deep/file.txt"), b"payload").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let tree = adapter.list_tree(Path::new(""), 3).unwrap();
+        let paths: Vec<_> = tree.iter().map(|(path, _)| path.as_path()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                Path::new("nested"),
+                Path::new("nested/deep"),
+                Path::new("nested/deep/file.txt"),
+            ]
+        );
+        assert!(matches!(
+            adapter.list_tree(Path::new(""), 2),
+            Err(LocalError::UnsafeEntry)
+        ));
+        assert!(matches!(
+            adapter.list_tree(Path::new("../outside"), 100),
+            Err(LocalError::InvalidPath)
+        ));
         fs::remove_dir_all(root).unwrap();
     }
 
