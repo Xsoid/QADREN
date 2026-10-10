@@ -397,6 +397,13 @@ pub(super) fn create_with_post_link_check<R: Read, F: FnOnce() -> io::Result<()>
             Err(LocalError::UnsafeEntry)
         };
     }
+    // After linkat, the destination name must still refer to our opened
+    // inode. A replaced destination must never be reported as a success.
+    if published && !same_temporary_inode(&directory, &destination, &output, 2) {
+        return Err(LocalError::OutcomeUnknown(io::Error::other(
+            "destination file identity changed after publication",
+        )));
+    }
     let cleanup = unsafe { unlinkat(directory.as_raw_fd(), temporary.as_ptr(), 0) };
     if cleanup != 0 {
         let error = io::Error::last_os_error();
