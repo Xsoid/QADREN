@@ -1566,10 +1566,7 @@ mod tests {
         fs::write(root.join("Report.TXT"), b"protected").unwrap();
         let adapter = LocalFilesystem::open(&root).unwrap();
         assert!(matches!(
-            adapter.create_from_reader_case_guarded(
-                Path::new("report.txt"),
-                &mut PanicReader,
-            ),
+            adapter.create_from_reader_case_guarded(Path::new("report.txt"), &mut PanicReader,),
             Err(LocalError::AlreadyExists)
         ));
         assert_eq!(fs::read(root.join("Report.TXT")).unwrap(), b"protected");
