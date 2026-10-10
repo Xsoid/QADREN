@@ -328,9 +328,12 @@ impl LocalFilesystem {
         if !path.as_os_str().is_empty() {
             Self::relative(path)?;
         }
-        let mut pending = vec![path.to_path_buf()];
+        let mut pending = vec![(path.to_path_buf(), 0usize)];
         let mut result = Vec::new();
-        while let Some(directory) = pending.pop() {
+        // A malicious or unexpectedly deep tree should never trigger
+        // unbounded traversal work even if the entry limit is very high.
+        const MAX_DIRECTORY_DEPTH: usize = 256;
+        while let Some((directory, depth)) = pending.pop() {
             let entries = self.list(&directory)?;
             for entry in entries {
                 if result.len() >= max_entries {
@@ -339,7 +342,11 @@ impl LocalFilesystem {
                 let relative = directory.join(&entry.name);
                 Self::relative(&relative)?;
                 if entry.is_directory {
-                    pending.push(relative.clone());
+                    let next_depth = depth.checked_add(1).ok_or(LocalError::UnsafeEntry)?;
+                    if next_depth > MAX_DIRECTORY_DEPTH {
+                        return Err(LocalError::UnsafeEntry);
+                    }
+                    pending.push((relative.clone(), next_depth));
                 }
                 result.push((relative, entry));
             }
@@ -1581,6 +1588,21 @@ mod tests {
         ));
         assert!(!root.join("target.bin").exists());
         assert_eq!(fs::read(root.join("old.bin")).unwrap(), b"original");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_tree_rejects_unsafe_symlink_without_partial_success() {
+        let root = sandbox();
+        fs::create_dir(root.join("nested")).unwrap();
+        fs::write(root.join("nested/file.txt"), b"data").unwrap();
+        std::os::unix::fs::symlink("../nested/file.txt", root.join("nested/alias")).unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert!(matches!(
+            adapter.list_tree(Path::new(""), 100),
+            Err(LocalError::UnsafeEntry)
+        ));
         fs::remove_dir_all(root).unwrap();
     }
 
