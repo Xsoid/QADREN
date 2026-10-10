@@ -248,6 +248,50 @@ pub fn list(root: &File, relative: &Path) -> Result<Vec<LocalEntry>> {
     Ok(entries)
 }
 
+/// Check sibling names without stat-ing unrelated entries. A directory may
+/// contain symlinks; they must not block creation of an independent file.
+pub fn has_case_collision(root: &File, relative: &Path, leaf: &str) -> Result<bool> {
+    let dir = directory(root, relative)?;
+    let owned_fd = dir.try_clone()?.into_raw_fd();
+    let stream = unsafe { libc::fdopendir(owned_fd) };
+    if stream.is_null() {
+        unsafe { libc::close(owned_fd) };
+        return Err(LocalError::Io(io::Error::last_os_error()));
+    }
+    struct Stream(*mut libc::DIR);
+    impl Drop for Stream {
+        fn drop(&mut self) {
+            unsafe { libc::closedir(self.0) };
+        }
+    }
+    let stream = Stream(stream);
+    let expected = leaf.to_lowercase();
+    loop {
+        #[cfg(target_os = "macos")]
+        let errno = unsafe { libc::__error() };
+        #[cfg(target_os = "linux")]
+        let errno = unsafe { libc::__errno_location() };
+        unsafe { *errno = 0 };
+        let entry = unsafe { libc::readdir(stream.0) };
+        if entry.is_null() {
+            let code = unsafe { *errno };
+            return if code == 0 {
+                Ok(false)
+            } else {
+                Err(LocalError::Io(io::Error::from_raw_os_error(code)))
+            };
+        }
+        let bytes = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+        if bytes == b"." || bytes == b".." {
+            continue;
+        }
+        let name = std::str::from_utf8(bytes).map_err(|_| LocalError::UnsafeEntry)?;
+        if name.to_lowercase() == expected {
+            return Ok(true);
+        }
+    }
+}
+
 /// Detect revisiting the same directory while scanning an untrusted tree.
 pub fn directory_identity(root: &File, relative: &Path) -> Result<(u64, u64)> {
     let directory = directory(root, relative)?;
