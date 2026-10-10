@@ -326,7 +326,8 @@ pub fn has_exact_directory(root: &File, relative: &Path, leaf: &str) -> Result<b
         }
         let raw = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
         if raw == leaf.as_bytes() {
-            let (is_directory, _) = leaf_metadata(&dir, name(std::ffi::OsStr::from_bytes(raw))?.as_c_str())?;
+            let leaf_name = name(std::ffi::OsStr::from_bytes(raw))?;
+            let (is_directory, _) = leaf_metadata(&dir, leaf_name.as_c_str())?;
             return Ok(is_directory);
         }
     }
