@@ -427,3 +427,9 @@
 - Пользователь подтвердил предыдущий Mac-прогон до текущего набора изменений.
 - `e1beef4` добавляет Linux end-to-end тест: уже открытый source изменён после исходного `metadata`, а `VerifiedCopyReader` должен сорвать атомарную публикацию destination. Если source изменён, оригинал не удаляется.
 - Коррекция `6f233ac` убирает ненужный явный `drop` reader-а и полагается на стандартную NLL-проверку областей заимствования Rust. Нужна компиляция и тестирование на Mac на объединённом этапе; нет основания объявлять #15 завершённым.
+
+### Reconciliation boundary: copy versus byte equality (2026-10-11)
+
+- `c71bab1`: metadata-only `reconcile_move_copy` inspects a preserved source against the original inspection and checks that a destination of the expected length exists. It does **not** claim integrity, equality of content, recovery, completed move, or authorization to remove either file.
+- Unix negative contract test deliberately uses same-sized but different bytes: metadata reconciliation may return true, illustrating why caller MUST NOT mistake its result for verified copy integrity. A missing destination returns false. This interface is observational only.
+- To mark prepared copy as verified, execution needs a trustworthy content digest/producer-verified source and destination, alongside stable source identity and no forbidden macOS hydration. No automatic destructive step is enabled. Consolidated Mac tests remain pending for new code.
