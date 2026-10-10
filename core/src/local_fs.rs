@@ -2420,6 +2420,56 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn atomic_rename_new_rejects_hardlinked_source() {
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"source").unwrap();
+        fs::hard_link(root.join("source.bin"), root.join("alias.bin")).unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert!(matches!(
+            adapter.rename_file_new(Path::new("source.bin"), Path::new("target.bin")),
+            Err(LocalError::UnsafeEntry)
+        ));
+        assert_eq!(fs::read(root.join("alias.bin")).unwrap(), b"source");
+        assert_eq!(fs::read(root.join("source.bin")).unwrap(), b"source");
+        assert!(!root.join("target.bin").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_rename_new_rejects_case_collision() {
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"source").unwrap();
+        fs::write(root.join("DEST.bin"), b"protected").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert!(matches!(
+            adapter.rename_file_new(Path::new("source.bin"), Path::new("dest.bin")),
+            Err(LocalError::AlreadyExists)
+        ));
+        assert_eq!(fs::read(root.join("source.bin")).unwrap(), b"source");
+        assert_eq!(fs::read(root.join("DEST.bin")).unwrap(), b"protected");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_rename_new_rejects_parent_symlink() {
+        let root = sandbox();
+        let outside = sandbox();
+        fs::write(root.join("source.bin"), b"source").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("alias")).unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert!(adapter
+            .rename_file_new(Path::new("source.bin"), Path::new("alias/target.bin"))
+            .is_err());
+        assert_eq!(fs::read(root.join("source.bin")).unwrap(), b"source");
+        assert!(!outside.join("target.bin").exists());
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn atomic_rename_new_does_not_follow_destination_symlink() {
         let root = sandbox();
         fs::write(root.join("source.bin"), b"source").unwrap();
