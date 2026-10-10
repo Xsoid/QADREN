@@ -2738,6 +2738,44 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn prepared_copy_byte_verification_detects_same_size_corruption() {
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"original").unwrap();
+        fs::write(root.join("copy.bin"), b"changed!").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let source = Path::new("source.bin");
+        let destination = Path::new("copy.bin");
+        let expected = adapter.inspect_content(source).unwrap();
+        let consent = ContentReadConsent::GrantedForThisOperation;
+        assert!(!adapter
+            .verify_move_copy_bytes(source, destination, expected, consent)
+            .unwrap());
+        fs::write(root.join("copy.bin"), b"original").unwrap();
+        assert!(adapter
+            .verify_move_copy_bytes(source, destination, expected, consent)
+            .unwrap());
+        assert_eq!(fs::read(root.join("source.bin")).unwrap(), b"original");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn prepared_copy_byte_verification_never_opens_mac_content() {
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"original").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let source = Path::new("source.bin");
+        let expected = adapter.inspect_content(source).unwrap();
+        let consent = ContentReadConsent::GrantedForThisOperation;
+        assert!(matches!(
+            adapter.verify_move_copy_bytes(source, Path::new("copy.bin"), expected, consent),
+            Err(LocalError::UnsafeEntry)
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn move_copy_reconciliation_reports_only_metadata_not_integrity() {
