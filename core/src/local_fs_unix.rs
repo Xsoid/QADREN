@@ -270,7 +270,12 @@ pub(super) fn create_directory_with_post_mkdir_check<F: FnOnce() -> io::Result<(
 /// Ensure a temporary directory entry still refers to the inode opened by
 /// this operation. This detects replaced names; it is not an atomic guarantee
 /// against a malicious process with write access to the same directory.
-fn same_temporary_inode(directory: &File, temporary: &CStr, output: &File, expected_links: u64) -> bool {
+fn same_temporary_inode(
+    directory: &File,
+    temporary: &CStr,
+    output: &File,
+    expected_links: u64,
+) -> bool {
     let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
     if unsafe {
         libc::fstatat(
@@ -323,7 +328,12 @@ pub(super) fn create_with_post_link_check<R: Read, F: FnOnce() -> io::Result<()>
         let bytes = io::copy(input, &mut output)?;
         output.flush()?;
         output.sync_all()?;
-        if !same_temporary_inode(&directory, &temporary, &output, if published { 2 } else { 1 }) {
+        if !same_temporary_inode(
+            &directory,
+            &temporary,
+            &output,
+            if published { 2 } else { 1 },
+        ) {
             return Err(LocalError::UnsafeEntry);
         }
         let linked = unsafe {
@@ -350,7 +360,12 @@ pub(super) fn create_with_post_link_check<R: Read, F: FnOnce() -> io::Result<()>
     })();
     // Even after publication, never unlink a staging pathname replaced
     // by another writer. The published destination requires reconciliation.
-    if !same_temporary_inode(&directory, &temporary, &output, if published { 2 } else { 1 }) {
+    if !same_temporary_inode(
+        &directory,
+        &temporary,
+        &output,
+        if published { 2 } else { 1 },
+    ) {
         return if published {
             Err(LocalError::OutcomeUnknown(io::Error::other(
                 "temporary file identity changed after publication",
