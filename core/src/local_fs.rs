@@ -732,11 +732,7 @@ impl LocalFilesystem {
 
     /// Recheck the source inode and destination vacancy before a proposed
     /// move. This does not authorize deletion or close the rename race.
-    pub fn preview_move_identity(
-        &self,
-        from: &Path,
-        to: &Path,
-    ) -> Result<LocalFileIdentity> {
+    pub fn preview_move_identity(&self, from: &Path, to: &Path) -> Result<LocalFileIdentity> {
         self.preview_move_new(from, to)?;
         self.file_identity(from)
     }
