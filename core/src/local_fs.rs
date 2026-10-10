@@ -580,7 +580,23 @@ impl LocalFilesystem {
         for component in path.components() {
             prefix.push(component.as_os_str());
             match self.stat(&prefix) {
-                Ok(entry) if entry.is_directory => continue,
+                Ok(entry) if entry.is_directory => {
+                    // On case-insensitive volumes stat may resolve a different
+                    // spelling. Do not silently accept that alias.
+                    let parent = prefix.parent().ok_or(LocalError::InvalidPath)?;
+                    let expected = prefix
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .ok_or(LocalError::UnsafeEntry)?;
+                    let exact = self
+                        .list(parent)?
+                        .iter()
+                        .any(|item| item.name == expected);
+                    if !exact {
+                        return Err(LocalError::AlreadyExists);
+                    }
+                    continue;
+                },
                 Ok(_) => {
                     if created > 0 {
                         return Err(LocalError::OutcomeUnknown(io::Error::other(
