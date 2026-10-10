@@ -594,8 +594,22 @@ impl LocalFilesystem {
         Self::relative(to)?;
         #[cfg(unix)]
         {
-            let source = self.file_identity(from)?;
-            let staged = self.file_identity(to)?;
+            // A missing name is a negative reconciliation result, not an
+            // exceptional I/O failure. Never recreate either name here.
+            let source = match self.file_identity(from) {
+                Ok(identity) => identity,
+                Err(LocalError::Io(ref error)) if error.kind() == io::ErrorKind::NotFound => {
+                    return Ok(false);
+                }
+                Err(error) => return Err(error),
+            };
+            let staged = match self.file_identity(to) {
+                Ok(identity) => identity,
+                Err(LocalError::Io(ref error)) if error.kind() == io::ErrorKind::NotFound => {
+                    return Ok(false);
+                }
+                Err(error) => return Err(error),
+            };
             Ok(source == expected && staged == expected)
         }
         #[cfg(not(unix))]
@@ -1794,6 +1808,27 @@ mod tests {
             Err(LocalError::AlreadyExists)
         ));
         assert_eq!(fs::read(root.join("occupied.bin")).unwrap(), b"protected");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_reconciliation_reports_missing_names_without_recreating() {
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"original").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let source = Path::new("source.bin");
+        let staged = Path::new("staged.bin");
+        let expected = adapter.file_identity(source).unwrap();
+        assert!(!adapter
+            .reconcile_staged_link(source, staged, expected)
+            .unwrap());
+        assert!(!root.join("staged.bin").exists());
+        fs::rename(root.join("source.bin"), root.join("retained.bin")).unwrap();
+        assert!(!adapter
+            .reconcile_staged_link(source, staged, expected)
+            .unwrap());
+        assert_eq!(fs::read(root.join("retained.bin")).unwrap(), b"original");
         fs::remove_dir_all(root).unwrap();
     }
 
