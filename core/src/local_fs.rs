@@ -59,9 +59,19 @@ fn validate_copy_source(
     after: &std::fs::Metadata,
     bytes: u64,
 ) -> Result<()> {
-    if before.len() != after.len()
-        || before.modified().ok() != after.modified().ok()
-        || bytes != before.len()
+    use std::os::unix::fs::MetadataExt;
+
+    // Compare the opened inode, not the source pathname. Nanosecond mtime
+    // and ctime catch more same-length mutations than modified() alone.
+    // This remains best-effort detection, not an immutable snapshot.
+    if bytes != before.len()
+        || before.dev() != after.dev()
+        || before.ino() != after.ino()
+        || before.len() != after.len()
+        || before.mtime() != after.mtime()
+        || before.mtime_nsec() != after.mtime_nsec()
+        || before.ctime() != after.ctime()
+        || before.ctime_nsec() != after.ctime_nsec()
     {
         return Err(LocalError::OutcomeUnknown(io::Error::other(
             "source metadata changed during local copy",
@@ -869,6 +879,21 @@ mod tests {
         let after = fs::metadata(&source).unwrap();
         assert!(matches!(
             validate_copy_source(&before, &after, 3),
+            Err(LocalError::OutcomeUnknown(_))
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn copy_source_verification_rejects_truncated_transfer() {
+        let root = sandbox();
+        let source = root.join("stable.bin");
+        fs::write(&source, b"stable-data").unwrap();
+        let metadata = fs::metadata(&source).unwrap();
+        assert!(validate_copy_source(&metadata, &metadata, 11).is_ok());
+        assert!(matches!(
+            validate_copy_source(&metadata, &metadata, 4),
             Err(LocalError::OutcomeUnknown(_))
         ));
         fs::remove_dir_all(root).unwrap();
