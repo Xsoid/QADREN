@@ -673,11 +673,7 @@ impl LocalFilesystem {
                 .to_str()
                 .ok_or(LocalError::UnsafeEntry)?
                 .to_lowercase();
-            if self
-                .list(parent)?
-                .iter()
-                .any(|entry| entry.name.to_lowercase() == leaf)
-            {
+            if secure::has_case_collision(&self.root_fd, parent, &leaf)? {
                 return Err(LocalError::AlreadyExists);
             }
         }
@@ -1710,6 +1706,29 @@ mod tests {
             Err(LocalError::AlreadyExists)
         ));
         assert_eq!(fs::read(root.join("occupied.bin")).unwrap(), b"protected");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_creation_allows_unrelated_symlink_in_directory() {
+        let root = sandbox();
+        std::os::unix::fs::symlink("missing-target", root.join("unrelated-link")).unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert_eq!(
+            adapter
+                .create_from_reader(
+                    Path::new("safe-file.bin"),
+                    &mut io::Cursor::new(b"data"),
+                )
+                .unwrap(),
+            4
+        );
+        assert_eq!(fs::read(root.join("safe-file.bin")).unwrap(), b"data");
+        assert!(fs::symlink_metadata(root.join("unrelated-link"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
         fs::remove_dir_all(root).unwrap();
     }
 
