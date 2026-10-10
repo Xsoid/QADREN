@@ -584,7 +584,10 @@ impl LocalFilesystem {
                 before.ctime(),
                 before.ctime_nsec(),
             );
-            if opened_identity != expected.identity || opened_stamp != expected.change_stamp {
+            if opened_identity != expected.identity
+                || opened_stamp != expected.change_stamp
+                || before.nlink() != 1
+            {
                 return Err(LocalError::UnsafeEntry);
             }
             // Reject short or growing streams before publishing the staged
@@ -2613,6 +2616,27 @@ mod tests {
         assert_eq!(observed, adapter.file_identity(source).unwrap());
         assert!(!root.join("destination.bin").exists());
         assert_eq!(fs::read(root.join("source.bin")).unwrap(), b"original");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn move_copy_preparation_rejects_hardlinked_source() {
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"original").unwrap();
+        fs::hard_link(root.join("source.bin"), root.join("alias.bin")).unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let from = Path::new("source.bin");
+        let expected = adapter.inspect_content(from).unwrap();
+        let result = adapter.prepare_move_copy_new(
+            from,
+            Path::new("copy.bin"),
+            expected,
+            ContentReadConsent::GrantedForThisOperation,
+        );
+        assert!(matches!(result, Err(LocalError::UnsafeEntry)));
+        assert!(!root.join("copy.bin").exists());
+        assert_eq!(fs::read(root.join("alias.bin")).unwrap(), b"original");
         fs::remove_dir_all(root).unwrap();
     }
 
