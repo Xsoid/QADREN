@@ -430,6 +430,48 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn staging_hardlink_injected_during_stream_blocks_publication() {
+        struct HardlinkReader {
+            staging: PathBuf,
+            alias: PathBuf,
+            done: bool,
+        }
+        impl io::Read for HardlinkReader {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if self.done {
+                    return Ok(0);
+                }
+                self.done = true;
+                fs::hard_link(&self.staging, &self.alias)?;
+                buf[0] = b'x';
+                Ok(1)
+            }
+        }
+        let root = sandbox();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let serial = 940006;
+        let staging = root.join(format!(".qadren-{}-{serial}.tmp", std::process::id()));
+        let alias = root.join("foreign-hardlink");
+        let result = secure::create_with_post_link_check(
+            &adapter.root_fd,
+            Path::new("destination.bin"),
+            &mut HardlinkReader {
+                staging: staging.clone(),
+                alias: alias.clone(),
+                done: false,
+            },
+            serial,
+            || Ok(()),
+        );
+        assert!(matches!(result, Err(LocalError::UnsafeEntry)));
+        assert!(!root.join("destination.bin").exists());
+        assert_eq!(fs::read(&alias).unwrap(), b"x");
+        assert_eq!(fs::read(&staging).unwrap(), b"x");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn staging_name_replacement_is_rejected_without_publishing() {
         struct SwapReader {
             root: PathBuf,
