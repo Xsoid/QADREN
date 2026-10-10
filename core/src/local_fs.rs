@@ -434,6 +434,21 @@ impl LocalFilesystem {
         Ok(created)
     }
 
+    /// Create a file only if the currently reported free space can cover the
+    /// expected payload and the caller's reserve. Capacity is not reserved;
+    /// the atomic writer still handles mid-transfer ENOSPC.
+    pub fn create_with_space_reserve<R: io::Read>(
+        &self,
+        target: &Path,
+        input: &mut R,
+        expected_bytes: u64,
+        reserve_bytes: u64,
+    ) -> Result<u64> {
+        Self::relative(target)?;
+        self.require_free_space(expected_bytes, reserve_bytes)?;
+        self.create_from_reader(target, input)
+    }
+
     /// Create a new file through directory descriptors, without following
     /// symlinks or replacing an existing target. Unsupported platforms fail closed.
     /// Reading cloud-backed local placeholders remains prohibited until guarded.
@@ -1109,6 +1124,28 @@ mod tests {
             Err(LocalError::OutcomeUnknown(_))
         ));
         assert!(output.changed);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reserved_creation_rejects_before_reading_or_publishing() {
+        struct PanicReader;
+        impl io::Read for PanicReader {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                panic!("reader must not be called when capacity check fails")
+            }
+        }
+        let root = sandbox();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let result = adapter.create_with_space_reserve(
+            Path::new("must-not-exist"),
+            &mut PanicReader,
+            u64::MAX,
+            1,
+        );
+        assert!(matches!(result, Err(LocalError::UnsafeEntry)));
+        assert!(!root.join("must-not-exist").exists());
         fs::remove_dir_all(root).unwrap();
     }
 
