@@ -252,7 +252,15 @@ impl LocalFilesystem {
         #[cfg(unix)]
         {
             let mut input = secure::open_content(&self.root_fd, path)?;
-            Ok(io::copy(&mut input, output)?)
+            #[cfg(target_os = "linux")]
+            let before = input.metadata()?;
+            let bytes = io::copy(&mut input, output)?;
+            #[cfg(target_os = "linux")]
+            {
+                let after = input.metadata().map_err(LocalError::OutcomeUnknown)?;
+                validate_copy_source(&before, &after, bytes)?;
+            }
+            Ok(bytes)
         }
         #[cfg(not(unix))]
         {
@@ -948,6 +956,48 @@ mod tests {
             assert!(!root.join("linked-copy.bin").exists());
         }
         assert_eq!(fs::read(root.join("source.bin")).unwrap(), b"original");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn read_stream_reports_unknown_on_source_mutation() {
+        struct MutatingWriter {
+            source: PathBuf,
+            bytes: Vec<u8>,
+            changed: bool,
+        }
+        impl io::Write for MutatingWriter {
+            fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+                if !self.changed {
+                    self.changed = true;
+                    fs::write(&self.source, b"changed and longer")?;
+                }
+                self.bytes.extend_from_slice(buffer);
+                Ok(buffer.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let root = sandbox();
+        let source = root.join("source.bin");
+        fs::write(&source, b"original").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let mut output = MutatingWriter {
+            source: source.clone(),
+            bytes: Vec::new(),
+            changed: false,
+        };
+        assert!(matches!(
+            adapter.read_to_writer(
+                Path::new("source.bin"),
+                &mut output,
+                ContentReadConsent::GrantedForThisOperation,
+            ),
+            Err(LocalError::OutcomeUnknown(_))
+        ));
+        assert!(output.changed);
         fs::remove_dir_all(root).unwrap();
     }
 
