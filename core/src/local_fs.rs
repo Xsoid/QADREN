@@ -7,9 +7,9 @@ use crate::capabilities::{CapabilityDeclaration, MetadataConfidence, Operations,
 use std::fs;
 #[cfg(unix)]
 use std::fs::File;
+use std::io;
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
-use std::io;
 #[cfg(any(not(unix), test))]
 use std::path::PathBuf;
 use std::path::{Component, Path};
