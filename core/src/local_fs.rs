@@ -2569,9 +2569,10 @@ mod tests {
         let src = Path::new("src.bin");
         let dst = Path::new("new.bin");
         let expected = adapter.inspect_content(src).unwrap();
-        let copied = adapter.prepare_move_copy_new(
-            src, dst, expected, ContentReadConsent::GrantedForThisOperation,
-        ).unwrap();
+        let consent = ContentReadConsent::GrantedForThisOperation;
+        let copied = adapter
+            .prepare_move_copy_new(src, dst, expected, consent)
+            .unwrap();
         assert_eq!(copied, 8);
         assert_eq!(fs::read(root.join("src.bin")).unwrap(), b"original");
         assert_eq!(fs::read(root.join("new.bin")).unwrap(), b"original");
