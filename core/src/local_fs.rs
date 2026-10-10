@@ -2593,6 +2593,32 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn exact_size_move_stream_rejects_truncation_and_growth() {
+        let root = sandbox();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let mut short = Cursor::new(b"short".as_slice());
+        let mut short_reader = ExactSizeReader {
+            inner: &mut short,
+            remaining: 6,
+        };
+        assert!(adapter
+            .create_from_reader(Path::new("short.bin"), &mut short_reader)
+            .is_err());
+        assert!(!root.join("short.bin").exists());
+        let mut long = Cursor::new(b"too-long".as_slice());
+        let mut long_reader = ExactSizeReader {
+            inner: &mut long,
+            remaining: 3,
+        };
+        assert!(adapter
+            .create_from_reader(Path::new("long.bin"), &mut long_reader)
+            .is_err());
+        assert!(!root.join("long.bin").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn move_copy_preparation_keeps_original_and_refuses_overwrite() {
         let root = sandbox();
         fs::write(root.join("src.bin"), b"original").unwrap();
