@@ -596,7 +596,7 @@ impl LocalFilesystem {
                         return Err(LocalError::AlreadyExists);
                     }
                     continue;
-                },
+                }
                 Ok(_) => {
                     if created > 0 {
                         return Err(LocalError::OutcomeUnknown(io::Error::other(
