@@ -2645,6 +2645,30 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn verified_reader_does_not_publish_changed_source() {
+        let root = sandbox();
+        let source_path = root.join("source.bin");
+        fs::write(&source_path, b"original").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let mut source = fs::File::open(&source_path).unwrap();
+        let baseline = source.metadata().unwrap();
+        fs::write(&source_path, b"modified").unwrap();
+        let mut verified = VerifiedCopyReader {
+            inner: ExactSizeReader {
+                inner: &mut source,
+                remaining: baseline.len(),
+            },
+            baseline,
+        };
+        let result = adapter.create_from_reader(Path::new("new.bin"), &mut verified);
+        assert!(result.is_err());
+        assert!(!root.join("new.bin").exists());
+        assert_eq!(fs::read(source_path).unwrap(), b"modified");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn verified_copy_reader_rejects_mutation_before_publication() {
         let root = sandbox();
         let source_path = root.join("source.bin");
