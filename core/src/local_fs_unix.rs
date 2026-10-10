@@ -99,6 +99,41 @@ pub fn root(path: &Path) -> Result<File> {
     Ok(current)
 }
 
+/// Detect whether two pinned roots are identical or nested without
+/// opening file contents or relying on canonical pathname comparisons.
+pub fn roots_overlap(first: &File, second: &File) -> Result<bool> {
+    fn ancestor_contains(root: &File, target: (u64, u64)) -> Result<bool> {
+        let mut current = root.try_clone()?;
+        let dotdot = CString::new("..").map_err(|_| LocalError::InvalidPath)?;
+        for _ in 0..1024 {
+            let metadata = current.metadata()?;
+            let identity = (metadata.dev(), metadata.ino());
+            if identity == target {
+                return Ok(true);
+            }
+            let parent = opened(unsafe {
+                openat(
+                    current.as_raw_fd(),
+                    dotdot.as_ptr(),
+                    RDONLY | DIRECTORY | NOFOLLOW | CLOEXEC,
+                )
+            })?;
+            let higher = parent.metadata()?;
+            if (higher.dev(), higher.ino()) == identity {
+                return Ok(false);
+            }
+            current = parent;
+        }
+        Err(LocalError::UnsafeEntry)
+    }
+    let a = first.metadata()?;
+    let b = second.metadata()?;
+    Ok(
+        ancestor_contains(first, (b.dev(), b.ino()))?
+            || ancestor_contains(second, (a.dev(), a.ino()))?,
+    )
+}
+
 fn parent(root: &File, relative: &Path) -> Result<(File, CString)> {
     let mut components = relative.components().peekable();
     let mut current = root.try_clone()?;
