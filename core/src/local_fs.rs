@@ -60,22 +60,28 @@ pub struct LocalFilesystem {
 
 impl LocalFilesystem {
     pub fn open(root: &Path) -> Result<Self> {
-        let meta = fs::symlink_metadata(root)?;
-        if meta.file_type().is_symlink() {
-            return Err(LocalError::UnsafeEntry);
-        }
-        if !meta.is_dir() {
-            return Err(LocalError::NotDirectory);
-        }
-        let canonical = fs::canonicalize(root)?;
         #[cfg(unix)]
-        let root_fd = secure::root(&canonical)?;
-        Ok(Self {
-            #[cfg(not(unix))]
-            root: canonical,
-            #[cfg(unix)]
-            root_fd,
-        })
+        {
+            // Pin the requested directory immediately. Checking a pathname,
+            // canonicalizing it and opening it later leaves a root-swap race.
+            let root_fd = secure::root(root)?;
+            if !root_fd.metadata()?.is_dir() {
+                return Err(LocalError::NotDirectory);
+            }
+            Ok(Self { root_fd })
+        }
+        #[cfg(not(unix))]
+        {
+            let meta = fs::symlink_metadata(root)?;
+            if meta.file_type().is_symlink() {
+                return Err(LocalError::UnsafeEntry);
+            }
+            if !meta.is_dir() {
+                return Err(LocalError::NotDirectory);
+            }
+            let canonical = fs::canonicalize(root)?;
+            Ok(Self { root: canonical })
+        }
     }
 
     fn relative(path: &Path) -> Result<()> {
@@ -356,6 +362,23 @@ mod tests {
         let entries = adapter.list(Path::new("entries")).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].size, 8);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_root_is_rejected_before_any_content_access() {
+        use std::os::unix::fs::symlink;
+        let root = sandbox();
+        let parent = sandbox();
+        let alias = parent.join("linked-root");
+        symlink(&root, &alias).unwrap();
+        assert!(matches!(
+            LocalFilesystem::open(&alias),
+            Err(LocalError::UnsafeEntry)
+        ));
+        assert!(LocalFilesystem::open(&root).is_ok());
+        fs::remove_dir_all(parent).unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 
