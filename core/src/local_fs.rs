@@ -1775,6 +1775,22 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn stage_move_rejects_case_alias_without_changing_source() {
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"original").unwrap();
+        fs::write(root.join("TARGET.BIN"), b"protected").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert!(matches!(
+            adapter.stage_move_link_new(Path::new("source.bin"), Path::new("target.bin")),
+            Err(LocalError::AlreadyExists)
+        ));
+        assert_eq!(fs::read(root.join("source.bin")).unwrap(), b"original");
+        assert_eq!(fs::read(root.join("TARGET.BIN")).unwrap(), b"protected");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn stage_move_rejects_symlink_source_without_publishing() {
         let root = sandbox();
         fs::write(root.join("real.bin"), b"protected").unwrap();
