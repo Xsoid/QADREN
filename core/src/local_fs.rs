@@ -201,6 +201,20 @@ impl LocalFilesystem {
         }
     }
 
+    /// Return POSIX mode bits without reading content. This is advisory:
+    /// ACLs, effective user identity and filesystem policy can still deny access.
+    pub fn mode_bits(&self, path: &Path) -> Result<u32> {
+        Self::relative(path)?;
+        #[cfg(unix)]
+        {
+            secure::file_mode(&self.root_fd, path)
+        }
+        #[cfg(not(unix))]
+        {
+            Err(LocalError::UnsafeEntry)
+        }
+    }
+
     /// Query filesystem capacity without reading any file contents.
     /// This must not be interpreted as a reservation of free space.
     pub fn storage_space(&self) -> Result<LocalStorageSpace> {
@@ -2272,6 +2286,40 @@ mod tests {
             .unwrap());
         assert_eq!(fs::read(root.join("old.bin")).unwrap(), b"original");
         assert_eq!(fs::read(root.join("staged.bin")).unwrap(), b"original");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_mode_bits_report_file_and_directory_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = sandbox();
+        fs::write(root.join("file.bin"), b"content").unwrap();
+        fs::create_dir(root.join("folder")).unwrap();
+        fs::set_permissions(root.join("file.bin"), fs::Permissions::from_mode(0o640)).unwrap();
+        fs::set_permissions(root.join("folder"), fs::Permissions::from_mode(0o750)).unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert_eq!(adapter.mode_bits(Path::new("file.bin")).unwrap() & 0o777, 0o640);
+        assert_eq!(adapter.mode_bits(Path::new("folder")).unwrap() & 0o777, 0o750);
+        assert_eq!(fs::read(root.join("file.bin")).unwrap(), b"content");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_mode_bits_reject_symlink_and_traversal() {
+        let root = sandbox();
+        fs::write(root.join("file.bin"), b"content").unwrap();
+        std::os::unix::fs::symlink("file.bin", root.join("alias.bin")).unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert!(matches!(
+            adapter.mode_bits(Path::new("alias.bin")),
+            Err(LocalError::UnsafeEntry)
+        ));
+        assert!(matches!(
+            adapter.mode_bits(Path::new("../file.bin")),
+            Err(LocalError::InvalidPath)
+        ));
         fs::remove_dir_all(root).unwrap();
     }
 
