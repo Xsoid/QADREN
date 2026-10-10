@@ -730,6 +730,17 @@ impl LocalFilesystem {
         }
     }
 
+    /// Recheck the source inode and destination vacancy before a proposed
+    /// move. This does not authorize deletion or close the rename race.
+    pub fn preview_move_identity(
+        &self,
+        from: &Path,
+        to: &Path,
+    ) -> Result<LocalFileIdentity> {
+        self.preview_move_new(from, to)?;
+        self.file_identity(from)
+    }
+
     /// Observe the outcome of an ambiguous rename without changing files.
     /// Returns true only when the source name is missing and destination has
     /// the expected inode. This is not proof against subsequent mutations.
@@ -2478,6 +2489,21 @@ mod tests {
         fs::write(root.join("target.bin"), b"foreign").unwrap();
         assert!(!adapter.reconcile_renamed_file(from, to, expected).unwrap());
         assert_eq!(fs::read(root.join("retained.bin")).unwrap(), b"original");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn move_identity_preview_does_not_mutate_file() {
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"original").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let source = Path::new("source.bin");
+        let destination = Path::new("destination.bin");
+        let observed = adapter.preview_move_identity(source, destination).unwrap();
+        assert_eq!(observed, adapter.file_identity(source).unwrap());
+        assert!(!root.join("destination.bin").exists());
+        assert_eq!(fs::read(root.join("source.bin")).unwrap(), b"original");
         fs::remove_dir_all(root).unwrap();
     }
 
