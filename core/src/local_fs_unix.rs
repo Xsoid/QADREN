@@ -460,6 +460,29 @@ pub fn link_file_new(root: &File, from: &Path, to: &Path) -> Result<()> {
         };
     }
     // Published; all subsequent failures are ambiguous and MUST NOT retry.
+    // The source pathname must still resolve to the inspected inode.
+    // This is a best-effort race detector, not an atomic source guard.
+    let mut current_source = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe {
+        libc::fstatat(
+            source_dir.as_raw_fd(),
+            source_name.as_ptr(),
+            current_source.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return Err(LocalError::OutcomeUnknown(io::Error::last_os_error()));
+    }
+    let current_source = unsafe { current_source.assume_init() };
+    if current_source.st_dev != source_info.st_dev
+        || current_source.st_ino != source_info.st_ino
+        || current_source.st_mode & libc::S_IFMT != libc::S_IFREG
+    {
+        return Err(LocalError::OutcomeUnknown(io::Error::other(
+            "source pathname changed during hard-link publication",
+        )));
+    }
     target_dir.sync_all().map_err(LocalError::OutcomeUnknown)?;
     let mut target_info = std::mem::MaybeUninit::<libc::stat>::uninit();
     if unsafe {
