@@ -375,8 +375,10 @@ mod tests {
         }
         let root = sandbox();
         let adapter = LocalFilesystem::open(&root).unwrap();
-        let result = adapter
-            .create_from_reader(Path::new("disk-full.bin"), &mut DiskFullAfterFirstChunk(false));
+        let result = adapter.create_from_reader(
+            Path::new("disk-full.bin"),
+            &mut DiskFullAfterFirstChunk(false),
+        );
         assert!(matches!(
             result,
             Err(LocalError::Io(ref e)) if e.raw_os_error() == Some(libc::ENOSPC)
