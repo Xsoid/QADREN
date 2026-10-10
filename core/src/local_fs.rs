@@ -79,6 +79,9 @@ pub enum LocalContentResidency {
 pub struct LocalContentInspection {
     pub identity: LocalFileIdentity,
     pub residency: LocalContentResidency,
+    /// Modification and status-change timestamps (seconds, nanoseconds).
+    /// Observational: these do not guarantee content immutability.
+    pub change_stamp: (i64, i64, i64, i64),
 }
 
 /// Filesystem capacity reported by the OS for the pinned local root.
@@ -567,14 +570,25 @@ impl LocalFilesystem {
     pub fn inspect_content(&self, path: &Path) -> Result<LocalContentInspection> {
         Self::relative(path)?;
         let before = self.file_identity(path)?;
+        #[cfg(unix)]
+        let prior_stamp = secure::file_change_stamp(&self.root_fd, path)?;
         let residency = self.content_residency(path)?;
+        #[cfg(unix)]
+        let change_stamp = secure::file_change_stamp(&self.root_fd, path)?;
         let after = self.file_identity(path)?;
+        #[cfg(not(unix))]
+        let change_stamp = (0, 0, 0, 0);
         if before != after {
+            return Err(LocalError::UnsafeEntry);
+        }
+        #[cfg(unix)]
+        if prior_stamp != change_stamp {
             return Err(LocalError::UnsafeEntry);
         }
         Ok(LocalContentInspection {
             identity: after,
             residency,
+            change_stamp,
         })
     }
 
@@ -1969,6 +1983,41 @@ mod tests {
             Err(LocalError::UnsafeEntry)
         ));
         assert_eq!(fs::read(root.join("one.bin")).unwrap(), b"one");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inspection_detects_same_length_content_rewrite() {
+        use std::io::{Seek, SeekFrom, Write};
+        let root = sandbox();
+        fs::write(root.join("item.bin"), b"original").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let path = Path::new("item.bin");
+        let observed = adapter.inspect_content(path).unwrap();
+        let mut file = fs::OpenOptions::new().write(true).open(root.join("item.bin")).unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(b"REPLACED").unwrap();
+        file.sync_all().unwrap();
+        assert_eq!(adapter.file_identity(path).unwrap(), observed.identity);
+        assert!(!adapter
+            .revalidate_content_inspection(path, observed)
+            .unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inspection_batch_detects_same_size_rewrite() {
+        let root = sandbox();
+        fs::write(root.join("one.bin"), b"original").unwrap();
+        fs::write(root.join("two.bin"), b"second__").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let paths = [Path::new("one.bin"), Path::new("two.bin")];
+        let earlier = adapter.inspect_content_batch(&paths).unwrap();
+        fs::write(root.join("two.bin"), b"UPDATED_").unwrap();
+        assert_eq!(adapter.file_identity(paths[1]).unwrap(), earlier[1].identity);
+        assert!(!adapter.revalidate_content_batch(&paths, &earlier).unwrap());
         fs::remove_dir_all(root).unwrap();
     }
 
