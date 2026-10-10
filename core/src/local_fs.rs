@@ -6,6 +6,7 @@
 use std::fs;
 #[cfg(unix)]
 use std::fs::File;
+use crate::capabilities::{CapabilityDeclaration, MetadataConfidence, Operations, Platform};
 use std::io;
 #[cfg(any(not(unix), test))]
 use std::path::PathBuf;
@@ -60,6 +61,31 @@ pub struct LocalFilesystem {
 }
 
 impl LocalFilesystem {
+    /// Describe only implemented operations; successful opening establishes
+    /// the local root prerequisite, not consent for any content transfer.
+    pub fn capabilities(&self) -> CapabilityDeclaration {
+        let _ = self;
+        CapabilityDeclaration {
+            supported_platforms: vec![
+                #[cfg(target_os = "macos")]
+                Platform::MacOS,
+                #[cfg(target_os = "linux")]
+                Platform::Linux,
+                #[cfg(target_os = "windows")]
+                Platform::Windows,
+            ],
+            operations: Operations {
+                list_metadata: true,
+                read_content: cfg!(target_os = "linux"),
+                write_content: cfg!(unix),
+                streaming: cfg!(unix),
+                create_directory: cfg!(unix),
+                ..Operations::default()
+            },
+            prerequisites_verified: true,
+            metadata_confidence: MetadataConfidence::LocallyVerified,
+        }
+    }
     pub fn open(root: &Path) -> Result<Self> {
         #[cfg(unix)]
         {
@@ -286,6 +312,20 @@ mod tests {
             adapter.list_page(Path::new(""), 0, 10),
             Err(LocalError::UnsafeEntry)
         ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_capabilities_do_not_advertise_unsafe_operations() {
+        let root = sandbox();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let capabilities = adapter.capabilities();
+        assert!(capabilities.operations.list_metadata);
+        assert!(!capabilities.operations.rename);
+        assert!(!capabilities.operations.delete);
+        assert_eq!(capabilities.operations.read_content, cfg!(target_os = "linux"));
+        assert_eq!(capabilities.operations.write_content, cfg!(unix));
+        assert_eq!(capabilities.operations.create_directory, cfg!(unix));
         fs::remove_dir_all(root).unwrap();
     }
 
