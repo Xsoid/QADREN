@@ -320,7 +320,11 @@ impl LocalFilesystem {
     /// Traverse a local subtree using metadata only, with a hard entry limit.
     /// Paths are relative to the adapter root. No file content is opened.
     /// A symlink or unsafe entry anywhere in the subtree fails closed.
-    pub fn list_tree(&self, path: &Path, max_entries: usize) -> Result<Vec<(std::path::PathBuf, LocalEntry)>> {
+    pub fn list_tree(
+        &self,
+        path: &Path,
+        max_entries: usize,
+    ) -> Result<Vec<(std::path::PathBuf, LocalEntry)>> {
         if !path.as_os_str().is_empty() {
             Self::relative(path)?;
         }
