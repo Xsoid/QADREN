@@ -2289,6 +2289,25 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn staging_reconciliation_detects_destination_inode_swap() {
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"source").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let source = Path::new("source.bin");
+        let destination = Path::new("staged.bin");
+        let expected = adapter.file_identity(source).unwrap();
+        adapter.stage_move_link_new(source, destination).unwrap();
+        fs::rename(root.join("staged.bin"), root.join("original-link.bin")).unwrap();
+        fs::write(root.join("staged.bin"), b"foreign").unwrap();
+        assert!(!adapter.reconcile_staged_link(source, destination, expected).unwrap());
+        assert_eq!(fs::read(root.join("source.bin")).unwrap(), b"source");
+        assert_eq!(fs::read(root.join("original-link.bin")).unwrap(), b"source");
+        assert_eq!(fs::read(root.join("staged.bin")).unwrap(), b"foreign");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn stage_move_rejects_directory_source_without_new_name() {
         let root = sandbox();
         fs::create_dir(root.join("source")).unwrap();
