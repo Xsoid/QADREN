@@ -287,9 +287,11 @@ fn same_temporary_inode(directory: &File, temporary: &CStr, output: &File) -> bo
     let Ok(opened) = output.metadata() else {
         return false;
     };
-    u64::try_from(info.st_dev).ok() == Some(opened.dev())
-        && u64::try_from(info.st_ino).ok() == Some(opened.ino())
-        && info.st_nlink == 1
+    #[cfg(target_os = "macos")]
+    let same_device = u64::try_from(info.st_dev).ok() == Some(opened.dev());
+    #[cfg(target_os = "linux")]
+    let same_device = info.st_dev == opened.dev();
+    same_device && info.st_ino == opened.ino() && info.st_nlink == 1
 }
 
 pub fn create<R: Read>(root: &File, target: &Path, input: &mut R, serial: u64) -> Result<u64> {
