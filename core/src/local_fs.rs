@@ -1555,6 +1555,26 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn occupied_destination_is_rejected_before_streaming() {
+        struct PanicReader;
+        impl io::Read for PanicReader {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                panic!("existing destination must reject before reading")
+            }
+        }
+        let root = sandbox();
+        fs::write(root.join("occupied.bin"), b"protected").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert!(matches!(
+            adapter.create_from_reader(Path::new("occupied.bin"), &mut PanicReader),
+            Err(LocalError::AlreadyExists)
+        ));
+        assert_eq!(fs::read(root.join("occupied.bin")).unwrap(), b"protected");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn guarded_create_rejects_case_collision_before_reading() {
         struct PanicReader;
         impl io::Read for PanicReader {
