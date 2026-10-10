@@ -1,6 +1,6 @@
 //! Descriptor-relative, symlink-resistant non-overwriting file creation.
 //! Unix only. Every intermediate directory is opened with O_NOFOLLOW.
-use super::{LocalEntry, LocalError, Result};
+use super::{LocalEntry, LocalError, LocalFileIdentity, Result};
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -166,6 +166,32 @@ fn leaf_metadata(directory: &File, leaf: &CStr) -> Result<(bool, u64)> {
         return Err(LocalError::UnsafeEntry);
     }
     Ok((kind == libc::S_IFDIR, info.st_size.max(0) as u64))
+}
+
+/// Inspect an inode relative to the pinned root without opening content.
+pub fn file_identity(root: &File, target: &Path) -> Result<LocalFileIdentity> {
+    let (directory, leaf) = parent(root, target)?;
+    let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let status = unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            leaf.as_ptr(),
+            info.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if status != 0 {
+        return Err(LocalError::Io(io::Error::last_os_error()));
+    }
+    let info = unsafe { info.assume_init() };
+    if info.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Err(LocalError::UnsafeEntry);
+    }
+    Ok(LocalFileIdentity {
+        device: info.st_dev as u64,
+        inode: info.st_ino as u64,
+        size: info.st_size.max(0) as u64,
+    })
 }
 
 /// Enumerate via fdopendir/readdir. On macOS /dev/fd/N is not a
