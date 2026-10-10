@@ -109,6 +109,22 @@ pub fn rename_file_noreplace(root: &File, from: &Path, to: &Path) -> Result<()> 
             "renamed destination identity differs from preflight",
         )));
     }
+    // A recreated source path is not proof that the rename failed; report
+    // ambiguity and leave both paths untouched for explicit reconciliation.
+    let mut remaining = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let status = unsafe {
+        libc::fstatat(
+            source_dir.as_raw_fd(),
+            source_name.as_ptr(),
+            remaining.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if status == 0 || io::Error::last_os_error().kind() != io::ErrorKind::NotFound {
+        return Err(LocalError::OutcomeUnknown(io::Error::other(
+            "source pathname was not confirmed absent after rename",
+        )));
+    }
     source_dir.sync_all().map_err(LocalError::OutcomeUnknown)?;
     target_dir.sync_all().map_err(LocalError::OutcomeUnknown)?;
     Ok(())
