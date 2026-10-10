@@ -52,6 +52,69 @@ unsafe extern "C" {
     fn mkdirat(fd: c_int, path: *const c_char, mode: u32) -> c_int;
 }
 
+/// Rename a regular file without replacing the destination. This moves
+/// a directory entry atomically, but path-to-inode races still require
+/// post-operation reconciliation before any job reports success.
+pub fn rename_file_noreplace(root: &File, from: &Path, to: &Path) -> Result<()> {
+    let (source_dir, source_name) = parent(root, from)?;
+    let (target_dir, target_name) = parent(root, to)?;
+    let source = file_identity(root, from)?;
+    let source_info = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let mut source_info = source_info;
+    if unsafe {
+        libc::fstatat(
+            source_dir.as_raw_fd(),
+            source_name.as_ptr(),
+            source_info.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return Err(LocalError::Io(io::Error::last_os_error()));
+    }
+    let source_info = unsafe { source_info.assume_init() };
+    if source_info.st_nlink != 1 {
+        return Err(LocalError::UnsafeEntry);
+    }
+    #[cfg(target_os = "linux")]
+    let outcome = unsafe {
+        libc::renameat2(
+            source_dir.as_raw_fd(),
+            source_name.as_ptr(),
+            target_dir.as_raw_fd(),
+            target_name.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    #[cfg(target_os = "macos")]
+    let outcome = unsafe {
+        libc::renameatx_np(
+            source_dir.as_raw_fd(),
+            source_name.as_ptr(),
+            target_dir.as_raw_fd(),
+            target_name.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+    if outcome != 0 {
+        let error = io::Error::last_os_error();
+        return if error.kind() == io::ErrorKind::AlreadyExists {
+            Err(LocalError::AlreadyExists)
+        } else {
+            Err(LocalError::Io(error))
+        };
+    }
+    let current = file_identity(root, to);
+    if !matches!(current, Ok(identity) if identity == source) {
+        return Err(LocalError::OutcomeUnknown(io::Error::other(
+            "renamed destination identity differs from preflight",
+        )));
+    }
+    source_dir.sync_all().map_err(LocalError::OutcomeUnknown)?;
+    target_dir.sync_all().map_err(LocalError::OutcomeUnknown)?;
+    Ok(())
+}
+
 fn name(path: &std::ffi::OsStr) -> Result<CString> {
     CString::new(path.as_bytes()).map_err(|_| LocalError::InvalidPath)
 }
