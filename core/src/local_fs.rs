@@ -368,6 +368,30 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn staging_swap_after_publish_preserves_foreign_file() {
+        let root = sandbox();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let serial = 940004;
+        let staging = root.join(format!(".qadren-{}-{serial}.tmp", std::process::id()));
+        let moved = root.join("original-staging");
+        let result = secure::create_with_post_link_check(
+            &adapter.root_fd,
+            Path::new("published.bin"),
+            &mut Cursor::new(b"original"),
+            serial,
+            || {
+                fs::rename(&staging, &moved)?;
+                fs::write(&staging, b"foreign")
+            },
+        );
+        assert!(matches!(result, Err(LocalError::OutcomeUnknown(_))));
+        assert_eq!(fs::read(root.join("published.bin")).unwrap(), b"original");
+        assert_eq!(fs::read(staging).unwrap(), b"foreign");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn staging_name_replacement_is_rejected_without_publishing() {
         struct SwapReader {
             root: PathBuf,
