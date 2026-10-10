@@ -623,8 +623,8 @@ impl LocalFilesystem {
                         .file_name()
                         .and_then(|name| name.to_str())
                         .ok_or(LocalError::UnsafeEntry)?;
-                    let same_spelling = self
-                        .list(parent)?
+                    let entries = self.list(parent)?;
+                    let same_spelling = entries
                         .iter()
                         .any(|item| item.name == expected && item.is_directory);
                     if !same_spelling
