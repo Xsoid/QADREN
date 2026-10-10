@@ -59,8 +59,7 @@ pub fn rename_file_noreplace(root: &File, from: &Path, to: &Path) -> Result<()> 
     let (source_dir, source_name) = parent(root, from)?;
     let (target_dir, target_name) = parent(root, to)?;
     let source = file_identity(root, from)?;
-    let source_info = std::mem::MaybeUninit::<libc::stat>::uninit();
-    let mut source_info = source_info;
+    let mut source_info = std::mem::MaybeUninit::<libc::stat>::uninit();
     if unsafe {
         libc::fstatat(
             source_dir.as_raw_fd(),
