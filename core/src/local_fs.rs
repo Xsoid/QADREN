@@ -406,6 +406,30 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn destination_swap_after_publish_preserves_foreign_file() {
+        let root = sandbox();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let serial = 940005;
+        let destination = root.join("published.bin");
+        let displaced = root.join("displaced-published.bin");
+        let result = secure::create_with_post_link_check(
+            &adapter.root_fd,
+            Path::new("published.bin"),
+            &mut Cursor::new(b"original"),
+            serial,
+            || {
+                fs::rename(&destination, &displaced)?;
+                fs::write(&destination, b"foreign")
+            },
+        );
+        assert!(matches!(result, Err(LocalError::OutcomeUnknown(_))));
+        assert_eq!(fs::read(&destination).unwrap(), b"foreign");
+        assert_eq!(fs::read(&displaced).unwrap(), b"original");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn staging_name_replacement_is_rejected_without_publishing() {
         struct SwapReader {
             root: PathBuf,
