@@ -2267,6 +2267,60 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn staged_link_post_publish_io_error_keeps_both_names() {
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"original").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let result = secure::link_file_new_with_post_link_check(
+            &adapter.root_fd,
+            Path::new("source.bin"),
+            Path::new("staged.bin"),
+            || Err(io::Error::other("injected post-link failure")),
+        );
+        assert!(matches!(result, Err(LocalError::OutcomeUnknown(_))));
+        assert_eq!(fs::read(root.join("source.bin")).unwrap(), b"original");
+        assert_eq!(fs::read(root.join("staged.bin")).unwrap(), b"original");
+        assert!(matches!(
+            adapter.stage_move_link_new(Path::new("source.bin"), Path::new("staged.bin")),
+            Err(LocalError::AlreadyExists)
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stage_move_rejects_directory_source_without_new_name() {
+        let root = sandbox();
+        fs::create_dir(root.join("source")).unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert!(matches!(
+            adapter.stage_move_link_new(Path::new("source"), Path::new("staged")),
+            Err(LocalError::UnsafeEntry)
+        ));
+        assert!(!root.join("staged").exists());
+        assert!(root.join("source").is_dir());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stage_move_rejects_symlink_destination_without_altering_target() {
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"source").unwrap();
+        fs::write(root.join("target.bin"), b"target").unwrap();
+        std::os::unix::fs::symlink("target.bin", root.join("destination.bin")).unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert!(matches!(
+            adapter.stage_move_link_new(Path::new("source.bin"), Path::new("destination.bin")),
+            Err(LocalError::AlreadyExists)
+        ));
+        assert_eq!(fs::read(root.join("source.bin")).unwrap(), b"source");
+        assert_eq!(fs::read(root.join("target.bin")).unwrap(), b"target");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn hard_link_source_swap_after_publish_is_unknown_without_cleanup() {
         let root = sandbox();
         fs::write(root.join("source.bin"), b"original").unwrap();
