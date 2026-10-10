@@ -54,6 +54,18 @@ unsafe extern "C" {
 
 /// Classify syscall failure without treating an interrupted rename as
 /// safely retryable: a namespace mutation may already have occurred.
+/// Do not rename or publish an alias of a known macOS dataless
+/// placeholder. Metadata does not establish that other File Provider files
+/// are fully local, so this is only a conservative negative guard.
+#[cfg(target_os = "macos")]
+fn reject_dataless_mutation(info: &libc::stat) -> Result<()> {
+    const SF_DATALESS: u32 = 0x4000_0000;
+    if info.st_flags & SF_DATALESS != 0 {
+        return Err(LocalError::UnsafeEntry);
+    }
+    Ok(())
+}
+
 fn rename_failure(error: io::Error) -> LocalError {
     if error.kind() == io::ErrorKind::AlreadyExists {
         LocalError::AlreadyExists
@@ -84,6 +96,8 @@ pub fn rename_file_noreplace(root: &File, from: &Path, to: &Path) -> Result<()> 
         return Err(LocalError::Io(io::Error::last_os_error()));
     }
     let source_info = unsafe { source_info.assume_init() };
+    #[cfg(target_os = "macos")]
+    reject_dataless_mutation(&source_info)?;
     if source_info.st_nlink != 1
         || source_info.st_dev as u64 != source.device
         || source_info.st_ino != source.inode
@@ -649,6 +663,8 @@ pub(super) fn link_file_new_with_post_link_check<F: FnOnce() -> io::Result<()>>(
         return Err(LocalError::Io(io::Error::last_os_error()));
     }
     let source_info = unsafe { source_info.assume_init() };
+    #[cfg(target_os = "macos")]
+    reject_dataless_mutation(&source_info)?;
     if source_info.st_mode & libc::S_IFMT != libc::S_IFREG {
         return Err(LocalError::UnsafeEntry);
     }
