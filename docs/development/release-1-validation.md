@@ -72,3 +72,9 @@
 - `44909b5` добавляет `copy_file_new(from, to, consent)`: Linux читает через pinned descriptor и публикует только новый файл без overwrite; отказ в consent запрещает чтение и создание. На macOS метод намеренно fail-closed даже при consent до верификации File Provider placeholder residency; не считать этот путь готовым для macOS.
 - Добавлен негативный тест отсутствия согласия, существующего destination и неизменности данных; для Linux также успешная локальная копия.
 - Новый код ещё не подтверждён macOS CI/локальным запуском; операция не подключена к Job Engine. Rename/move/delete, macOS content residency и настоящие fault-injection испытания остаются открытыми.
+
+### Local copy safety regression (2026-10-11)
+
+- Пользователь подтвердил `ca747a0`: `scripts/test-core.sh`, fmt/Clippy пройдены, **100/100** Rust tests, doc-tests (0) успешны.
+- `38d5c99` добавляет негативный тест `copy_file_new`: отклонение source/destination с `..`, отсутствующего source и symlink источника (Unix), без публикации целевого файла или изменения исходного содержимого.
+- Дополнительный тест ещё не проверен на macOS. На macOS content read/copy остаются fail-closed до residency проверки; недоверенные перемещения, переименования и удаления не реализованы.
