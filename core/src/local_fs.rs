@@ -361,6 +361,30 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn temporary_name_collision_does_not_modify_existing_file() {
+        let root = sandbox();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let serial = 730001_u64;
+        let temp = root.join(format!(".qadren-{}-{serial}.tmp", std::process::id()));
+        fs::write(&temp, b"another operation").unwrap();
+        let result = secure::create_with_post_link_check(
+            &adapter.root_fd,
+            Path::new("destination.bin"),
+            &mut Cursor::new(b"replacement"),
+            serial,
+            || Ok(()),
+        );
+        assert!(matches!(
+            result,
+            Err(LocalError::AlreadyExists) | Err(LocalError::Io(_))
+        ));
+        assert_eq!(fs::read(&temp).unwrap(), b"another operation");
+        assert!(!root.join("destination.bin").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn mkdir_after_creation_failure_is_unknown_and_preserves_directory() {
         let root = sandbox();
         let adapter = LocalFilesystem::open(&root).unwrap();
