@@ -148,6 +148,22 @@ impl LocalFilesystem {
         }
     }
 
+    /// Enforce a conservative capacity preflight before starting a transfer.
+    /// This is not a space reservation; the write path must still handle ENOSPC.
+    pub fn require_free_space(&self, incoming_bytes: u64, reserve_bytes: u64) -> Result<()> {
+        let required = incoming_bytes
+            .checked_add(reserve_bytes)
+            .ok_or(LocalError::UnsafeEntry)?;
+        let space = self.storage_space()?;
+        if space.available_bytes < required {
+            return Err(LocalError::Io(io::Error::new(
+                io::ErrorKind::StorageFull,
+                "insufficient free space for requested transfer and reserve",
+            )));
+        }
+        Ok(())
+    }
+
     pub fn open(root: &Path) -> Result<Self> {
         #[cfg(unix)]
         {
@@ -1093,6 +1109,26 @@ mod tests {
             Err(LocalError::OutcomeUnknown(_))
         ));
         assert!(output.changed);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capacity_preflight_rejects_unfulfillable_transfer() {
+        let root = sandbox();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let available = adapter.storage_space().unwrap().available_bytes;
+        assert!(adapter.require_free_space(0, 0).is_ok());
+        assert!(matches!(
+            adapter.require_free_space(u64::MAX, 1),
+            Err(LocalError::UnsafeEntry)
+        ));
+        if available < u64::MAX {
+            assert!(matches!(
+                adapter.require_free_space(available + 1, 0),
+                Err(LocalError::Io(ref error)) if error.kind() == io::ErrorKind::StorageFull
+            ));
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
