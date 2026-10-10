@@ -539,6 +539,16 @@ impl LocalFilesystem {
                         return Err(LocalError::NotDirectory);
                     }
                 }
+                #[cfg(unix)]
+                {
+                    let leaf = to
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .ok_or(LocalError::UnsafeEntry)?;
+                    if secure::has_case_collision(&self.root_fd, parent, leaf)? {
+                        return Err(LocalError::AlreadyExists);
+                    }
+                }
                 Ok(source)
             }
             Err(error) => Err(error),
@@ -2262,6 +2272,46 @@ mod tests {
             .unwrap());
         assert_eq!(fs::read(root.join("old.bin")).unwrap(), b"original");
         assert_eq!(fs::read(root.join("staged.bin")).unwrap(), b"original");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn move_preview_rejects_case_alias_destination() {
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"source").unwrap();
+        fs::write(root.join("TARGET.bin"), b"protected").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let from = Path::new("source.bin");
+        let to = Path::new("target.bin");
+        assert!(matches!(
+            adapter.preview_move_new(from, to),
+            Err(LocalError::AlreadyExists)
+        ));
+        let expected = adapter.file_identity(from).unwrap();
+        assert!(matches!(
+            adapter.revalidate_move_new(from, to, expected),
+            Err(LocalError::AlreadyExists)
+        ));
+        assert_eq!(fs::read(root.join("TARGET.bin")).unwrap(), b"protected");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn move_preview_allows_distinct_destination_without_mutation() {
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"source").unwrap();
+        fs::create_dir(root.join("destination")).unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let from = Path::new("source.bin");
+        let to = Path::new("destination/new.bin");
+        let preview = adapter.preview_move_new(from, to).unwrap();
+        assert_eq!(preview.size, 6);
+        let expected = adapter.file_identity(from).unwrap();
+        adapter.revalidate_move_new(from, to, expected).unwrap();
+        assert!(!root.join("destination/new.bin").exists());
+        assert_eq!(fs::read(root.join("source.bin")).unwrap(), b"source");
         fs::remove_dir_all(root).unwrap();
     }
 
