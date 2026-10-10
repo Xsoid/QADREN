@@ -172,18 +172,16 @@ impl LocalFilesystem {
                 Platform::MacOS,
                 #[cfg(target_os = "linux")]
                 Platform::Linux,
-                #[cfg(target_os = "windows")]
-                Platform::Windows,
             ],
             operations: Operations {
-                list_metadata: true,
+                list_metadata: cfg!(unix),
                 read_content: cfg!(target_os = "linux"),
                 write_content: cfg!(unix),
                 streaming: cfg!(unix),
                 create_directory: cfg!(unix),
                 ..Operations::default()
             },
-            prerequisites_verified: true,
+            prerequisites_verified: cfg!(unix),
             metadata_confidence: MetadataConfidence::LocallyVerified,
         }
     }
