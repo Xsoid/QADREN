@@ -161,3 +161,9 @@
 - Пользователь подтвердил `15e7e0a` на macOS: форматирование, Clippy и 110/110 Rust unit tests без ошибок.
 - `28a8712`, `d9934c6`: введены `LocalFileIdentity` (device/inode/size) и `LocalFilesystem::file_identity(path)`. Unix реализация использует `fstatat(AT_SYMLINK_NOFOLLOW)` относительно pinned root, не открывает содержимое; тест проверяет сохранение идентичности после внешнего переименования и запрет traversal.
 - Полученный идентификатор пригоден для сопоставления результатов и reconciliation, **не предоставляет атомарное право на rename/unlink**. Повторное сравнение inode и pathname само по себе не устраняет TOCTOU/ABA. `move_file_new` остаётся fail-closed, destructive delete не добавлен. Новый код ещё не подтверждён на Mac.
+
+### Move preview inode revalidation (2026-10-11)
+
+- Пользователь подтвердил `8c8d9e0` на macOS: fmt/Clippy без ошибок, **111/111** Rust tests passed, 0 doc-tests.
+- `dd04ce5` добавляет read-only `revalidate_move_new(from, to, expected)` — повторная проверка идентичности inode source и отсутствия destination, без открытия содержимого и без изменения файлов. Unix-тест заменяет source после предпросмотра и проверяет отказ с сохранением данных.
+- Повторная проверка сама по себе не устраняет TOCTOU после возврата. `move_file_new` и destructive operations остаются заблокированными. Новые изменения пока не проверены на Mac.
