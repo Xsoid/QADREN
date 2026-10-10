@@ -379,3 +379,8 @@
 - `133dc04`: добавлен contract test, подтверждающий, что `LocalFilesystem::capabilities()` не рекламирует Rename/Delete и `CapabilityDeclaration::allows` возвращает `UnsupportedOperation` для обоих на Unix. Это защита слоя планирования от преждевременного использования experimental rename, а не устранение source pathname race.
 - Последняя подтверждённая пользователем macOS проверка была до `993b81a`; объединённые изменения после неё ещё не прошли fmt/clippy/test на Mac. В рамках согласованного процесса не требуем отдельного тестового прогона сейчас.
 - Блокер закрытия этапа: обеспечить безопасные удаления/перемещения при допускаемых конкурентных мутациях или согласовать ограниченную модель контролируемой директории, плюс File Provider/macOS hydration policy и полная приёмка.
+
+### macOS dataless mutation guard (2026-10-11)
+
+- `da3474b`, `90a6ff3`: на macOS операции `rename_file_noreplace` и `link_file_new_with_post_link_check` отклоняют `SF_DATALESS` source до изменения namespace. Добавлен unit-тест флага. Результат компиляции и тестирования ещё не подтверждён.
+- Отсутствие флага `SF_DATALESS` не доказывает, что File Provider item полностью локальный; metadata guard не выдаёт право на чтение. Все content reads на macOS остаются запрещены. Rename не публикуется в capabilities из-за source pathname race. Полный DoD #15 ещё открыт.
