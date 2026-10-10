@@ -155,3 +155,9 @@
 - Пользователь подтвердил `4b385d4` на macOS: форматирование, Clippy, компиляция и **109/109 unit tests**, 0 doc-tests ошибок.
 - `d422a7c` добавляет `preview_move_new(from, to)` как read-only проверку: пути остаются внутри pinned root, source должен быть обычным файлом, destination отсутствует, parent destination существует и является каталогом. Возвращаются метаданные source, никакие данные не читаются и ни один объект не перемещается. Тест проверяет предпросмотр, конфликт, traversal и отсутствие изменений в source/destination.
 - Результат предварительной проверки не гарантирует безопасности последующего rename из-за TOCTOU; `move_file_new` остаётся заблокированным до identity-preserving реализации и adversarial tests. Код нового патча ещё не проверен на Mac.
+
+### Descriptor-relative file identity (2026-10-11)
+
+- Пользователь подтвердил `15e7e0a` на macOS: форматирование, Clippy и 110/110 Rust unit tests без ошибок.
+- `28a8712`, `d9934c6`: введены `LocalFileIdentity` (device/inode/size) и `LocalFilesystem::file_identity(path)`. Unix реализация использует `fstatat(AT_SYMLINK_NOFOLLOW)` относительно pinned root, не открывает содержимое; тест проверяет сохранение идентичности после внешнего переименования и запрет traversal.
+- Полученный идентификатор пригоден для сопоставления результатов и reconciliation, **не предоставляет атомарное право на rename/unlink**. Повторное сравнение inode и pathname само по себе не устраняет TOCTOU/ABA. `move_file_new` остаётся fail-closed, destructive delete не добавлен. Новый код ещё не подтверждён на Mac.
