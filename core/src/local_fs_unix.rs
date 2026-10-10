@@ -189,7 +189,7 @@ pub fn file_identity(root: &File, target: &Path) -> Result<LocalFileIdentity> {
     }
     Ok(LocalFileIdentity {
         device: info.st_dev as u64,
-        inode: info.st_ino as u64,
+        inode: info.st_ino,
         size: info.st_size.max(0) as u64,
     })
 }
