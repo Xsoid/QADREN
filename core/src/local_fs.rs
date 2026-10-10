@@ -511,6 +511,23 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn intermediate_symlink_in_root_path_is_rejected() {
+        use std::os::unix::fs::symlink;
+        let parent = sandbox();
+        let actual = parent.join("actual");
+        fs::create_dir(&actual).unwrap();
+        fs::create_dir(actual.join("nested")).unwrap();
+        symlink("actual", parent.join("alias")).unwrap();
+        assert!(LocalFilesystem::open(&actual.join("nested")).is_ok());
+        assert!(matches!(
+            LocalFilesystem::open(&parent.join("alias").join("nested")),
+            Err(LocalError::UnsafeEntry)
+        ));
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn symlink_root_is_rejected_before_any_content_access() {
         use std::os::unix::fs::symlink;
         let root = sandbox();
