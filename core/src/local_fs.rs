@@ -90,6 +90,40 @@ fn validate_copy_source(
     Ok(())
 }
 
+/// Reject a short or oversized stream before the atomic writer publishes it.
+struct ExactSizeReader<'a, R: io::Read> {
+    inner: &'a mut R,
+    remaining: u64,
+}
+
+impl<R: io::Read> io::Read for ExactSizeReader<'_, R> {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        if output.is_empty() {
+            return Ok(0);
+        }
+        if self.remaining == 0 {
+            let mut extra = [0u8; 1];
+            return match self.inner.read(&mut extra)? {
+                0 => Ok(0),
+                _ => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "source exceeds declared content length",
+                )),
+            };
+        }
+        let max = usize::try_from(self.remaining).unwrap_or(usize::MAX);
+        let read = self.inner.read(&mut output[..output.len().min(max)])?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "source is shorter than declared content length",
+            ));
+        }
+        self.remaining -= read as u64;
+        Ok(read)
+    }
+}
+
 pub struct LocalFilesystem {
     #[cfg(not(unix))]
     root: PathBuf,
@@ -446,7 +480,11 @@ impl LocalFilesystem {
     ) -> Result<u64> {
         Self::relative(target)?;
         self.require_free_space(expected_bytes, reserve_bytes)?;
-        self.create_from_reader(target, input)
+        let mut exact = ExactSizeReader {
+            inner: input,
+            remaining: expected_bytes,
+        };
+        self.create_from_reader(target, &mut exact)
     }
 
     /// Create a new file through directory descriptors, without following
@@ -1124,6 +1162,35 @@ mod tests {
             Err(LocalError::OutcomeUnknown(_))
         ));
         assert!(output.changed);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reserved_creation_rejects_mismatched_length_before_publish() {
+        let root = sandbox();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        for (name, source, length) in [
+            ("short.bin", b"abc".as_slice(), 4),
+            ("long.bin", b"abc".as_slice(), 2),
+        ] {
+            let result = adapter.create_with_space_reserve(
+                Path::new(name),
+                &mut io::Cursor::new(source),
+                length,
+                0,
+            );
+            assert!(matches!(result, Err(LocalError::Io(_))));
+            assert!(!root.join(name).exists());
+        }
+        let result = adapter.create_with_space_reserve(
+            Path::new("exact.bin"),
+            &mut io::Cursor::new(b"abc"),
+            3,
+            0,
+        );
+        assert_eq!(result.unwrap(), 3);
+        assert_eq!(fs::read(root.join("exact.bin")).unwrap(), b"abc");
         fs::remove_dir_all(root).unwrap();
     }
 
