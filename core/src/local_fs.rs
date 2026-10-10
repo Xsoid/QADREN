@@ -595,10 +595,25 @@ impl LocalFilesystem {
     /// Inspect several local files in one metadata-only batch. A failure
     /// aborts the batch instead of returning an incomplete success list.
     pub fn inspect_content_batch(&self, paths: &[&Path]) -> Result<Vec<LocalContentInspection>> {
-        paths
-            .iter()
-            .map(|path| self.inspect_content(path))
-            .collect()
+        let mut seen_paths = std::collections::HashSet::new();
+        let mut seen_inodes = std::collections::HashSet::new();
+        let mut inspected = Vec::with_capacity(paths.len());
+        for path in paths {
+            Self::relative(path)?;
+            // Reject duplicate requests even before inspecting their metadata.
+            // Fold only ASCII: non-ASCII filesystem case rules are platform-
+            // specific, so inode identity below remains the decisive guard.
+            let folded = path.to_string_lossy().to_ascii_lowercase();
+            if !seen_paths.insert(folded) {
+                return Err(LocalError::AlreadyExists);
+            }
+            let item = self.inspect_content(path)?;
+            if !seen_inodes.insert((item.identity.device, item.identity.inode)) {
+                return Err(LocalError::AlreadyExists);
+            }
+            inspected.push(item);
+        }
+        Ok(inspected)
     }
 
     /// Recheck a previously observed file without reading its content.
@@ -2038,6 +2053,42 @@ mod tests {
         assert_eq!(result[0].identity.size, 3);
         assert_eq!(result[1].identity.size, 3);
         assert_ne!(result[0].identity.inode, result[1].identity.inode);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inspection_batch_rejects_duplicate_paths_and_case_aliases() {
+        let root = sandbox();
+        fs::write(root.join("Assets.bin"), b"data").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let duplicated = [Path::new("Assets.bin"), Path::new("Assets.bin")];
+        assert!(matches!(
+            adapter.inspect_content_batch(&duplicated),
+            Err(LocalError::AlreadyExists)
+        ));
+        let aliases = [Path::new("Assets.bin"), Path::new("assets.bin")];
+        assert!(matches!(
+            adapter.inspect_content_batch(&aliases),
+            Err(LocalError::AlreadyExists)
+        ));
+        assert_eq!(fs::read(root.join("Assets.bin")).unwrap(), b"data");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inspection_batch_rejects_hardlinked_duplicate_inode() {
+        let root = sandbox();
+        fs::write(root.join("original.bin"), b"data").unwrap();
+        fs::hard_link(root.join("original.bin"), root.join("alias.bin")).unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let entries = [Path::new("original.bin"), Path::new("alias.bin")];
+        assert!(matches!(
+            adapter.inspect_content_batch(&entries),
+            Err(LocalError::AlreadyExists)
+        ));
+        assert_eq!(fs::read(root.join("alias.bin")).unwrap(), b"data");
         fs::remove_dir_all(root).unwrap();
     }
 
