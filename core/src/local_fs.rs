@@ -1609,7 +1609,15 @@ mod tests {
 
         let root = sandbox();
         let invalid = std::ffi::OsStr::from_bytes(b"bad-\xff");
-        fs::write(root.join(invalid), b"protected").unwrap();
+        if let Err(error) = fs::write(root.join(invalid), b"protected") {
+            // APFS/macOS rejects malformed UTF-8 names before QADREN can
+            // inspect them; Linux filesystems may permit such raw bytes.
+            if cfg!(target_os = "macos") && error.raw_os_error() == Some(92) {
+                fs::remove_dir_all(root).unwrap();
+                return;
+            }
+            panic!("failed to prepare invalid UTF-8 filename: {error}");
+        }
         let adapter = LocalFilesystem::open(&root).unwrap();
         assert!(matches!(
             adapter.list(Path::new("")),
