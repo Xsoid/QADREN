@@ -254,7 +254,9 @@ impl LocalFilesystem {
             let mut input = secure::open_content(&self.root_fd, path)?;
             #[cfg(target_os = "linux")]
             let before = input.metadata()?;
-            let bytes = io::copy(&mut input, output)?;
+            // Streaming may have already written to the destination when it
+            // fails. Never classify that as safely retryable without inspection.
+            let bytes = io::copy(&mut input, output).map_err(LocalError::OutcomeUnknown)?;
             #[cfg(target_os = "linux")]
             {
                 let after = input.metadata().map_err(LocalError::OutcomeUnknown)?;
@@ -1119,6 +1121,40 @@ mod tests {
             adapter.create_directory_tree(Path::new("../escape")),
             Err(LocalError::InvalidPath)
         ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn failed_streaming_read_is_unknown_after_partial_output() {
+        struct PartialWriter {
+            accepted: usize,
+        }
+        impl io::Write for PartialWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if self.accepted > 0 {
+                    return Err(io::Error::other("downstream failed"));
+                }
+                self.accepted += 1;
+                Ok(bytes.len().min(1))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"multiple bytes").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let mut writer = PartialWriter { accepted: 0 };
+        assert!(matches!(
+            adapter.read_to_writer(
+                Path::new("source.bin"),
+                &mut writer,
+                ContentReadConsent::GrantedForThisOperation
+            ),
+            Err(LocalError::OutcomeUnknown(_))
+        ));
+        assert_eq!(writer.accepted, 1);
         fs::remove_dir_all(root).unwrap();
     }
 
