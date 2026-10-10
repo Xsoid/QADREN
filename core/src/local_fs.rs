@@ -619,6 +619,34 @@ impl LocalFilesystem {
         }
     }
 
+    /// Reconcile a non-destructive prepared copy after an uncertain result.
+    /// This checks names and source metadata only; it cannot prove byte equality.
+    /// A true result means both entries are present with matching sizes and
+    /// the source still matches its earlier observation. Neither is deleted.
+    pub fn reconcile_move_copy(
+        &self,
+        from: &Path,
+        to: &Path,
+        expected: LocalContentInspection,
+    ) -> Result<bool> {
+        Self::relative(from)?;
+        Self::relative(to)?;
+        if from == to {
+            return Err(LocalError::AlreadyExists);
+        }
+        if !self.revalidate_content_inspection(from, expected)? {
+            return Ok(false);
+        }
+        let destination = match self.file_identity(to) {
+            Ok(identity) => identity,
+            Err(LocalError::Io(ref error)) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        };
+        Ok(destination.size == expected.identity.size)
+    }
+
     /// Read-only preview for a proposed no-overwrite move. This does not
     /// authorize execution: a different process may change either entry
     /// immediately after inspection, so move_file_new stays fail-closed.
@@ -2616,6 +2644,25 @@ mod tests {
         assert_eq!(observed, adapter.file_identity(source).unwrap());
         assert!(!root.join("destination.bin").exists());
         assert_eq!(fs::read(root.join("source.bin")).unwrap(), b"original");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn move_copy_reconciliation_reports_only_metadata_not_integrity() {
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"original").unwrap();
+        fs::write(root.join("copy.bin"), b"different").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let source = Path::new("source.bin");
+        let expected = adapter.inspect_content(source).unwrap();
+        assert!(adapter
+            .reconcile_move_copy(source, Path::new("copy.bin"), expected)
+            .unwrap());
+        fs::remove_file(root.join("copy.bin")).unwrap();
+        assert!(!adapter
+            .reconcile_move_copy(source, Path::new("copy.bin"), expected)
+            .unwrap());
         fs::remove_dir_all(root).unwrap();
     }
 
