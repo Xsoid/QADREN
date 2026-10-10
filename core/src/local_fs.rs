@@ -2,6 +2,7 @@
 //! Initial safe slice: metadata and non-overwriting atomic creation only.
 //! Content reads on macOS are intentionally not exposed until iCloud placeholder
 //! detection and per-transfer consent can be enforced.
+#[cfg(any(not(unix), test))]
 use std::fs;
 #[cfg(unix)]
 use std::fs::File;
