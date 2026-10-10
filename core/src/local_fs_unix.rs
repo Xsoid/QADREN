@@ -84,7 +84,11 @@ pub fn rename_file_noreplace(root: &File, from: &Path, to: &Path) -> Result<()> 
         return Err(LocalError::Io(io::Error::last_os_error()));
     }
     let source_info = unsafe { source_info.assume_init() };
-    if source_info.st_nlink != 1 {
+    if source_info.st_nlink != 1
+        || source_info.st_dev as u64 != source.device
+        || source_info.st_ino != source.inode
+        || source_info.st_size.max(0) as u64 != source.size
+    {
         return Err(LocalError::UnsafeEntry);
     }
     #[cfg(target_os = "linux")]
