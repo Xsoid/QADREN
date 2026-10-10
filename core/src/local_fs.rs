@@ -2086,6 +2086,20 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn pinned_root_overlap_survives_directory_rename() {
+        let root = sandbox();
+        fs::create_dir(root.join("original")).unwrap();
+        fs::create_dir(root.join("original/child")).unwrap();
+        let parent = LocalFilesystem::open(&root.join("original")).unwrap();
+        let child = LocalFilesystem::open(&root.join("original/child")).unwrap();
+        fs::rename(root.join("original"), root.join("renamed")).unwrap();
+        assert!(parent.overlaps_root(&child).unwrap());
+        assert!(child.overlaps_root(&parent).unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn pinned_roots_reject_sibling_overlap_without_content_reads() {
         let root = sandbox();
         fs::create_dir(root.join("alpha")).unwrap();
