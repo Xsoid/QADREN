@@ -1717,10 +1717,7 @@ mod tests {
         let adapter = LocalFilesystem::open(&root).unwrap();
         assert_eq!(
             adapter
-                .create_from_reader(
-                    Path::new("safe-file.bin"),
-                    &mut io::Cursor::new(b"data"),
-                )
+                .create_from_reader(Path::new("safe-file.bin"), &mut io::Cursor::new(b"data"),)
                 .unwrap(),
             4
         );
