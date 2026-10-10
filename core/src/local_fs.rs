@@ -2518,6 +2518,31 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn capabilities_never_advertise_unbound_rename_or_delete() {
+        use crate::capabilities::{CapabilityError, RequestedOperation};
+        let root = sandbox();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let available = adapter.capabilities();
+        assert!(!available.operations.rename);
+        assert!(!available.operations.delete);
+        let platform = if cfg!(target_os = "macos") {
+            Platform::MacOS
+        } else {
+            Platform::Linux
+        };
+        assert_eq!(
+            available.allows(platform, RequestedOperation::Rename),
+            Err(CapabilityError::UnsupportedOperation)
+        );
+        assert_eq!(
+            available.allows(platform, RequestedOperation::Delete),
+            Err(CapabilityError::UnsupportedOperation)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn checked_rename_rejects_replaced_source_without_moving_it() {
         let root = sandbox();
         fs::write(root.join("source.bin"), b"first").unwrap();
