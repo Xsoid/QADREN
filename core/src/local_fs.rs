@@ -1604,6 +1604,27 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn invalid_utf8_filename_is_never_silently_replaced() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let root = sandbox();
+        let invalid = std::ffi::OsStr::from_bytes(b"bad-\xff");
+        fs::write(root.join(invalid), b"protected").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert!(matches!(
+            adapter.list(Path::new("")),
+            Err(LocalError::UnsafeEntry)
+        ));
+        assert!(matches!(
+            adapter.stat(Path::new(invalid)),
+            Err(LocalError::UnsafeEntry)
+        ));
+        assert_eq!(fs::read(root.join(invalid)).unwrap(), b"protected");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn directory_identity_is_stable_for_opened_directory() {
         let root = sandbox();
         fs::create_dir(root.join("nested")).unwrap();
