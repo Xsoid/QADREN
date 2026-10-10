@@ -654,20 +654,6 @@ impl LocalFilesystem {
         target: &Path,
         input: &mut R,
     ) -> Result<u64> {
-        Self::relative(target)?;
-        let parent = target.parent().ok_or(LocalError::InvalidPath)?;
-        let leaf = target
-            .file_name()
-            .ok_or(LocalError::InvalidPath)?
-            .to_string_lossy()
-            .to_lowercase();
-        if self
-            .list(parent)?
-            .iter()
-            .any(|entry| entry.name.to_lowercase() == leaf)
-        {
-            return Err(LocalError::AlreadyExists);
-        }
         self.create_from_reader(target, input)
     }
 
@@ -676,6 +662,25 @@ impl LocalFilesystem {
     /// Reading cloud-backed local placeholders remains prohibited until guarded.
     pub fn create_from_reader<R: io::Read>(&self, target: &Path, input: &mut R) -> Result<u64> {
         Self::relative(target)?;
+        #[cfg(unix)]
+        {
+            // Every write entry point must reject case aliases before reading
+            // data. The atomic linkat check remains authoritative for races.
+            let parent = target.parent().ok_or(LocalError::InvalidPath)?;
+            let leaf = target
+                .file_name()
+                .ok_or(LocalError::InvalidPath)?
+                .to_str()
+                .ok_or(LocalError::UnsafeEntry)?
+                .to_lowercase();
+            if self
+                .list(parent)?
+                .iter()
+                .any(|entry| entry.name.to_lowercase() == leaf)
+            {
+                return Err(LocalError::AlreadyExists);
+            }
+        }
         #[cfg(unix)]
         {
             let serial = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -1705,6 +1710,26 @@ mod tests {
             Err(LocalError::AlreadyExists)
         ));
         assert_eq!(fs::read(root.join("occupied.bin")).unwrap(), b"protected");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_creation_rejects_case_collision_before_reading() {
+        struct PanicReader;
+        impl io::Read for PanicReader {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                panic!("default writer must reject case alias before reading")
+            }
+        }
+        let root = sandbox();
+        fs::write(root.join("Archive.DAT"), b"original").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert!(matches!(
+            adapter.create_from_reader(Path::new("archive.dat"), &mut PanicReader),
+            Err(LocalError::AlreadyExists)
+        ));
+        assert_eq!(fs::read(root.join("Archive.DAT")).unwrap(), b"original");
         fs::remove_dir_all(root).unwrap();
     }
 
