@@ -64,6 +64,15 @@ pub struct LocalFileIdentity {
     pub size: u64,
 }
 
+/// Metadata-only indication of local content residency.
+/// NotDatalessFlagged is NOT authorization to read or a hydration guarantee.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalContentResidency {
+    DatalessPlaceholder,
+    NotDatalessFlagged,
+    Unknown,
+}
+
 /// Filesystem capacity reported by the OS for the pinned local root.
 /// This is informational: other processes may consume space immediately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -522,6 +531,26 @@ impl LocalFilesystem {
         #[cfg(not(unix))]
         {
             Err(LocalError::UnsafeEntry)
+        }
+    }
+
+    /// Query content-residency hints without opening content. macOS reports
+    /// SF_DATALESS; other OSes return Unknown rather than assuming availability.
+    /// Read permission remains independent of this observation.
+    pub fn content_residency(&self, path: &Path) -> Result<LocalContentResidency> {
+        Self::relative(path)?;
+        #[cfg(target_os = "macos")]
+        {
+            return if secure::is_dataless(&self.root_fd, path)? {
+                Ok(LocalContentResidency::DatalessPlaceholder)
+            } else {
+                Ok(LocalContentResidency::NotDatalessFlagged)
+            };
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = self.file_identity(path)?;
+            Ok(LocalContentResidency::Unknown)
         }
     }
 
@@ -1808,6 +1837,42 @@ mod tests {
             Err(LocalError::AlreadyExists)
         ));
         assert_eq!(fs::read(root.join("occupied.bin")).unwrap(), b"protected");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn local_residency_inspection_does_not_enable_content_reads() {
+        let root = sandbox();
+        fs::write(root.join("local.bin"), b"original").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert_eq!(
+            adapter.content_residency(Path::new("local.bin")).unwrap(),
+            LocalContentResidency::NotDatalessFlagged
+        );
+        let mut output = Vec::new();
+        assert!(matches!(
+            adapter.read_to_writer(
+                Path::new("local.bin"),
+                &mut output,
+                ContentReadConsent::GrantedForThisOperation,
+            ),
+            Err(LocalError::UnsafeEntry)
+        ));
+        assert!(output.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_content_residency_is_unknown_without_content_access() {
+        let root = sandbox();
+        fs::write(root.join("local.bin"), b"original").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert_eq!(
+            adapter.content_residency(Path::new("local.bin")).unwrap(),
+            LocalContentResidency::Unknown
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
