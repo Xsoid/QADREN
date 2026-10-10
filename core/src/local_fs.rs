@@ -1891,6 +1891,22 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn inspection_batch_aborts_on_missing_file() {
+        let root = sandbox();
+        fs::write(root.join("one.bin"), b"one").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let paths = [Path::new("one.bin"), Path::new("missing.bin")];
+        assert!(matches!(
+            adapter.inspect_content_batch(&paths),
+            Err(LocalError::Io(ref error)) if error.kind() == io::ErrorKind::NotFound
+        ));
+        assert_eq!(fs::read(root.join("one.bin")).unwrap(), b"one");
+        assert!(!root.join("missing.bin").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn inspection_batch_rejects_symlink_and_traversal() {
         let root = sandbox();
         fs::write(root.join("one.bin"), b"one").unwrap();
