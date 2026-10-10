@@ -368,6 +368,43 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn concurrent_creates_of_same_target_never_overwrite() {
+        use std::sync::{Arc, Barrier};
+        let root = sandbox();
+        let adapter = Arc::new(LocalFilesystem::open(&root).unwrap());
+        let barrier = Arc::new(Barrier::new(3));
+        let handles: Vec<_> = [b"first".as_slice(), b"second".as_slice()]
+            .into_iter()
+            .map(|payload| {
+                let adapter = Arc::clone(&adapter);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    adapter.create_from_reader(
+                        Path::new("shared.bin"),
+                        &mut Cursor::new(payload),
+                    )
+                })
+            })
+            .collect();
+        barrier.wait();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|r| matches!(r, Err(LocalError::AlreadyExists)))
+                .count(),
+            1
+        );
+        let bytes = fs::read(root.join("shared.bin")).unwrap();
+        assert!(bytes == b"first" || bytes == b"second");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn filesystem_root_remains_pinned_after_path_is_replaced() {
         let parent = sandbox();
         let original = parent.join("original");
