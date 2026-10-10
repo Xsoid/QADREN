@@ -390,6 +390,37 @@ impl LocalFilesystem {
         }
     }
 
+    /// Linux-only safe-scope copy with free-space reserve and exact-length
+    /// publication. macOS stays closed to avoid File Provider hydration.
+    pub fn copy_file_new_with_reserve(
+        &self,
+        from: &Path,
+        to: &Path,
+        reserve_bytes: u64,
+        consent: ContentReadConsent,
+    ) -> Result<u64> {
+        Self::relative(from)?;
+        Self::relative(to)?;
+        if consent != ContentReadConsent::GrantedForThisOperation {
+            return Err(LocalError::UnsafeEntry);
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let mut source = secure::open_content(&self.root_fd, from)?;
+            let before = source.metadata()?;
+            let bytes =
+                self.create_with_space_reserve(to, &mut source, before.len(), reserve_bytes)?;
+            let after = source.metadata().map_err(LocalError::OutcomeUnknown)?;
+            validate_copy_source(&before, &after, bytes)?;
+            Ok(bytes)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = reserve_bytes;
+            Err(LocalError::UnsafeEntry)
+        }
+    }
+
     /// Moving by pathname cannot guarantee source identity under concurrent mutation.
     /// Reject until an identity-preserving platform implementation is available.
     pub fn move_file_new(&self, from: &Path, to: &Path) -> Result<()> {
@@ -1346,6 +1377,36 @@ mod tests {
             Err(LocalError::OutcomeUnknown(_))
         ));
         assert_eq!(writer.accepted, 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reserved_copy_keeps_existing_destination_and_mac_content_closed() {
+        let root = sandbox();
+        fs::write(root.join("origin.bin"), b"original").unwrap();
+        fs::write(root.join("occupied.bin"), b"preserved").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert!(matches!(
+            adapter.copy_file_new_with_reserve(
+                Path::new("origin.bin"),
+                Path::new("untouched.bin"),
+                0,
+                ContentReadConsent::Denied,
+            ),
+            Err(LocalError::UnsafeEntry)
+        ));
+        assert!(!root.join("untouched.bin").exists());
+        let result = adapter.copy_file_new_with_reserve(
+            Path::new("origin.bin"),
+            Path::new("occupied.bin"),
+            0,
+            ContentReadConsent::GrantedForThisOperation,
+        );
+        #[cfg(target_os = "linux")]
+        assert!(matches!(result, Err(LocalError::AlreadyExists)));
+        #[cfg(not(target_os = "linux"))]
+        assert!(matches!(result, Err(LocalError::UnsafeEntry)));
+        assert_eq!(fs::read(root.join("occupied.bin")).unwrap(), b"preserved");
         fs::remove_dir_all(root).unwrap();
     }
 
