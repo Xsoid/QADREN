@@ -581,6 +581,30 @@ impl LocalFilesystem {
         }
     }
 
+    /// Inspect an ambiguous hard-link publication without changing any files.
+    /// A matching inode indicates both names currently reference the same file;
+    /// it does not prove a completed move or permit source deletion.
+    pub fn reconcile_staged_link(
+        &self,
+        from: &Path,
+        to: &Path,
+        expected: LocalFileIdentity,
+    ) -> Result<bool> {
+        Self::relative(from)?;
+        Self::relative(to)?;
+        #[cfg(unix)]
+        {
+            let source = self.file_identity(from)?;
+            let staged = self.file_identity(to)?;
+            Ok(source == expected && staged == expected)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = expected;
+            Err(LocalError::UnsafeEntry)
+        }
+    }
+
     /// Moving by pathname cannot guarantee source identity under concurrent mutation.
     /// Reject until an identity-preserving platform implementation is available.
     pub fn move_file_new(&self, from: &Path, to: &Path) -> Result<()> {
@@ -1770,6 +1794,37 @@ mod tests {
             Err(LocalError::AlreadyExists)
         ));
         assert_eq!(fs::read(root.join("occupied.bin")).unwrap(), b"protected");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_reconciliation_is_read_only_and_detects_replacement() {
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"original").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let expected = adapter.file_identity(Path::new("source.bin")).unwrap();
+        adapter
+            .stage_move_link_new(Path::new("source.bin"), Path::new("staged.bin"))
+            .unwrap();
+        assert!(adapter
+            .reconcile_staged_link(
+                Path::new("source.bin"),
+                Path::new("staged.bin"),
+                expected,
+            )
+            .unwrap());
+        fs::rename(root.join("source.bin"), root.join("old.bin")).unwrap();
+        fs::write(root.join("source.bin"), b"replacement").unwrap();
+        assert!(!adapter
+            .reconcile_staged_link(
+                Path::new("source.bin"),
+                Path::new("staged.bin"),
+                expected,
+            )
+            .unwrap());
+        assert_eq!(fs::read(root.join("old.bin")).unwrap(), b"original");
+        assert_eq!(fs::read(root.join("staged.bin")).unwrap(), b"original");
         fs::remove_dir_all(root).unwrap();
     }
 
