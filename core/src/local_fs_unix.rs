@@ -252,7 +252,7 @@ pub fn create_directory(root: &File, target: &Path) -> Result<()> {
             Err(LocalError::Io(error))
         };
     }
-    directory.sync_all()?;
+    directory.sync_all().map_err(LocalError::OutcomeUnknown)?;
     Ok(())
 }
 
