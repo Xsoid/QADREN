@@ -1604,6 +1604,19 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn directory_identity_is_stable_for_opened_directory() {
+        let root = sandbox();
+        fs::create_dir(root.join("nested")).unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let before = secure::directory_identity(&adapter.root_fd, Path::new("nested")).unwrap();
+        fs::rename(root.join("nested"), root.join("renamed")).unwrap();
+        let after = secure::directory_identity(&adapter.root_fd, Path::new("renamed")).unwrap();
+        assert_eq!(before, after);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn list_tree_rejects_unsafe_symlink_without_partial_success() {
         let root = sandbox();
         fs::create_dir(root.join("nested")).unwrap();
