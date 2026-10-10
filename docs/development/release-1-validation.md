@@ -276,3 +276,10 @@
 - `f3ad883`: macOS `fstatat(AT_SYMLINK_NOFOLLOW)` относительно закреплённого descriptor проверяет Apple `SF_DATALESS = 0x40000000` (XNU `bsd/sys/stat.h`). Не открывает контент и не инициирует материализацию.
 - `eb8256e`: `content_residency(path)` возвращает `DatalessPlaceholder`, `NotDatalessFlagged` (не означает гарантированную доступность содержимого!) либо `Unknown` на Linux. macOS read-to-writer остаётся запрещённым даже после per-operation consent; статус не выдаёт разрешения на чтение. Добавлены macOS и Linux тесты.
 - Известное ограничение: `SF_DATALESS` не заменяет полную оценку File Provider/iCloud `ubiquitousItemDownloadingStatus` и устойчивую per-operation no-hydration политику; отсутствующий флаг не доказывает, что file read безопасен. Новое состояние main пока не проверено на Mac, ожидаются 130 тестов на macOS (Linux: 130).
+
+### Batch metadata inspection (2026-10-11)
+
+- Пользователь подтвердил успешную локальную проверку предыдущего состояния (`d9dda36`, 130 тестов); GitHub-hosted Actions заблокированы биллингом, используем локальный `scripts/test-core.sh`.
+- `8a736f2`, `ecf2a61`: добавлены `inspect_content()` и `inspect_content_batch()` — составной metadata-only preflight с проверкой inode/size до и после запроса residency. Сбор данных из нескольких файлов атомарности/консистентного snapshot не гарантирует. Если любой элемент отсутствует, является symlink или выходит за пределы root — полный вызов возвращает ошибку без частичного успешного результата.
+- Три новых Unix-теста: batch для двух regular files, отказ на symlink и traversal, отказ на missing entry без создания данных. Ожидаемый локальный тестовый итог на macOS: 133 теста, ещё не проверено.
+- Отсутствие `SF_DATALESS` не разрешает hydration или чтение содержимого. macOS content reads остаются запрещены. Расширенные File Provider statuses и безопасные rename/move/delete ещё не реализованы. Оценка #15: ~58%.
