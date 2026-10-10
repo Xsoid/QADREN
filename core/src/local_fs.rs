@@ -355,6 +355,19 @@ impl LocalFilesystem {
             }
             match self.create_directory(&prefix) {
                 Ok(()) => created += 1,
+                // Another writer may have created this directory after stat.
+                // Accept only an actual directory within the pinned root;
+                // never treat an unexpected file or symlink as success.
+                Err(LocalError::AlreadyExists) => {
+                    if !matches!(self.stat(&prefix), Ok(entry) if entry.is_directory) {
+                        if created > 0 {
+                            return Err(LocalError::OutcomeUnknown(io::Error::other(
+                                "directory tree partially created after concurrent collision",
+                            )));
+                        }
+                        return Err(LocalError::UnsafeEntry);
+                    }
+                }
                 Err(err) => {
                     if created > 0 {
                         return Err(LocalError::OutcomeUnknown(io::Error::other(
@@ -1071,6 +1084,23 @@ mod tests {
         ));
         assert_eq!(fs::read(root.join("one/file")).unwrap(), b"protected");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_tree_rejects_symlink_and_preserves_external_directory() {
+        use std::os::unix::fs::symlink;
+        let root = sandbox();
+        let external = sandbox();
+        symlink(&external, root.join("redirect")).unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert!(matches!(
+            adapter.create_directory_tree(Path::new("redirect/subdirectory")),
+            Err(LocalError::UnsafeEntry)
+        ));
+        assert!(!external.join("subdirectory").exists());
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(external).unwrap();
     }
 
     #[cfg(unix)]
