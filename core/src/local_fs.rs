@@ -587,6 +587,43 @@ impl LocalFilesystem {
             .collect()
     }
 
+    /// Recheck a previously observed file without reading its content.
+    /// This is a point-in-time observation, never authorization to hydrate.
+    pub fn revalidate_content_inspection(
+        &self,
+        path: &Path,
+        expected: LocalContentInspection,
+    ) -> Result<bool> {
+        match self.inspect_content(path) {
+            Ok(current) => Ok(current == expected),
+            Err(LocalError::Io(ref error)) if error.kind() == io::ErrorKind::NotFound => {
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Revalidate a whole batch against earlier observations. An index
+    /// corresponds to the same index in paths; mismatched lengths fail.
+    /// Each item is checked again and no file content is opened.
+    pub fn revalidate_content_batch(
+        &self,
+        paths: &[&Path],
+        expected: &[LocalContentInspection],
+    ) -> Result<bool> {
+        if paths.len() != expected.len() {
+            return Err(LocalError::InvalidPath);
+        }
+        // Inspect every entry even after a mismatch; failures must propagate.
+        let mut all_match = true;
+        for (path, previous) in paths.iter().zip(expected.iter()) {
+            if !self.revalidate_content_inspection(path, *previous)? {
+                all_match = false;
+            }
+        }
+        Ok(all_match)
+    }
+
     /// Confirm that a previewed regular-file inode is still at its original
     /// path and that the destination remains absent. This is observational:
     /// no filesystem mutation is authorized by this method.
@@ -1870,6 +1907,64 @@ mod tests {
             Err(LocalError::AlreadyExists)
         ));
         assert_eq!(fs::read(root.join("occupied.bin")).unwrap(), b"protected");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inspection_revalidation_detects_replacement_and_missing_file() {
+        let root = sandbox();
+        fs::write(root.join("item.bin"), b"original").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let path = Path::new("item.bin");
+        let observed = adapter.inspect_content(path).unwrap();
+        assert!(adapter.revalidate_content_inspection(path, observed).unwrap());
+        fs::rename(root.join("item.bin"), root.join("retained.bin")).unwrap();
+        fs::write(root.join("item.bin"), b"new").unwrap();
+        assert!(!adapter.revalidate_content_inspection(path, observed).unwrap());
+        fs::remove_file(root.join("item.bin")).unwrap();
+        assert!(!adapter.revalidate_content_inspection(path, observed).unwrap());
+        assert_eq!(fs::read(root.join("retained.bin")).unwrap(), b"original");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inspection_batch_revalidation_detects_stale_entry_and_length_error() {
+        let root = sandbox();
+        fs::write(root.join("one.bin"), b"one").unwrap();
+        fs::write(root.join("two.bin"), b"two").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let paths = [Path::new("one.bin"), Path::new("two.bin")];
+        let previous = adapter.inspect_content_batch(&paths).unwrap();
+        assert!(adapter.revalidate_content_batch(&paths, &previous).unwrap());
+        assert!(matches!(
+            adapter.revalidate_content_batch(&paths, &previous[..1]),
+            Err(LocalError::InvalidPath)
+        ));
+        fs::rename(root.join("two.bin"), root.join("old-two.bin")).unwrap();
+        fs::write(root.join("two.bin"), b"replaced").unwrap();
+        assert!(!adapter.revalidate_content_batch(&paths, &previous).unwrap());
+        assert_eq!(fs::read(root.join("old-two.bin")).unwrap(), b"two");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inspection_batch_revalidation_propagates_unsafe_entry() {
+        let root = sandbox();
+        fs::write(root.join("one.bin"), b"one").unwrap();
+        fs::write(root.join("two.bin"), b"two").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let paths = [Path::new("one.bin"), Path::new("two.bin")];
+        let previous = adapter.inspect_content_batch(&paths).unwrap();
+        fs::remove_file(root.join("two.bin")).unwrap();
+        std::os::unix::fs::symlink("one.bin", root.join("two.bin")).unwrap();
+        assert!(matches!(
+            adapter.revalidate_content_batch(&paths, &previous),
+            Err(LocalError::UnsafeEntry)
+        ));
+        assert_eq!(fs::read(root.join("one.bin")).unwrap(), b"one");
         fs::remove_dir_all(root).unwrap();
     }
 
