@@ -55,6 +55,15 @@ pub struct LocalEntry {
     pub size: u64,
 }
 
+/// Identity for detecting renamed or substituted directory entries.
+/// Identifiers are meaningful only within the same live filesystem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalFileIdentity {
+    pub device: u64,
+    pub inode: u64,
+    pub size: u64,
+}
+
 /// Filesystem capacity reported by the OS for the pinned local root.
 /// This is informational: other processes may consume space immediately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -450,6 +459,20 @@ impl LocalFilesystem {
                 Ok(source)
             }
             Err(error) => Err(error),
+        }
+    }
+
+    /// Return the stable inode identity of a local file for reconciliation.
+    /// Does not read file contents. Unix only; not an authorization to move.
+    pub fn file_identity(&self, path: &Path) -> Result<LocalFileIdentity> {
+        Self::relative(path)?;
+        #[cfg(unix)]
+        {
+            secure::file_identity(&self.root_fd, path)
+        }
+        #[cfg(not(unix))]
+        {
+            Err(LocalError::UnsafeEntry)
         }
     }
 
@@ -1439,6 +1462,24 @@ mod tests {
         #[cfg(not(target_os = "linux"))]
         assert!(matches!(result, Err(LocalError::UnsafeEntry)));
         assert_eq!(fs::read(root.join("occupied.bin")).unwrap(), b"preserved");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_identity_tracks_inode_without_reading_content() {
+        let root = sandbox();
+        fs::write(root.join("first.bin"), b"source").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let before = adapter.file_identity(Path::new("first.bin")).unwrap();
+        assert_eq!(before.size, 6);
+        fs::rename(root.join("first.bin"), root.join("second.bin")).unwrap();
+        let after = adapter.file_identity(Path::new("second.bin")).unwrap();
+        assert_eq!(before, after);
+        assert!(matches!(
+            adapter.file_identity(Path::new("../outside")),
+            Err(LocalError::InvalidPath)
+        ));
         fs::remove_dir_all(root).unwrap();
     }
 
