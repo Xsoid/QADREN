@@ -2209,6 +2209,52 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn macos_copy_entry_points_reject_without_creating_destination() {
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"original").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let from = Path::new("source.bin");
+        let to = Path::new("destination.bin");
+        for consent in [
+            ContentReadConsent::Denied,
+            ContentReadConsent::GrantedForThisOperation,
+        ] {
+            assert!(matches!(
+                adapter.copy_file_new(from, to, consent),
+                Err(LocalError::UnsafeEntry)
+            ));
+            assert!(matches!(
+                adapter.copy_file_new_with_reserve(from, to, 1024, consent),
+                Err(LocalError::UnsafeEntry)
+            ));
+            assert!(!root.join("destination.bin").exists());
+        }
+        assert_eq!(fs::read(root.join("source.bin")).unwrap(), b"original");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_content_inspection_is_metadata_only_and_never_enables_read() {
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"original").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let path = Path::new("source.bin");
+        let inspected = adapter.inspect_content(path).unwrap();
+        assert_eq!(inspected.identity.size, 8);
+        assert_eq!(inspected.residency, LocalContentResidency::NotDatalessFlagged);
+        let mut bytes = Vec::new();
+        assert!(matches!(
+            adapter.read_to_writer(path, &mut bytes, ContentReadConsent::GrantedForThisOperation),
+            Err(LocalError::UnsafeEntry)
+        ));
+        assert!(bytes.is_empty());
+        assert!(!adapter.capabilities().operations.read_content);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn local_residency_inspection_does_not_enable_content_reads() {
         let root = sandbox();
         fs::write(root.join("local.bin"), b"original").unwrap();
