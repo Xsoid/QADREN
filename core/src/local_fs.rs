@@ -53,6 +53,19 @@ pub struct LocalEntry {
     pub size: u64,
 }
 
+#[cfg(target_os = "linux")]
+fn validate_copy_source(before: &std::fs::Metadata, after: &std::fs::Metadata, bytes: u64) -> Result<()> {
+    if before.len() != after.len()
+        || before.modified().ok() != after.modified().ok()
+        || bytes != before.len()
+    {
+        return Err(LocalError::OutcomeUnknown(io::Error::other(
+            "source metadata changed during local copy",
+        )));
+    }
+    Ok(())
+}
+
 pub struct LocalFilesystem {
     #[cfg(not(unix))]
     root: PathBuf,
@@ -258,14 +271,7 @@ impl LocalFilesystem {
             // This detects a source changing during transfer, but is not a
             // transactional snapshot: a same-size rewrite may evade metadata.
             // The destination may exist, so do not retry automatically.
-            if before.len() != after.len()
-                || before.modified().ok() != after.modified().ok()
-                || bytes != before.len()
-            {
-                return Err(LocalError::OutcomeUnknown(io::Error::other(
-                    "source metadata changed during local copy",
-                )));
-            }
+            validate_copy_source(&before, &after, bytes)?;
             Ok(bytes)
         }
         #[cfg(not(target_os = "linux"))]
@@ -845,6 +851,22 @@ mod tests {
         ));
         assert_eq!(fs::metadata(root.join("large.bin")).unwrap().len(), length);
         assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn changed_copy_source_requires_reconciliation() {
+        let root = sandbox();
+        let source = root.join("mutable.bin");
+        fs::write(&source, b"old").unwrap();
+        let before = fs::metadata(&source).unwrap();
+        fs::write(&source, b"new and longer").unwrap();
+        let after = fs::metadata(&source).unwrap();
+        assert!(matches!(
+            validate_copy_source(&before, &after, 3),
+            Err(LocalError::OutcomeUnknown(_))
+        ));
         fs::remove_dir_all(root).unwrap();
     }
 
