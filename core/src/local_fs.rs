@@ -545,7 +545,29 @@ impl LocalFilesystem {
                 return Err(LocalError::UnsafeEntry);
             }
             self.preview_move_new(from, to)?;
-            let bytes = self.copy_file_new(from, to, consent)?;
+            // Pin the actual source inode before writing any destination.
+            // Path-only revalidation cannot guarantee that open_content did
+            // not race with a rename by another process.
+            use std::os::unix::fs::MetadataExt;
+            let mut source = secure::open_content(&self.root_fd, from)?;
+            let before = source.metadata()?;
+            let opened_identity = LocalFileIdentity {
+                device: before.dev(),
+                inode: before.ino(),
+                size: before.len(),
+            };
+            let opened_stamp = (
+                before.mtime(),
+                before.mtime_nsec(),
+                before.ctime(),
+                before.ctime_nsec(),
+            );
+            if opened_identity != expected.identity || opened_stamp != expected.change_stamp {
+                return Err(LocalError::UnsafeEntry);
+            }
+            let bytes = self.create_from_reader(to, &mut source)?;
+            let after = source.metadata().map_err(LocalError::OutcomeUnknown)?;
+            validate_copy_source(&before, &after, bytes)?;
             if !self
                 .revalidate_content_inspection(from, expected)
                 .unwrap_or(false)
