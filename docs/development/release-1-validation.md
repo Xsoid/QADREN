@@ -65,3 +65,10 @@
 - Пользователь проверил `805ce3d` на MacBook: fmt/Clippy успешны, 98/98 unit tests passed, doc-tests 0.
 - `9deeb67` добавляет `LocalFilesystem::capabilities()` на основе реально включённых функций: чтение содержимого — только Linux, создание новых файлов и каталогов — Unix, операции delete/rename по-прежнему запрещены. Для Windows поддержка только metadata, остальное fail-closed.
 - Добавлен тест непротиворечивости capabilities. Новая проверка пока не выполнена на macOS; capabilities не отменяют требования индивидуального согласия на чтение содержимого.
+
+### Scoped local copy — #15 (2026-10-11)
+
+- Пользователь подтвердил `df2fff5`: `scripts/test-core.sh`, fmt/Clippy без ошибок, 99/99 Rust unit tests, 0 doc-test failures.
+- `44909b5` добавляет `copy_file_new(from, to, consent)`: Linux читает через pinned descriptor и публикует только новый файл без overwrite; отказ в consent запрещает чтение и создание. На macOS метод намеренно fail-closed даже при consent до верификации File Provider placeholder residency; не считать этот путь готовым для macOS.
+- Добавлен негативный тест отсутствия согласия, существующего destination и неизменности данных; для Linux также успешная локальная копия.
+- Новый код ещё не подтверждён macOS CI/локальным запуском; операция не подключена к Job Engine. Rename/move/delete, macOS content residency и настоящие fault-injection испытания остаются открытыми.
