@@ -442,6 +442,12 @@ pub fn link_file_new(root: &File, from: &Path, to: &Path) -> Result<()> {
     if source_info.st_mode & libc::S_IFMT != libc::S_IFREG {
         return Err(LocalError::UnsafeEntry);
     }
+    // A staging operation must not introduce another link to a file
+    // already shared via hard links: such files require explicit conflict
+    // handling, not implicit aliasing.
+    if source_info.st_nlink != 1 {
+        return Err(LocalError::UnsafeEntry);
+    }
     if unsafe {
         linkat(
             source_dir.as_raw_fd(),
