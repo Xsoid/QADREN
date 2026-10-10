@@ -128,10 +128,8 @@ pub fn roots_overlap(first: &File, second: &File) -> Result<bool> {
     }
     let a = first.metadata()?;
     let b = second.metadata()?;
-    Ok(
-        ancestor_contains(first, (b.dev(), b.ino()))?
-            || ancestor_contains(second, (a.dev(), a.ino()))?,
-    )
+    Ok(ancestor_contains(first, (b.dev(), b.ino()))?
+        || ancestor_contains(second, (a.dev(), a.ino()))?)
 }
 
 fn parent(root: &File, relative: &Path) -> Result<(File, CString)> {
