@@ -357,6 +357,14 @@ pub(super) fn create_directory_with_post_mkdir_check<F: FnOnce() -> io::Result<(
     post_mkdir_check: F,
 ) -> Result<()> {
     let (directory, destination) = parent(root, target)?;
+    let parent_path = target.parent().ok_or(LocalError::InvalidPath)?;
+    let leaf = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(LocalError::UnsafeEntry)?;
+    if has_case_collision(root, parent_path, leaf)? {
+        return Err(LocalError::AlreadyExists);
+    }
     let result = unsafe { mkdirat(directory.as_raw_fd(), destination.as_ptr(), 0o700) };
     if result != 0 {
         let error = io::Error::last_os_error();
