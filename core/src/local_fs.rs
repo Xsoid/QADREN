@@ -54,7 +54,11 @@ pub struct LocalEntry {
 }
 
 #[cfg(target_os = "linux")]
-fn validate_copy_source(before: &std::fs::Metadata, after: &std::fs::Metadata, bytes: u64) -> Result<()> {
+fn validate_copy_source(
+    before: &std::fs::Metadata,
+    after: &std::fs::Metadata,
+    bytes: u64,
+) -> Result<()> {
     if before.len() != after.len()
         || before.modified().ok() != after.modified().ok()
         || bytes != before.len()
