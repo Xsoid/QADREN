@@ -647,6 +647,97 @@ impl LocalFilesystem {
         Ok(destination.size == expected.identity.size)
     }
 
+    /// Linux-only byte verification of a prepared, non-destructive copy.
+    /// Both files are opened with no-follow from the pinned root. Returns
+    /// false on content mismatch; a concurrent mutation yields an error.
+    /// Does not delete or rename either path.
+    pub fn verify_move_copy_bytes(
+        &self,
+        from: &Path,
+        to: &Path,
+        expected: LocalContentInspection,
+        consent: ContentReadConsent,
+    ) -> Result<bool> {
+        Self::relative(from)?;
+        Self::relative(to)?;
+        if from == to || consent != ContentReadConsent::GrantedForThisOperation {
+            return Err(LocalError::UnsafeEntry);
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use std::io::Read;
+            use std::os::unix::fs::MetadataExt;
+            if !self.revalidate_content_inspection(from, expected)? {
+                return Err(LocalError::UnsafeEntry);
+            }
+            let mut source = secure::open_content(&self.root_fd, from)?;
+            let mut destination = secure::open_content(&self.root_fd, to)?;
+            let source_before = source.metadata()?;
+            let destination_before = destination.metadata()?;
+            let source_signature = (
+                source_before.dev(),
+                source_before.ino(),
+                source_before.len(),
+                source_before.mtime(),
+                source_before.mtime_nsec(),
+                source_before.ctime(),
+                source_before.ctime_nsec(),
+            );
+            let expected_signature = (
+                expected.identity.device,
+                expected.identity.inode,
+                expected.identity.size,
+                expected.change_stamp.0,
+                expected.change_stamp.1,
+                expected.change_stamp.2,
+                expected.change_stamp.3,
+            );
+            if source_signature != expected_signature {
+                return Err(LocalError::UnsafeEntry);
+            }
+            if destination_before.len() != source_before.len() {
+                return Ok(false);
+            }
+            let mut left = [0u8; 65536];
+            let mut right = [0u8; 65536];
+            let mut equal = true;
+            loop {
+                let count = source.read(&mut left).map_err(LocalError::OutcomeUnknown)?;
+                if count == 0 {
+                    break;
+                }
+                destination
+                    .read_exact(&mut right[..count])
+                    .map_err(LocalError::OutcomeUnknown)?;
+                if left[..count] != right[..count] {
+                    equal = false;
+                }
+            }
+            let source_after = source.metadata().map_err(LocalError::OutcomeUnknown)?;
+            let destination_after = destination.metadata().map_err(LocalError::OutcomeUnknown)?;
+            validate_copy_source(&source_before, &source_after, source_before.len())?;
+            validate_copy_source(
+                &destination_before,
+                &destination_after,
+                destination_before.len(),
+            )?;
+            if !self
+                .revalidate_content_inspection(from, expected)
+                .unwrap_or(false)
+            {
+                return Err(LocalError::OutcomeUnknown(io::Error::other(
+                    "source pathname changed during copy verification",
+                )));
+            }
+            Ok(equal)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = expected;
+            Err(LocalError::UnsafeEntry)
+        }
+    }
+
     /// Read-only preview for a proposed no-overwrite move. This does not
     /// authorize execution: a different process may change either entry
     /// immediately after inspection, so move_file_new stays fail-closed.
