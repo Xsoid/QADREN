@@ -565,7 +565,13 @@ impl LocalFilesystem {
             if opened_identity != expected.identity || opened_stamp != expected.change_stamp {
                 return Err(LocalError::UnsafeEntry);
             }
-            let bytes = self.create_from_reader(to, &mut source)?;
+            // Reject short or growing streams before publishing the staged
+            // destination; metadata after publication remains a second guard.
+            let mut exact = ExactSizeReader {
+                inner: &mut source,
+                remaining: before.len(),
+            };
+            let bytes = self.create_from_reader(to, &mut exact)?;
             let after = source.metadata().map_err(LocalError::OutcomeUnknown)?;
             validate_copy_source(&before, &after, bytes)?;
             if !self
