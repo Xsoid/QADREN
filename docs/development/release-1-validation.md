@@ -356,3 +356,8 @@
 - `6208400`: non-Unix local adapter no longer declares `Windows` as supported nor marks insecure path-based metadata listing as verified; `list_metadata` and prerequisites now require Unix. Existing non-Unix fallback is not a production-safe file adapter and should be replaced by OS-specific secure implementation before enabling Windows.
 - `2dbedec`: rename compares second `fstatat` source `(dev,ino,size)` with initial identity and requires `nlink==1`. This narrows the pre-rename race window but does not close it; unresolved source-binding limitation still forbids automatic destructive jobs.
 - Next gate: verify platform-specific `libc` symbols and fmt/clippy/tests on Mac as part of the agreed consolidated review, then decide safe source-binding and deletion policy before declaring #15 accepted.
+
+### Подтверждённый локальный пакет и следующий инкремент (2026-10-11)
+
+- Пользователь подтвердил успешный `scripts/test-core.sh` после форматирования `91f3a2a`. Это подтверждает fmt/clippy/tests для данного состояния, но не закрывает вопросы сохранности при конкурентных файловых мутациях.
+- `12415b1`: metadata-only `preview_move_identity(from,to)` возвращает наблюдаемую идентичность исходного regular file после проверки назначения, не меняя файлов. Тест проверяет отсутствие изменений на диске. Это вспомогательный контракт для будущего reconciliation, не реализация безопасного удаления или move; проверку нового патча включить в следующую объединённую приёмку, не запрашивая отдельный запуск.
