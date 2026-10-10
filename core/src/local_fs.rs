@@ -580,11 +580,11 @@ impl LocalFilesystem {
 
     /// Inspect several local files in one metadata-only batch. A failure
     /// aborts the batch instead of returning an incomplete success list.
-    pub fn inspect_content_batch(
-        &self,
-        paths: &[&Path],
-    ) -> Result<Vec<LocalContentInspection>> {
-        paths.iter().map(|path| self.inspect_content(path)).collect()
+    pub fn inspect_content_batch(&self, paths: &[&Path]) -> Result<Vec<LocalContentInspection>> {
+        paths
+            .iter()
+            .map(|path| self.inspect_content(path))
+            .collect()
     }
 
     /// Confirm that a previewed regular-file inode is still at its original
