@@ -292,6 +292,46 @@ pub fn has_case_collision(root: &File, relative: &Path, leaf: &str) -> Result<bo
     }
 }
 
+/// Check an exact directory entry spelling without inspecting unrelated
+/// symlinks. A positive result is observational, not a lock or a snapshot.
+pub fn has_exact_directory(root: &File, relative: &Path, leaf: &str) -> Result<bool> {
+    let dir = directory(root, relative)?;
+    let owned_fd = dir.try_clone()?.into_raw_fd();
+    let stream = unsafe { libc::fdopendir(owned_fd) };
+    if stream.is_null() {
+        unsafe { libc::close(owned_fd) };
+        return Err(LocalError::Io(io::Error::last_os_error()));
+    }
+    struct Stream(*mut libc::DIR);
+    impl Drop for Stream {
+        fn drop(&mut self) {
+            unsafe { libc::closedir(self.0) };
+        }
+    }
+    let stream = Stream(stream);
+    loop {
+        #[cfg(target_os = "macos")]
+        let errno = unsafe { libc::__error() };
+        #[cfg(target_os = "linux")]
+        let errno = unsafe { libc::__errno_location() };
+        unsafe { *errno = 0 };
+        let entry = unsafe { libc::readdir(stream.0) };
+        if entry.is_null() {
+            let code = unsafe { *errno };
+            return if code == 0 {
+                Ok(false)
+            } else {
+                Err(LocalError::Io(io::Error::from_raw_os_error(code)))
+            };
+        }
+        let raw = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+        if raw == leaf.as_bytes() {
+            let (is_directory, _) = leaf_metadata(&dir, name(std::ffi::OsStr::from_bytes(raw))?.as_c_str())?;
+            return Ok(is_directory);
+        }
+    }
+}
+
 /// Detect revisiting the same directory while scanning an untrusted tree.
 pub fn directory_identity(root: &File, relative: &Path) -> Result<(u64, u64)> {
     let directory = directory(root, relative)?;
