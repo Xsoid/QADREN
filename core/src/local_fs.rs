@@ -1775,6 +1775,29 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn hard_link_source_swap_after_publish_is_unknown_without_cleanup() {
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"original").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let result = secure::link_file_new_with_post_link_check(
+            &adapter.root_fd,
+            Path::new("source.bin"),
+            Path::new("staged.bin"),
+            || {
+                fs::rename(root.join("source.bin"), root.join("original.bin"))?;
+                fs::write(root.join("source.bin"), b"replacement")?;
+                Ok(())
+            },
+        );
+        assert!(matches!(result, Err(LocalError::OutcomeUnknown(_))));
+        assert_eq!(fs::read(root.join("original.bin")).unwrap(), b"original");
+        assert_eq!(fs::read(root.join("staged.bin")).unwrap(), b"original");
+        assert_eq!(fs::read(root.join("source.bin")).unwrap(), b"replacement");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn stage_move_rejects_existing_hardlinked_source() {
         let root = sandbox();
         fs::write(root.join("source.bin"), b"original").unwrap();
