@@ -362,6 +362,25 @@ pub(super) fn create_with_post_link_check<R: Read, F: FnOnce() -> io::Result<()>
     post_link_check: F,
 ) -> Result<u64> {
     let (directory, destination) = parent(root, target)?;
+    // Reject an occupied destination before reading potentially large input.
+    // The final linkat still performs the authoritative atomic no-overwrite
+    // check, since this inspection is subject to concurrent changes.
+    let mut existing = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let status = unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            destination.as_ptr(),
+            existing.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if status == 0 {
+        return Err(LocalError::AlreadyExists);
+    }
+    let error = io::Error::last_os_error();
+    if error.kind() != io::ErrorKind::NotFound {
+        return Err(LocalError::Io(error));
+    }
     let temporary = CString::new(format!(".qadren-{}-{serial}.tmp", std::process::id()))
         .map_err(|_| LocalError::InvalidPath)?;
     let mut output = opened(unsafe {
