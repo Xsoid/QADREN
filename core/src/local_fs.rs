@@ -1995,7 +1995,8 @@ mod tests {
         let adapter = LocalFilesystem::open(&root).unwrap();
         let path = Path::new("item.bin");
         let observed = adapter.inspect_content(path).unwrap();
-        let mut file = fs::OpenOptions::new().write(true).open(root.join("item.bin")).unwrap();
+        let item = root.join("item.bin");
+        let mut file = fs::OpenOptions::new().write(true).open(&item).unwrap();
         file.seek(SeekFrom::Start(0)).unwrap();
         file.write_all(b"REPLACED").unwrap();
         file.sync_all().unwrap();
