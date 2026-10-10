@@ -287,7 +287,9 @@ fn same_temporary_inode(directory: &File, temporary: &CStr, output: &File) -> bo
     let Ok(opened) = output.metadata() else {
         return false;
     };
-    info.st_dev == opened.dev() && info.st_ino == opened.ino() && info.st_nlink == 1
+    u64::try_from(info.st_dev).ok() == Some(opened.dev())
+        && u64::try_from(info.st_ino).ok() == Some(opened.ino())
+        && info.st_nlink == 1
 }
 
 pub fn create<R: Read>(root: &File, target: &Path, input: &mut R, serial: u64) -> Result<u64> {
