@@ -433,3 +433,9 @@
 - `c71bab1`: metadata-only `reconcile_move_copy` inspects a preserved source against the original inspection and checks that a destination of the expected length exists. It does **not** claim integrity, equality of content, recovery, completed move, or authorization to remove either file.
 - Unix negative contract test deliberately uses same-sized but different bytes: metadata reconciliation may return true, illustrating why caller MUST NOT mistake its result for verified copy integrity. A missing destination returns false. This interface is observational only.
 - To mark prepared copy as verified, execution needs a trustworthy content digest/producer-verified source and destination, alongside stable source identity and no forbidden macOS hydration. No automatic destructive step is enabled. Consolidated Mac tests remain pending for new code.
+
+### End-to-end prepared copy byte verification (2026-10-11)
+
+- `c71bab1`, `bcbaa41`: metadata-only copy reconciliation проверяет наличие двух имён и размер, **не** целостность; отрицательный контракт демонстрирует одинаковую длину при разных байтах.
+- `67c4a9c`, `a4ab00a`: отдельный Linux API `verify_move_copy_bytes` по явному разрешению открывает исходник и назначение через pinned root + no-follow, сравнивает содержимое потоково блоками 64 KiB и перепроверяет оба открытых inode по metadata до/после. При изменении обнаруженных metadata или исходного pathname возвращает ошибку, а не мнимый успех. Linux-тест различает equal-size corruption от точного совпадения, macOS-тест требует fail-closed даже с consent.
+- При враждебной записи в открытый файл сравнение + timestamps не обеспечивает транзакционный байтовый snapshot; автоматический delete/move остаётся недоступен. Эти новые изменения не проверены Mac toolchain. Прогресс оценивать по готовым функциям, не количеству тестов.
