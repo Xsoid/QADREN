@@ -1074,10 +1074,13 @@ mod tests {
     fn directory_tree_partial_failure_is_unknown_without_rollback() {
         let root = sandbox();
         let adapter = LocalFilesystem::open(&root).unwrap();
+        let too_long = "x".repeat(300);
+        let target = format!("first/{too_long}");
         assert!(matches!(
-            adapter.create_directory_tree(Path::new("first/second/too-long")),
-            Ok(_)
+            adapter.create_directory_tree(Path::new(&target)),
+            Err(LocalError::OutcomeUnknown(_))
         ));
+        assert!(root.join("first").is_dir());
         assert!(matches!(
             adapter.create_directory_tree(Path::new("../escape")),
             Err(LocalError::InvalidPath)
