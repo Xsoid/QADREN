@@ -248,6 +248,16 @@ pub fn list(root: &File, relative: &Path) -> Result<Vec<LocalEntry>> {
     Ok(entries)
 }
 
+/// Detect revisiting the same directory while scanning an untrusted tree.
+pub fn directory_identity(root: &File, relative: &Path) -> Result<(u64, u64)> {
+    let directory = directory(root, relative)?;
+    let metadata = directory.metadata()?;
+    if !metadata.is_dir() {
+        return Err(LocalError::UnsafeEntry);
+    }
+    Ok((metadata.dev(), metadata.ino()))
+}
+
 /// Metadata lookup without opening the final file or resolving symlinks.
 pub fn stat(root: &File, target: &Path) -> Result<LocalEntry> {
     let (directory, name) = parent(root, target)?;
