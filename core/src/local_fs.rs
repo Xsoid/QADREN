@@ -730,6 +730,19 @@ impl LocalFilesystem {
         }
     }
 
+    /// Checked rename for a previously previewed source. Refuses an already
+    /// stale preview, but concurrent writers may still replace the source
+    /// after the check. Not exposed to automatic jobs.
+    pub fn rename_file_new_checked(
+        &self,
+        from: &Path,
+        to: &Path,
+        expected: LocalFileIdentity,
+    ) -> Result<()> {
+        self.revalidate_move_new(from, to, expected)?;
+        self.rename_file_new(from, to)
+    }
+
     /// Recheck the source inode and destination vacancy before a proposed
     /// move. This does not authorize deletion or close the rename race.
     pub fn preview_move_identity(&self, from: &Path, to: &Path) -> Result<LocalFileIdentity> {
@@ -2500,6 +2513,42 @@ mod tests {
         assert_eq!(observed, adapter.file_identity(source).unwrap());
         assert!(!root.join("destination.bin").exists());
         assert_eq!(fs::read(root.join("source.bin")).unwrap(), b"original");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checked_rename_rejects_replaced_source_without_moving_it() {
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"first").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let from = Path::new("source.bin");
+        let to = Path::new("destination.bin");
+        let expected = adapter.preview_move_identity(from, to).unwrap();
+        fs::rename(root.join("source.bin"), root.join("retained.bin")).unwrap();
+        fs::write(root.join("source.bin"), b"second").unwrap();
+        assert!(matches!(
+            adapter.rename_file_new_checked(from, to, expected),
+            Err(LocalError::UnsafeEntry)
+        ));
+        assert!(!root.join("destination.bin").exists());
+        assert_eq!(fs::read(root.join("retained.bin")).unwrap(), b"first");
+        assert_eq!(fs::read(root.join("source.bin")).unwrap(), b"second");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checked_rename_moves_unchanged_source_once() {
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"original").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let from = Path::new("source.bin");
+        let to = Path::new("destination.bin");
+        let expected = adapter.preview_move_identity(from, to).unwrap();
+        adapter.rename_file_new_checked(from, to, expected).unwrap();
+        assert!(!root.join("source.bin").exists());
+        assert_eq!(fs::read(root.join("destination.bin")).unwrap(), b"original");
         fs::remove_dir_all(root).unwrap();
     }
 
