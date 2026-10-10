@@ -73,6 +73,14 @@ pub enum LocalContentResidency {
     Unknown,
 }
 
+/// Metadata-only file record for a preflight inspection.
+/// Identity and residency are observations, never content-read permission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalContentInspection {
+    pub identity: LocalFileIdentity,
+    pub residency: LocalContentResidency,
+}
+
 /// Filesystem capacity reported by the OS for the pinned local root.
 /// This is informational: other processes may consume space immediately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -552,6 +560,31 @@ impl LocalFilesystem {
             let _ = self.file_identity(path)?;
             Ok(LocalContentResidency::Unknown)
         }
+    }
+
+    /// Inspect identity and residency without opening content. An inode
+    /// replacement between the two queries is reported as unsafe.
+    pub fn inspect_content(&self, path: &Path) -> Result<LocalContentInspection> {
+        Self::relative(path)?;
+        let before = self.file_identity(path)?;
+        let residency = self.content_residency(path)?;
+        let after = self.file_identity(path)?;
+        if before != after {
+            return Err(LocalError::UnsafeEntry);
+        }
+        Ok(LocalContentInspection {
+            identity: after,
+            residency,
+        })
+    }
+
+    /// Inspect several local files in one metadata-only batch. A failure
+    /// aborts the batch instead of returning an incomplete success list.
+    pub fn inspect_content_batch(
+        &self,
+        paths: &[&Path],
+    ) -> Result<Vec<LocalContentInspection>> {
+        paths.iter().map(|path| self.inspect_content(path)).collect()
     }
 
     /// Confirm that a previewed regular-file inode is still at its original
@@ -1837,6 +1870,42 @@ mod tests {
             Err(LocalError::AlreadyExists)
         ));
         assert_eq!(fs::read(root.join("occupied.bin")).unwrap(), b"protected");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inspection_batch_returns_identities_without_content_reads() {
+        let root = sandbox();
+        fs::write(root.join("one.bin"), b"one").unwrap();
+        fs::write(root.join("two.bin"), b"two").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let paths = [Path::new("one.bin"), Path::new("two.bin")];
+        let result = adapter.inspect_content_batch(&paths).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].identity.size, 3);
+        assert_eq!(result[1].identity.size, 3);
+        assert_ne!(result[0].identity.inode, result[1].identity.inode);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inspection_batch_rejects_symlink_and_traversal() {
+        let root = sandbox();
+        fs::write(root.join("one.bin"), b"one").unwrap();
+        std::os::unix::fs::symlink("one.bin", root.join("alias.bin")).unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let alias = [Path::new("one.bin"), Path::new("alias.bin")];
+        assert!(matches!(
+            adapter.inspect_content_batch(&alias),
+            Err(LocalError::UnsafeEntry)
+        ));
+        let traversal = [Path::new("one.bin"), Path::new("../one.bin")];
+        assert!(matches!(
+            adapter.inspect_content_batch(&traversal),
+            Err(LocalError::InvalidPath)
+        ));
         fs::remove_dir_all(root).unwrap();
     }
 
