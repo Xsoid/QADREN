@@ -903,6 +903,19 @@ pub(super) fn create_with_post_link_check<R: Read, F: FnOnce() -> io::Result<()>
 mod rename_error_tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn dataless_flag_blocks_mutating_file_operations() {
+        let mut metadata = unsafe { std::mem::zeroed::<libc::stat>() };
+        metadata.st_flags = 0x4000_0000;
+        assert!(matches!(
+            reject_dataless_mutation(&metadata),
+            Err(LocalError::UnsafeEntry)
+        ));
+        metadata.st_flags = 0;
+        assert!(reject_dataless_mutation(&metadata).is_ok());
+    }
+
     #[test]
     fn interrupted_rename_is_ambiguous_and_must_not_be_retried() {
         let classified = rename_failure(io::Error::from(io::ErrorKind::Interrupted));
