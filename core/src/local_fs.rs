@@ -1052,12 +1052,16 @@ mod tests {
         let root = sandbox();
         let adapter = LocalFilesystem::open(&root).unwrap();
         assert_eq!(
-            adapter.create_directory_tree(Path::new("one/two/three")).unwrap(),
+            adapter
+                .create_directory_tree(Path::new("one/two/three"))
+                .unwrap(),
             3
         );
         assert!(root.join("one/two/three").is_dir());
         assert_eq!(
-            adapter.create_directory_tree(Path::new("one/two/three")).unwrap(),
+            adapter
+                .create_directory_tree(Path::new("one/two/three"))
+                .unwrap(),
             0
         );
         fs::write(root.join("one/file"), b"protected").unwrap();
