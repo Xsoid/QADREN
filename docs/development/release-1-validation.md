@@ -118,3 +118,9 @@
 - Пользователь подтвердил `6ac84ef`: `scripts/test-core.sh`, fmt/Clippy clean, 104/104 macOS tests passed, 0 doc-tests.
 - `ddc96b0` изменяет Linux `read_to_writer`: ошибка из `io::copy` теперь `OutcomeUnknown`, потому что при передаче получатель мог принять часть байтов и автоматический повтор небезопасен. Добавлен Linux-only тест Writer, который принимает один байт и отказывает на следующем вызове.
 - Новый патч ещё не проверен на macOS/Linux. Не завершены safe rename/move/delete, macOS placeholder guard и основные acceptance-тесты #15.
+
+### Local filesystem capacity inspection (2026-10-11)
+
+- Пользователь проверил `e91f0fb` на macOS: `scripts/test-core.sh`, fmt/Clippy passed, 104/104 Rust unit tests, doc-tests 0.
+- `94158a5`: добавлен read-only `LocalFilesystem::storage_space()` с `fstatvfs` закреплённого дескриптора корня на Unix. Возвращает общий и доступный объём байтов без чтения содержимого файлов. Добавлен тест, включающий проверку после удаления имени корневого каталога при живом pinned descriptor.
+- Значения не являются резервированием дискового пространства и не доказывают возможность последующей записи; ENOSPC в реальной операции всё равно обрабатывается отдельно. На неподдерживаемых платформах возвращается отказ. Новый патч пока не проверен на Mac.
