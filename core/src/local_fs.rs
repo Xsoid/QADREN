@@ -254,7 +254,10 @@ mod tests {
 
     fn sandbox() -> PathBuf {
         static N: AtomicU64 = AtomicU64::new(0);
-        let p = std::env::temp_dir().join(format!(
+        // macOS commonly exposes /var as a symlink to /private/var.
+        // Exercise confinement using a physical sandbox root, not that alias.
+        let temp_root = fs::canonicalize(std::env::temp_dir()).unwrap();
+        let p = temp_root.join(format!(
             "qadren-local-{}-{}",
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed)
