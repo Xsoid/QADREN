@@ -525,6 +525,41 @@ impl LocalFilesystem {
         }
     }
 
+    /// Create a non-destructive copy for an anticipated move. Never deletes
+    /// the source; post-publication source changes yield OutcomeUnknown.
+    pub fn prepare_move_copy_new(
+        &self,
+        from: &Path,
+        to: &Path,
+        expected: LocalContentInspection,
+        consent: ContentReadConsent,
+    ) -> Result<u64> {
+        Self::relative(from)?;
+        Self::relative(to)?;
+        if consent != ContentReadConsent::GrantedForThisOperation {
+            return Err(LocalError::UnsafeEntry);
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if !self.revalidate_content_inspection(from, expected)? {
+                return Err(LocalError::UnsafeEntry);
+            }
+            self.preview_move_new(from, to)?;
+            let bytes = self.copy_file_new(from, to, consent)?;
+            if !self.revalidate_content_inspection(from, expected).unwrap_or(false) {
+                return Err(LocalError::OutcomeUnknown(io::Error::other(
+                    "source changed during non-destructive move preparation",
+                )));
+            }
+            Ok(bytes)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = expected;
+            Err(LocalError::UnsafeEntry)
+        }
+    }
+
     /// Read-only preview for a proposed no-overwrite move. This does not
     /// authorize execution: a different process may change either entry
     /// immediately after inspection, so move_file_new stays fail-closed.
