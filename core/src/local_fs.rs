@@ -600,6 +600,9 @@ impl LocalFilesystem {
                 baseline: before.clone(),
             };
             let bytes = self.create_from_reader(to, &mut verified)?;
+            // Release the mutable borrow of the pinned descriptor before
+            // post-publication revalidation.
+            drop(verified);
             let after = source.metadata().map_err(LocalError::OutcomeUnknown)?;
             validate_copy_source(&before, &after, bytes)?;
             if !self
