@@ -2299,6 +2299,27 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn move_preview_rejects_symlink_parent_and_missing_parent() {
+        let root = sandbox();
+        fs::write(root.join("source.bin"), b"source").unwrap();
+        fs::create_dir(root.join("real")).unwrap();
+        std::os::unix::fs::symlink("real", root.join("alias")).unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let from = Path::new("source.bin");
+        assert!(matches!(
+            adapter.preview_move_new(from, Path::new("alias/new.bin")),
+            Err(LocalError::UnsafeEntry)
+        ));
+        assert!(adapter
+            .preview_move_new(from, Path::new("missing/new.bin"))
+            .is_err());
+        assert!(!root.join("real/new.bin").exists());
+        assert_eq!(fs::read(root.join("source.bin")).unwrap(), b"source");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn move_preview_allows_distinct_destination_without_mutation() {
         let root = sandbox();
         fs::write(root.join("source.bin"), b"source").unwrap();
