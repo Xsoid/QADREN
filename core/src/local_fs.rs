@@ -411,11 +411,7 @@ mod tests {
         ));
         assert!(!root.join("destination").exists());
         assert_eq!(
-            fs::read(root.join(format!(
-                ".qadren-{}-{serial}.tmp",
-                std::process::id()
-            )))
-            .unwrap(),
+            fs::read(root.join(format!(".qadren-{}-{serial}.tmp", std::process::id()))).unwrap(),
             b"foreign contents"
         );
         fs::remove_dir_all(root).unwrap();
