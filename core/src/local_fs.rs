@@ -2652,7 +2652,7 @@ mod tests {
     fn move_copy_reconciliation_reports_only_metadata_not_integrity() {
         let root = sandbox();
         fs::write(root.join("source.bin"), b"original").unwrap();
-        fs::write(root.join("copy.bin"), b"different").unwrap();
+        fs::write(root.join("copy.bin"), b"changed!").unwrap();
         let adapter = LocalFilesystem::open(&root).unwrap();
         let source = Path::new("source.bin");
         let expected = adapter.inspect_content(source).unwrap();
