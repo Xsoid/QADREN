@@ -8,6 +8,14 @@ private func jobFree(_ pointer: UnsafeMutablePointer<CChar>?)
 private func runMockCreate(
     _ databasePath: UnsafePointer<CChar>?, _ storageRoot: UnsafePointer<CChar>?, _ jobID: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_jobs_queue_mock_create")
+private func queueMockCreate(
+    _ databasePath: UnsafePointer<CChar>?, _ jobID: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_jobs_cancel_mock_create")
+private func cancelMockCreate(
+    _ databasePath: UnsafePointer<CChar>?, _ jobID: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
 
 struct JobRow: Decodable, Identifiable {
     let id: String
@@ -54,11 +62,29 @@ enum JobInventory {
         return jobs
     }
 
-    /// The button invoking this method is the explicit consent for this
+    private static func command(
+        _ invoke: (UnsafePointer<CChar>?, UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?,
+        jobID: String
+    ) throws {
+        let database = try paths().database
+        let pointer = database.withCString { database in
+            jobID.withCString { identifier in invoke(database, identifier) }
+        }
+        guard let pointer else { throw StorageError.operation("Mock Job command unavailable") }
+        defer { jobFree(pointer) }
+        let result = try JSONDecoder().decode(MockCreateEnvelope.self, from: Data(String(cString: pointer).utf8))
+        guard result.ok else { throw StorageError.operation(result.error ?? "Mock Job failed") }
+    }
+
+    /// Queuing changes only QADREN's local SQLite metadata; it creates no file.
+    static func queueMockArtifact() throws {
+        try command(queueMockCreate, jobID: "g1-" + UUID().uuidString.lowercased())
+    }
+
+    /// The button invoking this method is the operation-scoped consent for an
     /// app-owned test artifact. No user or cloud content is read.
-    static func createMockArtifact() throws {
+    static func runMockArtifact(jobID: String) throws {
         let paths = try paths()
-        let jobID = "g1-" + UUID().uuidString.lowercased()
         let pointer = paths.database.withCString { database in
             paths.mockStorage.withCString { storage in
                 jobID.withCString { identifier in runMockCreate(database, storage, identifier) }
@@ -68,5 +94,9 @@ enum JobInventory {
         defer { jobFree(pointer) }
         let result = try JSONDecoder().decode(MockCreateEnvelope.self, from: Data(String(cString: pointer).utf8))
         guard result.ok else { throw StorageError.operation(result.error ?? "Mock Job failed") }
+    }
+
+    static func cancelMockArtifact(jobID: String) throws {
+        try command(cancelMockCreate, jobID: jobID)
     }
 }

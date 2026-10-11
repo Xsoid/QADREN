@@ -13,6 +13,7 @@ const MOCK_CONTENT: &[u8] = b"QADREN G1 mock create artifact\n";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MockCreateStatus {
+    Queued,
     Completed,
     Existing(JobState),
 }
@@ -152,6 +153,30 @@ pub fn run_mock_create(
     run_mock_create_inner(database_path, storage_root, job_id, consent, None)
 }
 
+/// Persist a mock Job without creating content. This is deliberately separate
+/// from execution so a user can cancel it before any external effect starts.
+pub fn queue_mock_create(
+    database_path: &Path,
+    job_id: &str,
+) -> Result<MockCreateStatus, MockCreateError> {
+    target_name(job_id)?;
+    let mut store = JobStore::open(database_path)?;
+    if let Some(existing) = store.get(job_id)? {
+        return Ok(MockCreateStatus::Existing(existing.state));
+    }
+    store.enqueue(job_id, None)?;
+    Ok(MockCreateStatus::Queued)
+}
+
+/// Cancel a mock Job only before an operation attempt is durable. This does
+/// not touch test storage and cannot turn a possible effect into cancellation.
+pub fn cancel_mock_create(database_path: &Path, job_id: &str) -> Result<(), MockCreateError> {
+    target_name(job_id)?;
+    let mut store = JobStore::open(database_path)?;
+    store.cancel(job_id)?;
+    Ok(())
+}
+
 fn run_mock_create_inner(
     database_path: &Path,
     storage_root: &Path,
@@ -165,12 +190,15 @@ fn run_mock_create_inner(
     let target_name = target_name(job_id)?;
     let mut store = JobStore::open(database_path)?;
     if let Some(existing) = store.get(job_id)? {
-        return Ok(MockCreateStatus::Existing(existing.state));
+        if existing.state != JobState::Queued {
+            return Ok(MockCreateStatus::Existing(existing.state));
+        }
+    } else {
+        store.enqueue(job_id, None)?;
     }
 
     let storage = MockStorage::open(storage_root)?;
     let expected_md5 = md5_hex(MOCK_CONTENT);
-    store.enqueue(job_id, None)?;
     store.advance(
         job_id,
         JobState::Queued,
@@ -285,6 +313,25 @@ mod tests {
             run_mock_create(&database, &storage, "job-1", true).unwrap(),
             MockCreateStatus::Existing(JobState::Completed)
         );
+    }
+
+    #[test]
+    fn queued_mock_job_can_be_cancelled_without_storage_effect() {
+        let (database, storage) = fixture("cancel");
+        assert_eq!(
+            queue_mock_create(&database, "job-1").unwrap(),
+            MockCreateStatus::Queued
+        );
+        cancel_mock_create(&database, "job-1").unwrap();
+        assert!(!storage.exists());
+        let store = JobStore::open(&database).unwrap();
+        assert_eq!(store.state("job-1").unwrap(), Some(JobState::Cancelled));
+        drop(store);
+        assert_eq!(
+            run_mock_create(&database, &storage, "job-1", true).unwrap(),
+            MockCreateStatus::Existing(JobState::Cancelled)
+        );
+        assert!(!storage.exists());
     }
 
     #[test]

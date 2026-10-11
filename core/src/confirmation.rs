@@ -45,22 +45,28 @@ impl JobState {
         next: Self,
         confirmation: Confirmation,
     ) -> Result<Self, StateTransitionError> {
-        use JobState::{Completed, Failed, Paused, Queued, Running, Unknown, WaitingForDecision};
+        use JobState::{
+            Cancelled, Completed, Failed, Paused, Queued, Running, Unknown, WaitingForDecision,
+        };
         let allowed = matches!(
             (self, next),
             (Queued, Running)
                 | (Queued, Paused)
                 | (Queued, Failed)
+                | (Queued, Cancelled)
                 | (Running, Paused)
                 | (Running, WaitingForDecision)
                 | (Running, Completed)
                 | (Running, Failed)
                 | (Running, Unknown)
+                | (Running, Cancelled)
                 | (Paused, Queued)
                 | (Paused, Running)
+                | (Paused, Cancelled)
                 | (WaitingForDecision, Queued)
                 | (WaitingForDecision, Running)
                 | (WaitingForDecision, Failed)
+                | (WaitingForDecision, Cancelled)
                 | (Unknown, WaitingForDecision)
                 | (Unknown, Completed)
                 | (Unknown, Failed)
@@ -84,7 +90,9 @@ mod tests {
     /// No external provider, credentials or file contents are involved.
     #[test]
     fn property_transition_invariants_hold_for_all_states_and_evidence() {
-        use JobState::{Completed, Failed, Paused, Queued, Running, Unknown, WaitingForDecision};
+        use JobState::{
+            Cancelled, Completed, Failed, Paused, Queued, Running, Unknown, WaitingForDecision,
+        };
         let states = [
             Queued,
             Running,
@@ -92,6 +100,7 @@ mod tests {
             WaitingForDecision,
             Completed,
             Failed,
+            Cancelled,
             Unknown,
         ];
         let evidence = [

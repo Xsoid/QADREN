@@ -25,14 +25,18 @@ pub enum JobState {
     WaitingForDecision,
     Completed,
     Failed,
+    /// The user stopped this Job before an operation attempt could start.
+    /// A cancellation is never used to hide an active or unknown effect.
+    Cancelled,
     Unknown,
 }
 
 impl JobState {
-    /// Completed and Failed describe a *verified* terminal result.
+    /// Completed and Failed describe a *verified* terminal result. Cancelled
+    /// means no effect attempt was active when the user stopped the Job.
     /// Unknown is never treated as a failure eligible for blind retry.
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Failed)
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
 }
 
@@ -253,6 +257,7 @@ mod tests {
         assert!(!JobState::Unknown.is_terminal());
         assert!(JobState::Completed.is_terminal());
         assert!(JobState::Failed.is_terminal());
+        assert!(JobState::Cancelled.is_terminal());
         assert!(!JobState::WaitingForDecision.is_terminal());
     }
 

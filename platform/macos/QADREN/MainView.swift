@@ -27,13 +27,13 @@ struct MainView: View {
                 HStack {
                     Text("Job queue").font(.headline)
                     Spacer()
-                    Button("Create verified mock file") { createMockJob() }
+                    Button("Queue mock file") { queueMockJob() }
                     Button("Refresh jobs") { refreshJobs() }
                 }
                 if let jobError {
                     Text(jobError).font(.caption).foregroundStyle(.orange)
                 } else if jobs.isEmpty {
-                    Text("No jobs yet. Create verified mock file uses app-owned test storage only.")
+                    Text("No jobs yet. Queued mock Jobs change local SQLite only until you explicitly run them.")
                         .font(.caption).foregroundStyle(.secondary)
                 } else {
                     ForEach(jobs) { job in
@@ -41,6 +41,10 @@ struct MainView: View {
                             Text(job.id).lineLimit(1)
                             Spacer()
                             Text(job.state).foregroundStyle(.secondary)
+                            if job.state == "queued" {
+                                Button("Run") { runMockJob(job.id) }
+                                Button("Cancel", role: .destructive) { cancelMockJob(job.id) }
+                            }
                         }
                     }
                 }
@@ -109,12 +113,32 @@ struct MainView: View {
         }
     }
 
-    private func createMockJob() {
+    private func queueMockJob() {
         do {
-            try JobInventory.createMockArtifact()
+            try JobInventory.queueMockArtifact()
             refreshJobs()
         } catch {
             jobError = error.localizedDescription
+        }
+    }
+
+    private func runMockJob(_ jobID: String) {
+        do {
+            try JobInventory.runMockArtifact(jobID: jobID)
+            refreshJobs()
+        } catch {
+            jobError = error.localizedDescription
+            refreshJobs()
+        }
+    }
+
+    private func cancelMockJob(_ jobID: String) {
+        do {
+            try JobInventory.cancelMockArtifact(jobID: jobID)
+            refreshJobs()
+        } catch {
+            jobError = error.localizedDescription
+            refreshJobs()
         }
     }
 }

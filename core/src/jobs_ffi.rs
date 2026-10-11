@@ -67,6 +67,9 @@ pub unsafe extern "C" fn qadren_jobs_run_mock_create(
         job_id,
         true,
     ) {
+        Ok(crate::job_execution::MockCreateStatus::Queued) => {
+            response(json!({"ok": false, "error": "invalid_state"}))
+        }
         Ok(crate::job_execution::MockCreateStatus::Completed) => {
             response(json!({"ok": true, "data": {"status": "completed"}}))
         }
@@ -93,6 +96,68 @@ pub unsafe extern "C" fn qadren_jobs_run_mock_create(
         Err(crate::job_execution::MockCreateError::Store(_)) => {
             response(json!({"ok": false, "error": "job_store_unavailable"}))
         }
+    }
+}
+
+/// Persist one app-owned mock Job without starting an effect.
+///
+/// # Safety
+/// Arguments must be valid, NUL-terminated strings for the duration of call.
+#[no_mangle]
+pub unsafe extern "C" fn qadren_jobs_queue_mock_create(
+    database_path: *const c_char,
+    job_id: *const c_char,
+) -> *mut c_char {
+    let (Some(database_path), Some(job_id)) = (input(database_path), input(job_id)) else {
+        return response(json!({"ok": false, "error": "invalid_request"}));
+    };
+    match crate::job_execution::queue_mock_create(Path::new(database_path), job_id) {
+        Ok(crate::job_execution::MockCreateStatus::Queued) => {
+            response(json!({"ok": true, "data": {"status": "queued"}}))
+        }
+        Ok(crate::job_execution::MockCreateStatus::Existing(state)) => response(
+            json!({"ok": true, "data": {"status": format!("{:?}", state).to_ascii_lowercase(), "existing": true}}),
+        ),
+        Ok(crate::job_execution::MockCreateStatus::Completed) => {
+            response(json!({"ok": false, "error": "invalid_state"}))
+        }
+        Err(crate::job_execution::MockCreateError::InvalidJobId) => {
+            response(json!({"ok": false, "error": "invalid_request"}))
+        }
+        Err(crate::job_execution::MockCreateError::Store(_)) => {
+            response(json!({"ok": false, "error": "job_store_unavailable"}))
+        }
+        Err(_) => response(json!({"ok": false, "error": "mock_queue_unavailable"})),
+    }
+}
+
+/// Cancel only a Job that has no active or unknown operation attempt.
+///
+/// # Safety
+/// Arguments must be valid, NUL-terminated strings for the duration of call.
+#[no_mangle]
+pub unsafe extern "C" fn qadren_jobs_cancel_mock_create(
+    database_path: *const c_char,
+    job_id: *const c_char,
+) -> *mut c_char {
+    let (Some(database_path), Some(job_id)) = (input(database_path), input(job_id)) else {
+        return response(json!({"ok": false, "error": "invalid_request"}));
+    };
+    match crate::job_execution::cancel_mock_create(Path::new(database_path), job_id) {
+        Ok(()) => response(json!({"ok": true, "data": {"status": "cancelled"}})),
+        Err(crate::job_execution::MockCreateError::InvalidJobId) => {
+            response(json!({"ok": false, "error": "invalid_request"}))
+        }
+        Err(crate::job_execution::MockCreateError::Store(crate::jobs::JobStoreError::NotFound)) => {
+            response(json!({"ok": false, "error": "not_found"}))
+        }
+        Err(crate::job_execution::MockCreateError::Store(
+            crate::jobs::JobStoreError::InvalidTransition,
+        )) => response(json!({"ok": false, "error": "cannot_cancel_after_effect"})),
+        Err(crate::job_execution::MockCreateError::Store(_)) => {
+            response(json!({"ok": false, "error": "job_store_unavailable"}))
+        }
+        Err(_) => response(json!({"ok": false, "error": "mock_cancel_unavailable"})),
     }
 }
 
@@ -152,5 +217,31 @@ mod tests {
         let message = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap();
         assert!(message.contains("completed"));
         unsafe { qadren_jobs_free_string(ptr) };
+    }
+
+    #[test]
+    fn queued_job_can_be_cancelled_through_the_c_abi() {
+        let base = std::env::temp_dir().join(format!(
+            "qadren-ffi-cancel-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&base).unwrap();
+        let database = CString::new(base.join("jobs.sqlite3").to_str().unwrap()).unwrap();
+        let job = CString::new("queued-job").unwrap();
+        let queued = unsafe { qadren_jobs_queue_mock_create(database.as_ptr(), job.as_ptr()) };
+        assert!(unsafe { CStr::from_ptr(queued) }
+            .to_str()
+            .unwrap()
+            .contains("queued"));
+        unsafe { qadren_jobs_free_string(queued) };
+        let cancelled = unsafe { qadren_jobs_cancel_mock_create(database.as_ptr(), job.as_ptr()) };
+        assert!(unsafe { CStr::from_ptr(cancelled) }
+            .to_str()
+            .unwrap()
+            .contains("cancelled"));
+        unsafe { qadren_jobs_free_string(cancelled) };
     }
 }
