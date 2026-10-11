@@ -145,7 +145,10 @@ impl StorageAdapter for YandexMetadataClient {
 impl YandexMetadataClient {
     pub fn new() -> Result<Self> {
         Ok(Self {
-            http: Client::builder().timeout(Duration::from_secs(15)).build()?,
+            http: Client::builder()
+                .timeout(Duration::from_secs(15))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()?,
             api_base: API.to_owned(),
         })
     }
