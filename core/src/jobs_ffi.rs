@@ -45,6 +45,30 @@ pub unsafe extern "C" fn qadren_jobs_list(path: *const c_char) -> *mut c_char {
     }
 }
 
+/// Read whether local credential removal must stop for unresolved attempts.
+/// This is an inventory check only; it never resolves, retries, or changes Jobs.
+///
+/// # Safety
+/// Arguments must be valid, NUL-terminated strings for the duration of call.
+#[no_mangle]
+pub unsafe extern "C" fn qadren_jobs_connection_has_unresolved_attempts(
+    path: *const c_char,
+    connection_id: *const c_char,
+) -> *mut c_char {
+    let (Some(path), Some(connection_id)) = (input(path), input(connection_id)) else {
+        return response(json!({"ok": false, "error": "invalid_request"}));
+    };
+    match JobStore::open(Path::new(path))
+        .and_then(|store| store.connection_has_unresolved_attempts(connection_id))
+    {
+        Ok(unresolved) => response(json!({"ok": true, "data": {"unresolved": unresolved}})),
+        Err(crate::jobs::JobStoreError::InvalidId) => {
+            response(json!({"ok": false, "error": "invalid_request"}))
+        }
+        Err(_) => response(json!({"ok": false, "error": "job_store_unavailable"})),
+    }
+}
+
 /// Start one explicit, app-owned G1 mock create Job. This command never uses
 /// real cloud connections or user content; Rust owns the full execution.
 ///
@@ -236,6 +260,7 @@ pub unsafe extern "C" fn qadren_jobs_free_string(pointer: *mut c_char) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{confirmation::Confirmation, model::JobState};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
     #[test]
@@ -331,5 +356,59 @@ mod tests {
             .unwrap()
             .contains("queued"));
         unsafe { qadren_jobs_free_string(resumed) };
+    }
+
+    #[test]
+    fn connection_attempt_gate_is_available_through_the_c_abi() {
+        let base = std::env::temp_dir().join(format!(
+            "qadren-ffi-connection-gate-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&base).unwrap();
+        let path = base.join("jobs.sqlite3");
+        let mut store = JobStore::open(&path).unwrap();
+        store.enqueue("job", None).unwrap();
+        store
+            .advance(
+                "job",
+                JobState::Queued,
+                JobState::Running,
+                Confirmation::Unknown,
+            )
+            .unwrap();
+        store
+            .prepare_bound_attempt(
+                "job",
+                "attempt",
+                "copy",
+                "connection-a",
+                "/object",
+                1,
+                "abcdef0123456789abcdef0123456789",
+            )
+            .unwrap();
+        drop(store);
+        let database = CString::new(path.to_str().unwrap()).unwrap();
+        let blocked = CString::new("connection-a").unwrap();
+        let unaffected = CString::new("connection-b").unwrap();
+        let blocked_response = unsafe {
+            qadren_jobs_connection_has_unresolved_attempts(database.as_ptr(), blocked.as_ptr())
+        };
+        assert!(unsafe { CStr::from_ptr(blocked_response) }
+            .to_str()
+            .unwrap()
+            .contains("\"unresolved\":true"));
+        unsafe { qadren_jobs_free_string(blocked_response) };
+        let unaffected_response = unsafe {
+            qadren_jobs_connection_has_unresolved_attempts(database.as_ptr(), unaffected.as_ptr())
+        };
+        assert!(unsafe { CStr::from_ptr(unaffected_response) }
+            .to_str()
+            .unwrap()
+            .contains("\"unresolved\":false"));
+        unsafe { qadren_jobs_free_string(unaffected_response) };
     }
 }

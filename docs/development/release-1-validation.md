@@ -8,7 +8,7 @@
 |---|---|---|---|
 | Rust Registry | `scripts/test-core.sh`, migration v1→v2, FFI, разные account IDs | Неповреждённая SQLite после обновления установки | Rust CI успешно на `ff585c7`; обновление реальной установки не проверялось |
 | macOS SwiftUI | Компиляция и проверка .app в Actions | Запуск UI и восстановление состояния окон | CI успешно; ручной smoke test отсутствует |
-| Keychain remove | Swift fault injection: disable / Keychain / Registry failures, retry, второй аккаунт | Принудительный отказ системного Keychain и повтор после перезапуска | CI успешно на `ff585c7`; системная проверка отсутствует |
+| Keychain remove | Swift fault injection: disable / Job attempt gate / Keychain / Registry failures, retry, второй аккаунт | Принудительный отказ системного Keychain и повтор после перезапуска | Локальный runner проходит на 2026-10-12; системная проверка отсутствует |
 | Legacy OAuth | Проверка кода сохранения legacy до успешного импорта | Импорт старого токена на реальном Mac и rollback | Реальная проверка в этом цикле отсутствует |
 | Yandex metadata | Rust mock HTTP тесты | Авторизация, квота, 2 аккаунта, offline/401 | Исторически подтверждено в документации; в этом цикле не перепроверено |
 | Content / iCloud / Worker | Частичные Local FS и Yandex content primitives существуют; полного Job execution и iCloud container нет | Отдельные реальные проверки по мере реализации | PARTIAL: полный E2E не подтверждён |
@@ -31,6 +31,12 @@
 - [ ] Подтвердить Keychain retry и legacy migration на реальном Mac с безопасными тестовыми подключениями.
 - [ ] Снять idle CPU/RAM, диск/сеть и записать версии macOS, Xcode и Rust.
 - [ ] Внести обнаруженные дефекты в отдельные Issues; не выдавать будущую поддержку iCloud за действующую.
+
+## Connection cleanup gate — #25 (2026-10-12)
+
+- Remove сначала переводит connection в `disabled`, затем выполняет Rust read-only gate по `connection_id`. Активная/UNKNOWN попытка, legacy attempt без target binding либо недоступность JobStore останавливают удаление до Keychain: disabled Registry record и credential остаются для recovery/reconciliation.
+- Локально пройдены `bash scripts/test-core.sh` (fmt, Clippy, 197 Rust unit tests) и `bash scripts/build-macos.sh`. Отдельный Swift fault-injection runner проверил normal flow, отказ на Job gate, Keychain и Registry, повтор после каждого отказа и независимость второй connection.
+- Не выполнена реальная проверка отказа системного Keychain, restart между отключением и cleanup и live Scenario/adapter attempt. Поэтому #25 остаётся открытой и не является подтверждением готовности настоящего disconnect UX.
 
 Рабочий процесс: небольшие коммиты напрямую в `main`, обязательное ожидание CI и регистрация ограничений; ветки документации не создаются.
 

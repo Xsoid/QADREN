@@ -1029,6 +1029,7 @@ impl JobStore {
 
     /// Inventory for operator investigation. Never changes or retries attempts.
     pub fn unresolved_attempts(&self) -> Result<Vec<UnresolvedAttempt>> {
+        self.check_storage_identity()?;
         let mut statement = self.db.prepare(
             "SELECT attempt_id,job_id,status,operation_kind,target_connection_id,target_path
              FROM job_attempts WHERE status!='resolved' ORDER BY job_id,attempt_id",
@@ -1051,6 +1052,27 @@ impl JobStore {
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(JobStoreError::from)
+    }
+
+    /// True when clearing this connection's credential could strand an
+    /// unresolved operation. Historical attempts without a durable target
+    /// binding also block cleanup: their target is unknowable, so allowing any
+    /// credential removal would be a blind safety decision.
+    pub fn connection_has_unresolved_attempts(&self, connection_id: &str) -> Result<bool> {
+        self.check_storage_identity()?;
+        if connection_id.is_empty() {
+            return Err(JobStoreError::InvalidId);
+        }
+        let blocked: i64 = self.db.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM job_attempts
+                WHERE status != 'resolved'
+                  AND (target_connection_id = ?1 OR target_connection_id IS NULL)
+            )",
+            [connection_id],
+            |row| row.get(0),
+        )?;
+        Ok(blocked != 0)
     }
 
     pub fn state(&self, id: &str) -> Result<Option<JobState>> {
@@ -1661,6 +1683,45 @@ mod tests {
         ));
         assert_eq!(db.unresolved_attempts().unwrap(), items);
         assert_eq!(db.state("legacy").unwrap(), Some(JobState::Unknown));
+        assert!(db
+            .connection_has_unresolved_attempts("any-connection")
+            .unwrap());
+    }
+
+    #[test]
+    fn only_the_bound_connection_is_blocked_until_its_attempt_is_resolved() {
+        let mut db = JobStore::in_memory().unwrap();
+        db.enqueue("job", None).unwrap();
+        db.advance(
+            "job",
+            JobState::Queued,
+            JobState::Running,
+            Confirmation::Unknown,
+        )
+        .unwrap();
+        let checksum = "abcdef0123456789abcdef0123456789";
+        db.prepare_bound_attempt(
+            "job",
+            "attempt",
+            "copy",
+            "connection-a",
+            "/object",
+            7,
+            checksum,
+        )
+        .unwrap();
+        assert!(db
+            .connection_has_unresolved_attempts("connection-a")
+            .unwrap());
+        assert!(!db
+            .connection_has_unresolved_attempts("connection-b")
+            .unwrap());
+        let receipt =
+            crate::verification::test_bound_receipt("attempt", "copy", "connection-a", "/object");
+        db.resolve_attempt("job", "attempt", &receipt).unwrap();
+        assert!(!db
+            .connection_has_unresolved_attempts("connection-a")
+            .unwrap());
     }
 
     #[test]

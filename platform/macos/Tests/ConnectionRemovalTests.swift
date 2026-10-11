@@ -8,6 +8,7 @@ final class FakeConnection {
     var credentialPresent = true
     var events: [String] = []
     var failDisable = false
+    var failAttemptCheck = false
     var failKeychain = false
     var failRegistry = false
 
@@ -18,6 +19,10 @@ final class FakeConnection {
                 self.events.append("disable")
                 if self.failDisable { throw SimulatedFailure.injected }
                 self.enabled = false
+            },
+            ensureNoUnresolvedAttempts: {
+                self.events.append("attempts")
+                if self.failAttemptCheck { throw SimulatedFailure.injected }
             },
             deleteCredential: {
                 self.events.append("keychain")
@@ -45,14 +50,24 @@ static func main() throws {
 let normal = FakeConnection()
 try normal.attempt()
 check(!normal.present && !normal.credentialPresent, "normal removal")
-check(normal.events == ["disable", "keychain", "registry"], "operation ordering")
+check(normal.events == ["disable", "attempts", "keychain", "registry"], "operation ordering")
+
+let unresolvedAttempt = FakeConnection()
+unresolvedAttempt.failAttemptCheck = true
+do { try unresolvedAttempt.attempt(); fatalError("unresolved attempt must stop removal") }
+catch SimulatedFailure.injected {}
+check(unresolvedAttempt.present && !unresolvedAttempt.enabled && unresolvedAttempt.credentialPresent, "attempt gate preserves recovery state")
+check(unresolvedAttempt.events == ["disable", "attempts"], "attempt gate stops before Keychain")
+unresolvedAttempt.failAttemptCheck = false
+try unresolvedAttempt.attempt()
+check(!unresolvedAttempt.present && !unresolvedAttempt.credentialPresent, "retry after reconciliation")
 
 let keychainError = FakeConnection()
 keychainError.failKeychain = true
 do { try keychainError.attempt(); fatalError("keychain failure must throw") }
 catch SimulatedFailure.injected {}
 check(keychainError.present && !keychainError.enabled && keychainError.credentialPresent, "keychain failure retains disabled record")
-check(keychainError.events == ["disable", "keychain"], "no registry deletion after keychain failure")
+check(keychainError.events == ["disable", "attempts", "keychain"], "no registry deletion after keychain failure")
 keychainError.failKeychain = false
 try keychainError.attempt()
 check(!keychainError.present && !keychainError.credentialPresent, "retry after keychain failure")

@@ -10,6 +10,7 @@ enum ConnectionRemoval {
     static func run(
         adapter: String,
         disable: () throws -> Void,
+        ensureNoUnresolvedAttempts: () throws -> Void,
         deleteCredential: () throws -> Void,
         deleteRecord: () throws -> Void
     ) throws {
@@ -17,6 +18,10 @@ enum ConnectionRemoval {
         // Disable before credential cleanup so that failures remain visible
         // and future executors cannot schedule new work for this connection.
         try disable()
+        // If the Job inventory is unavailable or points to an unresolved
+        // attempt, fail closed. The disabled record and Keychain credential
+        // remain available for recovery and read-only reconciliation.
+        try ensureNoUnresolvedAttempts()
         // Keychain delete treats item-not-found as success, allowing retry.
         try deleteCredential()
         // SQLite deletion happens last. If it fails, the disabled row stays

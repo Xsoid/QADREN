@@ -58,6 +58,9 @@ final class StorageConnections: ObservableObject {
             try ConnectionRemoval.run(
                 adapter: entry.adapter,
                 disable: { try StorageRegistryBridge.setEnabled(id: id, enabled: false) },
+                ensureNoUnresolvedAttempts: {
+                    try JobInventory.requireNoUnresolvedAttempts(connectionID: id)
+                },
                 deleteCredential: { try YandexKeychain.delete(id) },
                 deleteRecord: { try StorageRegistryBridge.remove(id: id) }
             )

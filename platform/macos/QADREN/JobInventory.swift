@@ -24,6 +24,10 @@ private func pauseMockCreate(
 private func resumeMockCreate(
     _ databasePath: UnsafePointer<CChar>?, _ jobID: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_jobs_connection_has_unresolved_attempts")
+private func connectionHasUnresolvedAttempts(
+    _ databasePath: UnsafePointer<CChar>?, _ connectionID: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
 
 struct JobRow: Decodable, Identifiable {
     let id: String
@@ -40,6 +44,16 @@ private struct JobEnvelope: Decodable {
 
 private struct MockCreateEnvelope: Decodable {
     let ok: Bool
+    let error: String?
+}
+
+private struct ConnectionAttemptData: Decodable {
+    let unresolved: Bool
+}
+
+private struct ConnectionAttemptEnvelope: Decodable {
+    let ok: Bool
+    let data: ConnectionAttemptData?
     let error: String?
 }
 
@@ -68,6 +82,31 @@ enum JobInventory {
             [.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: path
         )
         return jobs
+    }
+
+    /// Fails closed when the durable Job inventory cannot prove this local
+    /// connection is clear. This check never retries or reconciles a Job.
+    static func requireNoUnresolvedAttempts(connectionID: String) throws {
+        let database = try paths().database
+        let pointer = database.withCString { database in
+            connectionID.withCString { identifier in
+                connectionHasUnresolvedAttempts(database, identifier)
+            }
+        }
+        guard let pointer else { throw StorageError.operation("Job safety check unavailable") }
+        defer { jobFree(pointer) }
+        let result = try JSONDecoder().decode(
+            ConnectionAttemptEnvelope.self,
+            from: Data(String(cString: pointer).utf8)
+        )
+        guard result.ok, let data = result.data else {
+            throw StorageError.operation(result.error ?? "Job safety check failed")
+        }
+        guard !data.unresolved else {
+            throw StorageError.operation(
+                "Connection has unresolved Jobs; credentials were not touched"
+            )
+        }
     }
 
     private static func command(
