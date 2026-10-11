@@ -54,3 +54,16 @@
 - **Verify:** `bash scripts/test-core.sh`, применимые macOS Swift/FFI scripts, mock HTTP и реальные platform tests там, где они необходимы. Не путать mock PASS с реальной безопасностью macOS/облака.
 - **Review:** code review correctness, ownership и ABI; security review content policy, paths, races, secrets, overwrite, cancellation, reconciliation. Explicit diff review, затем коммит непосредственно main. Не объявлять Done без приемочных доказательств.
 - **Report:** commit SHA, проверенные и непроверенные критерии, версию среды, известные риски. После законченного пакета обновить Issue и документацию. GitHub Actions необязательны. Не переключаться в Work автоматически.
+
+
+## Интеграция AI-Docs-Hub: порядок для чата и Codex
+
+Это дополнение к обязательной политике совместимости в `AGENTS.md`. AI-Docs-Hub — опциональный dev-tool, не часть QADREN runtime.
+
+1. **Onboard без записи:** запустить `python3.11 scripts/onboard-project --project <qadren-project-id>` из установленного AI-Docs-Hub (подставить фактический ID после создания project config). Аналогично `scripts/scaffold-project-docs --project <id>` без `--write`. Просмотреть действия и diff; не принимать генерацию параллельных архитектурных каталогов.
+2. **Write только осознанно:** убедиться, что Hub добавляет максимум idempotent managed block в существующий root `AGENTS.md`; при непустых документах QADREN write запрещён, если меняет их смысл или размещение. Уточнить конфигурацию включений/исключений, исключить credentials, временные transfer файлы, SQLite и локальные артефакты.
+3. **Контекст:** агент начинает с QADREN `AGENTS.md` и действующих `docs/`, использует Hub RAG/Codebase Memory только как навигационный индекс с проверкой свежести относительно HEAD. Chat без Hub делает ровно те же шаги напрямую по репозиторию.
+4. **Проверка изменений:** canonical команды QADREN (`bash scripts/test-core.sh`, `bash scripts/build-macos.sh` на macOS плюс профильные тесты) остаются главными. Hub verify/review добавляет evidence, но не заменяет native или живой provider E2E. До публикации обязательны code review и security review независимо от доступности Hub.
+5. **Результат:** обновить соответствующую GitHub Issue с SHA, environment, PASS/FAIL/SKIPPED/BLOCKED, mock-vs-real evidence и известными рисками. Никогда не записывать в Hub secrets, пользовательские файлы или содержимое transfer; избегать git-tracked Hub-generated snapshots внутри QADREN.
+
+Установка Hub на машине и создание локального project binding — отдельное действие, **не** выполняемое автоматически изменениями этого документа. Директивы QADREN имеют приоритет над типовым шаблоном Hub.
