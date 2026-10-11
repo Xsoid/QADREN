@@ -445,3 +445,20 @@
 - По просьбе ускорить проект начата независимая работа #16 без фиктивного закрытия #15. Это параллельное начало, а не снятие блокирующих гарантий безопасности.
 - `a7e874d`, `8738354`, `020c72b`, `e69891f`: реализован минимальный путь upload: GET подписанного ресурса `/resources/upload?overwrite=false`, проверка HTTPS/PUT/отсутствия URL credentials, потоковый HTTP PUT фиксированной заявленной длины без открытия файлов на Mac, отдельный `UploadOutcome::Accepted/Pending`; запрещены HTTP redirects в производственном клиенте. Ошибка PUT считается возможным неизвестным состоянием удалённого файла и требует внешнего reconciliation; метод не выполняет автоматических retries.
 - Тест с mock API подтверждает отказ от передачи на HTTP URL до чтения входа. НЕТ end-to-end проверки реальным аккаунтом, проверки полного размера/MD5 после загрузки, честного `OutcomeUnknown` в типе ошибки, интеграции со сценариями/очередью, безопасного контроля отмены и retries/backoff; пока не включать автоматические Jobs или рекламировать production-ready. Новый код ещё не прошёл локальный fmt/clippy/tests.
+
+
+## Gate-focused acceptance matrix — 2026-10-11
+
+Исторические записи выше относятся к указанным там SHA и не подтверждают нынешний HEAD. Каждому утверждению о прохождении тестов обязателен фактический SHA и среда.
+
+| Gate | Готово тогда и только тогда, когда | Подтверждение на этапе подготовки |
+|---|---|---|
+| G0 | Документированы владельцы Job, scope consent, adapter errors/capabilities, FFI и UNKNOWN reconciliation | Документировано, реализации ещё требуют проверки |
+| G1 | Manual create-new проходит SwiftUI → Rust JobStore → mock adapter → verified SQLite receipt → UI; no-overwrite, restart/duplicate/fault tests | НЕ выполнено |
+| G2 | Та же вертикаль работает на реально подтверждённой паре адаптеров; live provider evidence и consent | НЕ выполнено |
+| G3 | One-way и two-way Scenario diff опираются на последнее подтверждённое состояние; конфликт блокируется | НЕ выполнено |
+| G4 | Mass delete/overwrite, concurrent mutation, Keychain disconnect и uncertain retry fail-closed | Частично, полная приёмка НЕ выполнена |
+| G5 | Единый Rust engine обслуживает Job в независимой службе; закрытие UI не прекращает выполнение | НЕ выполнено |
+| G6 | Матрица платформы, entitlement, выбранная distribution, signed install, ресурсы и fault tests зафиксированы | НЕ выполнено |
+
+Для каждого инкремента приложить тестовый case ID, SHA, environment, executed command, PASS/FAIL/BLOCKED/SKIPPED, источник evidence (real/mock/static) и оставшийся риск. Закрытие #15 по количеству unit tests запрещено. Рекомендуемый первый E2E: no-overwrite create-new-file, stable attempt ID и verification перед terminal success. Исходный контент нельзя автоматически скачивать на главный MacBook. Перед выпуском с неполными destructive capabilities запросить отдельное продуктовое согласование.
