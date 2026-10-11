@@ -236,8 +236,7 @@ impl YandexMetadataClient {
         if link.method != "PUT" {
             return Err(YandexError::UnsafeTransferUrl);
         }
-        let parsed = reqwest::Url::parse(&link.href)
-            .map_err(|_| YandexError::UnsafeTransferUrl)?;
+        let parsed = reqwest::Url::parse(&link.href).map_err(|_| YandexError::UnsafeTransferUrl)?;
         if parsed.scheme() != "https"
             || parsed.host_str().is_none()
             || parsed.username() != ""
