@@ -47,3 +47,42 @@ BackupSet, резервные версии и восстановление ст�
 ## Негативные проверки
 
 Нельзя тестировать сохранность только happy-path. Нужны обрывы связи, API 429/5xx, истечение токенов, частичная запись, повторные уведомления, смена времени/DST, недоступность назначения, race между delete/reconnect и локальной паузой. Результаты тестов фиксировать отдельно от планов.
+
+
+## Исполнимая карта зависимостей — актуализация 2026-10-11
+
+Линейные фразы «блокируется предыдущим этапом» в старых Issue заменяются следующими **контрактными**, а не календарными зависимостями. Нельзя закрывать Issue по числу тестов: требуется её функциональный DoD. Закрытая #14 — baseline моделей, **не** готовый runtime transfer contract.
+
+| Поток | Issue | Для начала требуется | Готовность |
+|---|---|---|---|
+| Baseline/contract stabilization | #13, #14 | Текущий main, #2/#7 | Отдельные проверки ещё открыты |
+| Local FS | #15 | Общие capability/error/safety contracts | Частичная реализация; destructive и macOS read блокированы |
+| Yandex content | #16 | Yandex metadata/OAuth + transfer contract | Streaming PUT создан, E2E не доказан |
+| iCloud container | #17 | Apple entitlement feasibility + contracts | Native spike не сделан |
+| Durable execution | #18 | Модели #14 + JobStore; mock adapter | Не ждать завершения #15–#17 |
+| Policy and recovery | #20, #25 | Контракты attempts/consent; можно параллельно #18 | Общие правила формируются, connection races открыты |
+| Scenario | #19 | Типы #14; для реального sync нужен Job runner #18 | Модель есть, execution отсутствует |
+| Scheduler | #21 | Durable Scenario/Job submission API; fake clock tests параллельно | Не ждать UI |
+| File manager | #22 | Metadata browse + Job commands; UI можно развивать с mock | Не ждать scheduler |
+| SwiftUI and service | #23 | Rust API + FFI; service extraction после первого vertical slice | Старт исполнения in-process согласован |
+| Integration/release | #24 | Сквозные gates G1–G6 и решение о distribution | Не готово |
+
+### Гейты
+
+- **G0 Контракты:** владелец Job, capability/consent, проверка evidence, UNKNOWN/reconciliation, error schema, FFI ABI и ownership согласованы; нет дублирующих движков.
+- **G1 Эталонная вертикаль:** создать **новый** файл без overwrite через команду → JobStore → adapter/mock → read-only verification → SQLite → UI; тесты no-consent, existing destination, partial transfer, fail-after-effect, kill/restart и duplicate attempt.
+- **G2 Межадаптерная операция:** та же система проводит потоковую передачу между двумя поддерживаемыми адаптерами; source read policy соблюдается; подтверждённая live test и fault matrix.
+- **G3 Сценарий:** one-way plan и повторная сверка, затем two-way + conflict; FileSyncState только после подтверждения.
+- **G4 Защита:** bulk deletion/overwrite, collision, consent, disconnect races, UNKNOWN recovery.
+- **G5 Автоматизация:** scheduler, UI lifecycle и та же Rust engine в самостоятельной фоновой службе; закрытие UI не прекращает работу.
+- **G6 Release:** реальная macOS/iCloud/OAuth матрица, измерения и выбранная модель distribution + соответствующие Gatekeeper/entitlement проверки.
+
+### Порядок передачи Codex
+
+1. Один компактный contract/baseline пакет для #13/#14/#18/#20, без переработки работающего metadata OAuth/Registry.
+2. G1 с mock/no-overwrite и durable результатом, затем реальный Yandex upload + reconcile (#16) и разрешённый Local FS integration (#15).
+3. Параллельно native spike iCloud (#17), FFI/UI commands (#22/#23), Scenario diff и тесты scheduler на виртуальных часах (#19/#21).
+4. На G2–G4 выполнить интеграцию, только потом опасные операции при доказанных гарантиях.
+5. G5 service extraction без второго движка, G6 выпуск.
+
+Реализация одной компоненты не блокирует разработку независимой. Общий `main` требует последовательной интеграции изменений и регрессионных проверок. Не закрывать #15/#16/#18 до их собственных критериев.
