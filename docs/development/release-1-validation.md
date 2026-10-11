@@ -44,6 +44,11 @@
 - `Create`/`Update` остаются предложениями. Удаление всегда требует отдельного policy decision; изменение destination и одновременные изменения дают conflict. Равенство имени/размера не считается равенством байтов: при отсутствии trusted checksum или provider revision результат `NeedsVerification`.
 - Локально пройден `bash scripts/test-core.sh` с 202 Rust tests. Нет adapter scan, persistence, FFI/UI, Job submission или E2E; #19 остаётся PARTIAL.
 
+## Automation coalescing baseline — #21 (2026-10-12)
+
+- Pure Rust state machine coalesces a burst of automatic triggers into one pending run and keeps exactly one follow-up while a Job is active. Disabled/locally paused Scenario ignores automatic triggers, while a manual request remains admissible.
+- Локально пройдены `bash scripts/test-core.sh` с 206 Rust tests и `bash scripts/build-macos.sh`. Нет SQLite persistence, clock/DST evaluator, priority aging, FFI/UI или Job submission; #21 остаётся PARTIAL.
+
 Рабочий процесс: небольшие коммиты напрямую в `main`, обязательное ожидание CI и регистрация ограничений; ветки документации не создаются.
 
 ## Local Filesystem Adapter — #15 (2026-10-11)
