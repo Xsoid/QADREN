@@ -4,6 +4,7 @@
 pub mod capabilities;
 pub mod confirmation;
 pub mod jobs;
+pub mod jobs_ffi;
 pub mod local_fs;
 pub mod model;
 pub mod registry;
