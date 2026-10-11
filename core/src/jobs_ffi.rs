@@ -11,12 +11,17 @@ fn response(value: serde_json::Value) -> *mut c_char {
         .into_raw()
 }
 
+/// Return JSON-encoded persisted jobs for a caller-owned C string path.
+///
+/// # Safety
+/// `path` must be null or point to a valid NUL-terminated C string whose memory
+/// remains readable for the duration of this call.
 #[no_mangle]
-pub extern "C" fn qadren_jobs_list(path: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn qadren_jobs_list(path: *const c_char) -> *mut c_char {
     if path.is_null() {
         return response(json!({"ok": false, "error": "invalid_path"}));
     }
-    let path = unsafe { CStr::from_ptr(path) };
+    let path = CStr::from_ptr(path);
     let Ok(path) = path.to_str() else {
         return response(json!({"ok": false, "error": "invalid_path"}));
     };
@@ -37,6 +42,11 @@ pub extern "C" fn qadren_jobs_list(path: *const c_char) -> *mut c_char {
     }
 }
 
+/// Release a string returned by `qadren_jobs_list`.
+///
+/// # Safety
+/// `pointer` must be null or a pointer returned by this API that has not already
+/// been freed. It must not be used after this call.
 #[no_mangle]
 pub unsafe extern "C" fn qadren_jobs_free_string(pointer: *mut c_char) {
     if !pointer.is_null() {
@@ -49,7 +59,7 @@ mod tests {
     use super::*;
     #[test]
     fn null_path_fails_without_opening_store() {
-        let ptr = qadren_jobs_list(std::ptr::null());
+        let ptr = unsafe { qadren_jobs_list(std::ptr::null()) };
         let message = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap();
         assert!(message.contains("invalid_path"));
         unsafe { qadren_jobs_free_string(ptr) };
