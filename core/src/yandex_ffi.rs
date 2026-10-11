@@ -12,6 +12,8 @@ fn safe_error(error: YandexError) -> &'static str {
         YandexError::InvalidToken => "invalid_token",
         YandexError::InvalidPath => "invalid_path",
         YandexError::InvalidAccountIdentity => "invalid_account_identity",
+        YandexError::UnsafeTransferUrl => "unsafe_transfer_url",
+        YandexError::UploadRejected(_) => "upload_rejected",
         YandexError::Transport(_) => "network_error",
         YandexError::Provider(_) => "provider_error",
     }
