@@ -387,6 +387,27 @@ impl JobStore {
             .map_err(JobStoreError::from)
     }
 
+    /// List persisted jobs for read-only UI/Controller monitoring.
+    /// This query never starts or changes an operation.
+    pub fn list_jobs(&self) -> Result<Vec<StoredJob>> {
+        self.check_storage_identity()?;
+        let mut statement = self.db.prepare(
+            "SELECT id,state,scenario_id,scenario_revision FROM jobs ORDER BY rowid ASC",
+        )?;
+        let jobs = statement.query_map([], |row| {
+            let state: String = row.get(1)?;
+            let revision: Option<i64> = row.get(3)?;
+            Ok(StoredJob {
+                id: row.get(0)?,
+                state: parse_state(&state)?,
+                scenario_id: row.get(2)?,
+                scenario_revision: revision.map(|value| value as u64),
+            })
+        })?;
+        jobs.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(JobStoreError::from)
+    }
+
     /// Compare-and-set: only the expected persisted state may advance.
     /// The caller remains responsible for verifying the evidence's provenance.
     pub fn advance(
@@ -881,6 +902,22 @@ impl JobStore {
 mod tests {
     use super::*;
     use crate::confirmation::EvidenceLevel;
+
+    #[test]
+    fn list_jobs_is_read_only_and_preserves_scenario_identity() {
+        let mut store = JobStore::in_memory().unwrap();
+        store.enqueue("job-a", None).unwrap();
+        store.enqueue("job-b", Some(("scenario-a", 2))).unwrap();
+        let jobs = store.list_jobs().unwrap();
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].id, "job-a");
+        assert_eq!(jobs[0].state, JobState::Queued);
+        assert_eq!(jobs[0].scenario_id, None);
+        assert_eq!(jobs[1].id, "job-b");
+        assert_eq!(jobs[1].scenario_id.as_deref(), Some("scenario-a"));
+        assert_eq!(jobs[1].scenario_revision, Some(2));
+        assert_eq!(store.list_jobs().unwrap().len(), 2);
+    }
 
     #[test]
     fn manual_and_scenario_jobs_remain_separate() {
