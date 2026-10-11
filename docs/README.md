@@ -30,4 +30,4 @@
 
 ## Подключение AI-Docs-Hub
 
-Единые правила для ChatGPT, Codex и других агентов независимо от наличия AI-Docs-Hub: [AGENTS.md](../AGENTS.md#совместимость-с-ai-docs-hub-и-независимость-от-точки-входа). Безопасный onboarding и сопоставление проверок: [engineering-rules.md](development/engineering-rules.md#интеграция-ai-docs-hub-порядок-для-чата-и-codex). Hub используется только как опциональный навигационный/quality инструмент, не как источник продуктовых архитектурных решений QADREN. Project binding не означает разрешение на перезапись или генерацию документации.
+Единые правила для ChatGPT, Codex и других агентов независимо от наличия AI-Docs-Hub: [AGENTS.md](../AGENTS.md#единый-порядок-работы-чат-codex-ai-docs-hub). Безопасный onboarding и сопоставление проверок: [engineering-rules.md](development/engineering-rules.md#интеграция-ai-docs-hub-порядок-для-чата-и-codex). Hub используется только как опциональный навигационный/quality инструмент, не как источник продуктовых архитектурных решений QADREN. Project binding не означает разрешение на перезапись или генерацию документации.
