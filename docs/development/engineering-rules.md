@@ -44,3 +44,13 @@
 - Если патч меняет принятый принцип — сперва предложить изменение ADR, явно указать несовместимости.
 - В том же PR обновлять документацию и тесты; новые решения не оставлять исключительно в чате или issue.
 - Не заявлять об успешной проверке без фактического запуска команды.
+
+
+## Codex workflow для Release 1 (2026-10-11)
+
+- **Start:** прочитать AGENTS.md, актуальные #12 и свою Issue, docs/roadmap.md и конкретные файлы кода; назвать уже существующие API и baseline SHA. Никаких вторых JobStore/Policy/Registry или веток для документации.
+- **Plan:** задать функциональную вертикаль, контракты на Rust/Swift/SQLite/FFI boundary, внешние эффекты, scope consent, UNKNOWN reconciliation и критерии завершения. Если платформенное ограничение не доказано — feature fail-closed.
+- **Implement:** один целостный пакет с behaviour test + negative/fault matrix, а не серия косметических фиксирующих тестов без функции. Первый runner хостится SwiftUI in-process, Rust engine остаётся независимым от UI и пригодным для service extraction.
+- **Verify:** `bash scripts/test-core.sh`, применимые macOS Swift/FFI scripts, mock HTTP и реальные platform tests там, где они необходимы. Не путать mock PASS с реальной безопасностью macOS/облака.
+- **Review:** code review correctness, ownership и ABI; security review content policy, paths, races, secrets, overwrite, cancellation, reconciliation. Explicit diff review, затем коммит непосредственно main. Не объявлять Done без приемочных доказательств.
+- **Report:** commit SHA, проверенные и непроверенные критерии, версию среды, известные риски. После законченного пакета обновить Issue и документацию. GitHub Actions необязательны. Не переключаться в Work автоматически.
