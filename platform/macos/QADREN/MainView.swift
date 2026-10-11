@@ -2,6 +2,8 @@ import SwiftUI
 
 struct MainView: View {
     @StateObject private var connections = StorageConnections()
+    @State private var jobs: [JobRow] = []
+    @State private var jobError: String?
 
     var body: some View {
         ScrollView {
@@ -21,6 +23,26 @@ struct MainView: View {
                 LabeledContent("Core version", value: CoreBridge.version)
                 LabeledContent("Core status", value: CoreBridge.status)
                 LabeledContent("Local worker", value: CoreBridge.workerStatus)
+                Divider()
+                HStack {
+                    Text("Job queue").font(.headline)
+                    Spacer()
+                    Button("Refresh jobs") { refreshJobs() }
+                }
+                if let jobError {
+                    Text(jobError).font(.caption).foregroundStyle(.orange)
+                } else if jobs.isEmpty {
+                    Text("No queued jobs. Execution is not enabled yet.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    ForEach(jobs) { job in
+                        HStack {
+                            Text(job.id).lineLimit(1)
+                            Spacer()
+                            Text(job.state).foregroundStyle(.secondary)
+                        }
+                    }
+                }
                 Divider()
                 HStack {
                     Text("Storage connections")
@@ -73,6 +95,16 @@ struct MainView: View {
                     .foregroundStyle(.secondary)
             }
             .padding(24)
+        }
+        .onAppear { refreshJobs() }
+    }
+
+    private func refreshJobs() {
+        do {
+            jobs = try JobInventory.list()
+            jobError = nil
+        } catch {
+            jobError = error.localizedDescription
         }
     }
 }
