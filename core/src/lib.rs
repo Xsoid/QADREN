@@ -10,6 +10,7 @@ pub mod local_fs;
 pub mod model;
 pub mod registry;
 pub mod registry_ffi;
+pub mod scenario_planner;
 pub mod verification;
 pub mod yandex;
 pub mod yandex_ffi;

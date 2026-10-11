@@ -38,6 +38,12 @@
 - Локально пройдены `bash scripts/test-core.sh` (fmt, Clippy, 197 Rust unit tests) и `bash scripts/build-macos.sh`. Отдельный Swift fault-injection runner проверил normal flow, отказ на Job gate, Keychain и Registry, повтор после каждого отказа и независимость второй connection.
 - Не выполнена реальная проверка отказа системного Keychain, restart между отключением и cleanup и live Scenario/adapter attempt. Поэтому #25 остаётся открытой и не является подтверждением готовности настоящего disconnect UX.
 
+## Scenario metadata-only dry-run planner — #19 (2026-10-12)
+
+- Rust `scenario_planner` строит детерминированный план только из разрешённых metadata snapshots и последнего подтверждённого `FileSyncState`; он не выполняет I/O, не создаёт Job и не меняет baseline.
+- `Create`/`Update` остаются предложениями. Удаление всегда требует отдельного policy decision; изменение destination и одновременные изменения дают conflict. Равенство имени/размера не считается равенством байтов: при отсутствии trusted checksum или provider revision результат `NeedsVerification`.
+- Локально пройден `bash scripts/test-core.sh` с 202 Rust tests. Нет adapter scan, persistence, FFI/UI, Job submission или E2E; #19 остаётся PARTIAL.
+
 Рабочий процесс: небольшие коммиты напрямую в `main`, обязательное ожидание CI и регистрация ограничений; ветки документации не создаются.
 
 ## Local Filesystem Adapter — #15 (2026-10-11)
