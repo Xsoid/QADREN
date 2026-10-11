@@ -27,12 +27,13 @@ struct MainView: View {
                 HStack {
                     Text("Job queue").font(.headline)
                     Spacer()
+                    Button("Create verified mock file") { createMockJob() }
                     Button("Refresh jobs") { refreshJobs() }
                 }
                 if let jobError {
                     Text(jobError).font(.caption).foregroundStyle(.orange)
                 } else if jobs.isEmpty {
-                    Text("No queued jobs. Execution is not enabled yet.")
+                    Text("No jobs yet. Create verified mock file uses app-owned test storage only.")
                         .font(.caption).foregroundStyle(.secondary)
                 } else {
                     ForEach(jobs) { job in
@@ -103,6 +104,15 @@ struct MainView: View {
         do {
             jobs = try JobInventory.list()
             jobError = nil
+        } catch {
+            jobError = error.localizedDescription
+        }
+    }
+
+    private func createMockJob() {
+        do {
+            try JobInventory.createMockArtifact()
+            refreshJobs()
         } catch {
             jobError = error.localizedDescription
         }

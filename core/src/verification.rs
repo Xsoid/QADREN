@@ -11,6 +11,25 @@ pub struct VerifiedReceipt {
 }
 
 impl VerifiedReceipt {
+    /// Constructed only by an adapter verifier after it has independently
+    /// observed the exact durable operation target.
+    pub(crate) fn metadata_verified(
+        attempt_id: &str,
+        operation_kind: &str,
+        target_connection_id: &str,
+        target_path: &str,
+    ) -> Self {
+        Self {
+            attempt_id: attempt_id.to_owned(),
+            confirmation: Confirmation::Confirmed(
+                crate::confirmation::EvidenceLevel::MetadataVerified,
+            ),
+            operation_kind: Some(operation_kind.to_owned()),
+            target_connection_id: Some(target_connection_id.to_owned()),
+            target_path: Some(target_path.to_owned()),
+        }
+    }
+
     pub fn attempt_id(&self) -> &str {
         &self.attempt_id
     }
@@ -45,11 +64,5 @@ pub(crate) fn test_bound_receipt(
     connection: &str,
     path: &str,
 ) -> VerifiedReceipt {
-    VerifiedReceipt {
-        attempt_id: attempt_id.to_owned(),
-        confirmation: Confirmation::Confirmed(crate::confirmation::EvidenceLevel::MetadataVerified),
-        operation_kind: Some(kind.to_owned()),
-        target_connection_id: Some(connection.to_owned()),
-        target_path: Some(path.to_owned()),
-    }
+    VerifiedReceipt::metadata_verified(attempt_id, kind, connection, path)
 }

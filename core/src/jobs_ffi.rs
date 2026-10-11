@@ -1,9 +1,19 @@
-//! Read-only job inventory exposed to the local macOS application.
+//! Narrow Job commands exposed to the local macOS application.
 //! Execution and state transitions remain inside Rust.
 use crate::jobs::JobStore;
 use serde_json::json;
 use std::ffi::{c_char, CStr, CString};
 use std::path::Path;
+
+fn input<'a>(pointer: *const c_char) -> Option<&'a str> {
+    if pointer.is_null() {
+        return None;
+    }
+    unsafe { CStr::from_ptr(pointer) }
+        .to_str()
+        .ok()
+        .filter(|value| !value.is_empty())
+}
 
 fn response(value: serde_json::Value) -> *mut c_char {
     CString::new(value.to_string())
@@ -18,16 +28,9 @@ fn response(value: serde_json::Value) -> *mut c_char {
 /// remains readable for the duration of this call.
 #[no_mangle]
 pub unsafe extern "C" fn qadren_jobs_list(path: *const c_char) -> *mut c_char {
-    if path.is_null() {
-        return response(json!({"ok": false, "error": "invalid_path"}));
-    }
-    let path = CStr::from_ptr(path);
-    let Ok(path) = path.to_str() else {
+    let Some(path) = input(path) else {
         return response(json!({"ok": false, "error": "invalid_path"}));
     };
-    if path.is_empty() {
-        return response(json!({"ok": false, "error": "invalid_path"}));
-    }
     match JobStore::open(Path::new(path)).and_then(|store| store.list_jobs()) {
         Ok(jobs) => response(json!({
             "ok": true,
@@ -39,6 +42,57 @@ pub unsafe extern "C" fn qadren_jobs_list(path: *const c_char) -> *mut c_char {
             })).collect::<Vec<_>>()
         })),
         Err(_) => response(json!({"ok": false, "error": "job_store_unavailable"})),
+    }
+}
+
+/// Start one explicit, app-owned G1 mock create Job. This command never uses
+/// real cloud connections or user content; Rust owns the full execution.
+///
+/// # Safety
+/// Arguments must be valid, NUL-terminated strings for the duration of call.
+#[no_mangle]
+pub unsafe extern "C" fn qadren_jobs_run_mock_create(
+    database_path: *const c_char,
+    storage_root: *const c_char,
+    job_id: *const c_char,
+) -> *mut c_char {
+    let (Some(database_path), Some(storage_root), Some(job_id)) =
+        (input(database_path), input(storage_root), input(job_id))
+    else {
+        return response(json!({"ok": false, "error": "invalid_request"}));
+    };
+    match crate::job_execution::run_mock_create(
+        Path::new(database_path),
+        Path::new(storage_root),
+        job_id,
+        true,
+    ) {
+        Ok(crate::job_execution::MockCreateStatus::Completed) => {
+            response(json!({"ok": true, "data": {"status": "completed"}}))
+        }
+        Ok(crate::job_execution::MockCreateStatus::Existing(state)) => response(
+            json!({"ok": true, "data": {"status": format!("{:?}", state).to_ascii_lowercase(), "existing": true}}),
+        ),
+        Err(crate::job_execution::MockCreateError::ConsentRequired) => {
+            response(json!({"ok": false, "error": "consent_required"}))
+        }
+        Err(crate::job_execution::MockCreateError::InvalidJobId) => {
+            response(json!({"ok": false, "error": "invalid_request"}))
+        }
+        Err(crate::job_execution::MockCreateError::OccupiedTarget) => {
+            response(json!({"ok": false, "error": "target_exists"}))
+        }
+        Err(crate::job_execution::MockCreateError::VerificationFailed) => {
+            response(json!({"ok": false, "error": "verification_failed"}))
+        }
+        // I/O after an effect is never converted to success or an automatic retry.
+        Err(crate::job_execution::MockCreateError::Io(_))
+        | Err(crate::job_execution::MockCreateError::SimulatedCrashAfterEffect) => {
+            response(json!({"ok": false, "error": "outcome_unknown_or_io"}))
+        }
+        Err(crate::job_execution::MockCreateError::Store(_)) => {
+            response(json!({"ok": false, "error": "job_store_unavailable"}))
+        }
     }
 }
 
@@ -57,11 +111,46 @@ pub unsafe extern "C" fn qadren_jobs_free_string(pointer: *mut c_char) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
     #[test]
     fn null_path_fails_without_opening_store() {
         let ptr = unsafe { qadren_jobs_list(std::ptr::null()) };
         let message = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap();
         assert!(message.contains("invalid_path"));
+        unsafe { qadren_jobs_free_string(ptr) };
+    }
+
+    #[test]
+    fn mock_command_rejects_invalid_inputs() {
+        let ptr = unsafe {
+            qadren_jobs_run_mock_create(std::ptr::null(), std::ptr::null(), std::ptr::null())
+        };
+        let message = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap();
+        assert!(message.contains("invalid_request"));
+        unsafe { qadren_jobs_free_string(ptr) };
+    }
+
+    #[test]
+    fn mock_command_executes_through_the_c_abi() {
+        let base = std::env::temp_dir().join(format!(
+            "qadren-ffi-g1-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&base).unwrap();
+        let database = base.join("jobs.sqlite3");
+        let storage = base.join("storage");
+        let database = CString::new(database.to_str().unwrap()).unwrap();
+        let storage = CString::new(storage.to_str().unwrap()).unwrap();
+        let job = CString::new("ffi-job").unwrap();
+        let ptr = unsafe {
+            qadren_jobs_run_mock_create(database.as_ptr(), storage.as_ptr(), job.as_ptr())
+        };
+        let message = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap();
+        assert!(message.contains("completed"));
         unsafe { qadren_jobs_free_string(ptr) };
     }
 }

@@ -454,7 +454,7 @@
 | Gate | Готово тогда и только тогда, когда | Подтверждение на этапе подготовки |
 |---|---|---|
 | G0 | Документированы владельцы Job, scope consent, adapter errors/capabilities, FFI и UNKNOWN reconciliation | Документировано, реализации ещё требуют проверки |
-| G1 | Manual create-new проходит SwiftUI → Rust JobStore → mock adapter → verified SQLite receipt → UI; no-overwrite, restart/duplicate/fault tests | НЕ выполнено |
+| G1 | Manual create-new проходит SwiftUI → Rust JobStore → mock adapter → verified SQLite receipt → UI; no-overwrite, restart/duplicate/fault tests | PARTIAL: Rust/mock/ABI tests and macOS compilation passed; manual SwiftUI smoke/reload remains required |
 | G2 | Та же вертикаль работает на реально подтверждённой паре адаптеров; live provider evidence и consent | НЕ выполнено |
 | G3 | One-way и two-way Scenario diff опираются на последнее подтверждённое состояние; конфликт блокируется | НЕ выполнено |
 | G4 | Mass delete/overwrite, concurrent mutation, Keychain disconnect и uncertain retry fail-closed | Частично, полная приёмка НЕ выполнена |
@@ -471,3 +471,11 @@
 **Проверки:** статический анализ путей по исходному коду. Rust fmt/Clippy/tests, Swift compiler, native macOS smoke и реальное восстановление после restart на этих коммитах здесь НЕ выполнялись. Код не считается проверенным, пока нет подтверждённого запуска. Этот промежуточный этап **не** удовлетворяет G1: отсутствуют manual Job executor, no-overwrite adapter effect, production verifier, согласованная фиксация результата и end-to-end test.
 
 **Перед следующим функциональным коммитом:** запустить `bash scripts/test-core.sh` и `bash scripts/build-macos.sh` на Mac. При неуспехе сначала исправить компиляцию, не расширять функциональность. Следующее изменение должно быть связано с безопасным исполнением, не наращивать read-only интерфейс без необходимости.
+
+### G1 mock create execution package — 2026-10-11
+
+Рабочее дерево после baseline `edc9485` добавляет единственный in-process vertical slice: явная кнопка SwiftUI создаёт новый **app-owned** mock artifact; `job_execution.rs` сохраняет `JobStore` Job и bound attempt с размером/MD5 до записи, выполняет `create_new` без overwrite, затем mock verifier заново читает только этот тестовый объект и сохраняет metadata-verified receipt в SQLite. Узкий C ABI `qadren_jobs_run_mock_create` остаётся границей Swift/Rust; Swift не пишет SQLite и не выполняет файловую бизнес-логику.
+
+Проверено на macOS: `bash scripts/test-core.sh` — Rust fmt, Clippy и 188 unit tests passed; в том числе consent-denial без эффекта, occupied destination без overwrite, invalid path, partial write, duplicate request, simulated crash after external effect → restart `UNKNOWN` with no replay, а также successful C-ABI execution. `bash scripts/build-macos.sh` собрал unsigned `dist/QADREN.app` и проверил `Info.plist`.
+
+Это **mock evidence**, не G2 и не реальная передача Yandex/iCloud/Local FS: не читается пользовательское или облачное содержимое, не добавлены destructive operations, Background Worker, Scenario, cancellation/pause или реальный provider reconciliation. До статуса VERIFIED G1 нужен ручной macOS smoke: нажать `Create verified mock file`, убедиться в `completed` после обновления UI, перезапустить приложение и подтвердить тот же SQLite inventory; затем провести diff/code/security review на финальном SHA.

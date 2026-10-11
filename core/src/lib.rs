@@ -3,6 +3,7 @@
 
 pub mod capabilities;
 pub mod confirmation;
+pub mod job_execution;
 pub mod jobs;
 pub mod jobs_ffi;
 pub mod local_fs;
