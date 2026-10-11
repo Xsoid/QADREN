@@ -19,6 +19,8 @@ pub enum YandexError {
     Provider(u16),
     InvalidPath,
     InvalidAccountIdentity,
+    UnsafeTransferUrl,
+    UploadRejected(u16),
 }
 impl From<reqwest::Error> for YandexError {
     fn from(err: reqwest::Error) -> Self {
@@ -94,6 +96,21 @@ pub fn compare_resource_metadata(
     } else {
         MetadataMatch::Mismatch
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TransferLink {
+    href: String,
+    method: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadOutcome {
+    /// Provider accepted the upload request. Reconcile resource metadata
+    /// separately; this does not establish cloud content integrity.
+    Accepted,
+    /// Provider queued asynchronous work; result must be reconciled.
+    Pending,
 }
 
 #[derive(Deserialize)]
@@ -188,6 +205,54 @@ impl YandexMetadataClient {
             return Err(YandexError::InvalidPath);
         }
         self.get_json("/resources", token, &[("path", path.to_owned())])
+    }
+
+    /// Upload content supplied by the caller to a new Yandex Disk path.
+    /// This operation never opens local files and never downloads file bytes.
+    /// The caller must enforce destination consent and source provenance.
+    /// A failed PUT after sending bytes may already have changed remote state.
+    pub fn upload_from_reader<R: std::io::Read + Send + 'static>(
+        &self,
+        token: &str,
+        path: &str,
+        source: R,
+        expected_size: u64,
+    ) -> Result<UploadOutcome> {
+        if !path.starts_with("disk:/")
+            || path.contains(|ch: char| ch.is_control())
+            || path == "disk:/"
+        {
+            return Err(YandexError::InvalidPath);
+        }
+        let link: TransferLink = self.get_json(
+            "/resources/upload",
+            token,
+            &[("path", path.to_owned()), ("overwrite", "false".to_owned())],
+        )?;
+        if link.method != "PUT" {
+            return Err(YandexError::UnsafeTransferUrl);
+        }
+        let parsed = reqwest::Url::parse(&link.href)
+            .map_err(|_| YandexError::UnsafeTransferUrl)?;
+        if parsed.scheme() != "https"
+            || parsed.host_str().is_none()
+            || parsed.username() != ""
+            || parsed.password().is_some()
+        {
+            return Err(YandexError::UnsafeTransferUrl);
+        }
+        let body = reqwest::blocking::Body::sized(source, expected_size);
+        let response = self.http.put(parsed).body(body).send()?;
+        match response.status() {
+            StatusCode::CREATED | StatusCode::OK | StatusCode::NO_CONTENT => {
+                Ok(UploadOutcome::Accepted)
+            }
+            StatusCode::ACCEPTED => Ok(UploadOutcome::Pending),
+            StatusCode::UNAUTHORIZED => Err(YandexError::Unauthorized),
+            StatusCode::FORBIDDEN => Err(YandexError::Forbidden),
+            StatusCode::TOO_MANY_REQUESTS => Err(YandexError::RateLimited),
+            code => Err(YandexError::UploadRejected(code.as_u16())),
+        }
     }
 
     /// Lists directory metadata without downloading file contents.
