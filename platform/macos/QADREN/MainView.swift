@@ -2,6 +2,7 @@ import SwiftUI
 
 struct MainView: View {
     @StateObject private var connections = StorageConnections()
+    @StateObject private var localWorkspace = LocalWorkspace()
     @State private var jobs: [JobRow] = []
     @State private var jobError: String?
 
@@ -23,6 +24,17 @@ struct MainView: View {
                 LabeledContent("Core version", value: CoreBridge.version)
                 LabeledContent("Core status", value: CoreBridge.status)
                 LabeledContent("Local worker", value: CoreBridge.workerStatus)
+                Divider()
+                HStack { Text("Local files").font(.headline); Spacer(); Button("Choose folder") { localWorkspace.chooseRoot() }; Button("Reload") { localWorkspace.refresh() }.disabled(localWorkspace.root == nil) }
+                if let root = localWorkspace.root {
+                    Text(root).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    HStack { Button("New folder") { localWorkspace.mkdir("New Folder") }.disabled(localWorkspace.entries.contains(where: { $0.name == "New Folder" })) }
+                    ForEach(localWorkspace.entries) { entry in
+                        HStack { Image(systemName: entry.is_directory ? "folder" : "doc"); Text(entry.name); Spacer(); if !entry.is_directory { Text(ByteCountFormatter.string(fromByteCount: Int64(clamping: entry.size), countStyle: .file)).foregroundStyle(.secondary) } }
+                    }
+                    Text("Metadata only: QADREN does not open file contents. Copy, move and delete remain unavailable.").font(.caption).foregroundStyle(.secondary)
+                } else { Text("Choose a folder to inspect its metadata locally.").font(.caption).foregroundStyle(.secondary) }
+                if let error = localWorkspace.error { Text(error).font(.caption).foregroundStyle(.orange) }
                 Divider()
                 HStack {
                     Text("Job queue").font(.headline)

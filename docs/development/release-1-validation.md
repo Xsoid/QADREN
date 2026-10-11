@@ -54,6 +54,10 @@
 - Pure Rust policy gate допускает destructive operation только с explicit accepted decision для точных operation, connection, relative path и срока. Нет решения, deny, expiry или несовпадение scope означают fail-closed.
 - Локально пройдены `bash scripts/test-core.sh` с 208 Rust tests и `bash scripts/build-macos.sh`. Нет durable decisions, UI prompt, adapter pre-I/O recheck или E2E; #20 остаётся PARTIAL.
 
+## Local metadata workspace — #22 (2026-10-12)
+
+- Пользователь выбирает локальную папку на текущую сессию; Rust FFI показывает только metadata entries и создаёт подпапку. Content read, copy, move и delete не доступны.
+
 Рабочий процесс: небольшие коммиты напрямую в `main`, обязательное ожидание CI и регистрация ограничений; ветки документации не создаются.
 
 ## Local Filesystem Adapter — #15 (2026-10-11)

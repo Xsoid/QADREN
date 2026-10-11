@@ -8,6 +8,7 @@ pub mod job_execution;
 pub mod jobs;
 pub mod jobs_ffi;
 pub mod local_fs;
+pub mod local_fs_ffi;
 pub mod model;
 pub mod policy;
 pub mod registry;
