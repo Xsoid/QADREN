@@ -569,6 +569,58 @@ impl JobStore {
         Ok(())
     }
 
+    /// Pause a Job only before any operation attempt is active or unresolved.
+    /// Checkpointing an in-flight effect needs a separate adapter contract;
+    /// this guard must not pretend that an active transfer was paused.
+    pub fn pause(&mut self, id: &str) -> Result<()> {
+        self.check_storage_identity()?;
+        let tx = self.db.transaction()?;
+        let state: Option<String> = tx
+            .query_row("SELECT state FROM jobs WHERE id=?1", [id], |row| row.get(0))
+            .optional()?;
+        let Some(state) = state else {
+            return Err(JobStoreError::NotFound);
+        };
+        let current = parse_state(&state)?;
+        if current
+            .transition(JobState::Paused, Confirmation::Unknown)
+            .is_err()
+        {
+            return Err(JobStoreError::InvalidTransition);
+        }
+        let unresolved: i64 = tx.query_row(
+            "SELECT count(*) FROM job_attempts WHERE job_id=?1 AND status!='resolved'",
+            [id],
+            |row| row.get(0),
+        )?;
+        if unresolved != 0 {
+            return Err(JobStoreError::InvalidTransition);
+        }
+        let changed = tx.execute(
+            "UPDATE jobs SET state='paused' WHERE id=?1 AND state=?2",
+            params![id, state],
+        )?;
+        if changed != 1 {
+            return Err(JobStoreError::InvalidTransition);
+        }
+        tx.execute(
+            "INSERT INTO job_events(job_id,state,kind) VALUES (?1,'paused','paused_before_effect')",
+            [id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Resume a pre-effect paused Job by returning it to the durable queue.
+    pub fn resume(&mut self, id: &str) -> Result<()> {
+        self.advance(
+            id,
+            JobState::Paused,
+            JobState::Queued,
+            Confirmation::Unknown,
+        )
+    }
+
     /// Atomically prepare an operation and its immutable expected metadata.
     /// Persist this transaction BEFORE initiating any external effect.
     #[allow(clippy::too_many_arguments)] // Atomic preparation takes a complete operation identity.
@@ -1193,6 +1245,40 @@ mod tests {
         .unwrap();
         assert!(matches!(
             db.cancel("effect"),
+            Err(JobStoreError::InvalidTransition)
+        ));
+        assert_eq!(db.state("effect").unwrap(), Some(JobState::Running));
+    }
+
+    #[test]
+    fn pause_and_resume_are_durable_but_active_effects_cannot_pause() {
+        let mut db = JobStore::in_memory().unwrap();
+        db.enqueue("queued", None).unwrap();
+        db.pause("queued").unwrap();
+        assert_eq!(db.state("queued").unwrap(), Some(JobState::Paused));
+        db.resume("queued").unwrap();
+        assert_eq!(db.state("queued").unwrap(), Some(JobState::Queued));
+
+        db.enqueue("effect", None).unwrap();
+        db.advance(
+            "effect",
+            JobState::Queued,
+            JobState::Running,
+            Confirmation::Unknown,
+        )
+        .unwrap();
+        db.prepare_bound_attempt(
+            "effect",
+            "effect-attempt",
+            "copy",
+            "target",
+            "/new",
+            1,
+            "900150983cd24fb0d6963f7d28e17f72",
+        )
+        .unwrap();
+        assert!(matches!(
+            db.pause("effect"),
             Err(JobStoreError::InvalidTransition)
         ));
         assert_eq!(db.state("effect").unwrap(), Some(JobState::Running));

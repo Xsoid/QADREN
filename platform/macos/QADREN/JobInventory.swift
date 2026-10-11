@@ -16,6 +16,14 @@ private func queueMockCreate(
 private func cancelMockCreate(
     _ databasePath: UnsafePointer<CChar>?, _ jobID: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_jobs_pause_mock_create")
+private func pauseMockCreate(
+    _ databasePath: UnsafePointer<CChar>?, _ jobID: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_jobs_resume_mock_create")
+private func resumeMockCreate(
+    _ databasePath: UnsafePointer<CChar>?, _ jobID: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
 
 struct JobRow: Decodable, Identifiable {
     let id: String
@@ -98,5 +106,13 @@ enum JobInventory {
 
     static func cancelMockArtifact(jobID: String) throws {
         try command(cancelMockCreate, jobID: jobID)
+    }
+
+    static func pauseMockArtifact(jobID: String) throws {
+        try command(pauseMockCreate, jobID: jobID)
+    }
+
+    static func resumeMockArtifact(jobID: String) throws {
+        try command(resumeMockCreate, jobID: jobID)
     }
 }

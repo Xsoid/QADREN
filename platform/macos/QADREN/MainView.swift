@@ -43,6 +43,10 @@ struct MainView: View {
                             Text(job.state).foregroundStyle(.secondary)
                             if job.state == "queued" {
                                 Button("Run") { runMockJob(job.id) }
+                                Button("Pause") { pauseMockJob(job.id) }
+                                Button("Cancel", role: .destructive) { cancelMockJob(job.id) }
+                            } else if job.state == "paused" {
+                                Button("Resume") { resumeMockJob(job.id) }
                                 Button("Cancel", role: .destructive) { cancelMockJob(job.id) }
                             }
                         }
@@ -135,6 +139,26 @@ struct MainView: View {
     private func cancelMockJob(_ jobID: String) {
         do {
             try JobInventory.cancelMockArtifact(jobID: jobID)
+            refreshJobs()
+        } catch {
+            jobError = error.localizedDescription
+            refreshJobs()
+        }
+    }
+
+    private func pauseMockJob(_ jobID: String) {
+        do {
+            try JobInventory.pauseMockArtifact(jobID: jobID)
+            refreshJobs()
+        } catch {
+            jobError = error.localizedDescription
+            refreshJobs()
+        }
+    }
+
+    private func resumeMockJob(_ jobID: String) {
+        do {
+            try JobInventory.resumeMockArtifact(jobID: jobID)
             refreshJobs()
         } catch {
             jobError = error.localizedDescription

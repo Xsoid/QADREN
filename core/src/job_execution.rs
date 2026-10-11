@@ -177,6 +177,23 @@ pub fn cancel_mock_create(database_path: &Path, job_id: &str) -> Result<(), Mock
     Ok(())
 }
 
+/// Pause only a queued mock Job. No storage effect is started or interrupted.
+pub fn pause_mock_create(database_path: &Path, job_id: &str) -> Result<(), MockCreateError> {
+    target_name(job_id)?;
+    let mut store = JobStore::open(database_path)?;
+    store.pause(job_id)?;
+    Ok(())
+}
+
+/// Return a safely paused mock Job to the queue; the later Run click remains
+/// the separate operation-scoped consent for the file creation effect.
+pub fn resume_mock_create(database_path: &Path, job_id: &str) -> Result<(), MockCreateError> {
+    target_name(job_id)?;
+    let mut store = JobStore::open(database_path)?;
+    store.resume(job_id)?;
+    Ok(())
+}
+
 fn run_mock_create_inner(
     database_path: &Path,
     storage_root: &Path,
@@ -332,6 +349,21 @@ mod tests {
             MockCreateStatus::Existing(JobState::Cancelled)
         );
         assert!(!storage.exists());
+    }
+
+    #[test]
+    fn paused_mock_job_survives_resume_without_storage_effect() {
+        let (database, storage) = fixture("pause");
+        queue_mock_create(&database, "job-1").unwrap();
+        pause_mock_create(&database, "job-1").unwrap();
+        assert!(!storage.exists());
+        let store = JobStore::open(&database).unwrap();
+        assert_eq!(store.state("job-1").unwrap(), Some(JobState::Paused));
+        drop(store);
+        resume_mock_create(&database, "job-1").unwrap();
+        assert!(!storage.exists());
+        let store = JobStore::open(&database).unwrap();
+        assert_eq!(store.state("job-1").unwrap(), Some(JobState::Queued));
     }
 
     #[test]
