@@ -1,0 +1,24 @@
+# Codebase Memory safety boundary managed by AI Docs Hub.
+.env
+.env.*
+**/.env
+**/.env.*
+**/*secret*
+**/*token*
+**/*password*
+**/*credential*
+**/*cookie*
+**/*session*
+**/*dump*
+**/*.key
+**/*.pem
+**/*.p12
+**/*.pfx
+storage/
+cache/
+tmp/
+logs/
+*.sqlite
+*.sqlite3
+*.db
+*.db-*

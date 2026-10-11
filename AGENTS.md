@@ -80,3 +80,15 @@
 - Не публиковать patch при failed verification, stale/incomplete review или unresolved blocking finding.
 - Для проекта qadren использовать project-scoped Hub tools и не смешивать контекст других проектов.
 <!-- END AI DOCS HUB PROJECT LIFECYCLE -->
+
+<!-- BEGIN AI DOCS HUB CODEBASE MEMORY -->
+## Codebase Memory
+
+- Для этого проекта Codebase Memory используется только с project scope `qadren`.
+- Документацию, ADR, runbooks и project policies сначала искать через AI Docs Hub.
+- Для symbols, definitions, calls, dependencies, routes и blast radius сначала использовать Codebase Memory MCP.
+- Обычные `rg` и чтение файлов остаются fallback, если graph coverage неполный или нужен source of truth.
+- `manage_adr`, cross-project wildcard, `delete_project`, `ingest_traces` и repository persistence запрещены.
+- Если документация и code graph расходятся, проверить исходный код и явно сообщить о конфликте с путями.
+- После первого подключения или изменения MCP-конфигурации перезапустить Codex, чтобы новая сессия загрузила server tools.
+<!-- END AI DOCS HUB CODEBASE MEMORY -->
