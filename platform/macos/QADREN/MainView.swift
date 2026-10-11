@@ -176,13 +176,20 @@ struct MainView: View {
 private struct LocalWorkspacePanel: View {
     let title: String
     @ObservedObject var workspace: LocalWorkspace
+    @State private var selected = Set<String>()
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack { Text(title).font(.subheadline.bold()); Spacer(); Button("Choose") { workspace.chooseRoot() }; Button("Reload") { workspace.refresh() }.disabled(workspace.root == nil) }
             if let root = workspace.root {
                 Text(root).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 HStack { Button("Up") { workspace.up() }.disabled(workspace.relativePath.isEmpty); Text(workspace.relativePath.isEmpty ? "/" : "/" + workspace.relativePath).font(.caption); Spacer(); Button("New folder") { workspace.mkdir("New Folder") }.disabled(workspace.entries.contains(where: { $0.name == "New Folder" })) }
-                ForEach(workspace.entries) { entry in Button { workspace.open(entry) } label: { HStack { Image(systemName: entry.is_directory ? "folder" : "doc"); Text(entry.name); Spacer(); if !entry.is_directory { Text(ByteCountFormatter.string(fromByteCount: Int64(clamping: entry.size), countStyle: .file)) } }.foregroundStyle(entry.is_directory ? .primary : .secondary) }.buttonStyle(.plain).disabled(!entry.is_directory) }
+                if !selected.isEmpty { Text("Selected: \(selected.count)").font(.caption).foregroundStyle(.secondary) }
+                ForEach(workspace.entries) { entry in
+                    HStack {
+                        Toggle("", isOn: Binding(get: { selected.contains(entry.name) }, set: { enabled in if enabled { selected.insert(entry.name) } else { selected.remove(entry.name) } })).labelsHidden()
+                        Button { workspace.open(entry) } label: { HStack { Image(systemName: entry.is_directory ? "folder" : "doc"); Text(entry.name); Spacer(); if !entry.is_directory { Text(ByteCountFormatter.string(fromByteCount: Int64(clamping: entry.size), countStyle: .file)) } }.foregroundStyle(entry.is_directory ? .primary : .secondary) }.buttonStyle(.plain).disabled(!entry.is_directory)
+                    }
+                }
             } else { Text("Choose a folder.").font(.caption).foregroundStyle(.secondary) }
             if let error = workspace.error { Text(error).font(.caption).foregroundStyle(.orange) }
         }.frame(maxWidth: .infinity, alignment: .leading)
