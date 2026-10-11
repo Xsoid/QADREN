@@ -21,6 +21,7 @@ pub enum YandexError {
     InvalidAccountIdentity,
     UnsafeTransferUrl,
     UploadRejected(u16),
+    UploadOutcomeUnknown,
 }
 impl From<reqwest::Error> for YandexError {
     fn from(err: reqwest::Error) -> Self {
@@ -245,7 +246,12 @@ impl YandexMetadataClient {
             return Err(YandexError::UnsafeTransferUrl);
         }
         let body = reqwest::blocking::Body::sized(source, expected_size);
-        let response = self.http.put(parsed).body(body).send()?;
+        let response = self
+            .http
+            .put(parsed)
+            .body(body)
+            .send()
+            .map_err(|_| YandexError::UploadOutcomeUnknown)?;
         match response.status() {
             StatusCode::CREATED | StatusCode::OK | StatusCode::NO_CONTENT => {
                 Ok(UploadOutcome::Accepted)
@@ -254,6 +260,7 @@ impl YandexMetadataClient {
             StatusCode::UNAUTHORIZED => Err(YandexError::Unauthorized),
             StatusCode::FORBIDDEN => Err(YandexError::Forbidden),
             StatusCode::TOO_MANY_REQUESTS => Err(YandexError::RateLimited),
+            code if code.is_server_error() => Err(YandexError::UploadOutcomeUnknown),
             code => Err(YandexError::UploadRejected(code.as_u16())),
         }
     }
