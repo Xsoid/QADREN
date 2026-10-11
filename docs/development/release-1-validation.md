@@ -462,3 +462,12 @@
 | G6 | Матрица платформы, entitlement, выбранная distribution, signed install, ресурсы и fault tests зафиксированы | НЕ выполнено |
 
 Для каждого инкремента приложить тестовый case ID, SHA, environment, executed command, PASS/FAIL/BLOCKED/SKIPPED, источник evidence (real/mock/static) и оставшийся риск. Закрытие #15 по количеству unit tests запрещено. Рекомендуемый первый E2E: no-overwrite create-new-file, stable attempt ID и verification перед terminal success. Исходный контент нельзя автоматически скачивать на главный MacBook. Перед выпуском с неполными destructive capabilities запросить отдельное продуктовое согласование.
+
+
+### G1 in-process job inventory — 2026-10-11
+
+Срез исходного кода: `a39c392` (`JobStore::list_jobs`), `519810a`/`c581b9b` (read-only C ABI `qadren_jobs_list`), `58cd095` (Swift `JobInventory`), `33fc1f8` (read-only queue panel in `MainView`). Статусы считываются непосредственно из durable SQLite; никакой Job не запускается при открытии UI. Для первого runner сохраняется отдельная архитектурная граница, без придуманной worker службы.
+
+**Проверки:** статический анализ путей по исходному коду. Rust fmt/Clippy/tests, Swift compiler, native macOS smoke и реальное восстановление после restart на этих коммитах здесь НЕ выполнялись. Код не считается проверенным, пока нет подтверждённого запуска. Этот промежуточный этап **не** удовлетворяет G1: отсутствуют manual Job executor, no-overwrite adapter effect, production verifier, согласованная фиксация результата и end-to-end test.
+
+**Перед следующим функциональным коммитом:** запустить `bash scripts/test-core.sh` и `bash scripts/build-macos.sh` на Mac. При неуспехе сначала исправить компиляцию, не расширять функциональность. Следующее изменение должно быть связано с безопасным исполнением, не наращивать read-only интерфейс без необходимости.
