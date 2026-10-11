@@ -317,6 +317,46 @@ mod tests {
     }
 
     #[test]
+    fn upload_refuses_insecure_signed_url_without_sending_content() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut buffer = [0u8; 8192];
+            let count = stream.read(&mut buffer).unwrap();
+            let request = String::from_utf8_lossy(&buffer[..count]);
+            assert!(request.starts_with("GET /v1/disk/resources/upload?"));
+            assert!(request.contains("overwrite=false"));
+            let body = r#"{"href":"http://127.0.0.1:1/content","method":"PUT"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let client = YandexMetadataClient {
+            http: Client::builder()
+                .timeout(Duration::from_secs(3))
+                .build()
+                .unwrap(),
+            api_base: format!("http://{address}/v1/disk"),
+        };
+        let result = client.upload_from_reader(
+            "test-token",
+            "disk:/file.bin",
+            std::io::Cursor::new(b"content".to_vec()),
+            7,
+        );
+        assert!(matches!(result, Err(YandexError::UnsafeTransferUrl)));
+        server.join().unwrap();
+    }
+
+    #[test]
     fn single_resource_metadata_uses_read_only_get() {
         use std::io::{Read, Write};
         use std::net::TcpListener;
