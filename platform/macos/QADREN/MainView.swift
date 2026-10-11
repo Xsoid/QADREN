@@ -3,6 +3,7 @@ import SwiftUI
 struct MainView: View {
     @StateObject private var connections = StorageConnections()
     @StateObject private var localWorkspace = LocalWorkspace()
+    @StateObject private var rightLocalWorkspace = LocalWorkspace()
     @State private var jobs: [JobRow] = []
     @State private var jobError: String?
 
@@ -25,16 +26,9 @@ struct MainView: View {
                 LabeledContent("Core status", value: CoreBridge.status)
                 LabeledContent("Local worker", value: CoreBridge.workerStatus)
                 Divider()
-                HStack { Text("Local files").font(.headline); Spacer(); Button("Choose folder") { localWorkspace.chooseRoot() }; Button("Reload") { localWorkspace.refresh() }.disabled(localWorkspace.root == nil) }
-                if let root = localWorkspace.root {
-                    Text(root).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                    HStack { Button("Up") { localWorkspace.up() }.disabled(localWorkspace.relativePath.isEmpty); Text(localWorkspace.relativePath.isEmpty ? "/" : "/" + localWorkspace.relativePath).font(.caption); Spacer(); Button("New folder") { localWorkspace.mkdir("New Folder") }.disabled(localWorkspace.entries.contains(where: { $0.name == "New Folder" })) }
-                    ForEach(localWorkspace.entries) { entry in
-                        Button { localWorkspace.open(entry) } label: { HStack { Image(systemName: entry.is_directory ? "folder" : "doc"); Text(entry.name); Spacer(); if !entry.is_directory { Text(ByteCountFormatter.string(fromByteCount: Int64(clamping: entry.size), countStyle: .file)) } }.foregroundStyle(entry.is_directory ? .primary : .secondary) }.buttonStyle(.plain).disabled(!entry.is_directory)
-                    }
-                    Text("Metadata only: QADREN does not open file contents. Copy, move and delete remain unavailable.").font(.caption).foregroundStyle(.secondary)
-                } else { Text("Choose a folder to inspect its metadata locally.").font(.caption).foregroundStyle(.secondary) }
-                if let error = localWorkspace.error { Text(error).font(.caption).foregroundStyle(.orange) }
+                Text("Local files").font(.headline)
+                HStack(alignment: .top, spacing: 18) { LocalWorkspacePanel(title: "Left", workspace: localWorkspace); LocalWorkspacePanel(title: "Right", workspace: rightLocalWorkspace) }
+                Text("Metadata only: QADREN does not open file contents. Copy, move and delete remain unavailable.").font(.caption).foregroundStyle(.secondary)
                 Divider()
                 HStack {
                     Text("Job queue").font(.headline)
@@ -176,6 +170,22 @@ struct MainView: View {
             jobError = error.localizedDescription
             refreshJobs()
         }
+    }
+}
+
+private struct LocalWorkspacePanel: View {
+    let title: String
+    @ObservedObject var workspace: LocalWorkspace
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack { Text(title).font(.subheadline.bold()); Spacer(); Button("Choose") { workspace.chooseRoot() }; Button("Reload") { workspace.refresh() }.disabled(workspace.root == nil) }
+            if let root = workspace.root {
+                Text(root).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                HStack { Button("Up") { workspace.up() }.disabled(workspace.relativePath.isEmpty); Text(workspace.relativePath.isEmpty ? "/" : "/" + workspace.relativePath).font(.caption); Spacer(); Button("New folder") { workspace.mkdir("New Folder") }.disabled(workspace.entries.contains(where: { $0.name == "New Folder" })) }
+                ForEach(workspace.entries) { entry in Button { workspace.open(entry) } label: { HStack { Image(systemName: entry.is_directory ? "folder" : "doc"); Text(entry.name); Spacer(); if !entry.is_directory { Text(ByteCountFormatter.string(fromByteCount: Int64(clamping: entry.size), countStyle: .file)) } }.foregroundStyle(entry.is_directory ? .primary : .secondary) }.buttonStyle(.plain).disabled(!entry.is_directory) }
+            } else { Text("Choose a folder.").font(.caption).foregroundStyle(.secondary) }
+            if let error = workspace.error { Text(error).font(.caption).foregroundStyle(.orange) }
+        }.frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
