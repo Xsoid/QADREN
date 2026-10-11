@@ -11,7 +11,7 @@
 | Keychain remove | Swift fault injection: disable / Keychain / Registry failures, retry, второй аккаунт | Принудительный отказ системного Keychain и повтор после перезапуска | CI успешно на `ff585c7`; системная проверка отсутствует |
 | Legacy OAuth | Проверка кода сохранения legacy до успешного импорта | Импорт старого токена на реальном Mac и rollback | Реальная проверка в этом цикле отсутствует |
 | Yandex metadata | Rust mock HTTP тесты | Авторизация, квота, 2 аккаунта, offline/401 | Исторически подтверждено в документации; в этом цикле не перепроверено |
-| Content / iCloud / Worker | Ещё не существует; добавить в этапах #15–#21 | Испытания по мере реализации | Не реализовано |
+| Content / iCloud / Worker | Частичные Local FS и Yandex content primitives существуют; полного Job execution и iCloud container нет | Отдельные реальные проверки по мере реализации | PARTIAL: полный E2E не подтверждён |
 | Ресурсы | CI фиксирует размер .app, без замера idle RAM/CPU | Activity Monitor, `ps`, network bytes, sleep/wake | Baseline не измерен |
 | Подпись и поставка | CI собирает неподписанный bundle | Gatekeeper, entitlement, notarization, clean install | Только future Release 1 |
 
