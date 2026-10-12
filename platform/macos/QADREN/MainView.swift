@@ -102,7 +102,7 @@ struct MainView: View {
                         Divider()
                     }
                 }
-                Text("iCloud Documents is not yet implemented. Cloud file content transfer is disabled.")
+                Text(ICloudAvailability.status)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text("QADREN does not download or upload file contents in this prototype.")
