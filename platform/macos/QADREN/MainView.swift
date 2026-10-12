@@ -6,7 +6,8 @@ struct MainView: View {
     @StateObject private var rightLocalWorkspace = LocalWorkspace()
     @State private var jobs: [JobRow] = []
     @State private var jobError: String?
-    @State private var section: DispatcherSection? = .overview
+    @State private var section: DispatcherSection? = .monitoring
+    @State private var monitoringView = MonitoringView.dashboard
 
     var body: some View {
         NavigationSplitView {
@@ -17,49 +18,64 @@ struct MainView: View {
             .safeAreaInset(edge: .bottom) {
                 HStack(spacing: 8) {
                     Circle().fill(CoreBridge.workerStatus == "ready" ? .green : .orange).frame(width: 8, height: 8)
-                    Text("Local Worker")
+                    Text("Локальный Worker")
                     Spacer()
                 }
                 .font(.caption).foregroundStyle(.secondary).padding(12)
             }
         } detail: {
             Group {
-                switch section ?? .overview {
-                case .overview: overview
-                case .jobs: jobsWorkspace
-                case .files: filesWorkspace
-                case .connections: connectionsWorkspace
+                switch section ?? .monitoring {
+                case .monitoring: monitoringWorkspace
+                case .scenarios: scenarioSettingsWorkspace
                 }
             }
-            .navigationTitle((section ?? .overview).title)
-            .toolbar { Button("Refresh", systemImage: "arrow.clockwise") { refreshCurrentSection() } }
+            .navigationTitle((section ?? .monitoring).title)
+            .toolbar { Button("Обновить", systemImage: "arrow.clockwise") { refreshCurrentSection() } }
         }
         .onAppear { refreshJobs() }
     }
 
-    private var overview: some View {
+    private var monitoringWorkspace: some View {
+        Group {
+            switch monitoringView {
+            case .dashboard: monitoringDashboard
+            case .jobs: jobsWorkspace
+            case .files: filesWorkspace
+            }
+        }
+    }
+
+    private var monitoringDashboard: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Dispatcher").font(.largeTitle.bold())
-                    Text("Local Controller and Worker · current operational state").foregroundStyle(.secondary)
+                    Text("Панель мониторинга").font(.largeTitle.bold())
+                    Text("Текущее состояние локального Controller и Worker").foregroundStyle(.secondary)
                 }
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 3), spacing: 14) {
-                    StatusTile(title: "Worker", value: CoreBridge.workerStatus, detail: "This Mac", symbol: "cpu")
-                    StatusTile(title: "Queue", value: "\(jobs.count)", detail: jobs.isEmpty ? "No recorded Jobs" : "Recorded Jobs", symbol: "list.number")
-                    StatusTile(title: "Connections", value: "\(connections.entries.count)", detail: "Independent local identities", symbol: "externaldrive")
+                    StatusTile(title: "Локальный Worker", value: workerStatus, detail: "Этот Mac", symbol: "cpu")
+                    StatusTile(title: "Очередь", value: "\(jobs.count)", detail: jobs.isEmpty ? "Нет заданий" : "Задания в истории", symbol: "list.number")
+                    StatusTile(title: "Подключения", value: "\(connections.entries.count)", detail: "Независимые локальные идентификаторы", symbol: "externaldrive")
                 }
-                WorkspaceCard(title: "Queue", subtitle: "Durable Job inventory") {
+                WorkspaceCard(title: "Оперативные действия", subtitle: "Действия используют общую очередь заданий") {
+                    HStack {
+                        Button("Открыть очередь") { monitoringView = .jobs }
+                        Button("Открыть файловый менеджер") { monitoringView = .files }
+                        Button("Настроить сценарии") { section = .scenarios }
+                    }
+                }
+                WorkspaceCard(title: "Очередь заданий", subtitle: "Долговременный список попыток") {
                     if jobs.isEmpty {
-                        EmptyWorkspaceState(title: "No Jobs", detail: "When execution is available, its queue and operational state appear here.", symbol: "checkmark.circle")
+                        EmptyWorkspaceState(title: "Заданий нет", detail: "Когда появится готовое выполнение, здесь будут отображаться очередь и состояние операций.", symbol: "checkmark.circle")
                     } else {
                         JobList(jobs: jobs, onRun: runMockJob, onPause: pauseMockJob, onResume: resumeMockJob, onCancel: cancelMockJob)
                     }
                 }
-                WorkspaceCard(title: "Health", subtitle: "Local runtime") {
-                    LabeledContent("Core", value: CoreBridge.status)
-                    LabeledContent("iCloud Documents", value: ICloudAvailability.status)
-                    Text("File content is not downloaded, uploaded, or previewed by this build.").font(.caption).foregroundStyle(.secondary)
+                WorkspaceCard(title: "Здоровье системы", subtitle: "Локальная среда выполнения") {
+                    LabeledContent("Ядро", value: coreStatus)
+                    LabeledContent("Документы iCloud", value: ICloudAvailability.status)
+                    Text("Это приложение не скачивает, не загружает и не открывает содержимое файлов.").font(.caption).foregroundStyle(.secondary)
                 }
             }.padding(28)
         }
@@ -68,13 +84,13 @@ struct MainView: View {
     private var jobsWorkspace: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                WorkspaceHeader(title: "Job queue", subtitle: "Durable attempts and their current local state") {
-                    Button("Queue test Job") { queueMockJob() }
+                WorkspaceHeader(title: "Очередь заданий", subtitle: "Долговременные попытки и их текущее локальное состояние") {
+                    Button("Добавить тестовое задание") { queueMockJob() }
                 }
                 if let jobError { Notice(text: jobError, symbol: "exclamationmark.triangle") }
-                WorkspaceCard(title: "Queue", subtitle: "Operations shown here do not create a Scenario") {
+                WorkspaceCard(title: "Очередь", subtitle: "Эти действия не создают постоянный сценарий") {
                     if jobs.isEmpty {
-                        EmptyWorkspaceState(title: "Queue is empty", detail: "The test command creates only an app-owned local artifact after an explicit Run.", symbol: "tray")
+                        EmptyWorkspaceState(title: "Очередь пуста", detail: "Тестовая команда создаёт только служебный локальный объект QADREN после явного запуска.", symbol: "tray")
                     } else {
                         JobList(jobs: jobs, onRun: runMockJob, onPause: pauseMockJob, onResume: resumeMockJob, onCancel: cancelMockJob)
                     }
@@ -85,37 +101,40 @@ struct MainView: View {
 
     private var filesWorkspace: some View {
         VStack(spacing: 0) {
-            WorkspaceHeader(title: "Files", subtitle: "Two local metadata panels") { EmptyView() }
+            WorkspaceHeader(title: "Файловый менеджер", subtitle: "Две локальные панели метаданных") { EmptyView() }
                 .padding(.horizontal, 28).padding(.vertical, 18)
             HStack(spacing: 0) {
-                FileManagerPane(title: "Left panel", workspace: localWorkspace)
+                FileManagerPane(title: "Левая панель", workspace: localWorkspace)
                 Divider()
-                FileManagerPane(title: "Right panel", workspace: rightLocalWorkspace)
+                FileManagerPane(title: "Правая панель", workspace: rightLocalWorkspace)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            Notice(text: "Metadata only. Content preview is unavailable; copy, move, rename and delete remain disabled until their safe Job paths are implemented.", symbol: "shield")
+            Notice(text: "Доступны только метаданные. Предпросмотр содержимого, копирование, перемещение, переименование и удаление выключены до реализации их безопасных Job-путей.", symbol: "shield")
                 .padding(16)
         }
     }
 
-    private var connectionsWorkspace: some View {
+    private var scenarioSettingsWorkspace: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                WorkspaceHeader(title: "Storage connections", subtitle: "Every connection has an independent identity and credentials") {
-                    Button("Add Yandex Disk", systemImage: "plus") { connections.addYandex() }
+                WorkspaceHeader(title: "Настройка сценариев", subtitle: "Подключения, назначение Worker и правила будущих сценариев") {
+                    Button("Добавить Яндекс Диск", systemImage: "plus") { connections.addYandex() }
+                }
+                WorkspaceCard(title: "Сценарии синхронизации", subtitle: "Правила будущего выполнения") {
+                    EmptyWorkspaceState(title: "Создание сценариев ещё не реализовано", detail: "Нельзя создать фиктивный сценарий: сначала должны появиться проверяемый план, политики конфликтов и безопасное выполнение в ядре.", symbol: "arrow.triangle.2.circlepath")
                 }
                 if connections.hasLegacyYandexToken {
-                    Notice(text: "An existing Yandex Disk authorization can be copied into an independent connection. The old Keychain item remains until the copy is verified.", symbol: "key") {
-                        Button("Import existing connection") { connections.importLegacyYandex() }
+                    Notice(text: "Найдена прежняя авторизация Яндекс Диска. Её можно перенести в независимое подключение; старый элемент Keychain останется до проверки копии.", symbol: "key") {
+                        Button("Перенести подключение") { connections.importLegacyYandex() }
                     }
                 }
                 if let error = connections.error { Notice(text: error, symbol: "exclamationmark.triangle") }
                 if connections.entries.isEmpty && !connections.hasLegacyYandexToken {
-                    EmptyWorkspaceState(title: "No connections", detail: "Add a storage connection to begin its local setup.", symbol: "externaldrive.badge.plus")
+                    EmptyWorkspaceState(title: "Подключений нет", detail: "Добавьте подключение, чтобы начать его локальную настройку.", symbol: "externaldrive.badge.plus")
                         .frame(maxWidth: .infinity, minHeight: 240)
                 }
                 ForEach(connections.entries) { entry in
-                    WorkspaceCard(title: entry.name, subtitle: entry.adapter) {
+                    WorkspaceCard(title: entry.name, subtitle: adapterTitle(entry.adapter)) {
                         if entry.adapter == "yandex_disk" {
                             YandexConnectionCard(
                                 entry: entry,
@@ -125,7 +144,7 @@ struct MainView: View {
                             )
                             .id(entry.id + (entry.enabled ? ":enabled" : ":disabled"))
                         } else {
-                            LabeledContent("Adapter", value: entry.adapter)
+                            LabeledContent("Адаптер", value: entry.adapter)
                         }
                     }
                 }
@@ -135,17 +154,18 @@ struct MainView: View {
     }
 
     private func refreshCurrentSection() {
-        switch section ?? .overview {
-        case .overview, .jobs:
+        switch section ?? .monitoring {
+        case .monitoring:
             refreshJobs()
             connections.refresh()
-        case .files:
-            localWorkspace.refresh()
-            rightLocalWorkspace.refresh()
-        case .connections:
+        case .scenarios:
             connections.refresh()
         }
     }
+
+    private var workerStatus: String { CoreBridge.workerStatus == "Idle Worker" ? "Worker простаивает" : CoreBridge.workerStatus }
+    private var coreStatus: String { CoreBridge.status == "ready - worker idle" ? "Готово — Worker простаивает" : CoreBridge.status }
+    private func adapterTitle(_ adapter: String) -> String { adapter == "yandex_disk" ? "Яндекс Диск" : adapter }
 
     private func refreshJobs() {
         do { jobs = try JobInventory.list(); jobError = nil }
@@ -174,14 +194,18 @@ struct MainView: View {
 }
 
 private enum DispatcherSection: String, CaseIterable, Hashable, Identifiable {
-    case overview, jobs, files, connections
+    case monitoring, scenarios
     var id: Self { self }
     var title: String {
-        switch self { case .overview: "Overview"; case .jobs: "Jobs"; case .files: "Files"; case .connections: "Connections" }
+        switch self { case .monitoring: "Рабочая панель"; case .scenarios: "Настройка сценариев" }
     }
     var symbol: String {
-        switch self { case .overview: "rectangle.3.group"; case .jobs: "checklist"; case .files: "folder"; case .connections: "externaldrive" }
+        switch self { case .monitoring: "rectangle.3.group"; case .scenarios: "slider.horizontal.3" }
     }
+}
+
+private enum MonitoringView {
+    case dashboard, jobs, files
 }
 
 private struct StatusTile: View {
@@ -283,22 +307,33 @@ private struct JobList: View {
                     Image(systemName: job.state == "paused" ? "pause.circle" : "circle.dashed").foregroundStyle(job.state == "paused" ? Color.orange : Color.accentColor)
                     VStack(alignment: .leading, spacing: 3) {
                         Text(job.id).textSelection(.enabled)
-                        Text(job.scenario_id == nil ? "Manual Job" : "Scenario Job").font(.caption).foregroundStyle(.secondary)
+                        Text(job.scenario_id == nil ? "Разовое задание" : "Задание сценария").font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Text(job.state.capitalized).font(.callout.weight(.medium))
+                    Text(jobStateTitle(job.state)).font(.callout.weight(.medium))
                     if job.state == "queued" {
-                        Button("Run") { onRun(job.id) }
-                        Button("Pause") { onPause(job.id) }
-                        Button("Cancel", role: .destructive) { onCancel(job.id) }
+                        Button("Запустить") { onRun(job.id) }
+                        Button("Приостановить") { onPause(job.id) }
+                        Button("Отменить", role: .destructive) { onCancel(job.id) }
                     } else if job.state == "paused" {
-                        Button("Resume") { onResume(job.id) }
-                        Button("Cancel", role: .destructive) { onCancel(job.id) }
+                        Button("Возобновить") { onResume(job.id) }
+                        Button("Отменить", role: .destructive) { onCancel(job.id) }
                     }
                 }.padding(.vertical, 10)
                 if job.id != jobs.last?.id { Divider() }
             }
         }
+    }
+}
+
+private func jobStateTitle(_ state: String) -> String {
+    switch state {
+    case "queued": "В очереди"
+    case "paused": "Приостановлено"
+    case "completed": "Завершено"
+    case "cancelled": "Отменено"
+    case "running": "Выполняется"
+    default: state
     }
 }
 
@@ -311,19 +346,19 @@ private struct FileManagerPane: View {
             HStack {
                 Text(title).font(.headline)
                 Spacer()
-                Button("Choose folder") { workspace.chooseRoot() }
-                Button("Reload", systemImage: "arrow.clockwise") { workspace.refresh() }.disabled(workspace.root == nil)
+                Button("Выбрать папку") { workspace.chooseRoot() }
+                Button("Обновить", systemImage: "arrow.clockwise") { workspace.refresh() }.disabled(workspace.root == nil)
             }.padding(.horizontal, 18).padding(.top, 16)
             if let root = workspace.root {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(root).font(.caption).textSelection(.enabled)
                     HStack {
-                        Button("Up", systemImage: "chevron.up") { workspace.up() }.disabled(workspace.relativePath.isEmpty)
+                        Button("Вверх", systemImage: "chevron.up") { workspace.up() }.disabled(workspace.relativePath.isEmpty)
                         Text(workspace.relativePath.isEmpty ? "/" : "/" + workspace.relativePath).font(.caption.monospaced()).textSelection(.enabled)
                         Spacer()
-                        if !selected.isEmpty { Text("\(selected.count) selected").font(.caption).foregroundStyle(.secondary) }
-                        Button("New folder", systemImage: "folder.badge.plus") { workspace.mkdir("New Folder") }
-                            .disabled(workspace.entries.contains(where: { $0.name == "New Folder" }))
+                        if !selected.isEmpty { Text("Выбрано: \(selected.count)").font(.caption).foregroundStyle(.secondary) }
+                        Button("Новая папка", systemImage: "folder.badge.plus") { workspace.mkdir("Новая папка") }
+                            .disabled(workspace.entries.contains(where: { $0.name == "Новая папка" }))
                     }
                 }.padding(.horizontal, 18)
                 List(workspace.entries) { entry in
@@ -340,7 +375,7 @@ private struct FileManagerPane: View {
                     }
                 }.listStyle(.inset)
             } else {
-                EmptyWorkspaceState(title: "Choose a folder", detail: "This panel reads only names, types and sizes.", symbol: "folder")
+                EmptyWorkspaceState(title: "Выберите папку", detail: "Эта панель читает только имена, типы и размеры.", symbol: "folder")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             if let error = workspace.error { Notice(text: error, symbol: "exclamationmark.triangle").padding(12) }
@@ -367,34 +402,34 @@ private struct YandexConnectionCard: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Yandex Disk · connection " + String(entry.id.prefix(8))).font(.caption).foregroundStyle(.secondary)
+                    Text("Яндекс Диск · подключение " + String(entry.id.prefix(8))).font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button("Remove", role: .destructive) { confirmRemoval = true }.disabled(yandex.busy || yandex.metadataBusy)
+                Button("Удалить", role: .destructive) { confirmRemoval = true }.disabled(yandex.busy || yandex.metadataBusy)
             }
             HStack {
-                TextField("Connection name", text: $draftName).textFieldStyle(.roundedBorder)
-                Button("Rename") { onRename(draftName) }.disabled(draftName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draftName == entry.name)
-                Toggle("Enabled", isOn: Binding(get: { entry.enabled }, set: { onSetEnabled($0) }))
+                TextField("Название подключения", text: $draftName).textFieldStyle(.roundedBorder)
+                Button("Переименовать") { onRename(draftName) }.disabled(draftName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draftName == entry.name)
+                Toggle("Включено", isOn: Binding(get: { entry.enabled }, set: { onSetEnabled($0) }))
             }
-            if !entry.enabled { Text("Disabled locally — no new operations will be started for this connection.").font(.caption).foregroundStyle(.secondary) }
-            Text(yandex.clientID.isEmpty ? "Client ID not configured for this build" : "OAuth application configured").font(.caption).foregroundStyle(.secondary)
+            if !entry.enabled { Text("Подключение выключено локально — новые операции для него не запускаются.").font(.caption).foregroundStyle(.secondary) }
+            Text(yandex.clientID.isEmpty ? "Client ID не настроен в этой сборке" : "OAuth-приложение настроено").font(.caption).foregroundStyle(.secondary)
             HStack {
-                Button("Connect") { yandex.connect() }.disabled(!entry.enabled || yandex.busy || yandex.connected || yandex.clientID.isEmpty)
-                Button("Disconnect") { yandex.disconnect() }.disabled(yandex.busy || !yandex.connected)
+                Button("Подключить") { yandex.connect() }.disabled(!entry.enabled || yandex.busy || yandex.connected || yandex.clientID.isEmpty)
+                Button("Отключить") { yandex.disconnect() }.disabled(yandex.busy || !yandex.connected)
             }
-            if let account = yandex.accountLabel { LabeledContent("Yandex account", value: account) }
-            Text(yandex.status).font(.caption).foregroundStyle(.secondary)
+            if let account = yandex.accountLabel { LabeledContent("Аккаунт Яндекс", value: account) }
+            Text(connectionStatus).font(.caption).foregroundStyle(.secondary)
             if yandex.connected {
-                HStack { Text("Disk metadata").font(.subheadline.bold()); Button("Refresh") { Task { await yandex.refreshDisk() } }.disabled(!entry.enabled || yandex.metadataBusy) }
+                HStack { Text("Метаданные Диска").font(.subheadline.bold()); Button("Обновить") { Task { await yandex.refreshDisk() } }.disabled(!entry.enabled || yandex.metadataBusy) }
                 if yandex.metadataBusy { ProgressView() }
                 if let quota = yandex.quota {
-                    LabeledContent("Total storage", value: ByteCountFormatter.string(fromByteCount: Int64(clamping: quota.total_space), countStyle: .file))
-                    LabeledContent("Used", value: ByteCountFormatter.string(fromByteCount: Int64(clamping: quota.used_space), countStyle: .file))
-                    LabeledContent("Free", value: ByteCountFormatter.string(fromByteCount: Int64(clamping: quota.total_space > quota.used_space ? quota.total_space - quota.used_space : 0), countStyle: .file))
+                    LabeledContent("Всего", value: ByteCountFormatter.string(fromByteCount: Int64(clamping: quota.total_space), countStyle: .file))
+                    LabeledContent("Занято", value: ByteCountFormatter.string(fromByteCount: Int64(clamping: quota.used_space), countStyle: .file))
+                    LabeledContent("Свободно", value: ByteCountFormatter.string(fromByteCount: Int64(clamping: quota.total_space > quota.used_space ? quota.total_space - quota.used_space : 0), countStyle: .file))
                 }
-                if let error = yandex.metadataError { Text("Disk API: " + error).font(.caption).foregroundStyle(.orange) }
-                Text("Root directory metadata (first 50 of \(yandex.rootTotal))").font(.subheadline)
+                if let error = yandex.metadataError { Text("API Диска: " + error).font(.caption).foregroundStyle(.orange) }
+                Text("Метаданные корневого каталога (первые 50 из \(yandex.rootTotal))").font(.subheadline)
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 6) {
                         ForEach(yandex.rootItems) { item in
@@ -409,10 +444,19 @@ private struct YandexConnectionCard: View {
                 }.frame(maxHeight: 160)
             }
         }
-        .confirmationDialog("Remove this QADREN connection locally?", isPresented: $confirmRemoval) {
-            Button("Remove connection", role: .destructive, action: onRemove)
+        .confirmationDialog("Удалить это локальное подключение QADREN?", isPresented: $confirmRemoval) {
+            Button("Удалить подключение", role: .destructive, action: onRemove)
         } message: {
-            Text("This removes only this local connection and its Keychain token. Files in Yandex Disk are untouched.")
+            Text("Будут удалены только локальное подключение и его токен Keychain. Файлы на Яндекс Диске не изменятся.")
+        }
+    }
+
+    private var connectionStatus: String {
+        switch yandex.status {
+        case "Registered connection": "Подключение зарегистрировано"
+        case "Connected": "Подключено"
+        case "Disconnected": "Отключено"
+        default: yandex.status
         }
     }
 }

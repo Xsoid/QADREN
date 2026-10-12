@@ -11,8 +11,8 @@ enum ICloudAvailability {
                 nil
               ) as? [String],
               !value.isEmpty else {
-            return "Unavailable: this build has no signed iCloud container entitlement."
+            return "Недоступно: в этой сборке нет подписанного entitlement для контейнера iCloud."
         }
-        return "Entitlement present for \(value.count) container(s); container access is not implemented."
+        return "Entitlement задан для контейнеров: \(value.count); доступ к контейнеру ещё не реализован."
     }
 }
