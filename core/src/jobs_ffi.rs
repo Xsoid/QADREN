@@ -123,6 +123,56 @@ pub unsafe extern "C" fn qadren_jobs_run_mock_create(
     }
 }
 
+/// Read-only reconciliation for one app-owned UNKNOWN G1 mock Job.  It never
+/// starts another create operation; a durable expectation and exact metadata
+/// match are required before the existing attempt can be completed.
+///
+/// # Safety
+/// Arguments must be valid, NUL-terminated strings for the duration of call.
+#[no_mangle]
+pub unsafe extern "C" fn qadren_jobs_reconcile_mock_create(
+    database_path: *const c_char,
+    storage_root: *const c_char,
+    job_id: *const c_char,
+) -> *mut c_char {
+    let (Some(database_path), Some(storage_root), Some(job_id)) =
+        (input(database_path), input(storage_root), input(job_id))
+    else {
+        return response(json!({"ok": false, "error": "invalid_request"}));
+    };
+    match crate::job_execution::reconcile_mock_create(
+        Path::new(database_path),
+        Path::new(storage_root),
+        job_id,
+    ) {
+        Ok(crate::job_execution::MockReconciliationStatus::Completed) => {
+            response(json!({"ok": true, "data": {"status": "completed", "reconciled": true}}))
+        }
+        Ok(crate::job_execution::MockReconciliationStatus::StillUnknown) => {
+            response(json!({"ok": true, "data": {"status": "unknown", "reconciled": false}}))
+        }
+        Ok(crate::job_execution::MockReconciliationStatus::Existing(state)) => response(
+            json!({"ok": true, "data": {"status": format!("{:?}", state).to_ascii_lowercase(), "existing": true, "reconciled": false}}),
+        ),
+        Err(crate::job_execution::MockCreateError::InvalidJobId) => {
+            response(json!({"ok": false, "error": "invalid_request"}))
+        }
+        Err(crate::job_execution::MockCreateError::Store(crate::jobs::JobStoreError::NotFound)) => {
+            response(json!({"ok": false, "error": "not_found"}))
+        }
+        // A root mismatch or unavailable storage never becomes a successful
+        // reconciliation and leaves the durable Job untouched.
+        Err(crate::job_execution::MockCreateError::OccupiedTarget)
+        | Err(crate::job_execution::MockCreateError::Io(_)) => {
+            response(json!({"ok": false, "error": "reconciliation_unavailable"}))
+        }
+        Err(crate::job_execution::MockCreateError::Store(_)) => {
+            response(json!({"ok": false, "error": "job_store_unavailable"}))
+        }
+        Err(_) => response(json!({"ok": false, "error": "reconciliation_failed"})),
+    }
+}
+
 /// Persist one app-owned mock Job without starting an effect.
 ///
 /// # Safety
@@ -302,6 +352,59 @@ mod tests {
         let message = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap();
         assert!(message.contains("completed"));
         unsafe { qadren_jobs_free_string(ptr) };
+    }
+
+    #[test]
+    fn reconciliation_completes_a_durably_unknown_mock_attempt_through_the_c_abi() {
+        let base = std::env::temp_dir().join(format!(
+            "qadren-ffi-reconcile-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&base).unwrap();
+        let database_path = base.join("jobs.sqlite3");
+        let storage_path = base.join("storage");
+        fs::create_dir(&storage_path).unwrap();
+        let job_id = "unknown-job";
+        let target = "unknown-job.qadren-g1-test";
+        let content = b"QADREN G1 mock create artifact\n";
+        fs::write(storage_path.join(target), content).unwrap();
+        let mut store = JobStore::open(&database_path).unwrap();
+        store.enqueue(job_id, None).unwrap();
+        store
+            .advance(
+                job_id,
+                JobState::Queued,
+                JobState::Running,
+                Confirmation::Confirmed(crate::confirmation::EvidenceLevel::Requested),
+            )
+            .unwrap();
+        store
+            .prepare_bound_attempt(
+                job_id,
+                "unknown-job-attempt-1",
+                "mock_create_new",
+                crate::job_execution::MOCK_CONNECTION_ID,
+                target,
+                content.len() as u64,
+                &format!("{:x}", md5::compute(content)),
+            )
+            .unwrap();
+        drop(store);
+
+        let database = CString::new(database_path.to_str().unwrap()).unwrap();
+        let storage = CString::new(storage_path.to_str().unwrap()).unwrap();
+        let job = CString::new(job_id).unwrap();
+        let response = unsafe {
+            qadren_jobs_reconcile_mock_create(database.as_ptr(), storage.as_ptr(), job.as_ptr())
+        };
+        let message = unsafe { CStr::from_ptr(response) }.to_str().unwrap();
+        assert!(message.contains("\"reconciled\":true"));
+        unsafe { qadren_jobs_free_string(response) };
+        let store = JobStore::open(&database_path).unwrap();
+        assert_eq!(store.state(job_id).unwrap(), Some(JobState::Completed));
     }
 
     #[test]

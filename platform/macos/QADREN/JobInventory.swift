@@ -8,6 +8,10 @@ private func jobFree(_ pointer: UnsafeMutablePointer<CChar>?)
 private func runMockCreate(
     _ databasePath: UnsafePointer<CChar>?, _ storageRoot: UnsafePointer<CChar>?, _ jobID: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_jobs_reconcile_mock_create")
+private func reconcileMockCreate(
+    _ databasePath: UnsafePointer<CChar>?, _ storageRoot: UnsafePointer<CChar>?, _ jobID: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_jobs_queue_mock_create")
 private func queueMockCreate(
     _ databasePath: UnsafePointer<CChar>?, _ jobID: UnsafePointer<CChar>?
@@ -141,6 +145,23 @@ enum JobInventory {
         defer { jobFree(pointer) }
         let result = try JSONDecoder().decode(MockCreateEnvelope.self, from: Data(String(cString: pointer).utf8))
         guard result.ok else { throw StorageError.operation(result.error ?? "Mock Job failed") }
+    }
+
+    /// Read-only recovery for an existing UNKNOWN app-owned mock artifact.
+    /// Rust verifies the bound target and metadata; this never retries a write.
+    static func reconcileMockArtifact(jobID: String) throws {
+        let paths = try paths()
+        let pointer = paths.database.withCString { database in
+            paths.mockStorage.withCString { storage in
+                jobID.withCString { identifier in reconcileMockCreate(database, storage, identifier) }
+            }
+        }
+        guard let pointer else { throw StorageError.operation("Mock reconciliation unavailable") }
+        defer { jobFree(pointer) }
+        let result = try JSONDecoder().decode(MockCreateEnvelope.self, from: Data(String(cString: pointer).utf8))
+        guard result.ok else {
+            throw StorageError.operation(result.error ?? "Mock reconciliation failed")
+        }
     }
 
     static func cancelMockArtifact(jobID: String) throws {

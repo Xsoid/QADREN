@@ -18,6 +18,16 @@ pub enum MockCreateStatus {
     Existing(JobState),
 }
 
+/// Result of a read-only check of an UNKNOWN mock operation.  This never
+/// retries a write: only an exact match with the durable expectation can
+/// resolve the existing attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MockReconciliationStatus {
+    Completed,
+    StillUnknown,
+    Existing(JobState),
+}
+
 #[derive(Debug)]
 pub enum MockCreateError {
     ConsentRequired,
@@ -86,6 +96,23 @@ impl MockStorage {
         Ok(Self {
             root: fs::canonicalize(root)?,
         })
+    }
+
+    /// Open an existing app-owned root without creating it.  Reconciliation
+    /// must remain observational when a prior effect cannot be proven.
+    fn open_existing(root: &Path) -> Result<Option<Self>, MockCreateError> {
+        match fs::symlink_metadata(root) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(MockCreateError::OccupiedTarget)
+            }
+            Ok(metadata) if !metadata.is_dir() => return Err(MockCreateError::OccupiedTarget),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        }
+        Ok(Some(Self {
+            root: fs::canonicalize(root)?,
+        }))
     }
 
     fn target(&self, name: &str) -> Result<PathBuf, MockCreateError> {
@@ -192,6 +219,72 @@ pub fn resume_mock_create(database_path: &Path, job_id: &str) -> Result<(), Mock
     let mut store = JobStore::open(database_path)?;
     store.resume(job_id)?;
     Ok(())
+}
+
+/// Reconcile an UNKNOWN mock create without writing, deleting, or retrying.
+///
+/// The durable binding must name exactly this app-owned mock operation and
+/// target.  A missing or mismatching object deliberately remains UNKNOWN.
+pub fn reconcile_mock_create(
+    database_path: &Path,
+    storage_root: &Path,
+    job_id: &str,
+) -> Result<MockReconciliationStatus, MockCreateError> {
+    let expected_target = target_name(job_id)?;
+    let mut store = JobStore::open(database_path)?;
+    let Some(job) = store.get(job_id)? else {
+        return Err(MockCreateError::Store(JobStoreError::NotFound));
+    };
+    if job.state != JobState::Unknown {
+        return Ok(MockReconciliationStatus::Existing(job.state));
+    }
+
+    let attempts = store.unresolved_attempts()?;
+    let matching: Vec<_> = attempts
+        .iter()
+        .filter(|attempt| {
+            attempt.job_id == job_id
+                && attempt.status == "unknown"
+                && attempt.operation_kind.as_deref() == Some("mock_create_new")
+                && attempt.target_connection_id.as_deref() == Some(MOCK_CONNECTION_ID)
+                && attempt.target_path.as_deref() == Some(expected_target.as_str())
+        })
+        .collect();
+    // Any missing or ambiguous durable binding remains for operator review.
+    if matching.len() != 1 {
+        return Ok(MockReconciliationStatus::StillUnknown);
+    }
+    let attempt = matching[0];
+    let Some(expected) = store.expected_metadata(job_id, &attempt.attempt_id)? else {
+        return Ok(MockReconciliationStatus::StillUnknown);
+    };
+    if expected.operation_kind != "mock_create_new"
+        || expected.target_connection_id != MOCK_CONNECTION_ID
+        || expected.target_path != expected_target
+        || expected.attempt_id != attempt.attempt_id
+    {
+        return Ok(MockReconciliationStatus::StillUnknown);
+    }
+    let Some(storage) = MockStorage::open_existing(storage_root)? else {
+        return Ok(MockReconciliationStatus::StillUnknown);
+    };
+    let verifier = MockVerifier {
+        storage: &storage,
+        target_name: &expected.target_path,
+        expected_size: expected.expected_size,
+        expected_md5: &expected.expected_md5,
+    };
+    let Some(receipt) = verifier.verify(&attempt.attempt_id) else {
+        return Ok(MockReconciliationStatus::StillUnknown);
+    };
+    store.resolve_attempt(job_id, &attempt.attempt_id, &receipt)?;
+    store.advance(
+        job_id,
+        JobState::Unknown,
+        JobState::Completed,
+        receipt.confirmation(),
+    )?;
+    Ok(MockReconciliationStatus::Completed)
 }
 
 fn run_mock_create_inner(
@@ -409,6 +502,57 @@ mod tests {
             fs::read(storage.join("job-1.qadren-g1-test")).unwrap(),
             &MOCK_CONTENT[..1]
         );
+        let store = JobStore::open(&database).unwrap();
+        assert_eq!(store.state("job-1").unwrap(), Some(JobState::Unknown));
+        assert_eq!(store.unresolved_attempts().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reconciliation_completes_only_exact_crash_after_effect_artifact() {
+        let (database, storage) = fixture("reconcile-complete");
+        assert!(matches!(
+            run_mock_create_inner(
+                &database,
+                &storage,
+                "job-1",
+                true,
+                Some(MockFault::CrashAfterEffect)
+            ),
+            Err(MockCreateError::SimulatedCrashAfterEffect)
+        ));
+        assert_eq!(
+            reconcile_mock_create(&database, &storage, "job-1").unwrap(),
+            MockReconciliationStatus::Completed
+        );
+        assert_eq!(
+            fs::read(storage.join("job-1.qadren-g1-test")).unwrap(),
+            MOCK_CONTENT
+        );
+        let store = JobStore::open(&database).unwrap();
+        assert_eq!(store.state("job-1").unwrap(), Some(JobState::Completed));
+        assert!(store.unresolved_attempts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn reconciliation_keeps_partial_or_missing_artifacts_unknown_without_writing() {
+        let (database, storage) = fixture("reconcile-partial");
+        assert!(matches!(
+            run_mock_create_inner(
+                &database,
+                &storage,
+                "job-1",
+                true,
+                Some(MockFault::PartialWrite)
+            ),
+            Err(MockCreateError::VerificationFailed)
+        ));
+        let target = storage.join("job-1.qadren-g1-test");
+        let before = fs::read(&target).unwrap();
+        assert_eq!(
+            reconcile_mock_create(&database, &storage, "job-1").unwrap(),
+            MockReconciliationStatus::StillUnknown
+        );
+        assert_eq!(fs::read(&target).unwrap(), before);
         let store = JobStore::open(&database).unwrap();
         assert_eq!(store.state("job-1").unwrap(), Some(JobState::Unknown));
         assert_eq!(store.unresolved_attempts().unwrap().len(), 1);
