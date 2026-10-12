@@ -71,6 +71,7 @@
 
 - Pure Rust state machine coalesces a burst of automatic triggers into one pending run and keeps exactly one follow-up while a Job is active. Disabled/locally paused Scenario ignores automatic triggers, while a manual request remains admissible.
 - SQLite v5 хранит только локальную паузу и один coalesced pending trigger. Active Job намеренно не дублируется: его durable ownership остаётся у JobStore и должен передаваться будущим scheduler при оценке trigger. Disable или local pause очищают pending automatic run; ни одна из этих операций не создаёт и не меняет Job.
+- Добавлен pure Rust evaluator weekly schedule на IANA timezone. `chrono-tz` встраивает только базу timezone в Rust binary, не добавляет сетевой сервис или runtime для пользователя. Повторяющийся DST slot получает один стабильный local key; несуществующий slot не создаёт запуск.
 - Локально пройдены `bash scripts/test-core.sh` с 221 Rust tests и `bash scripts/build-macos.sh`. Restart-тест подтверждает сохранение pending/pause. Нет clock/DST evaluator, priority aging, FFI/UI или Job submission; #21 остаётся PARTIAL.
 
 ## Scoped destructive-operation consent — #20 (2026-10-12)

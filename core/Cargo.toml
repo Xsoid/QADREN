@@ -10,6 +10,8 @@ name = "qadren_core"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+chrono-tz = "0.10"
 libc = "0.2"
 md5 = "0.7"
 rusqlite = { version = "0.32", features = ["bundled"] }
