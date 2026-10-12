@@ -5,14 +5,14 @@ struct QADRENApp: App {
     @AppStorage("qadren.theme") private var themeRaw = QDThemeMode.dark.rawValue
 
     var body: some Scene {
-        WindowGroup("QADREN", id: "monitoring") {
+        WindowGroup("Контрольная панель", id: "monitoring") {
             MainView(workspace: .monitoring)
                 .frame(minWidth: 900, minHeight: 620)
                 .preferredColorScheme(QDThemeMode(rawValue: themeRaw)?.preferredColorScheme)
         }
         .defaultSize(width: 1180, height: 760)
 
-        Window("Настройка сценариев", id: "scenario-settings") {
+        Window("Панель настроек", id: "scenario-settings") {
             MainView(workspace: .scenarios)
                 .frame(minWidth: 760, minHeight: 560)
                 .preferredColorScheme(QDThemeMode(rawValue: themeRaw)?.preferredColorScheme)
@@ -32,9 +32,9 @@ private struct MenuBarWorkspaceMenu: View {
         Text("QADREN \(CoreBridge.version)")
         Text(coreStatus).foregroundStyle(.secondary)
         Divider()
-        Button("Открыть рабочую панель") { open(id: "monitoring") }
-        Button("Новая рабочая панель") { open(id: "monitoring") }
-        Button("Настройка сценариев") { open(id: "scenario-settings") }
+        Button("Открыть контрольную панель") { open(id: "monitoring") }
+        Button("Новая контрольная панель") { open(id: "monitoring") }
+        Button("Панель настроек") { open(id: "scenario-settings") }
         Divider()
         Button("Выйти из QADREN") { NSApp.terminate(nil) }
     }

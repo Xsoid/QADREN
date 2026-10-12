@@ -22,25 +22,24 @@ struct MainView: View {
             case .scenarios: scenarioSettingsWorkspace
             }
         }
+        .tint(QDTheme.cyan)
         .navigationTitle(workspace.title)
         .toolbar {
-            ToolbarItem(placement: .principal) {
-                if workspace == .monitoring {
-                    HStack(spacing: 7) {
-                        QDLogo(size: 22)
-                        Text("QADREN").font(.headline.weight(.semibold))
-                    }
-                }
+            ToolbarItem(placement: .navigation) {
+                QDLogo(size: 20)
             }
             ToolbarItemGroup(placement: .primaryAction) {
                 Menu {
-                    Button("Панель мониторинга") { openWindow(id: "monitoring") }
-                    Button("Настройка сценариев") { openWindow(id: "scenario-settings") }
+                    Button("Контрольная панель") { openWindow(id: "monitoring") }
+                    Button("Панель настроек") { openWindow(id: "scenario-settings") }
                 } label: {
                     Label("Пространство", systemImage: "rectangle.3.group")
                 }
                 if workspace == .monitoring {
                     Button("Новая панель", systemImage: "macwindow.on.rectangle") { openWindow(id: "monitoring") }
+                }
+                if workspace == .scenarios {
+                    Button("Добавить подключение", systemImage: "plus") { connections.addYandex() }
                 }
                 Button("Обновить", systemImage: "arrow.clockwise") { refreshCurrentWorkspace() }
             }
@@ -162,9 +161,6 @@ struct MainView: View {
     private var scenarioSettingsWorkspace: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                WorkspaceHeader(title: "Настройка сценариев", subtitle: "Подключения, назначение Worker и правила будущих сценариев") {
-                    Button("Добавить Яндекс Диск", systemImage: "plus") { connections.addYandex() }
-                }
                 WorkspaceCard(title: "Сценарии синхронизации", subtitle: "Правила будущего выполнения") {
                     EmptyWorkspaceState(title: "Создание сценариев ещё не реализовано", detail: "Нельзя создать фиктивный сценарий: сначала должны появиться проверяемый план, политики конфликтов и безопасное выполнение в ядре.", symbol: "arrow.triangle.2.circlepath")
                 }
@@ -204,8 +200,11 @@ struct MainView: View {
                     }
                 }
                 Text(ICloudAvailability.status).font(.caption).foregroundStyle(.secondary)
-            }.padding(28)
+            }
+            .frame(maxWidth: 1100, alignment: .leading)
+            .padding(16)
         }
+        .background(QDTheme.color(.canvas, for: colorScheme))
     }
 
     private func refreshCurrentWorkspace() {
@@ -282,7 +281,7 @@ enum DispatcherSection: String, CaseIterable, Hashable, Identifiable {
     case monitoring, scenarios
     var id: Self { self }
     var title: String {
-        switch self { case .monitoring: "Рабочая панель"; case .scenarios: "Настройка сценариев" }
+        switch self { case .monitoring: "Контрольная панель"; case .scenarios: "Панель настроек" }
     }
     var symbol: String {
         switch self { case .monitoring: "rectangle.3.group"; case .scenarios: "slider.horizontal.3" }
@@ -315,17 +314,18 @@ private struct WorkspaceCard<Content: View>: View {
     let title: String
     let subtitle: String
     @ViewBuilder let content: Content
+    @Environment(\.colorScheme) private var colorScheme
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(.headline)
+                Text(title).font(.system(size: 13, weight: .semibold))
                 Text(subtitle).font(.caption).foregroundStyle(.secondary)
             }
             content
         }
-        .frame(maxWidth: .infinity, alignment: .leading).padding(18)
-        .background(.background, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(.quaternary))
+        .frame(maxWidth: .infinity, alignment: .leading).padding(12)
+        .background(QDTheme.color(.panel, for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(QDTheme.color(.stroke, for: colorScheme)))
     }
 }
 
