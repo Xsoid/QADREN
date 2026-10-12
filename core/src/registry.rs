@@ -1,5 +1,6 @@
 //! Persistent metadata-only storage connection registry.
 //! Never stores credentials, tokens, file content or remote delete requests.
+use crate::automation::{AutomaticTriggerResult, ScenarioAutomationState};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
@@ -60,6 +61,14 @@ pub struct ScenarioUpdate<'a> {
     pub direction: &'a str,
 }
 
+/// Durable subset of automatic-trigger state. Active Job ownership stays in
+/// JobStore and is supplied by the caller on each evaluation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioAutomationSnapshot {
+    pub locally_paused: bool,
+    pub pending_automatic_run: bool,
+}
+
 pub struct Registry {
     db: Connection,
 }
@@ -82,7 +91,7 @@ impl Registry {
         }
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 4 {
+        if version > 5 {
             return Err(RegistryError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -150,6 +159,18 @@ impl Registry {
                        right_connection_id,right_root,direction
                 FROM scenarios;
                 PRAGMA user_version = 4;
+                COMMIT;",
+            )?;
+        }
+        if version <= 4 {
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                CREATE TABLE scenario_automation (
+                    scenario_id TEXT PRIMARY KEY NOT NULL REFERENCES scenarios(id) ON DELETE RESTRICT,
+                    locally_paused INTEGER NOT NULL DEFAULT 0 CHECK(locally_paused IN (0,1)),
+                    pending_automatic_run INTEGER NOT NULL DEFAULT 0 CHECK(pending_automatic_run IN (0,1))
+                );
+                PRAGMA user_version = 5;
                 COMMIT;",
             )?;
         }
@@ -357,10 +378,91 @@ impl Registry {
     }
 
     pub fn set_scenario_enabled(&self, id: &str, enabled: bool) -> Result<()> {
-        self.changed(self.db.execute(
+        let transaction = self.db.unchecked_transaction()?;
+        let changed = transaction.execute(
             "UPDATE scenarios SET enabled=?1 WHERE id=?2",
             params![enabled, id],
+        )?;
+        if changed == 0 {
+            return Err(RegistryError::NotFound);
+        }
+        if !enabled {
+            transaction.execute(
+                "UPDATE scenario_automation SET pending_automatic_run=0 WHERE scenario_id=?1",
+                [id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn scenario_automation_snapshot(&self, id: &str) -> Result<ScenarioAutomationSnapshot> {
+        self.db
+            .query_row(
+                "SELECT COALESCE(a.locally_paused,0),COALESCE(a.pending_automatic_run,0)
+             FROM scenarios s LEFT JOIN scenario_automation a ON a.scenario_id=s.id
+             WHERE s.id=?1",
+                [id],
+                |row| {
+                    Ok(ScenarioAutomationSnapshot {
+                        locally_paused: row.get(0)?,
+                        pending_automatic_run: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?
+            .ok_or(RegistryError::NotFound)
+    }
+
+    /// Pausing automatic work also removes its queued successor. Manual Job
+    /// requests have a separate path and remain admissible.
+    pub fn set_scenario_locally_paused(&self, id: &str, paused: bool) -> Result<()> {
+        self.changed(self.db.execute(
+            "INSERT INTO scenario_automation(scenario_id,locally_paused,pending_automatic_run)
+             SELECT id,?1,0 FROM scenarios WHERE id=?2
+             ON CONFLICT(scenario_id) DO UPDATE SET
+               locally_paused=excluded.locally_paused,
+               pending_automatic_run=CASE WHEN excluded.locally_paused=1 THEN 0 ELSE scenario_automation.pending_automatic_run END",
+            params![paused, id],
         )?)
+    }
+
+    /// Persists coalesced automatic demand without submitting or mutating a
+    /// Job. `active_job` is read from the durable Job layer by the caller.
+    pub fn request_scenario_automatic_run(
+        &self,
+        id: &str,
+        active_job: bool,
+    ) -> Result<AutomaticTriggerResult> {
+        let transaction = self.db.unchecked_transaction()?;
+        let state = transaction
+            .query_row(
+                "SELECT s.enabled,COALESCE(a.locally_paused,0),COALESCE(a.pending_automatic_run,0)
+             FROM scenarios s LEFT JOIN scenario_automation a ON a.scenario_id=s.id
+             WHERE s.id=?1",
+                [id],
+                |row| {
+                    Ok(ScenarioAutomationState {
+                        enabled: row.get(0)?,
+                        locally_paused: row.get(1)?,
+                        active_job,
+                        pending_automatic_run: row.get(2)?,
+                    })
+                },
+            )
+            .optional()?
+            .ok_or(RegistryError::NotFound)?;
+        let mut state = state;
+        let result = state.request_automatic_run();
+        transaction.execute(
+            "INSERT INTO scenario_automation(scenario_id,locally_paused,pending_automatic_run)
+             VALUES(?1,?2,?3)
+             ON CONFLICT(scenario_id) DO UPDATE SET
+               locally_paused=excluded.locally_paused,pending_automatic_run=excluded.pending_automatic_run",
+            params![id, state.locally_paused, state.pending_automatic_run],
+        )?;
+        transaction.commit()?;
+        Ok(result)
     }
 
     /// Replaces a Scenario configuration and creates a new immutable revision
@@ -650,6 +752,58 @@ mod tests {
         assert_eq!(revision_two.name, "Updated documents");
         assert_eq!(revision_two.left_root, "/source");
         assert_eq!(revision_two.direction, "right_to_left");
+    }
+
+    #[test]
+    fn automation_pause_and_coalesced_trigger_survive_reopen_without_starting_jobs() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("qadren-automation-{unique}.sqlite3"));
+        let db = Registry::open(&path).unwrap();
+        let left = db.add("local_filesystem", "Left").unwrap();
+        let right = db.add("local_filesystem", "Right").unwrap();
+        let scenario = db
+            .create_scenario("Documents", &left, "/", &right, "/archive", "left_to_right")
+            .unwrap();
+        assert_eq!(
+            db.request_scenario_automatic_run(&scenario, false).unwrap(),
+            AutomaticTriggerResult::Queued
+        );
+        assert_eq!(
+            db.request_scenario_automatic_run(&scenario, true).unwrap(),
+            AutomaticTriggerResult::Coalesced
+        );
+        drop(db);
+
+        let db = Registry::open(&path).unwrap();
+        assert_eq!(
+            db.scenario_automation_snapshot(&scenario).unwrap(),
+            ScenarioAutomationSnapshot {
+                locally_paused: false,
+                pending_automatic_run: true,
+            }
+        );
+        db.set_scenario_locally_paused(&scenario, true).unwrap();
+        assert_eq!(
+            db.request_scenario_automatic_run(&scenario, false).unwrap(),
+            AutomaticTriggerResult::IgnoredPaused
+        );
+        assert_eq!(
+            db.scenario_automation_snapshot(&scenario).unwrap(),
+            ScenarioAutomationSnapshot {
+                locally_paused: true,
+                pending_automatic_run: false,
+            }
+        );
+        db.set_scenario_enabled(&scenario, false).unwrap();
+        assert_eq!(
+            db.request_scenario_automatic_run(&scenario, false).unwrap(),
+            AutomaticTriggerResult::IgnoredDisabled
+        );
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
