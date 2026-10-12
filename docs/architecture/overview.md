@@ -20,15 +20,15 @@ QADREN — система синхронизации и обмена файла�
 
 ## Платформенность
 
-Архитектура **кроссплатформенная**. Конкретные возможности определяются ОС, правами пользователя и адаптером. iCloud Documents привязан к поддерживаемой Apple платформенной интеграции. Не создавать глобальное ограничение macOS для остальных интеграций.
+Архитектура **кроссплатформенная**. Конкретные возможности определяются ОС, правами пользователя и адаптером. Активные адаптеры Release 1 — Яндекс Диск и Local Filesystem; Apple iCloud — отдельная будущая возможность, не ограничивающая ядро macOS.
 
 ## Ограничения
 
 - Контроллер не обязан видеть или скачивать содержимое файлов.
-- Нельзя считать успех локальной записи в iCloud доказательством того, что копия уже надёжно хранится в облаке.
+- Ответ Яндекс API о приёме операции нельзя считать доказательством целостной удалённой копии без подтверждающей проверки.
 - Отдельное устройство может исполнять задания автономно по ранее полученным правилам.
 - Протокол связи, обнаружение узлов, распределённые блокировки и переизбрание контроллера **отложены**.
-- Стек **Rust Core + SwiftUI macOS + Swift iCloud adapter + SQLite** принят; точные схемы, ABI и процессы уточняются. См. [стек](technology-stack.md).
+- Стек текущего релиза — **Rust Core + SwiftUI macOS + SQLite + Яндекс Диск/Local Filesystem**. iCloud adapter отложен по [D-017](../decisions/D-017-defer-icloud.md). См. [стек](technology-stack.md).
 
 ## Актуальная спецификация
 
@@ -41,7 +41,7 @@ QADREN — система синхронизации и обмена файла�
 
 ## Фактическая архитектурная база (аудит 2026-10-11)
 
-В `main` существуют: Rust модели `model.rs`, capabilities `capabilities.rs`, `JobStore` + attempts/events/expectations в `jobs.rs`, `confirmation.rs` и `verification.rs`, `Registry` в `registry.rs`, Yandex metadata/OAuth/Keychain и начальный streaming upload, защищённый частичный Local FS, narrow Registry/Yandex FFI и SwiftUI экран подключений. Нет доказанной сквозной Job → адаптер → durable verification → SwiftUI операции; сценарное исполнение, scheduler, iCloud Documents container и независимая служба не завершены. Реализованная SQLite JobStore — основа, не переписывать вторую очередь.
+В `main` существуют: Rust модели `model.rs`, capabilities `capabilities.rs`, `JobStore` + attempts/events/expectations в `jobs.rs`, `confirmation.rs` и `verification.rs`, `Registry` в `registry.rs`, Yandex metadata/OAuth/Keychain и начальный streaming upload, защищённый частичный Local FS, narrow Registry/Yandex FFI и SwiftUI экран подключений. Нет доказанной сквозной Job → адаптер → durable verification → SwiftUI операции; сценарное исполнение, scheduler и независимая служба не завершены; iCloud container намеренно исключён из scope. Реализованная SQLite JobStore — основа, не переписывать вторую очередь.
 
 ### Владение и зависимости
 
@@ -66,4 +66,4 @@ QADREN — система синхронизации и обмена файла�
 
 ### Явные решения до Release 1
 
-Старт исполнения внутри SwiftUI, но Rust владеет engine и SQLite. Destructive Local FS fail-closed до доказательства безопасности конкурирующих изменений; решение о выпуске с ограничениями принимается отдельно. App Store против прямой signed/notarized поставки пока открыто; сначала native spike iCloud entitlements + service lifecycle.
+Старт исполнения внутри SwiftUI, но Rust владеет engine и SQLite. Destructive Local FS fail-closed до доказательства безопасности конкурирующих изменений; решение о выпуске с ограничениями принимается отдельно. App Store против прямой signed/notarized поставки пока открыто; проверить service lifecycle и distribution самостоятельно, без iCloud entitlement spike.
