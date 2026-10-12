@@ -10,7 +10,7 @@
 
 | Раздел | Содержимое | До реализации backend |
 |---|---|---|
-| Подключения | плоский список именованных `StorageConnection`, адаптер, статус, credentials/capabilities, add/edit/remove | существующие Yandex OAuth/Keychain/Registry реальные; iCloud — по native feasibility |
+| Подключения | плоский список именованных `StorageConnection`, адаптер, статус, credentials/capabilities, add/edit/remove | существующие Yandex OAuth/Keychain/Registry реальные; Local FS внедряется; iCloud вне активного scope |
 | Сценарии | список с revision, source/destination и статусом; создать/переименовать/вкл/выкл/удалить | использовать существующую Scenario модель; не отображать невозможные операции как рабочие |
 | Автоматизация | триггеры и расписания **внутри сценария** (может быть отдельная вкладка редактора) | пока scheduler нет — read-only disabled с пояснением |
 | Политики | конфликты, удаления, scoped consents, пороги места, retention событий | не добавлять ложные возможности защиты или backup versions |
@@ -56,7 +56,7 @@
 
 Секреты не видны ни в UI, ни в error details, logs и clipboard. Ошибки авторизации и ограничения API показываются локально в контексте Connection, с кодом/предложенным безопасным действием. Никакого скрытого content read для «проверки». Удаление подключения — подтверждение по connection ID/имени с безопасным rollback и признаком pending cleanup.
 
-При отсутствии возможностей Apple iCloud Documents: реальное состояние entitlement/provisioning, предложить проверить среду, но не имитировать доступ к произвольному iCloud Drive.
+iCloud Documents/backup/sync отложены (D-017): не показывать как работающий/подключаемый адаптер, не добавлять wizard, entitlement probes или фиктивный UI. Local FS по-прежнему запрещает скрытую материализацию File Provider/iCloud placeholders.
 
 ## 7. Визуальный стиль окна настроек
 

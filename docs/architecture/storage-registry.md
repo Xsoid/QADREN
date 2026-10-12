@@ -39,7 +39,7 @@ SQLite `PRAGMA user_version=1`. При открытии `PRAGMA quick_check`; е
 
 ## Не реализовано
 
-Контентные операции, Scenario/Job, фоновый исполнитель, iCloud Documents и Local Filesystem. Metadata-only операции не означают готовую синхронизацию.
+Контентные операции Яндекс Диска, Scenario/Job, фоновый исполнитель и Local Filesystem. iCloud Documents не входит в активный Release 1 (D-017). Metadata-only операции не означают готовую синхронизацию.
 
 ## Schema v2 — идентичность внешнего аккаунта
 

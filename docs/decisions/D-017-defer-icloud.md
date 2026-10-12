@@ -1,0 +1,23 @@
+# D-017 — iCloud отложен за пределы активного Release 1
+
+**Дата:** 2026-10-12. **Статус:** принято. **Область:** продуктовый scope, Codex issues, архитектура, UI, release gate.
+
+## Решение
+
+В первом релизе QADREN **не разрабатываются резервирование, синхронизация, передача файлов с iCloud, iCloud Documents adapter, собственный контейнер, entitlement/provisioning, native feasibility spike, iCloud connection UI и iCloud integration/E2E**. iCloud остаётся потенциальной будущей интеграцией, не текущей задачей и не зависимостью. Существующая #17 закрывается как not planned. Codex не создаёт новых реализационных задач iCloud без явного решения владельца.
+
+Активные endpoints: **Яндекс Диск и Local Filesystem**. Приоритет — Local→Yandex upload, Yandex→Local download (с индивидуальным согласием при загрузке на основной MacBook), Local↔Local; прочие пары, включая Yandex↔Yandex, только после верификации capabilities. Далее one-way и two-way синхронизация и безопасные конфликты. Не считать простую копию гарантированной резервной версией: собственного BackupSet и версионирования содержимого нет.
+
+## Основание и условия возврата
+
+Владелец решил отложить iCloud из-за ограничений доступного ему бесплатного способа интеграции. Это принятое **продуктовое решение**, а не независимая проверка всех API, цен Apple и Apple Developer entitlements. Вернуться к iCloud только после нового явного решения, проверки технически и экономически доступной модели и доказательств семантики облачной выгрузки; до этого не делать даже spike.
+
+## Не отменяет
+
+- Системный iCloud/macOS работает независимо; QADREN не вмешивается.
+- Guards в Local Filesystem против неявной материализации File Provider/iCloud placeholders и скачивания содержимого на основной MacBook **сохраняются** как требования безопасности. Это не означает реализацию iCloud.
+- Действуют durable attempts, UNKNOWN/recovery, no-overwrite/conflict/delete policies, индивидуальные consent, независимые подключения и метаданные sync state.
+
+## Пересмотр решений
+
+Заменяет iCloud-часть D-003 и D-012; остальные решения об архитектуре и локальных файловых системах остаются. Ссылки: `README.md`, `AGENTS.md`, `docs/roadmap.md`, `docs/architecture/*`, `docs/development/*`, `docs/design/settings.md`, Epic #12.
