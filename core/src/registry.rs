@@ -1,8 +1,12 @@
 //! Persistent metadata-only storage connection registry.
 //! Never stores credentials, tokens, file content or remote delete requests.
 use crate::automation::{AutomaticTriggerResult, ScenarioAutomationState};
+use crate::scheduler::WeeklySchedule;
+use chrono::Weekday;
+use chrono_tz::Tz;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
+use std::str::FromStr;
 
 #[derive(Debug)]
 pub enum RegistryError {
@@ -12,6 +16,7 @@ pub enum RegistryError {
     UnsupportedSchema(i32),
     IntegrityFailed,
     NotFound,
+    InvalidSchedule,
 }
 impl From<rusqlite::Error> for RegistryError {
     fn from(error: rusqlite::Error) -> Self {
@@ -69,6 +74,20 @@ pub struct ScenarioAutomationSnapshot {
     pub pending_automatic_run: bool,
 }
 
+/// One durable automatic schedule for a Scenario. It is configuration only;
+/// no evaluation or Job submission happens while storing this record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioSchedule {
+    pub id: String,
+    pub scenario_id: String,
+    pub timezone: String,
+    /// Monday is 0 and Sunday is 6, matching `Weekday::num_days_from_monday`.
+    pub weekday: u8,
+    pub hour: u8,
+    pub minute: u8,
+    pub enabled: bool,
+}
+
 pub struct Registry {
     db: Connection,
 }
@@ -91,7 +110,7 @@ impl Registry {
         }
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 5 {
+        if version > 6 {
             return Err(RegistryError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -171,6 +190,22 @@ impl Registry {
                     pending_automatic_run INTEGER NOT NULL DEFAULT 0 CHECK(pending_automatic_run IN (0,1))
                 );
                 PRAGMA user_version = 5;
+                COMMIT;",
+            )?;
+        }
+        if version <= 5 {
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                CREATE TABLE scenario_schedules (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    scenario_id TEXT NOT NULL REFERENCES scenarios(id) ON DELETE RESTRICT,
+                    timezone TEXT NOT NULL,
+                    weekday INTEGER NOT NULL CHECK(weekday BETWEEN 0 AND 6),
+                    hour INTEGER NOT NULL CHECK(hour BETWEEN 0 AND 23),
+                    minute INTEGER NOT NULL CHECK(minute BETWEEN 0 AND 59),
+                    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1))
+                );
+                PRAGMA user_version = 6;
                 COMMIT;",
             )?;
         }
@@ -414,6 +449,51 @@ impl Registry {
             .ok_or(RegistryError::NotFound)
     }
 
+    pub fn create_scenario_schedule(
+        &self,
+        scenario_id: &str,
+        timezone: &str,
+        weekday: u8,
+        hour: u8,
+        minute: u8,
+    ) -> Result<String> {
+        validate_schedule(timezone, weekday, hour, minute)?;
+        let id: String = self
+            .db
+            .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
+        let changed = self.db.execute(
+            "INSERT INTO scenario_schedules(id,scenario_id,timezone,weekday,hour,minute)
+             SELECT ?1,id,?2,?3,?4,?5 FROM scenarios WHERE id=?6",
+            params![id, timezone, weekday, hour, minute, scenario_id],
+        )?;
+        if changed == 0 {
+            return Err(RegistryError::NotFound);
+        }
+        Ok(id)
+    }
+
+    pub fn list_scenario_schedules(&self, scenario_id: &str) -> Result<Vec<ScenarioSchedule>> {
+        let mut statement = self.db.prepare(
+            "SELECT id,scenario_id,timezone,weekday,hour,minute,enabled
+             FROM scenario_schedules WHERE scenario_id=?1 ORDER BY weekday,hour,minute,id",
+        )?;
+        let schedules = statement
+            .query_map([scenario_id], |row| {
+                Ok(ScenarioSchedule {
+                    id: row.get(0)?,
+                    scenario_id: row.get(1)?,
+                    timezone: row.get(2)?,
+                    weekday: row.get(3)?,
+                    hour: row.get(4)?,
+                    minute: row.get(5)?,
+                    enabled: row.get(6)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into);
+        schedules
+    }
+
     /// Pausing automatic work also removes its queued successor. Manual Job
     /// requests have a separate path and remain admissible.
     pub fn set_scenario_locally_paused(&self, id: &str, paused: bool) -> Result<()> {
@@ -561,6 +641,28 @@ fn valid_adapter(adapter: &str) -> bool {
         && adapter
             .bytes()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_' || c == b'-')
+}
+
+fn validate_schedule(timezone: &str, weekday: u8, hour: u8, minute: u8) -> Result<()> {
+    let timezone = Tz::from_str(timezone).map_err(|_| RegistryError::InvalidSchedule)?;
+    let weekday = match weekday {
+        0 => Weekday::Mon,
+        1 => Weekday::Tue,
+        2 => Weekday::Wed,
+        3 => Weekday::Thu,
+        4 => Weekday::Fri,
+        5 => Weekday::Sat,
+        6 => Weekday::Sun,
+        _ => return Err(RegistryError::InvalidSchedule),
+    };
+    WeeklySchedule {
+        timezone,
+        weekday,
+        hour: hour as u32,
+        minute: minute as u32,
+    }
+    .validate()
+    .map_err(|_| RegistryError::InvalidSchedule)
 }
 
 #[cfg(test)]
@@ -804,6 +906,31 @@ mod tests {
             AutomaticTriggerResult::IgnoredDisabled
         );
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn scenario_supports_multiple_validated_schedules_without_job_submission() {
+        let db = Registry::in_memory().unwrap();
+        let left = db.add("local_filesystem", "Left").unwrap();
+        let right = db.add("local_filesystem", "Right").unwrap();
+        let scenario = db
+            .create_scenario("Documents", &left, "/", &right, "/archive", "left_to_right")
+            .unwrap();
+        db.create_scenario_schedule(&scenario, "Europe/Samara", 0, 9, 30)
+            .unwrap();
+        db.create_scenario_schedule(&scenario, "Europe/Berlin", 6, 2, 30)
+            .unwrap();
+        let schedules = db.list_scenario_schedules(&scenario).unwrap();
+        assert_eq!(schedules.len(), 2);
+        assert_eq!(schedules[0].timezone, "Europe/Samara");
+        assert!(matches!(
+            db.create_scenario_schedule(&scenario, "not/a-zone", 0, 9, 0),
+            Err(RegistryError::InvalidSchedule)
+        ));
+        assert!(matches!(
+            db.create_scenario_schedule(&scenario, "Europe/Samara", 7, 9, 0),
+            Err(RegistryError::InvalidSchedule)
+        ));
     }
 
     #[test]
