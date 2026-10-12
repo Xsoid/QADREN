@@ -4,7 +4,7 @@
 
 Эта документация — **визуально-поведенческий контракт**, а не приказ сейчас создать несуществующие Core API. На 2026-10-12 в `main`: `QADRENApp.swift` имеет WindowGroup monitoring, окно `scenario-settings`, MenuBarExtra. `MainView.swift` — dashboard status tiles, jobs list, две local metadata panels, connections/OAuth setup; `StorageConnections.swift`, `YandexConnection.swift`, `LocalWorkspace.swift`, `JobInventory.swift` существуют. Первый полноценный Rust Job execution/independent worker service ещё проходит дорожные gates. **Перед реализацией проверить HEAD**, этот список может устареть.
 
-UI не должен изобретать data pipeline, вторую очередь, runtime history или registry. Все изменения в `main`; не создавай feature/docs branches, не предлагай автоматический переход Work. Завершение документации не закрывает Issue #23.
+UI не должен изобретать data pipeline, вторую очередь, runtime history или registry. Активные подключения Release 1 — Яндекс Диск и Local FS. iCloud connection/sync/backup UI исключены из активной реализации (D-017). Все изменения в `main`; не создавай feature/docs branches, не предлагай автоматический переход Work. Завершение документации не закрывает Issue #23.
 
 ## 1. Матрица соответствия текущего кода
 
@@ -47,7 +47,7 @@ UI не должен изобретать data pipeline, вторую очере
 ## 4. Обязательные security UX-инварианты
 
 - Никаких скачиваний содержимого на основной MacBook через QADREN без отдельного explicit scoped consent. Browse/list/stat/metadata не включают content.
-- UI не подтверждает verified success без соответствующего evidence Rust. UNKNOWN не имеет безусловного retry. Не считать iCloud локальную запись доказательством облачной копии.
+- UI не подтверждает verified success без соответствующего evidence Rust. UNKNOWN не имеет безусловного retry. Успех запроса Яндекс API не является безусловным доказательством полной доставки и целостности.
 - Хранилища/задачи с одинаковым display name различать по реальному connection_id/Job ID.
 - Не удалять пользовательские файлы через remove connection; локальная чистка credentials с recoverability #25.
 - No secret, auth URL, access token, file content in diagnostics, screenshots/previews, analytics.
@@ -71,7 +71,7 @@ UI не должен изобретать data pipeline, вторую очере
 | 2 Yandex connections | отдельные строки/credentials, никаких смешанных квот |
 | Job running and 1000 queued | lazy list; progress только по реальным данным; стабилен scroll/selection |
 | UNKNOWN after crash | отдельная цвет/label семантика, read-only inspect + reconciliation |
-| iCloud unsupported | объяснение entitlement/container, не universal drive и не fake quota |
+| iCloud out of scope | iCloud отсутствует в мастере и активных действиях; без кнопок подключения, entitlement probe и fake quota. Если в legacy данных есть iCloud connection, отображать как disabled/unsupported без I/O |
 | Auth revoked / no network | stale timestamp + причина; не зелёное «подключено» |
 | Global filter excludes critical job | глобальный attention остаётся виден |
 | Edit grid, resize, undo, close/open | deterministic layout и персистентность, без overlap |
