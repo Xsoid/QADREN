@@ -8,7 +8,6 @@ struct MainView: View {
     @StateObject private var rightLocalWorkspace = LocalWorkspace()
     @State private var jobs: [JobRow] = []
     @State private var jobError: String?
-    @AppStorage("qadren.theme") private var themeRaw = QDThemeMode.dark.rawValue
     let workspace: DispatcherSection
 
     init(workspace: DispatcherSection = .monitoring) {
@@ -30,16 +29,14 @@ struct MainView: View {
                 Menu {
                     Button("Контрольная панель") { openWindow(id: "monitoring") }
                     Button("Панель настроек") { openWindow(id: "scenario-settings") }
+                    Button("Настройки приложения") { openWindow(id: "application-settings") }
                 } label: {
                     Label("Пространство", systemImage: "rectangle.3.group")
                 }
                 if workspace == .monitoring {
                     Button("Новая панель", systemImage: "macwindow.on.rectangle") { openWindow(id: "monitoring") }
+                    Button("Обновить", systemImage: "arrow.clockwise") { refreshCurrentWorkspace() }
                 }
-                if workspace == .scenarios {
-                    Button("Добавить подключение", systemImage: "plus") { connections.addYandex() }
-                }
-                Button("Обновить", systemImage: "arrow.clockwise") { refreshCurrentWorkspace() }
             }
         }
         .onAppear { refreshJobs() }
@@ -57,7 +54,6 @@ struct MainView: View {
                         VStack(alignment: .leading, spacing: 10) {
                             QDStatusLabel(kind: workerStatusKind, text: workerStatus)
                             LabeledContent("Ядро", value: coreStatus)
-                            LabeledContent("iCloud Documents", value: ICloudAvailability.status)
                             Text("Источник: локальный Core; содержимое файлов не читается.")
                                 .font(.caption2).foregroundStyle(.secondary)
                         }
@@ -157,52 +153,7 @@ struct MainView: View {
     }
 
     private var scenarioSettingsWorkspace: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                WorkspaceCard(title: "Сценарии синхронизации", subtitle: "Правила будущего выполнения") {
-                    EmptyWorkspaceState(title: "Создание сценариев ещё не реализовано", detail: "Нельзя создать фиктивный сценарий: сначала должны появиться проверяемый план, политики конфликтов и безопасное выполнение в ядре.", symbol: "arrow.triangle.2.circlepath")
-                }
-                WorkspaceCard(title: "Интерфейс", subtitle: "Локальные настройки отображения") {
-                    Picker("Тема", selection: $themeRaw) {
-                        ForEach(QDThemeMode.allCases) { mode in
-                            Text(mode.title).tag(mode.rawValue)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    Text("Настройка хранится локально и не меняет сценарии, подключения или состояние Worker.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                if connections.hasLegacyYandexToken {
-                    Notice(text: "Найдена прежняя авторизация Яндекс Диска. Её можно перенести в независимое подключение; старый элемент Keychain останется до проверки копии.", symbol: "key") {
-                        Button("Перенести подключение") { connections.importLegacyYandex() }
-                    }
-                }
-                if let error = connections.error { Notice(text: error, symbol: "exclamationmark.triangle") }
-                if connections.entries.isEmpty && !connections.hasLegacyYandexToken {
-                    EmptyWorkspaceState(title: "Подключений нет", detail: "Добавьте подключение, чтобы начать его локальную настройку.", symbol: "externaldrive.badge.plus")
-                        .frame(maxWidth: .infinity, minHeight: 240)
-                }
-                ForEach(connections.entries) { entry in
-                    WorkspaceCard(title: entry.name, subtitle: adapterTitle(entry.adapter)) {
-                        if entry.adapter == "yandex_disk" {
-                            YandexConnectionCard(
-                                entry: entry,
-                                onRemove: { connections.remove(entry.id) },
-                                onRename: { connections.rename(entry.id, name: $0) },
-                                onSetEnabled: { connections.setEnabled(entry.id, enabled: $0) }
-                            )
-                            .id(entry.id + (entry.enabled ? ":enabled" : ":disabled"))
-                        } else {
-                            LabeledContent("Адаптер", value: entry.adapter)
-                        }
-                    }
-                }
-                Text(ICloudAvailability.status).font(.caption).foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: 1100, alignment: .leading)
-            .padding(16)
-        }
-        .background(QDTheme.color(.canvas, for: colorScheme))
+        SettingsPanelView(connections: connections)
     }
 
     private func refreshCurrentWorkspace() {
@@ -466,7 +417,7 @@ private struct FileManagerPane: View {
     }
 }
 
-private struct YandexConnectionCard: View {
+struct YandexConnectionCard: View {
     let entry: StorageEntry
     let onRemove: () -> Void
     let onRename: (String) -> Void

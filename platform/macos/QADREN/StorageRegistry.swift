@@ -3,6 +3,19 @@ import Security
 
 @_silgen_name("qadren_registry_list")
 private func registryList(_ path: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_scenarios_list")
+private func scenarioList(_ path: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_scenarios_create")
+private func scenarioCreate(
+    _ path: UnsafePointer<CChar>?, _ name: UnsafePointer<CChar>?,
+    _ leftID: UnsafePointer<CChar>?, _ leftRoot: UnsafePointer<CChar>?,
+    _ rightID: UnsafePointer<CChar>?, _ rightRoot: UnsafePointer<CChar>?,
+    _ direction: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_scenarios_set_enabled")
+private func scenarioSetEnabled(
+    _ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ enabled: UInt8
+) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_add")
 private func registryAdd(_ path: UnsafePointer<CChar>?, _ adapter: UnsafePointer<CChar>?, _ name: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_rename")
@@ -28,6 +41,17 @@ struct StorageEntry: Decodable, Identifiable {
     let status: String
     let credential_ref: String?
     let provider_account_id: String?
+}
+struct ScenarioEntry: Decodable, Identifiable {
+    let id: String
+    let name: String
+    let left_connection_id: String
+    let left_root: String
+    let right_connection_id: String
+    let right_root: String
+    let direction: String
+    let enabled: Bool
+    let revision: UInt64
 }
 private struct NewConnection: Decodable {
     let id: String
@@ -77,6 +101,50 @@ enum StorageRegistryBridge {
     static func list() throws -> [StorageEntry] {
         let database = try path
         return try database.withCString { try unwrap(registryList($0), as: [StorageEntry].self) }
+    }
+
+    static func listScenarios() throws -> [ScenarioEntry] {
+        let database = try path
+        return try database.withCString { try unwrap(scenarioList($0), as: [ScenarioEntry].self) }
+    }
+
+    static func createScenario(
+        name: String,
+        leftID: String,
+        leftRoot: String,
+        rightID: String,
+        rightRoot: String,
+        direction: String
+    ) throws -> String {
+        let database = try path
+        let result: NewConnection = try database.withCString { db in
+            try name.withCString { name in
+                try leftID.withCString { leftID in
+                    try leftRoot.withCString { leftRoot in
+                        try rightID.withCString { rightID in
+                            try rightRoot.withCString { rightRoot in
+                                try direction.withCString { direction in
+                                    try unwrap(
+                                        scenarioCreate(db, name, leftID, leftRoot, rightID, rightRoot, direction),
+                                        as: NewConnection.self
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return result.id
+    }
+
+    static func setScenarioEnabled(id: String, enabled: Bool) throws {
+        let database = try path
+        let _: Bool = try database.withCString { db in
+            try id.withCString { value in
+                try unwrap(scenarioSetEnabled(db, value, enabled ? 1 : 0), as: Bool.self)
+            }
+        }
     }
 
     static func addYandex(name: String) throws -> String {

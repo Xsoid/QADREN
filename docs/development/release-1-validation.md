@@ -534,3 +534,11 @@
 Добавлена отдельная read-only reconciliation для уже durable `UNKNOWN` G1 mock attempt: Rust сверяет ровно сохранённые `operation_kind`, `connection_id`, target, size и MD5 с app-owned test artifact, лишь после точного совпадения разрешает тот же attempt и переводит Job в `completed`. Несовпадение, отсутствие root/object или неоднозначная binding остаются `UNKNOWN`; повторная запись, удаление или автоматический rollback отсутствуют. Этот узкий mock recovery не является reconciliation для Yandex, Local FS или iCloud и не снимает оставшиеся G1/#18 ограничения.
 
 Проверено на macOS для этого изменения: `bash scripts/test-core.sh` — PASS (fmt, Clippy, 212 Rust unit tests, включая crash-after-effect → exact reconciliation и partial artifact → сохранение `UNKNOWN`); `bash scripts/build-macos.sh` — PASS (unsigned `dist/QADREN.app`, `Info.plist`).
+
+### Панель настроек: подключения и Scenario configuration — 2026-10-12
+
+«Панель настроек» остаётся отдельным окном и теперь использует две реальные секции: независимые `StorageConnection` и сохранённые Scenario. SwiftUI вызывает существующий Rust Registry FFI для list/create/enable Scenario; форма сохраняет имя, два connection ID, каталоги, направление и ревизию 1. Включение/выключение также меняет durable Registry. Отдельное окно «Настройки приложения» содержит локальную тему; оно не смешано с настройками синхронизации. В соответствии с D-017 iCloud отсутствует из активных пунктов интерфейса.
+
+Граница: это configuration-only UI. Нет редактирования/удаления Scenario, scheduler, dry-run запуска, Job submission или передачи файлов; экран явно сообщает об этих ограничениях и не имитирует Run/копирование. Удаление connection по-прежнему использует существующий recoverable Keychain/attempt gate.
+
+Проверено на macOS для этого изменения: `bash scripts/test-core.sh` — PASS (fmt, Clippy, 213 Rust unit tests, включая C ABI create/list/disable Scenario); `bash scripts/build-macos.sh` — PASS (unsigned `dist/QADREN.app`, `Info.plist`). Native visual/VoiceOver smoke для этой версии не подтверждён: session UI automation стала недоступна после перезапуска приложения.

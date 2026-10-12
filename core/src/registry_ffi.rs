@@ -287,6 +287,59 @@ mod tests {
     }
 
     #[test]
+    fn scenario_configuration_round_trips_through_ffi() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let file = std::env::temp_dir().join(format!(
+            "qadren-scenario-ffi-{}-{nanos}.sqlite3",
+            std::process::id()
+        ));
+        let path = CString::new(file.to_str().unwrap()).unwrap();
+        let adapter = CString::new("yandex_disk").unwrap();
+        let left_name = CString::new("Source").unwrap();
+        let right_name = CString::new("Destination").unwrap();
+        let add_left = qadren_registry_add(path.as_ptr(), adapter.as_ptr(), left_name.as_ptr());
+        let left: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(add_left) }.to_str().unwrap()).unwrap();
+        unsafe { qadren_registry_free_string(add_left) };
+        let add_right = qadren_registry_add(path.as_ptr(), adapter.as_ptr(), right_name.as_ptr());
+        let right: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(add_right) }.to_str().unwrap()).unwrap();
+        unsafe { qadren_registry_free_string(add_right) };
+        let left_id = CString::new(left["data"]["id"].as_str().unwrap()).unwrap();
+        let right_id = CString::new(right["data"]["id"].as_str().unwrap()).unwrap();
+        let scenario_name = CString::new("Documents").unwrap();
+        let root = CString::new("/").unwrap();
+        let direction = CString::new("left_to_right").unwrap();
+        let created = qadren_scenarios_create(
+            path.as_ptr(),
+            scenario_name.as_ptr(),
+            left_id.as_ptr(),
+            root.as_ptr(),
+            right_id.as_ptr(),
+            root.as_ptr(),
+            direction.as_ptr(),
+        );
+        let scenario: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(created) }.to_str().unwrap()).unwrap();
+        unsafe { qadren_registry_free_string(created) };
+        let scenario_id = CString::new(scenario["data"]["id"].as_str().unwrap()).unwrap();
+        let disabled = qadren_scenarios_set_enabled(path.as_ptr(), scenario_id.as_ptr(), 0);
+        unsafe { qadren_registry_free_string(disabled) };
+        let listed = qadren_scenarios_list(path.as_ptr());
+        let scenarios: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(listed) }.to_str().unwrap()).unwrap();
+        unsafe { qadren_registry_free_string(listed) };
+        assert_eq!(scenarios["data"][0]["name"], "Documents");
+        assert_eq!(scenarios["data"][0]["revision"], 1);
+        assert_eq!(scenarios["data"][0]["enabled"], false);
+        std::fs::remove_file(file).unwrap();
+    }
+
+    #[test]
     fn invalid_ffi_inputs_have_stable_json_errors() {
         let add = qadren_registry_add(std::ptr::null(), std::ptr::null(), std::ptr::null());
         let json: Value =
