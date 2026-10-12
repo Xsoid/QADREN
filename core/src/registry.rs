@@ -48,6 +48,18 @@ pub struct Scenario {
     pub revision: u64,
 }
 
+/// Replacement configuration for a persisted Scenario. It intentionally omits
+/// `enabled` and `revision`: configuration edits must not enable automation,
+/// and the Registry owns monotonically increasing revisions.
+pub struct ScenarioUpdate<'a> {
+    pub name: &'a str,
+    pub left_connection_id: &'a str,
+    pub left_root: &'a str,
+    pub right_connection_id: &'a str,
+    pub right_root: &'a str,
+    pub direction: &'a str,
+}
+
 pub struct Registry {
     db: Connection,
 }
@@ -70,7 +82,7 @@ impl Registry {
         }
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 3 {
+        if version > 4 {
             return Err(RegistryError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -113,6 +125,31 @@ impl Registry {
                     CHECK(NOT (left_connection_id = right_connection_id AND left_root = right_root))
                 );
                 PRAGMA user_version = 3;
+                COMMIT;",
+            )?;
+        }
+        if version <= 3 {
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                CREATE TABLE scenario_revisions (
+                    scenario_id TEXT NOT NULL REFERENCES scenarios(id) ON DELETE RESTRICT,
+                    revision INTEGER NOT NULL CHECK(revision > 0),
+                    name TEXT NOT NULL,
+                    left_connection_id TEXT NOT NULL REFERENCES storage_connections(id) ON DELETE RESTRICT,
+                    left_root TEXT NOT NULL,
+                    right_connection_id TEXT NOT NULL REFERENCES storage_connections(id) ON DELETE RESTRICT,
+                    right_root TEXT NOT NULL,
+                    direction TEXT NOT NULL CHECK(direction IN ('left_to_right','right_to_left','bidirectional')),
+                    PRIMARY KEY(scenario_id, revision)
+                );
+                INSERT INTO scenario_revisions(
+                    scenario_id,revision,name,left_connection_id,left_root,
+                    right_connection_id,right_root,direction
+                )
+                SELECT id,revision,name,left_connection_id,left_root,
+                       right_connection_id,right_root,direction
+                FROM scenarios;
+                PRAGMA user_version = 4;
                 COMMIT;",
             )?;
         }
@@ -295,10 +332,27 @@ impl Registry {
         let id: String = self
             .db
             .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
-        self.db.execute(
+        let transaction = self.db.unchecked_transaction()?;
+        transaction.execute(
             "INSERT INTO scenarios(id,name,left_connection_id,left_root,right_connection_id,right_root,direction) VALUES(?1,?2,?3,?4,?5,?6,?7)",
             params![id, name.trim(), left_connection_id, left_root, right_connection_id, right_root, direction],
         )?;
+        transaction.execute(
+            "INSERT INTO scenario_revisions(
+                scenario_id,revision,name,left_connection_id,left_root,
+                right_connection_id,right_root,direction
+             ) VALUES(?1,1,?2,?3,?4,?5,?6,?7)",
+            params![
+                id,
+                name.trim(),
+                left_connection_id,
+                left_root,
+                right_connection_id,
+                right_root,
+                direction
+            ],
+        )?;
+        transaction.commit()?;
         Ok(id)
     }
 
@@ -307,6 +361,83 @@ impl Registry {
             "UPDATE scenarios SET enabled=?1 WHERE id=?2",
             params![enabled, id],
         )?)
+    }
+
+    /// Replaces a Scenario configuration and creates a new immutable revision
+    /// for future Jobs. Existing Jobs must continue to use their pinned
+    /// revision; this Registry never rewrites their identity.
+    pub fn update_scenario(&self, id: &str, update: ScenarioUpdate<'_>) -> Result<()> {
+        if !valid_name(update.name)
+            || update.left_connection_id.is_empty()
+            || update.right_connection_id.is_empty()
+            || update.left_root.is_empty()
+            || update.right_root.is_empty()
+            || !matches!(
+                update.direction,
+                "left_to_right" | "right_to_left" | "bidirectional"
+            )
+        {
+            return Err(RegistryError::InvalidName);
+        }
+        let transaction = self.db.unchecked_transaction()?;
+        let changed = transaction.execute(
+            "UPDATE scenarios
+             SET name=?1,left_connection_id=?2,left_root=?3,
+                 right_connection_id=?4,right_root=?5,direction=?6,
+                 revision=revision+1
+             WHERE id=?7",
+            params![
+                update.name.trim(),
+                update.left_connection_id,
+                update.left_root,
+                update.right_connection_id,
+                update.right_root,
+                update.direction,
+                id
+            ],
+        )?;
+        if changed == 0 {
+            return Err(RegistryError::NotFound);
+        }
+        transaction.execute(
+            "INSERT INTO scenario_revisions(
+                scenario_id,revision,name,left_connection_id,left_root,
+                right_connection_id,right_root,direction
+             )
+             SELECT id,revision,name,left_connection_id,left_root,
+                    right_connection_id,right_root,direction
+             FROM scenarios WHERE id=?1",
+            [id],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Retrieves the immutable configuration that belongs to a Job's pinned
+    /// Scenario revision. It intentionally does not fall back to the current
+    /// row, because using a later configuration would change a durable Job.
+    pub fn get_scenario_revision(&self, id: &str, revision: u64) -> Result<Option<Scenario>> {
+        self.db
+            .query_row(
+                "SELECT scenario_id,name,left_connection_id,left_root,right_connection_id,right_root,direction,revision
+                 FROM scenario_revisions WHERE scenario_id=?1 AND revision=?2",
+                params![id, revision as i64],
+                |row| {
+                    Ok(Scenario {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        left_connection_id: row.get(2)?,
+                        left_root: row.get(3)?,
+                        right_connection_id: row.get(4)?,
+                        right_root: row.get(5)?,
+                        direction: row.get(6)?,
+                        enabled: false,
+                        revision: row.get::<_, i64>(7)? as u64,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     fn changed(&self, count: usize) -> Result<()> {
@@ -472,6 +603,98 @@ mod tests {
         db.set_scenario_enabled(&id, false).unwrap();
         assert!(!db.list_scenarios().unwrap()[0].enabled);
         assert!(matches!(db.remove(&left), Err(RegistryError::Database(_))));
+    }
+
+    #[test]
+    fn scenario_update_creates_a_new_revision_without_changing_enablement() {
+        let db = Registry::in_memory().unwrap();
+        let left = db.add("local_filesystem", "Left").unwrap();
+        let right = db.add("yandex_disk", "Right").unwrap();
+        let id = db
+            .create_scenario(
+                "Documents",
+                &left,
+                "/old",
+                &right,
+                "/archive",
+                "left_to_right",
+            )
+            .unwrap();
+        db.set_scenario_enabled(&id, false).unwrap();
+
+        db.update_scenario(
+            &id,
+            ScenarioUpdate {
+                name: "Updated documents",
+                left_connection_id: &right,
+                left_root: "/source",
+                right_connection_id: &left,
+                right_root: "/target",
+                direction: "right_to_left",
+            },
+        )
+        .unwrap();
+
+        let scenario = db.list_scenarios().unwrap().pop().unwrap();
+        assert_eq!(scenario.name, "Updated documents");
+        assert_eq!(scenario.left_connection_id, right);
+        assert_eq!(scenario.right_connection_id, left);
+        assert_eq!(scenario.revision, 2);
+        assert!(!scenario.enabled);
+
+        let revision_one = db.get_scenario_revision(&id, 1).unwrap().unwrap();
+        assert_eq!(revision_one.name, "Documents");
+        assert_eq!(revision_one.left_root, "/old");
+        assert_eq!(revision_one.direction, "left_to_right");
+        let revision_two = db.get_scenario_revision(&id, 2).unwrap().unwrap();
+        assert_eq!(revision_two.name, "Updated documents");
+        assert_eq!(revision_two.left_root, "/source");
+        assert_eq!(revision_two.direction, "right_to_left");
+    }
+
+    #[test]
+    fn migrates_v3_scenario_into_its_initial_revision_snapshot() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(
+            "CREATE TABLE storage_connections (
+                id TEXT PRIMARY KEY NOT NULL,
+                adapter TEXT NOT NULL,
+                name TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                status TEXT NOT NULL DEFAULT 'disconnected',
+                credential_ref TEXT,
+                last_checked_at INTEGER,
+                diagnosis TEXT,
+                provider_account_id TEXT
+            );
+            CREATE TABLE scenarios (
+                id TEXT PRIMARY KEY NOT NULL,
+                name TEXT NOT NULL,
+                left_connection_id TEXT NOT NULL REFERENCES storage_connections(id) ON DELETE RESTRICT,
+                left_root TEXT NOT NULL,
+                right_connection_id TEXT NOT NULL REFERENCES storage_connections(id) ON DELETE RESTRICT,
+                right_root TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                revision INTEGER NOT NULL DEFAULT 1
+            );
+            INSERT INTO storage_connections(id,adapter,name) VALUES
+                ('left','local_filesystem','Left'),
+                ('right','yandex_disk','Right');
+            INSERT INTO scenarios(
+                id,name,left_connection_id,left_root,right_connection_id,right_root,direction,enabled,revision
+            ) VALUES('scenario','Documents','left','/source','right','/archive','left_to_right',0,7);
+            PRAGMA user_version = 3;",
+        )
+        .unwrap();
+
+        let db = Registry::initialize(connection).unwrap();
+        let snapshot = db.get_scenario_revision("scenario", 7).unwrap().unwrap();
+        assert_eq!(snapshot.name, "Documents");
+        assert_eq!(snapshot.left_root, "/source");
+        assert_eq!(snapshot.right_root, "/archive");
+        assert_eq!(snapshot.direction, "left_to_right");
+        assert!(db.get_scenario_revision("scenario", 1).unwrap().is_none());
     }
 
     #[test]

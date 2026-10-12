@@ -1,7 +1,7 @@
 //! Minimal C ABI for the SQLite connection registry.
 //! Inputs are UTF-8 owned by the caller; JSON output is caller-freed.
 //! No OAuth tokens or file contents are persisted by these methods.
-use crate::registry::Registry;
+use crate::registry::{Registry, ScenarioUpdate};
 use serde_json::{json, Value};
 use std::ffi::{c_char, CStr, CString};
 use std::path::Path;
@@ -125,6 +125,53 @@ pub extern "C" fn qadren_scenarios_set_enabled(
     }
     with_registry(path, |db| {
         db.set_scenario_enabled(&id, enabled == 1)?;
+        Ok(json!(true))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn qadren_scenarios_update(
+    path: *const c_char,
+    id: *const c_char,
+    name: *const c_char,
+    left_id: *const c_char,
+    left_root: *const c_char,
+    right_id: *const c_char,
+    right_root: *const c_char,
+    direction: *const c_char,
+) -> *mut c_char {
+    let (
+        Some(id),
+        Some(name),
+        Some(left_id),
+        Some(left_root),
+        Some(right_id),
+        Some(right_root),
+        Some(direction),
+    ) = (
+        input(id),
+        input(name),
+        input(left_id),
+        input(left_root),
+        input(right_id),
+        input(right_root),
+        input(direction),
+    )
+    else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    with_registry(path, |db| {
+        db.update_scenario(
+            &id,
+            ScenarioUpdate {
+                name: &name,
+                left_connection_id: &left_id,
+                left_root: &left_root,
+                right_connection_id: &right_id,
+                right_root: &right_root,
+                direction: &direction,
+            },
+        )?;
         Ok(json!(true))
     })
 }
@@ -381,12 +428,28 @@ mod tests {
         let scenario_id = CString::new(scenario["data"]["id"].as_str().unwrap()).unwrap();
         let disabled = qadren_scenarios_set_enabled(path.as_ptr(), scenario_id.as_ptr(), 0);
         unsafe { qadren_registry_free_string(disabled) };
+        let updated_name = CString::new("Updated documents").unwrap();
+        let update_pointer = qadren_scenarios_update(
+            path.as_ptr(),
+            scenario_id.as_ptr(),
+            updated_name.as_ptr(),
+            right_id.as_ptr(),
+            root.as_ptr(),
+            left_id.as_ptr(),
+            root.as_ptr(),
+            direction.as_ptr(),
+        );
+        let update: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(update_pointer) }.to_str().unwrap())
+                .unwrap();
+        assert_eq!(update["data"], true);
+        unsafe { qadren_registry_free_string(update_pointer) };
         let listed = qadren_scenarios_list(path.as_ptr());
         let scenarios: Value =
             serde_json::from_str(unsafe { CStr::from_ptr(listed) }.to_str().unwrap()).unwrap();
         unsafe { qadren_registry_free_string(listed) };
-        assert_eq!(scenarios["data"][0]["name"], "Documents");
-        assert_eq!(scenarios["data"][0]["revision"], 1);
+        assert_eq!(scenarios["data"][0]["name"], "Updated documents");
+        assert_eq!(scenarios["data"][0]["revision"], 2);
         assert_eq!(scenarios["data"][0]["enabled"], false);
         std::fs::remove_file(file).unwrap();
     }

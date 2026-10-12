@@ -48,6 +48,33 @@ final class ScenarioSettings: ObservableObject {
             self.error = error.localizedDescription
         }
     }
+
+    func update(
+        id: String,
+        name: String,
+        leftID: String,
+        leftRoot: String,
+        rightID: String,
+        rightRoot: String,
+        direction: String
+    ) -> String? {
+        do {
+            try StorageRegistryBridge.updateScenario(
+                id: id,
+                name: name,
+                leftID: leftID,
+                leftRoot: leftRoot,
+                rightID: rightID,
+                rightRoot: rightRoot,
+                direction: direction
+            )
+            refresh()
+            return nil
+        } catch {
+            self.error = error.localizedDescription
+            return self.error
+        }
+    }
 }
 
 private enum SettingsPanelSection: String, CaseIterable, Hashable, Identifiable {
@@ -77,6 +104,7 @@ struct SettingsPanelView: View {
     @StateObject private var scenarios = ScenarioSettings()
     @State private var selection: SettingsPanelSection? = .connections
     @State private var isEditingScenario = false
+    @State private var editedScenario: ScenarioEntry?
 
     var body: some View {
         NavigationSplitView {
@@ -98,14 +126,16 @@ struct SettingsPanelView: View {
                     if isEditingScenario {
                         ScenarioEditorView(
                             connections: scenarioEndpoints,
-                            createScenario: createScenario,
+                            scenario: editedScenario,
+                            saveScenario: saveScenario,
                             cancel: { isEditingScenario = false }
                         )
                     } else {
                         ScenariosSettingsView(
                             scenarios: scenarios,
                             connections: connections.entries,
-                            createScenario: { isEditingScenario = true }
+                            createScenario: beginScenarioCreation,
+                            editScenario: beginScenarioEditing
                         )
                     }
                 case .application:
@@ -123,7 +153,7 @@ struct SettingsPanelView: View {
                         Button("Этот Mac") { connections.addLocalComputer() }
                     }
                 case .scenarios:
-                    Button("Создать сценарий", systemImage: "plus") { isEditingScenario = true }
+                    Button("Создать сценарий", systemImage: "plus", action: beginScenarioCreation)
                 case .application:
                     EmptyView()
                 }
@@ -141,7 +171,8 @@ struct SettingsPanelView: View {
 
     private var scenarioEndpoints: [StorageEntry] {
         var endpoints = connections.entries.filter {
-            $0.enabled && ($0.adapter == "yandex_disk" || $0.adapter == "local_filesystem")
+            ($0.enabled || $0.id == editedScenario?.left_connection_id || $0.id == editedScenario?.right_connection_id)
+                && ($0.adapter == "yandex_disk" || $0.adapter == "local_filesystem")
         }
         if !endpoints.contains(where: { $0.adapter == "local_filesystem" }) {
             endpoints.append(StorageEntry(
@@ -152,7 +183,17 @@ struct SettingsPanelView: View {
         return endpoints
     }
 
-    private func createScenario(
+    private func beginScenarioCreation() {
+        editedScenario = nil
+        isEditingScenario = true
+    }
+
+    private func beginScenarioEditing(_ scenario: ScenarioEntry) {
+        editedScenario = scenario
+        isEditingScenario = true
+    }
+
+    private func saveScenario(
         _ name: String, _ leftID: String, _ leftRoot: String,
         _ rightID: String, _ rightRoot: String, _ direction: String
     ) -> String? {
@@ -164,12 +205,24 @@ struct SettingsPanelView: View {
             } else {
                 localID = nil
             }
-            let result = scenarios.create(
-                name: name, leftID: leftID == "local-computer" ? localID! : leftID, leftRoot: leftRoot,
-                rightID: rightID == "local-computer" ? localID! : rightID, rightRoot: rightRoot, direction: direction
-            )
+            let resolvedLeftID = leftID == "local-computer" ? localID! : leftID
+            let resolvedRightID = rightID == "local-computer" ? localID! : rightID
+            let result: String?
+            if let editedScenario {
+                result = scenarios.update(
+                    id: editedScenario.id, name: name,
+                    leftID: resolvedLeftID, leftRoot: leftRoot,
+                    rightID: resolvedRightID, rightRoot: rightRoot, direction: direction
+                )
+            } else {
+                result = scenarios.create(
+                    name: name, leftID: resolvedLeftID, leftRoot: leftRoot,
+                    rightID: resolvedRightID, rightRoot: rightRoot, direction: direction
+                )
+            }
             if result == nil {
                 connections.refresh()
+                editedScenario = nil
                 isEditingScenario = false
             }
             return result
@@ -283,6 +336,7 @@ private struct ScenariosSettingsView: View {
     @ObservedObject var scenarios: ScenarioSettings
     let connections: [StorageEntry]
     let createScenario: () -> Void
+    let editScenario: (ScenarioEntry) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -324,6 +378,7 @@ private struct ScenariosSettingsView: View {
                                 set: { scenarios.setEnabled(scenario.id, enabled: $0) }
                             ))
                             .labelsHidden()
+                            Button("Изменить") { editScenario(scenario) }
                         }
                         EndpointLine(
                             title: "Источник",
@@ -376,7 +431,8 @@ private struct ScenariosSettingsView: View {
 
 private struct ScenarioEditorView: View {
     let connections: [StorageEntry]
-    let createScenario: (String, String, String, String, String, String) -> String?
+    let scenario: ScenarioEntry?
+    let saveScenario: (String, String, String, String, String, String) -> String?
     let cancel: () -> Void
     @State private var name = ""
     @State private var leftID = ""
@@ -391,12 +447,13 @@ private struct ScenarioEditorView: View {
             HStack(alignment: .firstTextBaseline) {
                 Button("Назад", systemImage: "chevron.left", action: cancel)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Новый сценарий").font(.largeTitle.bold())
-                    Text("Сначала настройте точки обмена и направление, затем выберите каталоги.")
+                    Text(scenario == nil ? "Новый сценарий" : "Изменить сценарий").font(.largeTitle.bold())
+                    Text("Изменения создают новую ревизию только для будущих заданий.")
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button("Создать", action: save).keyboardShortcut(.defaultAction).disabled(!canCreate)
+                Button(scenario == nil ? "Создать" : "Сохранить", action: save)
+                    .keyboardShortcut(.defaultAction).disabled(!canCreate)
             }
             .padding(24)
 
@@ -428,7 +485,14 @@ private struct ScenarioEditorView: View {
             if let error { Text(error).font(.caption).foregroundStyle(.red).padding([.horizontal, .bottom], 24) }
         }
         .onAppear {
-            if let first = connections.first {
+            if let scenario {
+                name = scenario.name
+                leftID = scenario.left_connection_id
+                leftRoot = scenario.left_root
+                rightID = scenario.right_connection_id
+                rightRoot = scenario.right_root
+                direction = scenario.direction
+            } else if let first = connections.first {
                 leftID = first.id
                 rightID = first.id
             }
@@ -443,7 +507,7 @@ private struct ScenarioEditorView: View {
             && (leftID != rightID || leftRoot != rightRoot)
     }
     private func save() {
-        error = createScenario(name, leftID, leftRoot, rightID, rightRoot, direction)
+        error = saveScenario(name, leftID, leftRoot, rightID, rightRoot, direction)
     }
 }
 

@@ -16,6 +16,13 @@ private func scenarioCreate(
 private func scenarioSetEnabled(
     _ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ enabled: UInt8
 ) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_scenarios_update")
+private func scenarioUpdate(
+    _ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ name: UnsafePointer<CChar>?,
+    _ leftID: UnsafePointer<CChar>?, _ leftRoot: UnsafePointer<CChar>?,
+    _ rightID: UnsafePointer<CChar>?, _ rightRoot: UnsafePointer<CChar>?,
+    _ direction: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_add")
 private func registryAdd(_ path: UnsafePointer<CChar>?, _ adapter: UnsafePointer<CChar>?, _ name: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_rename")
@@ -145,6 +152,40 @@ enum StorageRegistryBridge {
         let _: Bool = try database.withCString { db in
             try id.withCString { value in
                 try unwrap(scenarioSetEnabled(db, value, enabled ? 1 : 0), as: Bool.self)
+            }
+        }
+    }
+
+    static func updateScenario(
+        id: String,
+        name: String,
+        leftID: String,
+        leftRoot: String,
+        rightID: String,
+        rightRoot: String,
+        direction: String
+    ) throws {
+        let database = try path
+        let _: Bool = try database.withCString { db in
+            try id.withCString { id in
+                try name.withCString { name in
+                    try leftID.withCString { leftID in
+                        try leftRoot.withCString { leftRoot in
+                            try rightID.withCString { rightID in
+                                try rightRoot.withCString { rightRoot in
+                                    try direction.withCString { direction in
+                                        try unwrap(
+                                            scenarioUpdate(
+                                                db, id, name, leftID, leftRoot, rightID, rightRoot, direction
+                                            ),
+                                            as: Bool.self
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
