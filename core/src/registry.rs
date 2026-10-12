@@ -33,6 +33,21 @@ pub struct StorageConnection {
     pub diagnosis: Option<String>,
 }
 
+/// Persisted Scenario metadata. It stores configuration only: never file content,
+/// credentials, a transfer plan, or a confirmed FileSyncState.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Scenario {
+    pub id: String,
+    pub name: String,
+    pub left_connection_id: String,
+    pub left_root: String,
+    pub right_connection_id: String,
+    pub right_root: String,
+    pub direction: String,
+    pub enabled: bool,
+    pub revision: u64,
+}
+
 pub struct Registry {
     db: Connection,
 }
@@ -55,7 +70,7 @@ impl Registry {
         }
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 2 {
+        if version > 3 {
             return Err(RegistryError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -79,6 +94,25 @@ impl Registry {
                 "BEGIN IMMEDIATE;
                 ALTER TABLE storage_connections ADD COLUMN provider_account_id TEXT;
                 PRAGMA user_version = 2;
+                COMMIT;",
+            )?;
+        }
+        if version <= 2 {
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                CREATE TABLE scenarios (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    name TEXT NOT NULL,
+                    left_connection_id TEXT NOT NULL REFERENCES storage_connections(id) ON DELETE RESTRICT,
+                    left_root TEXT NOT NULL,
+                    right_connection_id TEXT NOT NULL REFERENCES storage_connections(id) ON DELETE RESTRICT,
+                    right_root TEXT NOT NULL,
+                    direction TEXT NOT NULL CHECK(direction IN ('left_to_right','right_to_left','bidirectional')),
+                    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+                    revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
+                    CHECK(NOT (left_connection_id = right_connection_id AND left_root = right_root))
+                );
+                PRAGMA user_version = 3;
                 COMMIT;",
             )?;
         }
@@ -199,6 +233,66 @@ impl Registry {
         self.changed(self.db.execute(
             "UPDATE storage_connections SET credential_ref=?1 WHERE id=?2",
             params![reference, id],
+        )?)
+    }
+
+    pub fn list_scenarios(&self) -> Result<Vec<Scenario>> {
+        let mut statement = self.db.prepare(
+            "SELECT id,name,left_connection_id,left_root,right_connection_id,right_root,direction,enabled,revision
+             FROM scenarios ORDER BY name COLLATE NOCASE, id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(Scenario {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                left_connection_id: row.get(2)?,
+                left_root: row.get(3)?,
+                right_connection_id: row.get(4)?,
+                right_root: row.get(5)?,
+                direction: row.get(6)?,
+                enabled: row.get(7)?,
+                revision: row.get::<_, i64>(8)? as u64,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn create_scenario(
+        &self,
+        name: &str,
+        left_connection_id: &str,
+        left_root: &str,
+        right_connection_id: &str,
+        right_root: &str,
+        direction: &str,
+    ) -> Result<String> {
+        if !valid_name(name)
+            || left_connection_id.is_empty()
+            || right_connection_id.is_empty()
+            || left_root.is_empty()
+            || right_root.is_empty()
+            || !matches!(
+                direction,
+                "left_to_right" | "right_to_left" | "bidirectional"
+            )
+        {
+            return Err(RegistryError::InvalidName);
+        }
+        let id: String = self
+            .db
+            .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
+        self.db.execute(
+            "INSERT INTO scenarios(id,name,left_connection_id,left_root,right_connection_id,right_root,direction) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            params![id, name.trim(), left_connection_id, left_root, right_connection_id, right_root, direction],
+        )?;
+        Ok(id)
+    }
+
+    pub fn set_scenario_enabled(&self, id: &str, enabled: bool) -> Result<()> {
+        self.changed(self.db.execute(
+            "UPDATE scenarios SET enabled=?1 WHERE id=?2",
+            params![enabled, id],
         )?)
     }
 
@@ -328,6 +422,23 @@ mod tests {
         );
         db.remove(&a).unwrap();
         assert!(db.get(&b).unwrap().is_some());
+    }
+
+    #[test]
+    fn scenario_is_revisioned_and_blocks_referenced_connection_removal() {
+        let db = Registry::in_memory().unwrap();
+        let left = db.add("local_filesystem", "Left").unwrap();
+        let right = db.add("local_filesystem", "Right").unwrap();
+        let id = db
+            .create_scenario("Documents", &left, "/", &right, "/archive", "left_to_right")
+            .unwrap();
+        let scenario = db.list_scenarios().unwrap().pop().unwrap();
+        assert_eq!(scenario.id, id);
+        assert_eq!(scenario.revision, 1);
+        assert!(scenario.enabled);
+        db.set_scenario_enabled(&id, false).unwrap();
+        assert!(!db.list_scenarios().unwrap()[0].enabled);
+        assert!(matches!(db.remove(&left), Err(RegistryError::Database(_))));
     }
 
     #[test]

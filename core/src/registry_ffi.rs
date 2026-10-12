@@ -61,6 +61,75 @@ pub extern "C" fn qadren_registry_list(path: *const c_char) -> *mut c_char {
 }
 
 #[no_mangle]
+pub extern "C" fn qadren_scenarios_list(path: *const c_char) -> *mut c_char {
+    with_registry(path, |db| {
+        Ok(json!(db
+            .list_scenarios()?
+            .into_iter()
+            .map(|item| json!({
+                "id": item.id, "name": item.name, "left_connection_id": item.left_connection_id,
+                "left_root": item.left_root, "right_connection_id": item.right_connection_id,
+                "right_root": item.right_root, "direction": item.direction, "enabled": item.enabled,
+                "revision": item.revision
+            }))
+            .collect::<Vec<Value>>()))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn qadren_scenarios_create(
+    path: *const c_char,
+    name: *const c_char,
+    left_id: *const c_char,
+    left_root: *const c_char,
+    right_id: *const c_char,
+    right_root: *const c_char,
+    direction: *const c_char,
+) -> *mut c_char {
+    let (
+        Some(name),
+        Some(left_id),
+        Some(left_root),
+        Some(right_id),
+        Some(right_root),
+        Some(direction),
+    ) = (
+        input(name),
+        input(left_id),
+        input(left_root),
+        input(right_id),
+        input(right_root),
+        input(direction),
+    )
+    else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    with_registry(path, |db| {
+        Ok(
+            json!({"id": db.create_scenario(&name, &left_id, &left_root, &right_id, &right_root, &direction)?}),
+        )
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn qadren_scenarios_set_enabled(
+    path: *const c_char,
+    id: *const c_char,
+    enabled: u8,
+) -> *mut c_char {
+    let Some(id) = input(id) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    if enabled > 1 {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    }
+    with_registry(path, |db| {
+        db.set_scenario_enabled(&id, enabled == 1)?;
+        Ok(json!(true))
+    })
+}
+
+#[no_mangle]
 pub extern "C" fn qadren_registry_add(
     path: *const c_char,
     adapter: *const c_char,
