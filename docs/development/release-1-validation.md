@@ -4,6 +4,8 @@
 
 Отметка «реализовано» или успешная компиляция **не** заменяет проверку поведения. Тест в mock-хранилище не является проверкой настоящего Keychain/облака.
 
+**Scope Release 1 (2026-10-12):** загрузка/скачивание и синхронизация между Яндекс Диском и локальными директориями, только реально подтверждённые capabilities. iCloud adapter/container/sync/backup, native spike и E2E не являются acceptance. Упоминания iCloud File Provider ниже — безопасность Local FS, не iCloud integration. [D-017](../decisions/D-017-defer-icloud.md).
+
 ## Dispatcher workspace shell (2026-10-12)
 
 - macOS-клиент больше не собирает все технические элементы в одну прокручиваемую страницу. Корневая навигация разделена на два пространства: `Рабочая панель` для мониторинга и оперативных действий и `Настройка сценариев` для подключений, будущих правил и назначения Worker. Очередь и двухпанельный файловый менеджер открываются внутри рабочей панели, а не становятся конкурирующими корневыми разделами.
@@ -30,7 +32,7 @@
 | Keychain remove | Swift fault injection: disable / Job attempt gate / Keychain / Registry failures, retry, второй аккаунт | Принудительный отказ системного Keychain и повтор после перезапуска | Локальный runner проходит на 2026-10-12; системная проверка отсутствует |
 | Legacy OAuth | Проверка кода сохранения legacy до успешного импорта | Импорт старого токена на реальном Mac и rollback | Реальная проверка в этом цикле отсутствует |
 | Yandex metadata | Rust mock HTTP тесты | Авторизация, квота, 2 аккаунта, offline/401 | Исторически подтверждено в документации; в этом цикле не перепроверено |
-| Content / iCloud / Worker | Частичные Local FS и Yandex content primitives существуют; полного Job execution и iCloud container нет | Отдельные реальные проверки по мере реализации | PARTIAL: полный E2E не подтверждён |
+| Content / Yandex / Local FS / Worker | Частичные Local FS и Yandex content primitives существуют; полного Job execution нет | Реальные Яндекс↔локальный каталог и Local↔Local, consent, integrity и recovery | PARTIAL: полный E2E не подтверждён; iCloud отложен |
 | Ресурсы | CI фиксирует размер .app, без замера idle RAM/CPU | Activity Monitor, `ps`, network bytes, sleep/wake | Baseline не измерен |
 | Подпись и поставка | CI собирает неподписанный bundle | Gatekeeper, entitlement, notarization, clean install | Только future Release 1 |
 
