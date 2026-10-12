@@ -5,9 +5,9 @@ struct QADRENApp: App {
     var body: some Scene {
         Window("QADREN", id: "main") {
             MainView()
-                .frame(minWidth: 360, minHeight: 270)
+                .frame(minWidth: 900, minHeight: 620)
         }
-        .defaultSize(width: 440, height: 320)
+        .defaultSize(width: 1180, height: 760)
 
         MenuBarExtra("QADREN", systemImage: "externaldrive.badge.icloud") {
             Text("QADREN \(CoreBridge.version)")
