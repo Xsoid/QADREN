@@ -367,9 +367,8 @@ private struct ScenariosSettingsView: View {
 
     private func directionTitle(_ direction: String) -> String {
         switch direction {
-        case "left_to_right": "Источник → назначение"
-        case "right_to_left": "Назначение → источник"
-        case "bidirectional": "Двусторонний"
+        case "left_to_right", "right_to_left": "Односторонняя"
+        case "bidirectional": "Двусторонняя"
         default: direction
         }
     }
@@ -404,8 +403,7 @@ private struct ScenarioEditorView: View {
             Form {
                 TextField("Название сценария", text: $name)
                 Picker("Тип синхронизации", selection: $direction) {
-                    Text("Источник → назначение").tag("left_to_right")
-                    Text("Назначение → источник").tag("right_to_left")
+                    Text("Односторонняя").tag("left_to_right")
                     Text("Двусторонняя").tag("bidirectional")
                 }
                 Text("Создание сохранит только конфигурацию и ревизию 1. Запуск, расписания и передача файлов не выполняются.")
