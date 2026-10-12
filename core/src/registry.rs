@@ -110,7 +110,7 @@ impl Registry {
         }
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 6 {
+        if version > 7 {
             return Err(RegistryError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -206,6 +206,18 @@ impl Registry {
                     enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1))
                 );
                 PRAGMA user_version = 6;
+                COMMIT;",
+            )?;
+        }
+        if version <= 6 {
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                CREATE TABLE schedule_occurrences (
+                    schedule_id TEXT NOT NULL REFERENCES scenario_schedules(id) ON DELETE RESTRICT,
+                    occurrence_key TEXT NOT NULL,
+                    PRIMARY KEY(schedule_id, occurrence_key)
+                );
+                PRAGMA user_version = 7;
                 COMMIT;",
             )?;
         }
@@ -492,6 +504,40 @@ impl Registry {
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into);
         schedules
+    }
+
+    /// Atomically claim one evaluated local schedule slot. A duplicate claim
+    /// is intentionally a no-op, preventing repeated DST hours and restart
+    /// catch-up from creating duplicate future Jobs.
+    pub fn claim_schedule_occurrence(
+        &self,
+        schedule_id: &str,
+        occurrence_key: &str,
+    ) -> Result<bool> {
+        if occurrence_key.is_empty()
+            || occurrence_key.len() > 256
+            || occurrence_key.chars().any(char::is_control)
+        {
+            return Err(RegistryError::InvalidSchedule);
+        }
+        let changed = self.db.execute(
+            "INSERT OR IGNORE INTO schedule_occurrences(schedule_id,occurrence_key) VALUES(?1,?2)",
+            params![schedule_id, occurrence_key],
+        )?;
+        if changed == 0 {
+            let exists: Option<String> = self
+                .db
+                .query_row(
+                    "SELECT id FROM scenario_schedules WHERE id=?1",
+                    [schedule_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if exists.is_none() {
+                return Err(RegistryError::NotFound);
+            }
+        }
+        Ok(changed == 1)
     }
 
     /// Pausing automatic work also removes its queued successor. Manual Job
@@ -931,6 +977,34 @@ mod tests {
             db.create_scenario_schedule(&scenario, "Europe/Samara", 7, 9, 0),
             Err(RegistryError::InvalidSchedule)
         ));
+    }
+
+    #[test]
+    fn schedule_occurrence_claim_survives_restart_and_deduplicates_dst_slot() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let path = std::env::temp_dir().join(format!(
+            "qadren-schedule-{}.sqlite3",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let db = Registry::open(&path).unwrap();
+        let left = db.add("local_filesystem", "Left").unwrap();
+        let right = db.add("local_filesystem", "Right").unwrap();
+        let scenario = db
+            .create_scenario("Documents", &left, "/", &right, "/archive", "left_to_right")
+            .unwrap();
+        let schedule = db
+            .create_scenario_schedule(&scenario, "Europe/Berlin", 6, 2, 30)
+            .unwrap();
+        let key = "2026-10-25 02:30@Europe/Berlin";
+        assert!(db.claim_schedule_occurrence(&schedule, key).unwrap());
+        assert!(!db.claim_schedule_occurrence(&schedule, key).unwrap());
+        drop(db);
+        let db = Registry::open(&path).unwrap();
+        assert!(!db.claim_schedule_occurrence(&schedule, key).unwrap());
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
