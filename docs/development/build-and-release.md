@@ -18,7 +18,7 @@
 
 1. Проверить tests, lint, контроль лицензий и зависимостей.
 2. Собрать оптимизированную release-конфигурацию, минимизировать символы отладки только в пользовательском артефакте.
-3. Сформировать .app с корректными sandbox/entitlements для iCloud.
+3. Сформировать .app с корректными подписыванием и sandbox/entitlements, только если они нужны выбранной модели распространения и реальным функциям Яндекс Диска/Local FS; iCloud entitlements не требуются.
 4. Проверить корректную загрузку Rust-компонента на чистой поддерживаемой macOS.
 5. Подписать Developer ID и выполнить notarization (для распространения вне Mac App Store); проверить Gatekeeper.
 6. Проверить установку, запуск, обновление и удаление без сторонних runtime.
@@ -27,7 +27,7 @@
 
 ## Другие ОС
 
-В будущем общее Rust-ядро компилируется под Windows/Linux. Платформенный UI и секреты — отдельные модули. Не обещать работу iCloud Documents вне поддерживаемой Apple интеграции. Цель — нативный пакет без стороннего runtime, но системные библиотеки и требования к версии ОС допустимы.
+В будущем общее Rust-ядро компилируется под Windows/Linux. Платформенный UI и секреты — отдельные модули. iCloud Documents adapter отложен (D-017) и не входит в release criteria для других ОС. Цель — нативный пакет без стороннего runtime, но системные библиотеки и требования к версии ОС допустимы.
 
 
 ## Сквозной integration runbook (2026-10-11)
@@ -38,7 +38,7 @@
 4. Перед I/O проверить connection/capability/consent и durable attempt. Провести no-overwrite write, metadata verification, сохранить receipt в SQLite, отобразить его в SwiftUI. Отличать adapter ACK от cloud integrity evidence.
 5. Fault matrix: отсутствует consent (нулевой content I/O), existing destination (не меняется), short/long stream, adapter 401/429/5xx, timeout после возможной записи, restart после external effect до DB commit, duplicate attempt, cancel/pause, отключение connection. UNKNOWN не retry и не success без read-only reconciliation.
 6. Сверить дерево файлов, object metadata и строки SQLite до/после; убедиться в отсутствии секретов и скачиваний на основной MacBook без операции-specific consent.
-7. Для G2 заменить mock реальными поддерживаемыми адаптерами; выделить реальные проверки Apple entitlement/Keychain/Yandex account отдельно от mock tests. Результаты записать в `release-1-validation.md` с SHA, командами и непройденными сценариями.
+7. Для G2 заменить mock реальными поддерживаемыми адаптерами; выделить реальные проверки macOS Keychain, Яндекс-аккаунта и разрешений Local FS отдельно от mock tests; не проверять iCloud entitlement. Результаты записать в `release-1-validation.md` с SHA, командами и непройденными сценариями.
 8. Провести code/security review и только затем отметить соответствующую клетку acceptance и Issue. Если шаг не воспроизводится, указать BLOCKED, не Done.
 
-**Рабочее решение по архитектуре:** первый runner работает in-process SwiftUI → Rust через узкий FFI. В release gate остаётся независимое выполнение после закрытия UI: после G1/G2 тот же Rust engine переносится в background service без новых JobStore или конкурирующих владельцев. Выбор Mac App Store/прямой signed distribution открыт до entitlement/service feasibility spike. GitHub Actions необязательны.
+**Рабочее решение по архитектуре:** первый runner работает in-process SwiftUI → Rust через узкий FFI. В release gate остаётся независимое выполнение после закрытия UI: после G1/G2 тот же Rust engine переносится в background service без новых JobStore или конкурирующих владельцев. Выбор Mac App Store/прямой signed distribution открыт до macOS signing/sandbox/service feasibility проверки, независимо от iCloud. GitHub Actions необязательны.
