@@ -19,6 +19,7 @@ struct MainView: View {
             switch workspace {
             case .monitoring: monitoringWorkspace
             case .scenarios: scenarioSettingsWorkspace
+            case .files: filesWorkspace
             }
         }
         .tint(QDTheme.cyan)
@@ -28,11 +29,12 @@ struct MainView: View {
             ToolbarItemGroup(placement: .primaryAction) {
                 Menu {
                     Button("Контрольная панель") { openWindow(id: "monitoring") }
+                    Button("Файловый менеджер") { openWindow(id: "file-manager") }
                     Button("Настройки") { openWindow(id: "scenario-settings") }
                 } label: {
                     Label("Пространство", systemImage: "rectangle.3.group")
                 }
-                if workspace == .monitoring {
+                if workspace == .monitoring || workspace == .files {
                     Button("Новая панель", systemImage: "macwindow.on.rectangle") { openWindow(id: "monitoring") }
                     Button("Обновить", systemImage: "arrow.clockwise") { refreshCurrentWorkspace() }
                 }
@@ -146,7 +148,7 @@ struct MainView: View {
                 FileManagerPane(title: "Правая панель", workspace: rightLocalWorkspace)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            Notice(text: "Доступны только метаданные. Предпросмотр содержимого, копирование, перемещение, переименование и удаление выключены до реализации их безопасных Job-путей.", symbol: "shield")
+            Notice(text: "Доступны только метаданные. Предпросмотр содержимого, создание папок, копирование, перемещение, переименование и удаление выключены до реализации их безопасных Job-путей.", symbol: "shield")
                 .padding(16)
         }
     }
@@ -162,6 +164,9 @@ struct MainView: View {
             connections.refresh()
         case .scenarios:
             connections.refresh()
+        case .files:
+            localWorkspace.refresh()
+            rightLocalWorkspace.refresh()
         }
     }
 
@@ -226,13 +231,13 @@ struct MainView: View {
 }
 
 enum DispatcherSection: String, CaseIterable, Hashable, Identifiable {
-    case monitoring, scenarios
+    case monitoring, scenarios, files
     var id: Self { self }
     var title: String {
-        switch self { case .monitoring: "Контрольная панель"; case .scenarios: "Настройки" }
+        switch self { case .monitoring: "Контрольная панель"; case .scenarios: "Настройки"; case .files: "Файловый менеджер" }
     }
     var symbol: String {
-        switch self { case .monitoring: "rectangle.3.group"; case .scenarios: "slider.horizontal.3" }
+        switch self { case .monitoring: "rectangle.3.group"; case .scenarios: "slider.horizontal.3"; case .files: "rectangle.split.2x1" }
     }
 }
 
@@ -390,8 +395,6 @@ private struct FileManagerPane: View {
                         Text(workspace.relativePath.isEmpty ? "/" : "/" + workspace.relativePath).font(.caption.monospaced()).textSelection(.enabled)
                         Spacer()
                         if !selected.isEmpty { Text("Выбрано: \(selected.count)").font(.caption).foregroundStyle(.secondary) }
-                        Button("Новая папка", systemImage: "folder.badge.plus") { workspace.mkdir("Новая папка") }
-                            .disabled(workspace.entries.contains(where: { $0.name == "Новая папка" }))
                     }
                 }.padding(.horizontal, 18)
                 List(workspace.entries) { entry in

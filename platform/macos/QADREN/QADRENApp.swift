@@ -19,6 +19,13 @@ struct QADRENApp: App {
         }
         .defaultSize(width: 980, height: 700)
 
+        Window("Файловый менеджер", id: "file-manager") {
+            MainView(workspace: .files)
+                .frame(minWidth: 900, minHeight: 620)
+                .preferredColorScheme(QDThemeMode(rawValue: themeRaw)?.preferredColorScheme)
+        }
+        .defaultSize(width: 1180, height: 760)
+
         MenuBarExtra("QADREN", systemImage: "externaldrive.fill") {
             MenuBarWorkspaceMenu()
         }
@@ -34,6 +41,7 @@ private struct MenuBarWorkspaceMenu: View {
         Divider()
         Button("Открыть контрольную панель") { open(id: "monitoring") }
         Button("Новая контрольная панель") { open(id: "monitoring") }
+        Button("Файловый менеджер") { open(id: "file-manager") }
         Button("Настройки") { open(id: "scenario-settings") }
         Divider()
         Button("Выйти из QADREN") { NSApp.terminate(nil) }

@@ -2,7 +2,6 @@ import AppKit
 import Foundation
 
 @_silgen_name("qadren_local_list") private func localList(_ root: UnsafePointer<CChar>?, _ relative: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
-@_silgen_name("qadren_local_mkdir") private func localMkdir(_ root: UnsafePointer<CChar>?, _ relative: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_local_free_string") private func localFree(_ pointer: UnsafeMutablePointer<CChar>?)
 
 struct LocalWorkspaceEntry: Decodable, Identifiable { let name: String; let is_directory: Bool; let size: UInt64; var id: String { name } }
@@ -27,7 +26,6 @@ private struct LocalEnvelope<T: Decodable>: Decodable { let ok: Bool; let data: 
     func refresh() { guard let root else { return }; do { entries = try call(localList, root: root, relative: relativePath); error = nil } catch { self.error = error.localizedDescription } }
     func open(_ entry: LocalWorkspaceEntry) { guard entry.is_directory else { return }; relativePath = relativePath.isEmpty ? entry.name : relativePath + "/" + entry.name; refresh() }
     func up() { guard !relativePath.isEmpty else { return }; relativePath = relativePath.split(separator: "/").dropLast().joined(separator: "/"); refresh() }
-    func mkdir(_ name: String) { guard let root else { return }; let path = relativePath.isEmpty ? name : relativePath + "/" + name; do { let _: Bool = try call(localMkdir, root: root, relative: path); refresh() } catch { self.error = error.localizedDescription } }
     private func call<T: Decodable>(_ operation: (UnsafePointer<CChar>?, UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?, root: String, relative: String) throws -> T {
         let pointer = root.withCString { root in relative.withCString { relative in operation(root, relative) } }
         guard let pointer else { throw StorageError.operation("Local filesystem unavailable") }; defer { localFree(pointer) }

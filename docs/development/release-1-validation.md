@@ -552,3 +552,11 @@
 Граница: это configuration-only UI. Есть создание, включение и revision-safe изменение Scenario; нет удаления Scenario, scheduler, dry-run запуска, Job submission или передачи файлов. Экран явно сообщает об этих ограничениях и не имитирует Run/копирование. Удаление connection по-прежнему использует существующий recoverable Keychain/attempt gate.
 
 Проверено на macOS для этого изменения: `bash scripts/test-core.sh` — PASS (fmt, Clippy, 220 Rust unit tests, включая C ABI create/list/enable/update Scenario и миграцию v3 с сохранением snapshot); `bash scripts/build-macos.sh` — PASS (unsigned `dist/QADREN.app`, `Info.plist`). Native visual/VoiceOver smoke для этой версии не подтверждён: session UI automation стала недоступна после перезапуска приложения.
+
+### Файловый менеджер: read-only metadata slice — #22 (2026-10-13)
+
+«Файловый менеджер» открыт отдельным macOS-окном из меню `Пространство` и Menu Bar, поэтому не возвращает постоянный Sidebar на мониторинговую панель. В окне две независимые локальные панели с выбором корня, breadcrumb-навигацией и выделением строк; они читают только имена, типы и размеры через существующий Local Filesystem FFI.
+
+Граница: это browsing-only срез. Предпросмотр и загрузка содержимого, создание каталогов, копирование, перемещение, переименование и удаление отключены: прямой Swift вызов `qadren_local_mkdir` удалён. Никакой Job, Scenario, consent или файловый эффект не создаётся открытием/обновлением окна. Операции изменения будут добавляться только вместе с безопасным Job Engine и его durable attempt/reconciliation контрактом.
+
+Для этого среза выполнены `bash scripts/test-core.sh` и `bash scripts/build-macos.sh`; native visual/VoiceOver smoke отдельно не выполнялся.
