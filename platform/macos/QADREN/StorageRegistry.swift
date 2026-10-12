@@ -159,6 +159,18 @@ enum StorageRegistryBridge {
         return result.id
     }
 
+    static func addLocalComputer(name: String = "Этот Mac") throws -> String {
+        let database = try path
+        let result: NewConnection = try database.withCString { db in
+            try "local_filesystem".withCString { adapter in
+                try name.withCString { label in
+                    try unwrap(registryAdd(db, adapter, label), as: NewConnection.self)
+                }
+            }
+        }
+        return result.id
+    }
+
     static func remove(id: String) throws {
         let database = try path
         let _: Bool = try database.withCString { db in

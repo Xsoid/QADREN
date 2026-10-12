@@ -42,6 +42,8 @@ enum CoreBridge {
 private func yandexDiskInfo(_ token: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_yandex_list_root")
 private func yandexRoot(_ token: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_yandex_list_folder")
+private func yandexFolder(_ token: UnsafePointer<CChar>?, _ path: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_yandex_free_string")
 private func yandexFree(_ pointer: UnsafeMutablePointer<CChar>?)
 
@@ -109,6 +111,23 @@ enum DiskMetadataBridge {
         let response: RootResource = try request(token: token, function: yandexRoot)
         guard let listing = response.embedded else {
             throw BridgeFailure.message("Missing directory listing")
+        }
+        return listing
+    }
+    static func folder(token: String, path: String) throws -> DiskListing {
+        let pointer = token.withCString { token in
+            path.withCString { path in yandexFolder(token, path) }
+        }
+        guard let pointer else { throw BridgeFailure.message("No response from Rust") }
+        defer { yandexFree(pointer) }
+        let result: MetadataResult<RootResource>
+        do {
+            result = try JSONDecoder().decode(MetadataResult<RootResource>.self, from: Data(String(cString: pointer).utf8))
+        } catch {
+            throw BridgeFailure.message("Invalid metadata response")
+        }
+        guard result.ok, let listing = result.data?.embedded else {
+            throw BridgeFailure.message(result.error ?? "Missing directory listing")
         }
         return listing
     }

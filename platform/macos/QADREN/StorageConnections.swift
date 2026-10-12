@@ -30,6 +30,15 @@ final class StorageConnections: ObservableObject {
         }
     }
 
+    func addLocalComputer() {
+        do {
+            _ = try StorageRegistryBridge.addLocalComputer()
+            refresh()
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
     func rename(_ id: String, name: String) {
         do {
             try StorageRegistryBridge.rename(id: id, name: name)

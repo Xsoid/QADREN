@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 @MainActor
 final class ScenarioSettings: ObservableObject {
@@ -75,7 +76,7 @@ struct SettingsPanelView: View {
     @ObservedObject var connections: StorageConnections
     @StateObject private var scenarios = ScenarioSettings()
     @State private var selection: SettingsPanelSection? = .connections
-    @State private var isCreatingScenario = false
+    @State private var isEditingScenario = false
 
     var body: some View {
         NavigationSplitView {
@@ -94,11 +95,19 @@ struct SettingsPanelView: View {
                 case .connections:
                     ConnectionsSettingsView(connections: connections)
                 case .scenarios:
-                    ScenariosSettingsView(
-                        scenarios: scenarios,
-                        connections: connections.entries,
-                        createScenario: { isCreatingScenario = true }
-                    )
+                    if isEditingScenario {
+                        ScenarioEditorView(
+                            connections: scenarioEndpoints,
+                            createScenario: createScenario,
+                            cancel: { isEditingScenario = false }
+                        )
+                    } else {
+                        ScenariosSettingsView(
+                            scenarios: scenarios,
+                            connections: connections.entries,
+                            createScenario: { isEditingScenario = true }
+                        )
+                    }
                 case .application:
                     ApplicationSettingsView()
                 }
@@ -107,11 +116,16 @@ struct SettingsPanelView: View {
         }
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
-                if (selection ?? .connections) == .connections {
-                    Button("Добавить подключение", systemImage: "plus") { connections.addYandex() }
-                } else {
-                    Button("Создать сценарий", systemImage: "plus") { isCreatingScenario = true }
-                        .disabled(scenarioEndpoints.isEmpty)
+                switch selection ?? .connections {
+                case .connections:
+                    Menu("Добавить подключение", systemImage: "plus") {
+                        Button("Яндекс Диск") { connections.addYandex() }
+                        Button("Этот Mac") { connections.addLocalComputer() }
+                    }
+                case .scenarios:
+                    Button("Создать сценарий", systemImage: "plus") { isEditingScenario = true }
+                case .application:
+                    EmptyView()
                 }
                 Button("Обновить", systemImage: "arrow.clockwise") {
                     connections.refresh()
@@ -123,26 +137,44 @@ struct SettingsPanelView: View {
             connections.refresh()
             scenarios.refresh()
         }
-        .sheet(isPresented: $isCreatingScenario) {
-            ScenarioCreationSheet(
-                connections: scenarioEndpoints,
-                onCreate: { name, leftID, leftRoot, rightID, rightRoot, direction in
-                    scenarios.create(
-                        name: name,
-                        leftID: leftID,
-                        leftRoot: leftRoot,
-                        rightID: rightID,
-                        rightRoot: rightRoot,
-                        direction: direction
-                    )
-                }
-            )
-        }
     }
 
     private var scenarioEndpoints: [StorageEntry] {
-        connections.entries.filter {
+        var endpoints = connections.entries.filter {
             $0.enabled && ($0.adapter == "yandex_disk" || $0.adapter == "local_filesystem")
+        }
+        if !endpoints.contains(where: { $0.adapter == "local_filesystem" }) {
+            endpoints.append(StorageEntry(
+                id: "local-computer", adapter: "local_filesystem", name: "Этот Mac",
+                enabled: true, status: "connected", credential_ref: nil, provider_account_id: nil
+            ))
+        }
+        return endpoints
+    }
+
+    private func createScenario(
+        _ name: String, _ leftID: String, _ leftRoot: String,
+        _ rightID: String, _ rightRoot: String, _ direction: String
+    ) -> String? {
+        do {
+            let localID: String?
+            if leftID == "local-computer" || rightID == "local-computer" {
+                localID = try (connections.entries.first { $0.adapter == "local_filesystem" && $0.enabled }?.id
+                    ?? StorageRegistryBridge.addLocalComputer())
+            } else {
+                localID = nil
+            }
+            let result = scenarios.create(
+                name: name, leftID: leftID == "local-computer" ? localID! : leftID, leftRoot: leftRoot,
+                rightID: rightID == "local-computer" ? localID! : rightID, rightRoot: rightRoot, direction: direction
+            )
+            if result == nil {
+                connections.refresh()
+                isEditingScenario = false
+            }
+            return result
+        } catch {
+            return error.localizedDescription
         }
     }
 }
@@ -172,7 +204,7 @@ private struct ConnectionsSettingsView: View {
                 if connections.entries.isEmpty && !connections.hasLegacyYandexToken {
                     SettingsEmptyState(
                         title: "Подключений пока нет",
-                        detail: "Добавьте Яндекс Диск, чтобы сохранить отдельную точку синхронизации.",
+                    detail: "Добавьте Яндекс Диск или этот Mac как отдельную точку синхронизации.",
                         symbol: "externaldrive.badge.plus"
                     )
                     .frame(maxWidth: .infinity, minHeight: 280)
@@ -187,6 +219,13 @@ private struct ConnectionsSettingsView: View {
                                 onSetEnabled: { connections.setEnabled(entry.id, enabled: $0) }
                             )
                             .id(entry.id + (entry.enabled ? ":enabled" : ":disabled"))
+                        } else if entry.adapter == "local_filesystem" {
+                            LocalConnectionCard(
+                                entry: entry,
+                                onRemove: { connections.remove(entry.id) },
+                                onRename: { connections.rename(entry.id, name: $0) },
+                                onSetEnabled: { connections.setEnabled(entry.id, enabled: $0) }
+                            )
                         } else {
                             LabeledContent("Адаптер", value: entry.adapter)
                             Text("Недоступно в активном Release 1; QADREN не выполняет для него I/O.")
@@ -201,6 +240,41 @@ private struct ConnectionsSettingsView: View {
             }
             .frame(maxWidth: 900, alignment: .leading)
             .padding(24)
+        }
+    }
+}
+
+private struct LocalConnectionCard: View {
+    let entry: StorageEntry
+    let onRemove: () -> Void
+    let onRename: (String) -> Void
+    let onSetEnabled: (Bool) -> Void
+    @State private var name: String
+    @State private var confirmRemoval = false
+
+    init(entry: StorageEntry, onRemove: @escaping () -> Void, onRename: @escaping (String) -> Void, onSetEnabled: @escaping (Bool) -> Void) {
+        self.entry = entry; self.onRemove = onRemove; self.onRename = onRename; self.onSetEnabled = onSetEnabled
+        _name = State(initialValue: entry.name)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Локальное подключение · " + String(entry.id.prefix(8)))
+                .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                TextField("Название подключения", text: $name)
+                Button("Переименовать") { onRename(name) }
+                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || name == entry.name)
+                Toggle("Включено", isOn: Binding(get: { entry.enabled }, set: { onSetEnabled($0) }))
+            }
+            Text("Корневая папка выбирается в редакторе сценария. До запуска сценария QADREN не передаёт и не удаляет файлы.")
+                .font(.caption).foregroundStyle(.secondary)
+            Button("Удалить", role: .destructive) { confirmRemoval = true }
+        }
+        .confirmationDialog("Удалить локальное подключение QADREN?", isPresented: $confirmRemoval) {
+            Button("Удалить подключение", role: .destructive, action: onRemove)
+        } message: {
+            Text("Будет удалена только локальная запись QADREN. Файлы на этом Mac не изменятся.")
         }
     }
 }
@@ -301,10 +375,10 @@ private struct ScenariosSettingsView: View {
     }
 }
 
-private struct ScenarioCreationSheet: View {
+private struct ScenarioEditorView: View {
     let connections: [StorageEntry]
-    let onCreate: (String, String, String, String, String, String) -> String?
-    @Environment(\.dismiss) private var dismiss
+    let createScenario: (String, String, String, String, String, String) -> String?
+    let cancel: () -> Void
     @State private var name = ""
     @State private var leftID = ""
     @State private var leftRoot = "/"
@@ -314,67 +388,199 @@ private struct ScenarioCreationSheet: View {
     @State private var error: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text("Новый сценарий обмена").font(.title2.bold())
+        VStack(spacing: 0) {
+            HStack(alignment: .firstTextBaseline) {
+                Button("Назад", systemImage: "chevron.left", action: cancel)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Новый сценарий").font(.largeTitle.bold())
+                    Text("Сначала настройте точки обмена и направление, затем выберите каталоги.")
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Создать", action: save).keyboardShortcut(.defaultAction).disabled(!canCreate)
+            }
+            .padding(24)
+
             Form {
-                TextField("Название", text: $name)
-                Picker("Источник", selection: $leftID) {
-                    ForEach(connections) { entry in
-                        Text(entry.name + " · " + adapterTitle(entry.adapter)).tag(entry.id)
-                    }
-                }
-                TextField("Каталог источника", text: $leftRoot)
-                Picker("Назначение", selection: $rightID) {
-                    ForEach(connections) { entry in
-                        Text(entry.name + " · " + adapterTitle(entry.adapter)).tag(entry.id)
-                    }
-                }
-                TextField("Каталог назначения", text: $rightRoot)
-                Picker("Направление", selection: $direction) {
+                TextField("Название сценария", text: $name)
+                Picker("Тип синхронизации", selection: $direction) {
                     Text("Источник → назначение").tag("left_to_right")
                     Text("Назначение → источник").tag("right_to_left")
-                    Text("Двусторонний").tag("bidirectional")
+                    Text("Двусторонняя").tag("bidirectional")
                 }
+                Text("Создание сохранит только конфигурацию и ревизию 1. Запуск, расписания и передача файлов не выполняются.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
-            Text("Создание сохраняет только конфигурацию и ревизию 1. Запуск, расписания и передача файлов не выполняются.")
-                .font(.caption).foregroundStyle(.secondary)
-            if let error {
-                Text(error).font(.caption).foregroundStyle(.red)
+            .formStyle(.grouped)
+            .padding(.horizontal, 24)
+
+            HStack(spacing: 0) {
+                ScenarioEndpointPicker(
+                    role: "Источник", connections: connections,
+                    selection: $leftID, root: $leftRoot
+                )
+                Divider()
+                ScenarioEndpointPicker(
+                    role: "Назначение", connections: connections,
+                    selection: $rightID, root: $rightRoot
+                )
             }
-            HStack {
-                Spacer()
-                Button("Отмена") { dismiss() }
-                Button("Создать") {
-                    if let failure = onCreate(name, leftID, leftRoot, rightID, rightRoot, direction) {
-                        error = failure
-                    } else {
-                        dismiss()
-                    }
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(!canCreate)
-            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(24)
+            if let error { Text(error).font(.caption).foregroundStyle(.red).padding([.horizontal, .bottom], 24) }
         }
-        .padding(24)
-        .frame(width: 520)
         .onAppear {
-            guard let first = connections.first else { return }
-            leftID = first.id
-            rightID = first.id
+            if let first = connections.first {
+                leftID = first.id
+                rightID = first.id
+            }
         }
     }
 
     private var canCreate: Bool {
         !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !leftID.isEmpty
-            && !rightID.isEmpty
+            && !leftID.isEmpty && !rightID.isEmpty
             && !leftRoot.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !rightRoot.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && (leftID != rightID || leftRoot != rightRoot)
     }
+    private func save() {
+        error = createScenario(name, leftID, leftRoot, rightID, rightRoot, direction)
+    }
+}
 
-    private func adapterTitle(_ adapter: String) -> String {
-        adapter == "yandex_disk" ? "Яндекс Диск" : adapter
+private struct ScenarioEndpointPicker: View {
+    let role: String
+    let connections: [StorageEntry]
+    @Binding var selection: String
+    @Binding var root: String
+    @State private var items: [DiskItem] = []
+    @State private var loading = false
+    @State private var error: String?
+    @StateObject private var localWorkspace = LocalWorkspace()
+
+    private var connection: StorageEntry? { connections.first { $0.id == selection } }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(role).font(.headline)
+            Picker(role, selection: $selection) {
+                ForEach(connections) { entry in
+                    Text(entry.name + " · " + adapterTitle(entry.adapter)).tag(entry.id)
+                }
+            }
+            .labelsHidden()
+            .onChange(of: selection) { _ in root = "/"; items = []; error = nil; loadDirectory() }
+            HStack {
+                Text(root).font(.caption.monospaced()).lineLimit(1).help(root)
+                Spacer()
+                if connection?.adapter == "local_filesystem" {
+                    Button("Выбрать папку…") { chooseLocalFolder() }
+                } else {
+                    Button("Обновить", systemImage: "arrow.clockwise", action: loadDirectory).disabled(loading)
+                }
+            }
+            if connection?.adapter == "local_filesystem" {
+                LocalScenarioFolderBrowser(workspace: localWorkspace, root: $root, choose: chooseLocalFolder)
+            } else if loading {
+                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let error {
+                SettingsEmptyState(title: "Каталог недоступен", detail: error, symbol: "exclamationmark.triangle")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(items) { item in
+                    Button {
+                        guard item.kind == "dir" else { return }
+                        root = item.path
+                        loadDirectory()
+                    } label: {
+                        HStack {
+                            Image(systemName: item.kind == "dir" ? "folder" : "doc")
+                            Text(item.name).lineLimit(1)
+                            Spacer()
+                            if item.kind == "dir" { Image(systemName: "chevron.right").foregroundStyle(.secondary) }
+                        }
+                    }
+                    .buttonStyle(.plain).disabled(item.kind != "dir")
+                }
+                .listStyle(.inset)
+            }
+        }
+        .padding(16)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .task(id: selection) { loadDirectory() }
+    }
+
+    private func chooseLocalFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        localWorkspace.selectRoot(url.path)
+        root = url.path
+    }
+    private func loadDirectory() {
+        guard let connection, connection.adapter == "yandex_disk" else { return }
+        guard let token = (try? YandexKeychain.read(connection.id)) ?? nil else {
+            error = "Подключите Яндекс Диск, чтобы просмотреть только метаданные каталогов."; return
+        }
+        loading = true; error = nil
+        let folder = root == "/" ? "disk:/" : root
+        Task.detached {
+            let result = Result { try DiskMetadataBridge.folder(token: token, path: folder) }
+            await MainActor.run {
+                loading = false
+                switch result { case .success(let listing): items = listing.items; case .failure(let failure): error = failure.localizedDescription }
+            }
+        }
+    }
+    private func adapterTitle(_ adapter: String) -> String { adapter == "yandex_disk" ? "Яндекс Диск" : "Этот Mac" }
+}
+
+private struct LocalScenarioFolderBrowser: View {
+    @ObservedObject var workspace: LocalWorkspace
+    @Binding var root: String
+    let choose: () -> Void
+
+    var body: some View {
+        if workspace.root == nil {
+            VStack(spacing: 8) {
+                Image(systemName: "laptopcomputer").font(.system(size: 28)).foregroundStyle(.secondary)
+                Text("Этот Mac").font(.headline)
+                Text("Выберите локальную папку, затем можно перейти глубже по её структуре.")
+                    .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                Button("Выбрать локальную папку", action: choose)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Button("Вверх", systemImage: "chevron.up") {
+                        workspace.up(); root = workspace.selectedDirectory ?? root
+                    }
+                    .disabled(workspace.relativePath.isEmpty)
+                    Text(workspace.selectedDirectory ?? root).font(.caption.monospaced()).lineLimit(1)
+                    Spacer()
+                    Button("Другая папка…", action: choose)
+                }
+                List(workspace.entries) { entry in
+                    Button {
+                        guard entry.is_directory else { return }
+                        workspace.open(entry)
+                        root = workspace.selectedDirectory ?? root
+                    } label: {
+                        HStack {
+                            Image(systemName: entry.is_directory ? "folder" : "doc")
+                            Text(entry.name)
+                            Spacer()
+                            if entry.is_directory { Image(systemName: "chevron.right").foregroundStyle(.secondary) }
+                        }
+                    }
+                    .buttonStyle(.plain).disabled(!entry.is_directory)
+                }
+                .listStyle(.inset)
+                if let error = workspace.error { Text(error).font(.caption).foregroundStyle(.orange) }
+            }
+        }
     }
 }
 

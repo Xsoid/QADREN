@@ -67,6 +67,28 @@ pub extern "C" fn qadren_yandex_list_root(token: *const c_char) -> *mut c_char {
     }
 }
 
+/// Lists one Yandex Disk directory's metadata. This never requests file bytes.
+#[no_mangle]
+pub extern "C" fn qadren_yandex_list_folder(
+    input: *const c_char,
+    path: *const c_char,
+) -> *mut c_char {
+    let (Some(access), Some(path)) = (parse_token(input), parse_token(path)) else {
+        return export(json!({"ok": false, "error": "invalid_request"}));
+    };
+    let result = YandexMetadataClient::new()
+        .map_err(safe_error)
+        .and_then(|client| {
+            client
+                .list_folder(&access, &path, 0, 50)
+                .map_err(safe_error)
+        });
+    match result {
+        Ok(folder) => export(json!({"ok": true, "data": folder})),
+        Err(error) => export(json!({"ok": false, "error": error})),
+    }
+}
+
 /// # Safety
 /// Pointer must have been returned by this module and not previously freed.
 #[no_mangle]
@@ -85,5 +107,13 @@ mod tests {
         let text = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_owned();
         unsafe { qadren_yandex_free_string(ptr) };
         assert!(text.contains("invalid_token"));
+    }
+
+    #[test]
+    fn folder_listing_rejects_missing_inputs_without_network_access() {
+        let ptr = qadren_yandex_list_folder(std::ptr::null(), std::ptr::null());
+        let text = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_owned();
+        unsafe { qadren_yandex_free_string(ptr) };
+        assert!(text.contains("invalid_request"));
     }
 }

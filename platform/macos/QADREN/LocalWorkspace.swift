@@ -17,7 +17,12 @@ private struct LocalEnvelope<T: Decodable>: Decodable { let ok: Bool; let data: 
     func chooseRoot() {
         let panel = NSOpenPanel(); panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        root = url.path; relativePath = ""; refresh()
+        selectRoot(url.path)
+    }
+    func selectRoot(_ path: String) { root = path; relativePath = ""; refresh() }
+    var selectedDirectory: String? {
+        guard let root else { return nil }
+        return relativePath.isEmpty ? root : root + "/" + relativePath
     }
     func refresh() { guard let root else { return }; do { entries = try call(localList, root: root, relative: relativePath); error = nil } catch { self.error = error.localizedDescription } }
     func open(_ entry: LocalWorkspaceEntry) { guard entry.is_directory else { return }; relativePath = relativePath.isEmpty ? entry.name : relativePath + "/" + entry.name; refresh() }
