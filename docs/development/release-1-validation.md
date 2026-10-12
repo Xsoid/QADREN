@@ -59,6 +59,8 @@
 - Локально пройдены `bash scripts/test-core.sh` (fmt, Clippy, 197 Rust unit tests) и `bash scripts/build-macos.sh`. Отдельный Swift fault-injection runner проверил normal flow, отказ на Job gate, Keychain и Registry, повтор после каждого отказа и независимость второй connection.
 - Не выполнена реальная проверка отказа системного Keychain, restart между отключением и cleanup и live Scenario/adapter attempt. Поэтому #25 остаётся открытой и не является подтверждением готовности настоящего disconnect UX.
 
+`YandexConnection.disconnect()` использует тот же fail-closed протокол: disable → read-only attempt gate → Keychain delete → единый SQLite finalization (`disconnected`, credential reference cleared, connection снова доступно для явной reauthorization). При сбое до finalization запись остаётся disabled; удаление облачных файлов и обращение к провайдеру отсутствуют. Фактические результаты этого изменения фиксируются вместе с SHA в #25.
+
 ## Scenario metadata-only dry-run planner — #19 (2026-10-12)
 
 - Rust `scenario_planner` строит детерминированный план только из разрешённых metadata snapshots и последнего подтверждённого `FileSyncState`; он не выполняет I/O, не создаёт Job и не меняет baseline.

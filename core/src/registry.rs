@@ -200,6 +200,19 @@ impl Registry {
         )?)
     }
 
+    /// Finalize a local credential disconnect in one Registry transaction.
+    /// The platform Keychain cleanup must already have succeeded; this method
+    /// never contacts a provider or deletes any provider object.
+    pub fn finalize_disconnect(&self, id: &str) -> Result<()> {
+        self.changed(self.db.execute(
+            "UPDATE storage_connections
+             SET enabled=1,status='disconnected',credential_ref=NULL,
+                 last_checked_at=NULL,diagnosis=NULL
+             WHERE id=?1",
+            [id],
+        )?)
+    }
+
     /// Deletes *only* the local registry record. Never modifies remote cloud data.
     /// Credential revocation/removal is the platform credential store's responsibility.
     pub fn remove(&self, id: &str) -> Result<()> {
@@ -335,6 +348,26 @@ mod tests {
         db.remove(&id).unwrap();
         assert!(db.get(&id).unwrap().is_none());
         assert!(matches!(db.remove(&id), Err(RegistryError::NotFound)));
+    }
+
+    #[test]
+    fn finalizing_disconnect_clears_only_local_credential_state() {
+        let db = Registry::in_memory().unwrap();
+        let id = db.add("yandex_disk", "Personal").unwrap();
+        db.set_provider_account_id(&id, Some("account-a")).unwrap();
+        db.set_credential_ref(&id, Some("keychain:connection-a"))
+            .unwrap();
+        db.set_enabled(&id, false).unwrap();
+        db.mark_checked(&id, "error", 7, Some("cleanup pending"))
+            .unwrap();
+        db.finalize_disconnect(&id).unwrap();
+        let entry = db.get(&id).unwrap().unwrap();
+        assert!(entry.enabled);
+        assert_eq!(entry.status, "disconnected");
+        assert_eq!(entry.credential_ref, None);
+        assert_eq!(entry.provider_account_id.as_deref(), Some("account-a"));
+        assert_eq!(entry.last_checked_at, None);
+        assert_eq!(entry.diagnosis, None);
     }
 
     #[test]

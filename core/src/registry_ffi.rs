@@ -186,6 +186,20 @@ pub extern "C" fn qadren_registry_set_enabled(
 }
 
 #[no_mangle]
+pub extern "C" fn qadren_registry_finalize_disconnect(
+    path: *const c_char,
+    id: *const c_char,
+) -> *mut c_char {
+    let Some(id) = input(id) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    with_registry(path, |db| {
+        db.finalize_disconnect(&id)?;
+        Ok(json!(true))
+    })
+}
+
+#[no_mangle]
 pub extern "C" fn qadren_registry_set_credential(
     path: *const c_char,
     id: *const c_char,
@@ -283,6 +297,44 @@ mod tests {
         assert_eq!(entries["data"].as_array().unwrap().len(), 1);
         assert_eq!(entries["data"][0]["id"], ids[1]);
         assert_eq!(entries["data"][0]["provider_account_id"], "shared-account");
+        std::fs::remove_file(file).unwrap();
+    }
+
+    #[test]
+    fn disconnect_finalization_round_trips_through_ffi() {
+        let file = std::env::temp_dir().join(format!(
+            "qadren-disconnect-ffi-{}-{}.sqlite3",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let database = CString::new(file.to_str().unwrap()).unwrap();
+        let adapter = CString::new("yandex_disk").unwrap();
+        let name = CString::new("Personal").unwrap();
+        let added_pointer = qadren_registry_add(database.as_ptr(), adapter.as_ptr(), name.as_ptr());
+        let added: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(added_pointer) }.to_str().unwrap())
+                .unwrap();
+        unsafe { qadren_registry_free_string(added_pointer) };
+        let id = CString::new(added["data"]["id"].as_str().unwrap()).unwrap();
+        let disabled = qadren_registry_set_enabled(database.as_ptr(), id.as_ptr(), 0);
+        unsafe { qadren_registry_free_string(disabled) };
+        let result_pointer = qadren_registry_finalize_disconnect(database.as_ptr(), id.as_ptr());
+        let result: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(result_pointer) }.to_str().unwrap())
+                .unwrap();
+        assert_eq!(result["data"], true);
+        unsafe { qadren_registry_free_string(result_pointer) };
+        let listed_pointer = qadren_registry_list(database.as_ptr());
+        let listed: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(listed_pointer) }.to_str().unwrap())
+                .unwrap();
+        assert_eq!(listed["data"][0]["enabled"], true);
+        assert_eq!(listed["data"][0]["status"], "disconnected");
+        assert!(listed["data"][0]["credential_ref"].is_null());
+        unsafe { qadren_registry_free_string(listed_pointer) };
         std::fs::remove_file(file).unwrap();
     }
 

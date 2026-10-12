@@ -97,6 +97,42 @@ let first = FakeConnection()
 let second = FakeConnection()
 try first.attempt()
 check(second.present && second.credentialPresent && second.enabled, "other connection remains independent")
+
+let disconnect = FakeConnection()
+var disconnectedRecord = false
+try ConnectionRemoval.disconnect(
+    adapter: "yandex_disk",
+    disable: {
+        disconnect.events.append("disable")
+        disconnect.enabled = false
+    },
+    ensureNoUnresolvedAttempts: { disconnect.events.append("attempts") },
+    deleteCredential: {
+        disconnect.events.append("keychain")
+        disconnect.credentialPresent = false
+    },
+    finalizeDisconnectedRecord: {
+        disconnect.events.append("registry")
+        disconnectedRecord = true
+        disconnect.enabled = true
+    }
+)
+check(disconnect.present && disconnectedRecord && !disconnect.credentialPresent && disconnect.enabled, "disconnect preserves reauthorizable record")
+check(disconnect.events == ["disable", "attempts", "keychain", "registry"], "disconnect ordering")
+
+let blockedDisconnect = FakeConnection()
+blockedDisconnect.failAttemptCheck = true
+do {
+    try ConnectionRemoval.disconnect(
+        adapter: "yandex_disk",
+        disable: { blockedDisconnect.enabled = false },
+        ensureNoUnresolvedAttempts: { throw SimulatedFailure.injected },
+        deleteCredential: { blockedDisconnect.credentialPresent = false },
+        finalizeDisconnectedRecord: { blockedDisconnect.enabled = true }
+    )
+    fatalError("unresolved attempt must stop disconnect")
+} catch SimulatedFailure.injected {}
+check(blockedDisconnect.present && !blockedDisconnect.enabled && blockedDisconnect.credentialPresent, "disconnect gate retains recovery state")
 // Inject failure at each step: never mark the record connected prematurely.
 for failureAt in 0..<5 {
     var events: [String] = []

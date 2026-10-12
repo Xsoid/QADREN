@@ -337,13 +337,25 @@ final class YandexConnection: NSObject, ObservableObject, ASWebAuthenticationPre
     func disconnect() {
         metadataGeneration += 1
         do {
-            try YandexKeychain.delete(connectionID)
+            guard let entry = try StorageRegistryBridge.list().first(where: { $0.id == connectionID }) else {
+                throw StorageError.operation("Connection not found; credentials were not touched")
+            }
+            try ConnectionRemoval.disconnect(
+                adapter: entry.adapter,
+                disable: { try StorageRegistryBridge.setEnabled(id: connectionID, enabled: false) },
+                ensureNoUnresolvedAttempts: {
+                    try JobInventory.requireNoUnresolvedAttempts(connectionID: connectionID)
+                },
+                deleteCredential: { try YandexKeychain.delete(connectionID) },
+                finalizeDisconnectedRecord: {
+                    try StorageRegistryBridge.finalizeDisconnect(id: connectionID)
+                }
+            )
         } catch {
-            status = "Could not remove credentials from Keychain"
+            status = "Disconnect incomplete; credentials retained or cleanup can be retried"
+            metadataError = error.localizedDescription
             return
         }
-        try? StorageRegistryBridge.clearCredential(id: connectionID)
-        try? StorageRegistryBridge.setStatus(id: connectionID, status: "disconnected")
         connected = false
         accountLabel = nil
         quota = nil

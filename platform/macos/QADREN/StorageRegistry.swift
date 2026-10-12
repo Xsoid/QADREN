@@ -22,6 +22,8 @@ private func registryAdd(_ path: UnsafePointer<CChar>?, _ adapter: UnsafePointer
 private func registryRename(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ name: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_set_enabled")
 private func registrySetEnabled(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ enabled: UInt8) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_registry_finalize_disconnect")
+private func registryFinalizeDisconnect(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_remove")
 private func registryRemove(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_set_credential")
@@ -194,6 +196,17 @@ enum StorageRegistryBridge {
         let _: Bool = try database.withCString { db in
             try id.withCString { value in
                 try unwrap(registrySetEnabled(db, value, enabled ? 1 : 0), as: Bool.self)
+            }
+        }
+    }
+
+    /// Final local Registry update after the matching Keychain item was
+    /// removed. This never contacts a provider or removes remote objects.
+    static func finalizeDisconnect(id: String) throws {
+        let database = try path
+        let _: Bool = try database.withCString { db in
+            try id.withCString { value in
+                try unwrap(registryFinalizeDisconnect(db, value), as: Bool.self)
             }
         }
     }

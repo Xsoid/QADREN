@@ -28,6 +28,23 @@ enum ConnectionRemoval {
         // visible and a subsequent attempt can finish the operation.
         try deleteRecord()
     }
+
+    /// Disconnect only local credentials while preserving the connection for a
+    /// later explicit reauthorization. As with removal, a failed step leaves
+    /// the Registry record disabled so no new work can begin accidentally.
+    static func disconnect(
+        adapter: String,
+        disable: () throws -> Void,
+        ensureNoUnresolvedAttempts: () throws -> Void,
+        deleteCredential: () throws -> Void,
+        finalizeDisconnectedRecord: () throws -> Void
+    ) throws {
+        guard adapter == "yandex_disk" else { throw Failure.unsupportedAdapter }
+        try disable()
+        try ensureNoUnresolvedAttempts()
+        try deleteCredential()
+        try finalizeDisconnectedRecord()
+    }
 }
 
  
