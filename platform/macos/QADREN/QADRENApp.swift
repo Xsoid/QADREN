@@ -16,17 +16,34 @@ struct QADRENApp: App {
         .defaultSize(width: 980, height: 700)
 
         MenuBarExtra("QADREN", systemImage: "externaldrive.badge.icloud") {
-            Text("QADREN \(CoreBridge.version)")
-            Text(CoreBridge.status)
-            Divider()
-            Button("Open QADREN") {
-                NSApp.activate(ignoringOtherApps: true)
-                if let window = NSApp.windows.first(where: { $0.canBecomeMain }) {
-                    window.makeKeyAndOrderFront(nil)
-                }
-            }
-            Divider()
-            Button("Quit QADREN") { NSApp.terminate(nil) }
+            MenuBarWorkspaceMenu()
         }
+    }
+}
+
+private struct MenuBarWorkspaceMenu: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Text("QADREN \(CoreBridge.version)")
+        Text(coreStatus).foregroundStyle(.secondary)
+        Divider()
+        Button("Открыть рабочую панель") { open(id: "monitoring") }
+        Button("Новая рабочая панель") { open(id: "monitoring") }
+        Button("Настройка сценариев") { open(id: "scenario-settings") }
+        Divider()
+        Button("Выйти из QADREN") { NSApp.terminate(nil) }
+    }
+
+    private var coreStatus: String {
+        switch CoreBridge.status {
+        case "ready - worker idle", "Core ready - worker idle": "Готово — Worker простаивает"
+        default: CoreBridge.status
+        }
+    }
+
+    private func open(id: String) {
+        openWindow(id: id)
+        NSApp.activate(ignoringOtherApps: true)
     }
 }
