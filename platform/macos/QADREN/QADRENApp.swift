@@ -3,11 +3,17 @@ import SwiftUI
 @main
 struct QADRENApp: App {
     var body: some Scene {
-        Window("QADREN", id: "main") {
-            MainView()
+        WindowGroup("QADREN", id: "monitoring") {
+            MainView(workspace: .monitoring)
                 .frame(minWidth: 900, minHeight: 620)
         }
         .defaultSize(width: 1180, height: 760)
+
+        Window("Настройка сценариев", id: "scenario-settings") {
+            MainView(workspace: .scenarios)
+                .frame(minWidth: 760, minHeight: 560)
+        }
+        .defaultSize(width: 980, height: 700)
 
         MenuBarExtra("QADREN", systemImage: "externaldrive.badge.icloud") {
             Text("QADREN \(CoreBridge.version)")

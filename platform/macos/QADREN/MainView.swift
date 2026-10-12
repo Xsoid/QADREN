@@ -1,37 +1,40 @@
 import SwiftUI
 
 struct MainView: View {
+    @Environment(\.openWindow) private var openWindow
     @StateObject private var connections = StorageConnections()
     @StateObject private var localWorkspace = LocalWorkspace()
     @StateObject private var rightLocalWorkspace = LocalWorkspace()
     @State private var jobs: [JobRow] = []
     @State private var jobError: String?
-    @State private var section: DispatcherSection? = .monitoring
     @State private var monitoringView = MonitoringView.dashboard
+    let workspace: DispatcherSection
+
+    init(workspace: DispatcherSection = .monitoring) {
+        self.workspace = workspace
+    }
 
     var body: some View {
-        NavigationSplitView {
-            List(DispatcherSection.allCases, selection: $section) { item in
-                Label(item.title, systemImage: item.symbol).tag(item)
+        Group {
+            switch workspace {
+            case .monitoring: monitoringWorkspace
+            case .scenarios: scenarioSettingsWorkspace
             }
-            .navigationSplitViewColumnWidth(min: 190, ideal: 215)
-            .safeAreaInset(edge: .bottom) {
-                HStack(spacing: 8) {
-                    Circle().fill(CoreBridge.workerStatus == "ready" ? .green : .orange).frame(width: 8, height: 8)
-                    Text("Локальный Worker")
-                    Spacer()
+        }
+        .navigationTitle(workspace.title)
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Menu {
+                    Button("Панель мониторинга") { openWindow(id: "monitoring") }
+                    Button("Настройка сценариев") { openWindow(id: "scenario-settings") }
+                } label: {
+                    Label("Пространство", systemImage: "rectangle.3.group")
                 }
-                .font(.caption).foregroundStyle(.secondary).padding(12)
-            }
-        } detail: {
-            Group {
-                switch section ?? .monitoring {
-                case .monitoring: monitoringWorkspace
-                case .scenarios: scenarioSettingsWorkspace
+                if workspace == .monitoring {
+                    Button("Новая панель", systemImage: "macwindow.on.rectangle") { openWindow(id: "monitoring") }
                 }
+                Button("Обновить", systemImage: "arrow.clockwise") { refreshCurrentWorkspace() }
             }
-            .navigationTitle((section ?? .monitoring).title)
-            .toolbar { Button("Обновить", systemImage: "arrow.clockwise") { refreshCurrentSection() } }
         }
         .onAppear { refreshJobs() }
     }
@@ -62,7 +65,7 @@ struct MainView: View {
                     HStack {
                         Button("Открыть очередь") { monitoringView = .jobs }
                         Button("Открыть файловый менеджер") { monitoringView = .files }
-                        Button("Настроить сценарии") { section = .scenarios }
+                        Button("Настроить сценарии") { openWindow(id: "scenario-settings") }
                     }
                 }
                 WorkspaceCard(title: "Очередь заданий", subtitle: "Долговременный список попыток") {
@@ -153,8 +156,8 @@ struct MainView: View {
         }
     }
 
-    private func refreshCurrentSection() {
-        switch section ?? .monitoring {
+    private func refreshCurrentWorkspace() {
+        switch workspace {
         case .monitoring:
             refreshJobs()
             connections.refresh()
@@ -163,8 +166,18 @@ struct MainView: View {
         }
     }
 
-    private var workerStatus: String { CoreBridge.workerStatus == "Idle Worker" ? "Worker простаивает" : CoreBridge.workerStatus }
-    private var coreStatus: String { CoreBridge.status == "ready - worker idle" ? "Готово — Worker простаивает" : CoreBridge.status }
+    private var workerStatus: String {
+        switch CoreBridge.workerStatus {
+        case "Idle", "Idle Worker": "Worker простаивает"
+        default: CoreBridge.workerStatus
+        }
+    }
+    private var coreStatus: String {
+        switch CoreBridge.status {
+        case "ready - worker idle", "Core ready - worker idle": "Готово — Worker простаивает"
+        default: CoreBridge.status
+        }
+    }
     private func adapterTitle(_ adapter: String) -> String { adapter == "yandex_disk" ? "Яндекс Диск" : adapter }
 
     private func refreshJobs() {
@@ -193,7 +206,7 @@ struct MainView: View {
     }
 }
 
-private enum DispatcherSection: String, CaseIterable, Hashable, Identifiable {
+enum DispatcherSection: String, CaseIterable, Hashable, Identifiable {
     case monitoring, scenarios
     var id: Self { self }
     var title: String {
