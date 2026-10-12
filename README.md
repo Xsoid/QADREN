@@ -29,6 +29,7 @@
 ## Документация
 
 - [Индекс документации](docs/README.md)
+- [Дизайн-система и UX интерфейса QADREN](docs/design/README.md)
 - [Обзор архитектуры](docs/architecture/overview.md)
 - [Модель сценариев синхронизации](docs/architecture/backup-model.md)
 - [Узлы и делегирование](docs/architecture/nodes-and-delegation.md)

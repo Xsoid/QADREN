@@ -9,6 +9,10 @@
 3. Проверить `docs/decisions/README.md`, `docs/architecture/technology-stack.md` и `docs/development/engineering-rules.md`.
 4. Сформулировать границы задачи, что уже утверждено, что остаётся неподтверждённым, какие тесты нужны.
 
+## Обязательный дизайн-контракт интерфейсов
+
+Для изменений интерфейса (`MainView.swift`, окон, виджетов, настройки, MenuBarExtra) до редактирования прочитать [`docs/design/README.md`](docs/design/README.md), [визуальный язык](docs/design/visual-language.md), [widget system](docs/design/widget-system.md), [мониторинг](docs/design/monitoring.md), [настройки](docs/design/settings.md) и [UI acceptance](docs/design/implementation.md). Взять исходный логотип **`assets/qadren-logo.png`**, не создавать заменяющий знак. Мониторинг — виджетное полотно **без постоянного Sidebar**; каталог виджетов появляется только в режиме компоновки. В настройках навигация допустима. HTML-прототип содержит вымышленные данные и не служит источником Core logic. Реализация обязана переиспользовать текущий SwiftUI/FFI, не внедрять фиктивные показатели, не обходить safety policies.
+
 ## Не нарушать
 
 - Rust — кроссплатформенное ядро; SwiftUI — нативный macOS UI; Swift/Apple APIs — iCloud Documents adapter.

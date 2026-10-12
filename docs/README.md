@@ -4,6 +4,7 @@
 
 | Документ | Содержание |
 |---|---|
+| [Дизайн-система / Control Surface](design/README.md) | Бренд, визуальные токены, SwiftUI-компоненты, виджеты, окна, UX и критерии приёмки |
 | [Стек](architecture/technology-stack.md) | Rust, SwiftUI, Swift/iCloud, SQLite, поставка без runtime |
 | [Правила разработки](development/engineering-rules.md) | Минимализм, ответственность модулей, надёжность и безопасность |
 | [Тесты](development/testing-and-quality.md) | Проверки и критерии готовности |
