@@ -24,10 +24,8 @@ struct MainView: View {
         }
         .tint(QDTheme.cyan)
         .navigationTitle(workspace.title)
+        .background(TitlebarLogoAccessory().frame(width: 0, height: 0))
         .toolbar {
-            ToolbarItem(placement: .navigation) {
-                QDLogo(size: 20)
-            }
             ToolbarItemGroup(placement: .primaryAction) {
                 Menu {
                     Button("Контрольная панель") { openWindow(id: "monitoring") }
