@@ -20,7 +20,9 @@ export MACOSX_DEPLOYMENT_TARGET=13.0
 cargo build --release --manifest-path core/Cargo.toml --target "$TARGET"
 APP="$ROOT/dist/QADREN.app"
 mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/Resources"
 cp platform/macos/Info.plist "$APP/Contents/Info.plist"
+cp assets/qadren-logo.png "$APP/Contents/Resources/qadren-logo.png"
 # Embed public OAuth Client ID from an untracked local build config.
 CONFIG="$ROOT/config/oauth.local.env"
 if [[ -f "$CONFIG" ]]; then

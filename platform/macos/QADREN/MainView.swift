@@ -2,12 +2,13 @@ import SwiftUI
 
 struct MainView: View {
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.colorScheme) private var colorScheme
     @StateObject private var connections = StorageConnections()
     @StateObject private var localWorkspace = LocalWorkspace()
     @StateObject private var rightLocalWorkspace = LocalWorkspace()
     @State private var jobs: [JobRow] = []
     @State private var jobError: String?
-    @State private var monitoringView = MonitoringView.dashboard
+    @AppStorage("qadren.theme") private var themeRaw = QDThemeMode.dark.rawValue
     let workspace: DispatcherSection
 
     init(workspace: DispatcherSection = .monitoring) {
@@ -23,6 +24,14 @@ struct MainView: View {
         }
         .navigationTitle(workspace.title)
         .toolbar {
+            ToolbarItem(placement: .principal) {
+                if workspace == .monitoring {
+                    HStack(spacing: 7) {
+                        QDLogo(size: 22)
+                        Text("QADREN").font(.headline.weight(.semibold))
+                    }
+                }
+            }
             ToolbarItemGroup(placement: .primaryAction) {
                 Menu {
                     Button("Панель мониторинга") { openWindow(id: "monitoring") }
@@ -40,48 +49,83 @@ struct MainView: View {
     }
 
     private var monitoringWorkspace: some View {
-        Group {
-            switch monitoringView {
-            case .dashboard: monitoringDashboard
-            case .jobs: jobsWorkspace
-            case .files: filesWorkspace
-            }
-        }
+        monitoringDashboard
     }
 
     private var monitoringDashboard: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Панель мониторинга").font(.largeTitle.bold())
-                    Text("Текущее состояние локального Controller и Worker").foregroundStyle(.secondary)
-                }
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 3), spacing: 14) {
-                    StatusTile(title: "Локальный Worker", value: workerStatus, detail: "Этот Mac", symbol: "cpu")
-                    StatusTile(title: "Очередь", value: "\(visibleJobs.count)", detail: visibleJobs.isEmpty ? "Нет заданий" : "Задания в истории", symbol: "list.number")
-                    StatusTile(title: "Подключения", value: "\(connections.entries.count)", detail: "Независимые локальные идентификаторы", symbol: "externaldrive")
-                }
-                WorkspaceCard(title: "Оперативные действия", subtitle: "Действия используют общую очередь заданий") {
-                    HStack {
-                        Button("Открыть очередь") { monitoringView = .jobs }
-                        Button("Открыть файловый менеджер") { monitoringView = .files }
-                        Button("Настроить сценарии") { openWindow(id: "scenario-settings") }
+            VStack(spacing: 10) {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 270), spacing: 10)], spacing: 10) {
+                    QDWidgetFrame(title: "Система", symbol: "cpu", status: workerStatusKind) {
+                        VStack(alignment: .leading, spacing: 10) {
+                            QDStatusLabel(kind: workerStatusKind, text: workerStatus)
+                            LabeledContent("Ядро", value: coreStatus)
+                            LabeledContent("iCloud Documents", value: ICloudAvailability.status)
+                            Text("Источник: локальный Core; содержимое файлов не читается.")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+
+                    QDWidgetFrame(title: "Задания", symbol: "arrow.triangle.2.circlepath", status: jobWidgetStatus) {
+                        if visibleJobs.isEmpty {
+                            QDEmptyState(
+                                title: "Заданий нет",
+                                detail: "История появится после безопасного выполнения через общий Job Engine.",
+                                symbol: "tray"
+                            )
+                        } else {
+                            JobList(jobs: visibleJobs, onRun: runMockJob, onPause: pauseMockJob, onResume: resumeMockJob, onCancel: cancelMockJob)
+                        }
+                    }
+
+                    QDWidgetFrame(title: "Очередь", symbol: "list.number") {
+                        HStack(alignment: .top, spacing: 24) {
+                            QDMetric(value: "\(visibleJobs.count)", label: "в инвентаре", provenance: "локальный JobStore")
+                            QDMetric(value: nil, label: "ETA", provenance: "не поддерживается")
+                        }
+                        Text("Порядок, прогресс и оценка времени появятся только когда их подтвердит Core.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+
+                    QDWidgetFrame(title: "Подключения", symbol: "externaldrive") {
+                        if connections.entries.isEmpty {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("Подключения ещё не настроены.").foregroundStyle(.secondary)
+                                Button("Открыть настройки") { openWindow(id: "scenario-settings") }
+                            }
+                        } else {
+                            VStack(alignment: .leading, spacing: 8) {
+                                ForEach(connections.entries.prefix(4)) { entry in
+                                    HStack(spacing: 8) {
+                                        Image(systemName: entry.enabled ? "externaldrive.fill" : "externaldrive")
+                                            .foregroundStyle(entry.enabled ? QDTheme.cyan : .secondary)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(entry.name).lineLimit(1)
+                                            Text("\(adapterTitle(entry.adapter)) · \(entry.status)")
+                                                .font(.caption).foregroundStyle(.secondary)
+                                        }
+                                        Spacer()
+                                    }
+                                }
+                                Button("Настроить подключения") { openWindow(id: "scenario-settings") }
+                                    .font(.caption)
+                            }
+                        }
                     }
                 }
-                WorkspaceCard(title: "Очередь заданий", subtitle: "Долговременный список попыток") {
-                    if visibleJobs.isEmpty {
-                        EmptyWorkspaceState(title: "Заданий нет", detail: "Когда появится готовое выполнение, здесь будут отображаться очередь и состояние операций.", symbol: "checkmark.circle")
-                    } else {
-                        JobList(jobs: visibleJobs, onRun: runMockJob, onPause: pauseMockJob, onResume: resumeMockJob, onCancel: cancelMockJob)
-                    }
+                .padding(12)
+
+                HStack(spacing: 8) {
+                    QDStatusLabel(kind: workerStatusKind, text: "Worker: \(workerStatus)")
+                    Divider().frame(height: 14)
+                    Text("Обновлено по запросу").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Text("Внимание: не поддерживается Core").font(.caption).foregroundStyle(.secondary)
                 }
-                WorkspaceCard(title: "Здоровье системы", subtitle: "Локальная среда выполнения") {
-                    LabeledContent("Ядро", value: coreStatus)
-                    LabeledContent("Документы iCloud", value: ICloudAvailability.status)
-                    Text("Это приложение не скачивает, не загружает и не открывает содержимое файлов.").font(.caption).foregroundStyle(.secondary)
-                }
-            }.padding(28)
+                .padding(.horizontal, 12).padding(.bottom, 8)
+            }
         }
+        .background(QDTheme.color(.canvas, for: colorScheme))
     }
 
     private var jobsWorkspace: some View {
@@ -123,6 +167,16 @@ struct MainView: View {
                 }
                 WorkspaceCard(title: "Сценарии синхронизации", subtitle: "Правила будущего выполнения") {
                     EmptyWorkspaceState(title: "Создание сценариев ещё не реализовано", detail: "Нельзя создать фиктивный сценарий: сначала должны появиться проверяемый план, политики конфликтов и безопасное выполнение в ядре.", symbol: "arrow.triangle.2.circlepath")
+                }
+                WorkspaceCard(title: "Интерфейс", subtitle: "Локальные настройки отображения") {
+                    Picker("Тема", selection: $themeRaw) {
+                        ForEach(QDThemeMode.allCases) { mode in
+                            Text(mode.title).tag(mode.rawValue)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    Text("Настройка хранится локально и не меняет сценарии, подключения или состояние Worker.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 if connections.hasLegacyYandexToken {
                     Notice(text: "Найдена прежняя авторизация Яндекс Диска. Её можно перенести в независимое подключение; старый элемент Keychain останется до проверки копии.", symbol: "key") {
@@ -169,6 +223,21 @@ struct MainView: View {
         case "Idle", "Idle Worker": "Worker простаивает"
         default: CoreBridge.workerStatus
         }
+    }
+    private var workerStatusKind: QDStatusKind {
+        switch CoreBridge.workerStatus {
+        case "Idle", "Idle Worker": .ready
+        case "Busy": .active
+        case "Unavailable": .unsupported
+        default: .unknown
+        }
+    }
+    private var jobWidgetStatus: QDStatusKind {
+        if visibleJobs.contains(where: { $0.state == "unknown" }) { return .unknown }
+        if visibleJobs.contains(where: { $0.state == "running" }) { return .active }
+        if visibleJobs.contains(where: { $0.state == "paused" }) { return .paused }
+        if visibleJobs.contains(where: { $0.state == "queued" }) { return .waiting }
+        return visibleJobs.isEmpty ? .waiting : .ready
     }
     private var coreStatus: String {
         switch CoreBridge.status {
@@ -327,11 +396,11 @@ private struct JobList: View {
                     }
                     Spacer()
                     Text(jobStateTitle(job.state)).font(.callout.weight(.medium))
-                    if job.state == "queued" {
+                    if job.id.hasPrefix("g1-") && job.state == "queued" {
                         Button("Запустить") { onRun(job.id) }
                         Button("Приостановить") { onPause(job.id) }
                         Button("Отменить", role: .destructive) { onCancel(job.id) }
-                    } else if job.state == "paused" {
+                    } else if job.id.hasPrefix("g1-") && job.state == "paused" {
                         Button("Возобновить") { onResume(job.id) }
                         Button("Отменить", role: .destructive) { onCancel(job.id) }
                     }
