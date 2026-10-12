@@ -5,7 +5,7 @@
 | Документ | Содержание |
 |---|---|
 | [Дизайн-система / Control Surface](design/README.md) | Бренд, визуальные токены, SwiftUI-компоненты, виджеты, окна, UX и критерии приёмки |
-| [Стек](architecture/technology-stack.md) | Rust, SwiftUI, Swift/iCloud, SQLite, поставка без runtime |
+| [Стек](architecture/technology-stack.md) | Rust, SwiftUI, SQLite, Яндекс Диск / Local FS, поставка без runtime |
 | [Правила разработки](development/engineering-rules.md) | Минимализм, ответственность модулей, надёжность и безопасность |
 | [Тесты](development/testing-and-quality.md) | Проверки и критерии готовности |
 | [Сборка](development/build-and-release.md) | Нативная поставка и выпуск |
@@ -14,10 +14,11 @@
 | [Обзор](architecture/overview.md) | Цели, компоненты, границы |
 | [Сценарии и модель исполнения](architecture/backup-model.md) | Актуальная модель |
 | [Узлы](architecture/nodes-and-delegation.md) | Controller/Worker, делегирование |
-| [Адаптеры](architecture/storage-adapters.md) | Yandex/iCloud, возможности и ОС |
+| [Адаптеры](architecture/storage-adapters.md) | Яндекс Диск, Local Filesystem; iCloud future-only |
 | [Загрузки](policies/local-downloads.md) | Запрет загрузок на основной MacBook по инициативе QADREN |
 | [Сохранность](policies/data-safety.md) | Подтверждение копий, удаление, восстановление |
 | [Решения](decisions/README.md) | Зафиксированные решения и основания |
+| [D-017: перенос iCloud](decisions/D-017-defer-icloud.md) | В текущем релизе только Яндекс Диск и локальные директории |
 | [План](roadmap.md) | Актуальная дорожная карта |
 
 ## Статусы
