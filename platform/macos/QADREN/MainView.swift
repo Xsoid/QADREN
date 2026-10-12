@@ -58,7 +58,7 @@ struct MainView: View {
                 }
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 3), spacing: 14) {
                     StatusTile(title: "Локальный Worker", value: workerStatus, detail: "Этот Mac", symbol: "cpu")
-                    StatusTile(title: "Очередь", value: "\(jobs.count)", detail: jobs.isEmpty ? "Нет заданий" : "Задания в истории", symbol: "list.number")
+                    StatusTile(title: "Очередь", value: "\(visibleJobs.count)", detail: visibleJobs.isEmpty ? "Нет заданий" : "Задания в истории", symbol: "list.number")
                     StatusTile(title: "Подключения", value: "\(connections.entries.count)", detail: "Независимые локальные идентификаторы", symbol: "externaldrive")
                 }
                 WorkspaceCard(title: "Оперативные действия", subtitle: "Действия используют общую очередь заданий") {
@@ -69,10 +69,10 @@ struct MainView: View {
                     }
                 }
                 WorkspaceCard(title: "Очередь заданий", subtitle: "Долговременный список попыток") {
-                    if jobs.isEmpty {
+                    if visibleJobs.isEmpty {
                         EmptyWorkspaceState(title: "Заданий нет", detail: "Когда появится готовое выполнение, здесь будут отображаться очередь и состояние операций.", symbol: "checkmark.circle")
                     } else {
-                        JobList(jobs: jobs, onRun: runMockJob, onPause: pauseMockJob, onResume: resumeMockJob, onCancel: cancelMockJob)
+                        JobList(jobs: visibleJobs, onRun: runMockJob, onPause: pauseMockJob, onResume: resumeMockJob, onCancel: cancelMockJob)
                     }
                 }
                 WorkspaceCard(title: "Здоровье системы", subtitle: "Локальная среда выполнения") {
@@ -87,15 +87,13 @@ struct MainView: View {
     private var jobsWorkspace: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                WorkspaceHeader(title: "Очередь заданий", subtitle: "Долговременные попытки и их текущее локальное состояние") {
-                    Button("Добавить тестовое задание") { queueMockJob() }
-                }
+                WorkspaceHeader(title: "Очередь заданий", subtitle: "Долговременные попытки и их текущее локальное состояние") { EmptyView() }
                 if let jobError { Notice(text: jobError, symbol: "exclamationmark.triangle") }
                 WorkspaceCard(title: "Очередь", subtitle: "Эти действия не создают постоянный сценарий") {
-                    if jobs.isEmpty {
-                        EmptyWorkspaceState(title: "Очередь пуста", detail: "Тестовая команда создаёт только служебный локальный объект QADREN после явного запуска.", symbol: "tray")
+                    if visibleJobs.isEmpty {
+                        EmptyWorkspaceState(title: "Очередь пуста", detail: "Задания появятся после реализации реальных сценариев или безопасных ручных файловых операций.", symbol: "tray")
                     } else {
-                        JobList(jobs: jobs, onRun: runMockJob, onPause: pauseMockJob, onResume: resumeMockJob, onCancel: cancelMockJob)
+                        JobList(jobs: visibleJobs, onRun: runMockJob, onPause: pauseMockJob, onResume: resumeMockJob, onCancel: cancelMockJob)
                     }
                 }
             }.padding(28)
@@ -183,6 +181,11 @@ struct MainView: View {
     private func refreshJobs() {
         do { jobs = try JobInventory.list(); jobError = nil }
         catch { jobError = error.localizedDescription }
+    }
+    /// `g1-*` is a test-only durable fixture created by the early mock runner.
+    /// It is retained for safe diagnostics, but is never product queue data.
+    private var visibleJobs: [JobRow] {
+        jobs.filter { !$0.id.hasPrefix("g1-") }
     }
     private func queueMockJob() {
         do { try JobInventory.queueMockArtifact(); refreshJobs() }
