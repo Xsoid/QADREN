@@ -12,19 +12,12 @@ struct QADRENApp: App {
         }
         .defaultSize(width: 1180, height: 760)
 
-        Window("Панель настроек", id: "scenario-settings") {
+        Window("Настройки", id: "scenario-settings") {
             MainView(workspace: .scenarios)
                 .frame(minWidth: 760, minHeight: 560)
                 .preferredColorScheme(QDThemeMode(rawValue: themeRaw)?.preferredColorScheme)
         }
         .defaultSize(width: 980, height: 700)
-
-        Window("Настройки приложения", id: "application-settings") {
-            ApplicationSettingsView()
-                .frame(minWidth: 480, minHeight: 340)
-                .preferredColorScheme(QDThemeMode(rawValue: themeRaw)?.preferredColorScheme)
-        }
-        .defaultSize(width: 560, height: 420)
 
         MenuBarExtra("QADREN", systemImage: "externaldrive.fill") {
             MenuBarWorkspaceMenu()
@@ -41,8 +34,7 @@ private struct MenuBarWorkspaceMenu: View {
         Divider()
         Button("Открыть контрольную панель") { open(id: "monitoring") }
         Button("Новая контрольная панель") { open(id: "monitoring") }
-        Button("Панель настроек") { open(id: "scenario-settings") }
-        Button("Настройки приложения") { open(id: "application-settings") }
+        Button("Настройки") { open(id: "scenario-settings") }
         Divider()
         Button("Выйти из QADREN") { NSApp.terminate(nil) }
     }

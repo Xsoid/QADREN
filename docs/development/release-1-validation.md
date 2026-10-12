@@ -535,9 +535,9 @@
 
 Проверено на macOS для этого изменения: `bash scripts/test-core.sh` — PASS (fmt, Clippy, 212 Rust unit tests, включая crash-after-effect → exact reconciliation и partial artifact → сохранение `UNKNOWN`); `bash scripts/build-macos.sh` — PASS (unsigned `dist/QADREN.app`, `Info.plist`).
 
-### Панель настроек: подключения и Scenario configuration — 2026-10-12
+### Настройки: подключения и Scenario configuration — 2026-10-12
 
-«Панель настроек» остаётся отдельным окном и теперь использует две реальные секции: независимые `StorageConnection` и сохранённые Scenario. SwiftUI вызывает существующий Rust Registry FFI для list/create/enable Scenario; форма сохраняет имя, два connection ID, каталоги, направление и ревизию 1. Включение/выключение также меняет durable Registry. Отдельное окно «Настройки приложения» содержит локальную тему; оно не смешано с настройками синхронизации. В соответствии с D-017 iCloud отсутствует из активных пунктов интерфейса.
+«Настройки» остаются отдельным окном и используют реальные секции: независимые `StorageConnection`, сохранённые Scenario и «Настройки приложения». SwiftUI вызывает существующий Rust Registry FFI для list/create/enable Scenario; форма сохраняет имя, два connection ID, каталоги, направление и ревизию 1. Включение/выключение также меняет durable Registry. «Настройки приложения» содержат локальную тему в том же левом меню и не смешивают её с настройками синхронизации. В соответствии с D-017 iCloud отсутствует из активных пунктов интерфейса.
 
 Граница: это configuration-only UI. Нет редактирования/удаления Scenario, scheduler, dry-run запуска, Job submission или передачи файлов; экран явно сообщает об этих ограничениях и не имитирует Run/копирование. Удаление connection по-прежнему использует существующий recoverable Keychain/attempt gate.
 

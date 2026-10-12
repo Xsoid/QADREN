@@ -52,25 +52,27 @@ final class ScenarioSettings: ObservableObject {
 private enum SettingsPanelSection: String, CaseIterable, Hashable, Identifiable {
     case connections
     case scenarios
+    case application
 
     var id: Self { self }
     var title: String {
         switch self {
         case .connections: "Подключения"
         case .scenarios: "Сценарии"
+        case .application: "Настройки приложения"
         }
     }
     var symbol: String {
         switch self {
         case .connections: "externaldrive"
         case .scenarios: "arrow.triangle.branch"
+        case .application: "gearshape"
         }
     }
 }
 
 struct SettingsPanelView: View {
     @ObservedObject var connections: StorageConnections
-    @Environment(\.openWindow) private var openWindow
     @StateObject private var scenarios = ScenarioSettings()
     @State private var selection: SettingsPanelSection? = .connections
     @State private var isCreatingScenario = false
@@ -85,7 +87,7 @@ struct SettingsPanelView: View {
                 }
             }
             .listStyle(.sidebar)
-            .navigationTitle("Панель настроек")
+            .navigationTitle("Настройки")
         } detail: {
             Group {
                 switch selection ?? .connections {
@@ -97,6 +99,8 @@ struct SettingsPanelView: View {
                         connections: connections.entries,
                         createScenario: { isCreatingScenario = true }
                     )
+                case .application:
+                    ApplicationSettingsView()
                 }
             }
             .frame(minWidth: 560, minHeight: 500)
@@ -108,9 +112,6 @@ struct SettingsPanelView: View {
                 } else {
                     Button("Создать сценарий", systemImage: "plus") { isCreatingScenario = true }
                         .disabled(scenarioEndpoints.isEmpty)
-                }
-                Button("Настройки приложения", systemImage: "gearshape") {
-                    openWindow(id: "application-settings")
                 }
                 Button("Обновить", systemImage: "arrow.clockwise") {
                     connections.refresh()
@@ -461,7 +462,7 @@ struct ApplicationSettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Состояние приложения") {
-                LabeledContent("Панель настроек", value: "Отдельное окно")
+                LabeledContent("Настройки", value: "Отдельное окно")
                 LabeledContent("Выполнение сценариев", value: "Недоступно до готовности Core")
             }
         }

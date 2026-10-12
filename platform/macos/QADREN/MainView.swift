@@ -28,8 +28,7 @@ struct MainView: View {
             ToolbarItemGroup(placement: .primaryAction) {
                 Menu {
                     Button("Контрольная панель") { openWindow(id: "monitoring") }
-                    Button("Панель настроек") { openWindow(id: "scenario-settings") }
-                    Button("Настройки приложения") { openWindow(id: "application-settings") }
+                    Button("Настройки") { openWindow(id: "scenario-settings") }
                 } label: {
                     Label("Пространство", systemImage: "rectangle.3.group")
                 }
@@ -230,7 +229,7 @@ enum DispatcherSection: String, CaseIterable, Hashable, Identifiable {
     case monitoring, scenarios
     var id: Self { self }
     var title: String {
-        switch self { case .monitoring: "Контрольная панель"; case .scenarios: "Панель настроек" }
+        switch self { case .monitoring: "Контрольная панель"; case .scenarios: "Настройки" }
     }
     var symbol: String {
         switch self { case .monitoring: "rectangle.3.group"; case .scenarios: "slider.horizontal.3" }
