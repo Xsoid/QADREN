@@ -9,6 +9,25 @@ pub enum ProtectedOperation {
     Rename,
 }
 
+impl ProtectedOperation {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Overwrite => "overwrite",
+            Self::Delete => "delete",
+            Self::Rename => "rename",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "overwrite" => Some(Self::Overwrite),
+            "delete" => Some(Self::Delete),
+            "rename" => Some(Self::Rename),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperationScope {
     pub operation: ProtectedOperation,
@@ -32,7 +51,7 @@ pub enum PolicyError {
     InvalidScope,
 }
 
-fn valid_path(path: &str) -> bool {
+pub(crate) fn valid_path(path: &str) -> bool {
     !path.is_empty()
         && !path.starts_with('/')
         && !path

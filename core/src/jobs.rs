@@ -2,6 +2,7 @@
 //! Stored independently from StorageConnection Registry until cross-links are specified.
 use crate::confirmation::Confirmation;
 use crate::model::JobState;
+use crate::policy::{Decision, OperationScope, ProtectedOperation};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
@@ -19,6 +20,10 @@ pub enum JobStoreError {
     AlreadyOpen,
     UnsafeDatabaseLink,
     StorageIdentityChanged,
+    ConsentMissing,
+    ConsentDenied,
+    ConsentExpired,
+    ConsentScopeMismatch,
 }
 impl From<std::io::Error> for JobStoreError {
     fn from(value: std::io::Error) -> Self {
@@ -100,6 +105,17 @@ pub struct StoredExpectation {
     pub target_path: String,
     pub expected_size: u64,
     pub expected_md5: String,
+}
+
+/// Durable, one-time authorization for a future dangerous effect. This is
+/// metadata only: recording or consuming it never touches an adapter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredOperationDecision {
+    pub decision_id: String,
+    pub job_id: String,
+    pub scope: OperationScope,
+    pub decision: Decision,
+    pub consumed: bool,
 }
 
 pub struct JobStore {
@@ -217,7 +233,7 @@ impl JobStore {
 
     fn initialize(db: Connection, owner_lock: Option<Connection>) -> Result<Self> {
         let version: i32 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 7 {
+        if version > 8 {
             return Err(JobStoreError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -360,6 +376,25 @@ impl JobStore {
                  PRAGMA user_version = 7;
                  COMMIT;
                  PRAGMA foreign_keys = ON;",
+            )?;
+        }
+        if version <= 7 {
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE operation_decisions (
+                   decision_id TEXT PRIMARY KEY NOT NULL,
+                   job_id TEXT NOT NULL REFERENCES jobs(id),
+                   operation_kind TEXT NOT NULL CHECK(operation_kind IN ('overwrite','delete','rename')),
+                   connection_id TEXT NOT NULL,
+                   relative_path TEXT NOT NULL,
+                   expires_at INTEGER NOT NULL CHECK(expires_at >= 0),
+                   decision TEXT NOT NULL CHECK(decision IN ('accepted','denied')),
+                   consumed INTEGER NOT NULL DEFAULT 0 CHECK(consumed IN (0,1))
+                 );
+                 CREATE INDEX operation_decisions_for_job
+                   ON operation_decisions(job_id, consumed);
+                 PRAGMA user_version = 8;
+                 COMMIT;",
             )?;
         }
         db.pragma_update(None, "foreign_keys", "ON")?;
@@ -619,6 +654,159 @@ impl JobStore {
             JobState::Queued,
             Confirmation::Unknown,
         )
+    }
+
+    /// Record an explicit decision while the Job is safely waiting before an
+    /// external effect. There are no wildcards for operation, connection or path.
+    pub fn record_operation_decision(
+        &mut self,
+        decision_id: &str,
+        job_id: &str,
+        scope: &OperationScope,
+        decision: Decision,
+    ) -> Result<()> {
+        self.check_storage_identity()?;
+        if decision_id.is_empty()
+            || job_id.is_empty()
+            || scope.connection_id.is_empty()
+            || !crate::policy::valid_path(&scope.relative_path)
+            || scope.expires_at > i64::MAX as u64
+        {
+            return Err(JobStoreError::InvalidId);
+        }
+        let tx = self.db.transaction()?;
+        let state: Option<String> = tx
+            .query_row("SELECT state FROM jobs WHERE id=?1", [job_id], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        match state.as_deref() {
+            None => return Err(JobStoreError::NotFound),
+            Some("waiting_for_decision") => {}
+            Some(_) => return Err(JobStoreError::InvalidTransition),
+        }
+        let unresolved: i64 = tx.query_row(
+            "SELECT count(*) FROM job_attempts WHERE job_id=?1 AND status!='resolved'",
+            [job_id],
+            |row| row.get(0),
+        )?;
+        if unresolved != 0 {
+            return Err(JobStoreError::InvalidTransition);
+        }
+        tx.execute(
+            "INSERT INTO operation_decisions
+              (decision_id,job_id,operation_kind,connection_id,relative_path,expires_at,decision)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            params![
+                decision_id,
+                job_id,
+                scope.operation.label(),
+                scope.connection_id,
+                scope.relative_path,
+                scope.expires_at as i64,
+                match decision {
+                    Decision::Accepted => "accepted",
+                    Decision::Denied => "denied",
+                },
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO job_events(job_id,state,kind) VALUES (?1,'waiting_for_decision','decision_recorded')",
+            [job_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Atomically consume one accepted decision for the exact requested
+    /// operation. A crash after this call leaves the consent spent and the Job
+    /// waiting; a new explicit decision is required before any retry.
+    pub fn consume_operation_decision(
+        &mut self,
+        decision_id: &str,
+        job_id: &str,
+        requested: &OperationScope,
+        now: u64,
+    ) -> Result<StoredOperationDecision> {
+        self.check_storage_identity()?;
+        if decision_id.is_empty()
+            || job_id.is_empty()
+            || requested.connection_id.is_empty()
+            || !crate::policy::valid_path(&requested.relative_path)
+            || now > i64::MAX as u64
+        {
+            return Err(JobStoreError::InvalidId);
+        }
+        let tx = self.db.transaction()?;
+        let stored: Option<(String, String, String, String, i64, String, i64)> = tx
+            .query_row(
+                "SELECT operation_kind,connection_id,relative_path,decision,expires_at,job_id,consumed
+                 FROM operation_decisions WHERE decision_id=?1",
+                [decision_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
+            )
+            .optional()?;
+        let Some((
+            operation,
+            connection_id,
+            relative_path,
+            decision,
+            expires_at,
+            stored_job_id,
+            consumed,
+        )) = stored
+        else {
+            return Err(JobStoreError::ConsentMissing);
+        };
+        let operation =
+            ProtectedOperation::parse(&operation).ok_or(JobStoreError::ConsentScopeMismatch)?;
+        if stored_job_id != job_id
+            || operation != requested.operation
+            || connection_id != requested.connection_id
+            || relative_path != requested.relative_path
+        {
+            return Err(JobStoreError::ConsentScopeMismatch);
+        }
+        if decision != "accepted" {
+            return Err(JobStoreError::ConsentDenied);
+        }
+        if expires_at < 0 || now > expires_at as u64 {
+            return Err(JobStoreError::ConsentExpired);
+        }
+        if consumed != 0 {
+            return Err(JobStoreError::ConsentMissing);
+        }
+        let state: String =
+            tx.query_row("SELECT state FROM jobs WHERE id=?1", [job_id], |row| {
+                row.get(0)
+            })?;
+        if state != "waiting_for_decision" {
+            return Err(JobStoreError::InvalidTransition);
+        }
+        let changed = tx.execute(
+            "UPDATE operation_decisions SET consumed=1 WHERE decision_id=?1 AND consumed=0",
+            [decision_id],
+        )?;
+        if changed != 1 {
+            return Err(JobStoreError::ConsentMissing);
+        }
+        tx.execute(
+            "INSERT INTO job_events(job_id,state,kind) VALUES (?1,'waiting_for_decision','decision_consumed')",
+            [job_id],
+        )?;
+        tx.commit()?;
+        Ok(StoredOperationDecision {
+            decision_id: decision_id.to_owned(),
+            job_id: job_id.to_owned(),
+            scope: OperationScope {
+                operation,
+                connection_id,
+                relative_path,
+                expires_at: expires_at as u64,
+            },
+            decision: Decision::Accepted,
+            consumed: true,
+        })
     }
 
     /// Atomically prepare an operation and its immutable expected metadata.
@@ -1084,6 +1272,91 @@ impl JobStore {
 mod tests {
     use super::*;
     use crate::confirmation::EvidenceLevel;
+    use crate::policy::{Decision, OperationScope, ProtectedOperation};
+
+    fn waiting_job(store: &mut JobStore, id: &str) {
+        store.enqueue(id, None).unwrap();
+        store
+            .advance(
+                id,
+                JobState::Queued,
+                JobState::Running,
+                Confirmation::Unknown,
+            )
+            .unwrap();
+        store
+            .advance(
+                id,
+                JobState::Running,
+                JobState::WaitingForDecision,
+                Confirmation::Unknown,
+            )
+            .unwrap();
+    }
+
+    fn destructive_scope() -> OperationScope {
+        OperationScope {
+            operation: ProtectedOperation::Delete,
+            connection_id: "connection-a".into(),
+            relative_path: "folder/file.txt".into(),
+            expires_at: 100,
+        }
+    }
+
+    #[test]
+    fn durable_scoped_decision_is_exact_and_single_use() {
+        let mut store = JobStore::in_memory().unwrap();
+        waiting_job(&mut store, "job-a");
+        let scope = destructive_scope();
+        store
+            .record_operation_decision("decision-a", "job-a", &scope, Decision::Accepted)
+            .unwrap();
+        let consumed = store
+            .consume_operation_decision("decision-a", "job-a", &scope, 100)
+            .unwrap();
+        assert!(consumed.consumed);
+        assert_eq!(consumed.scope, scope);
+        assert!(matches!(
+            store.consume_operation_decision("decision-a", "job-a", &scope, 100),
+            Err(JobStoreError::ConsentMissing)
+        ));
+    }
+
+    #[test]
+    fn dangerous_decision_fails_closed_for_denial_expiry_or_scope_mismatch() {
+        let mut store = JobStore::in_memory().unwrap();
+        waiting_job(&mut store, "job-a");
+        let scope = destructive_scope();
+        store
+            .record_operation_decision("denied", "job-a", &scope, Decision::Denied)
+            .unwrap();
+        assert!(matches!(
+            store.consume_operation_decision("denied", "job-a", &scope, 1),
+            Err(JobStoreError::ConsentDenied)
+        ));
+        let expired = OperationScope {
+            expires_at: 5,
+            ..scope.clone()
+        };
+        store
+            .record_operation_decision("expired", "job-a", &expired, Decision::Accepted)
+            .unwrap();
+        assert!(matches!(
+            store.consume_operation_decision("expired", "job-a", &expired, 6),
+            Err(JobStoreError::ConsentExpired)
+        ));
+        store
+            .record_operation_decision("mismatch", "job-a", &scope, Decision::Accepted)
+            .unwrap();
+        let other = OperationScope {
+            relative_path: "other.txt".into(),
+            ..scope
+        };
+        assert!(matches!(
+            store.consume_operation_decision("mismatch", "job-a", &other, 1),
+            Err(JobStoreError::ConsentScopeMismatch)
+        ));
+    }
 
     #[test]
     fn list_jobs_is_read_only_and_preserves_scenario_identity() {
@@ -1595,7 +1868,7 @@ mod tests {
             .db
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
     }
 
     #[test]

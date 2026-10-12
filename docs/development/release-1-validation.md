@@ -75,6 +75,8 @@
 - Pure Rust policy gate допускает destructive operation только с explicit accepted decision для точных operation, connection, relative path и срока. Нет решения, deny, expiry или несовпадение scope означают fail-closed.
 - Локально пройдены `bash scripts/test-core.sh` с 208 Rust tests и `bash scripts/build-macos.sh`. Нет durable decisions, UI prompt, adapter pre-I/O recheck или E2E; #20 остаётся PARTIAL.
 
+Следующий минимальный durable слой хранит решение только для Job в `waiting_for_decision`: SQLite v8 связывает его с точными operation/connection/relative path и сроком. Accepted decision расходуется атомарно ровно один раз; denied, expired, повторное или scope-mismatched решение блокируют операцию. Запись/расходование не выполняют adapter I/O; если процесс завершится после расходования и до будущего effect, Job остаётся в ожидании, а для повтора потребуется новое явное решение. UI prompt, adapter pre-I/O recheck и реальные destructive operations по-прежнему не реализованы.
+
 ## Local metadata workspace — #22 (2026-10-12)
 
 - Пользователь выбирает локальную папку на текущую сессию; Rust FFI показывает только metadata entries и создаёт подпапку. Content read, copy, move и delete не доступны.
