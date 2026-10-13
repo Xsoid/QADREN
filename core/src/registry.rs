@@ -7,8 +7,8 @@ use crate::model::{
     ScenarioReference, StorageEndpoint, SyncDirection,
 };
 use crate::scenario_planner::{self, ObservedFile, PlanItem};
-use crate::scheduler::WeeklySchedule;
-use chrono::Weekday;
+use crate::scheduler::{OccurrenceKey, WeeklySchedule};
+use chrono::{DateTime, Utc, Weekday};
 use chrono_tz::Tz;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
@@ -96,6 +96,15 @@ pub struct ScenarioSchedule {
     pub hour: u8,
     pub minute: u8,
     pub enabled: bool,
+}
+
+/// A read-only automatic-run candidate derived from persisted configuration.
+/// It is not a Job, a durable claim, or authorization to begin an effect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DueScheduleOccurrence {
+    pub scenario_id: String,
+    pub schedule_id: String,
+    pub occurrence_key: OccurrenceKey,
 }
 
 pub struct Registry {
@@ -535,6 +544,78 @@ impl Registry {
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into);
         schedules
+    }
+
+    /// Evaluate enabled schedules for enabled, locally unpaused Scenarios in
+    /// `(after, through]`. The result is deliberately read-only: claiming an
+    /// occurrence before durable Job submission could lose a run on crash, so
+    /// the future Job/outbox bridge must own that atomic boundary.
+    pub fn due_schedule_occurrences(
+        &self,
+        after: DateTime<Utc>,
+        through: DateTime<Utc>,
+    ) -> Result<Vec<DueScheduleOccurrence>> {
+        if through < after {
+            return Err(RegistryError::InvalidSchedule);
+        }
+        let mut statement = self.db.prepare(
+            "SELECT ss.id,ss.scenario_id,ss.timezone,ss.weekday,ss.hour,ss.minute
+             FROM scenario_schedules ss
+             JOIN scenarios s ON s.id=ss.scenario_id
+             LEFT JOIN scenario_automation a ON a.scenario_id=s.id
+             WHERE ss.enabled=1 AND s.enabled=1 AND COALESCE(a.locally_paused,0)=0
+             ORDER BY ss.scenario_id,ss.id",
+        )?;
+        let schedules = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, u8>(3)?,
+                    row.get::<_, u8>(4)?,
+                    row.get::<_, u8>(5)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut due = Vec::new();
+        for (schedule_id, scenario_id, timezone, weekday, hour, minute) in schedules {
+            let timezone = Tz::from_str(&timezone).map_err(|_| RegistryError::InvalidSchedule)?;
+            let weekday = match weekday {
+                0 => Weekday::Mon,
+                1 => Weekday::Tue,
+                2 => Weekday::Wed,
+                3 => Weekday::Thu,
+                4 => Weekday::Fri,
+                5 => Weekday::Sat,
+                6 => Weekday::Sun,
+                _ => return Err(RegistryError::InvalidSchedule),
+            };
+            let schedule = WeeklySchedule {
+                timezone,
+                weekday,
+                hour: hour as u32,
+                minute: minute as u32,
+            };
+            for occurrence_key in schedule
+                .occurrences_between(after, through)
+                .map_err(|_| RegistryError::InvalidSchedule)?
+            {
+                due.push(DueScheduleOccurrence {
+                    scenario_id: scenario_id.clone(),
+                    schedule_id: schedule_id.clone(),
+                    occurrence_key,
+                });
+            }
+        }
+        due.sort_by(|left, right| {
+            (&left.scenario_id, &left.schedule_id, &left.occurrence_key).cmp(&(
+                &right.scenario_id,
+                &right.schedule_id,
+                &right.occurrence_key,
+            ))
+        });
+        Ok(due)
     }
 
     /// Enable or disable one schedule without changing its already claimed
@@ -1399,6 +1480,70 @@ mod tests {
         let db = Registry::open(&path).unwrap();
         assert!(!db.claim_schedule_occurrence(&schedule, key).unwrap());
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn due_schedule_evaluation_respects_configuration_pause_and_dst_without_claiming() {
+        fn utc(value: &str) -> DateTime<Utc> {
+            value.parse().unwrap()
+        }
+
+        let db = Registry::in_memory().unwrap();
+        let left = db.add("local_filesystem", "Left").unwrap();
+        let right = db.add("local_filesystem", "Right").unwrap();
+        let scenario = db
+            .create_scenario(
+                "Documents",
+                &left,
+                "/source",
+                &right,
+                "/target",
+                "left_to_right",
+            )
+            .unwrap();
+        let schedule = db
+            .create_scenario_schedule(&scenario, "Europe/Berlin", 6, 2, 30)
+            .unwrap();
+        let after = utc("2026-10-25T00:00:00Z");
+        let through = utc("2026-10-25T02:00:00Z");
+        let expected = vec![DueScheduleOccurrence {
+            scenario_id: scenario.clone(),
+            schedule_id: schedule.clone(),
+            occurrence_key: OccurrenceKey("2026-10-25 02:30@Europe/Berlin".into()),
+        }];
+        assert_eq!(
+            db.due_schedule_occurrences(after, through).unwrap(),
+            expected
+        );
+        // Repeat is identical because evaluation has no claim/write side effect.
+        assert_eq!(
+            db.due_schedule_occurrences(after, through).unwrap(),
+            expected
+        );
+
+        db.set_scenario_schedule_enabled(&scenario, &schedule, false)
+            .unwrap();
+        assert!(db
+            .due_schedule_occurrences(after, through)
+            .unwrap()
+            .is_empty());
+        db.set_scenario_schedule_enabled(&scenario, &schedule, true)
+            .unwrap();
+        db.set_scenario_locally_paused(&scenario, true).unwrap();
+        assert!(db
+            .due_schedule_occurrences(after, through)
+            .unwrap()
+            .is_empty());
+        db.set_scenario_locally_paused(&scenario, false).unwrap();
+        db.set_scenario_enabled(&scenario, false).unwrap();
+        assert!(db
+            .due_schedule_occurrences(after, through)
+            .unwrap()
+            .is_empty());
+        assert!(matches!(
+            db.due_schedule_occurrences(through, after),
+            Err(RegistryError::InvalidSchedule)
+        ));
     }
 
     #[test]

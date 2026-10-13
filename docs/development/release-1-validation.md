@@ -81,6 +81,7 @@
 - Добавлен pure Rust evaluator weekly schedule на IANA timezone. `chrono-tz` встраивает только базу timezone в Rust binary, не добавляет сетевой сервис или runtime для пользователя. Повторяющийся DST slot получает один стабильный local key; несуществующий slot не создаёт запуск.
 - SQLite v6 хранит несколько валидированных расписаний на Scenario (IANA timezone, weekday, время). Это configuration-only слой: оценка времени, catch-up и создание Job ещё не подключены.
 - SQLite v7 atomically claims evaluated occurrence keys. Повторный DST slot и повтор после restart возвращают уже занятый key и не могут породить второй будущий Job.
+- `Registry::due_schedule_occurrences` читает enabled schedules только enabled/unpaused Scenario и детерминированно возвращает DST-safe кандидаты за заданный UTC interval. Это не claim и не Job submission: без атомарного JobStore/outbox bridge запись receipt до Job остаётся небезопасной при crash. C ABI принимает явные RFC 3339 UTC bounds и также остаётся read-only.
 - Локально пройдены `bash scripts/test-core.sh` с 221 Rust tests и `bash scripts/build-macos.sh`. Restart-тест подтверждает сохранение pending/pause. Нет clock/DST evaluator, priority aging, FFI/UI или Job submission; #21 остаётся PARTIAL.
 
 ## Scoped destructive-operation consent — #20 (2026-10-12)

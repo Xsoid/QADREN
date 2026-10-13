@@ -2,6 +2,7 @@
 //! Inputs are UTF-8 owned by the caller; JSON output is caller-freed.
 //! No OAuth tokens or file contents are persisted by these methods.
 use crate::registry::{Registry, ScenarioUpdate};
+use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use std::ffi::{c_char, CStr, CString};
 use std::path::Path;
@@ -145,6 +146,38 @@ pub extern "C" fn qadren_scenario_schedules_list(
                 "id": item.id, "scenario_id": item.scenario_id, "timezone": item.timezone,
                 "weekday": item.weekday, "hour": item.hour, "minute": item.minute,
                 "enabled": item.enabled
+            }))
+            .collect::<Vec<Value>>()))
+    })
+}
+
+/// Evaluate schedule candidates over a caller-supplied UTC interval. This is
+/// observation only: it does not claim occurrences or submit Jobs.
+#[no_mangle]
+pub extern "C" fn qadren_scenario_schedules_due(
+    path: *const c_char,
+    after: *const c_char,
+    through: *const c_char,
+) -> *mut c_char {
+    let (Some(after), Some(through)) = (input(after), input(through)) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    let (Ok(after), Ok(through)) = (
+        DateTime::parse_from_rfc3339(&after),
+        DateTime::parse_from_rfc3339(&through),
+    ) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    let after = after.with_timezone(&Utc);
+    let through = through.with_timezone(&Utc);
+    with_registry(path, |db| {
+        Ok(json!(db
+            .due_schedule_occurrences(after, through)?
+            .into_iter()
+            .map(|item| json!({
+                "scenario_id": item.scenario_id,
+                "schedule_id": item.schedule_id,
+                "occurrence_key": item.occurrence_key.0
             }))
             .collect::<Vec<Value>>()))
     })
@@ -526,6 +559,16 @@ mod tests {
         .unwrap();
         unsafe { qadren_registry_free_string(listed_schedules) };
         assert_eq!(schedules["data"][0]["timezone"], "Europe/Samara");
+        let after = CString::new("2026-10-12T04:00:00Z").unwrap();
+        let through = CString::new("2026-10-12T06:00:00Z").unwrap();
+        let due_pointer =
+            qadren_scenario_schedules_due(path.as_ptr(), after.as_ptr(), through.as_ptr());
+        let due: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(due_pointer) }.to_str().unwrap()).unwrap();
+        unsafe { qadren_registry_free_string(due_pointer) };
+        assert_eq!(due["data"].as_array().unwrap().len(), 1);
+        assert_eq!(due["data"][0]["scenario_id"], scenario_id.to_str().unwrap());
+        assert_eq!(due["data"][0]["schedule_id"], schedule_id.to_str().unwrap());
         let disabled_schedule = qadren_scenario_schedules_set_enabled(
             path.as_ptr(),
             scenario_id.as_ptr(),
@@ -589,6 +632,13 @@ mod tests {
         unsafe { qadren_registry_free_string(list) };
         assert_eq!(json["ok"], false);
         assert_eq!(json["error"], "invalid_path");
+
+        let due =
+            qadren_scenario_schedules_due(std::ptr::null(), std::ptr::null(), std::ptr::null());
+        let json: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(due) }.to_str().unwrap()).unwrap();
+        unsafe { qadren_registry_free_string(due) };
+        assert_eq!(json["error"], "invalid_input");
 
         unsafe { qadren_registry_free_string(std::ptr::null_mut()) };
     }
