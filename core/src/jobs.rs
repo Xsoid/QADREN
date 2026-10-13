@@ -1126,22 +1126,16 @@ impl JobStore {
         if !matches!(active.as_deref(), Some("active" | "unknown")) {
             return Err(JobStoreError::InvalidTransition.into());
         }
-        let observed = match client.resource_metadata(token, &expected.target_path) {
-            Ok(resource) => resource,
-            Err(crate::yandex::YandexError::NotFound) => {
-                return Ok(crate::yandex::MetadataMatch::Mismatch);
-            }
-            Err(error) => return Err(YandexObservationError::Provider(error)),
-        };
         let expected_resource = crate::yandex::ExpectedResourceMetadata {
             path: expected.target_path,
             size: expected.expected_size,
             md5: expected.expected_md5,
         };
-        Ok(crate::yandex::compare_resource_metadata(
-            &expected_resource,
-            &observed,
-        ))
+        match client.reconcile_uploaded_resource(token, &expected_resource) {
+            Ok(observation) => Ok(observation),
+            Err(crate::yandex::YandexError::NotFound) => Ok(crate::yandex::MetadataMatch::Mismatch),
+            Err(error) => Err(YandexObservationError::Provider(error)),
+        }
     }
 
     /// Records explicit resolution without claiming the remote operation succeeded.

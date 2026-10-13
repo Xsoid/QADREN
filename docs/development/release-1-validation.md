@@ -510,7 +510,7 @@
 ### Yandex upload metadata reconciliation contract — #16 (2026-10-13)
 
 - `reconcile_uploaded_resource` делает только `GET /resources` по точному ожидаемому path и сопоставляет path, size и 32-hex provider MD5. Некорректный ожидаемый MD5 останавливает проверку как `InsufficientEvidence` ещё до сети; неполный или иной ответ провайдера не становится успехом.
-- Контракт не повторяет PUT, не читает/скачивает контент, не изменяет Job/evidence/baseline и не подключён к FFI/UI. Mock HTTP test доказывает read-only GET и match metadata; это не live Yandex E2E и не подтверждение реальной передачи. #16 остаётся PARTIAL.
+- Наблюдение existing durable `copy` attempt переиспользует этот contract после проверки зарегистрированного `connection_id`, Keychain credential reference и provider account UID. Оно остаётся read-only: не повторяет PUT, не читает/скачивает контент, не изменяет Job/evidence/baseline и не подключено к FFI/UI. Mock HTTP test доказывает read-only GET и match metadata; это не live Yandex E2E и не подтверждение реальной передачи. #16 остаётся PARTIAL.
 - Тест с mock API подтверждает отказ от передачи на HTTP URL до чтения входа. НЕТ end-to-end проверки реальным аккаунтом, проверки полного размера/MD5 после загрузки, честного `OutcomeUnknown` в типе ошибки, интеграции со сценариями/очередью, безопасного контроля отмены и retries/backoff; пока не включать автоматические Jobs или рекламировать production-ready. Новый код ещё не прошёл локальный fmt/clippy/tests.
 
 
