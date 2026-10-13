@@ -25,7 +25,7 @@
 ## Перед публикацией в main / релизом
 
 - Форматирование и статический анализ Rust: `bash scripts/test-core.sh` (Rust fmt, clippy и tests); CI уже запускает этот скрипт.
-- `cargo test`, платформенные Swift tests и интеграционные сценарии по доступным окружениям. Для native Swift→Rust Job inventory bridge: `bash scripts/test-macos-job-inventory.sh`; он использует только временный app-owned mock root и не запускает QADREN.app.
+- `cargo test`, платформенные Swift tests и интеграционные сценарии по доступным окружениям. Для native Swift→Rust Job inventory bridge: `bash scripts/test-macos-job-inventory.sh`; он использует только временный app-owned mock root и не запускает QADREN.app. Для фактического macOS Keychain lifecycle: `bash scripts/test-macos-keychain.sh`; runner использует непредсказуемый test-only connection ID, проверяет store/read/update/delete/idempotent delete и убирает только этот test item.
 - Dependency/security review, проверка отсутствия секретов, проверка обновлённых документов.
 - Компиляция release для macOS, проверка комплектности .app и зависимостей.
 - Подпись/notarization и clean-install smoke test при выпуске для пользователей.

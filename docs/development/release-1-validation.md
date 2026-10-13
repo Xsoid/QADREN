@@ -57,7 +57,7 @@
 
 - Remove сначала переводит connection в `disabled`, затем выполняет Rust read-only gate по `connection_id`. Активная/UNKNOWN попытка, legacy attempt без target binding либо недоступность JobStore останавливают удаление до Keychain: disabled Registry record и credential остаются для recovery/reconciliation.
 - Локально пройдены `bash scripts/test-core.sh` (fmt, Clippy, 197 Rust unit tests) и `bash scripts/build-macos.sh`. Отдельный Swift fault-injection runner проверил normal flow, отказ на Job gate, Keychain и Registry, повтор после каждого отказа и независимость второй connection.
-- Не выполнена реальная проверка отказа системного Keychain, restart между отключением и cleanup и live Scenario/adapter attempt. Поэтому #25 остаётся открытой и не является подтверждением готовности настоящего disconnect UX.
+- Реальный macOS Keychain lifecycle подтверждён отдельным test-only runner: запись, чтение, update duplicate item, delete и повторный delete для непредсказуемого `connection_id`; runner не обращается к Registry, provider или пользовательским credentials. Не выполнены проверка принудительного отказа системного Keychain, restart между disable и cleanup и live Scenario/adapter attempt. Поэтому #25 остаётся открытой и не является подтверждением готовности настоящего disconnect UX.
 
 `YandexConnection.disconnect()` использует тот же fail-closed протокол: disable → read-only attempt gate → Keychain delete → единый SQLite finalization (`disconnected`, credential reference cleared, connection снова доступно для явной reauthorization). При сбое до finalization запись остаётся disabled; удаление облачных файлов и обращение к провайдеру отсутствуют. Фактические результаты этого изменения фиксируются вместе с SHA в #25.
 
