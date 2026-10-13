@@ -77,6 +77,52 @@ final class ScenarioSettings: ObservableObject {
     }
 }
 
+@MainActor
+final class ScenarioScheduleSettings: ObservableObject {
+    @Published private(set) var entries: [ScenarioScheduleEntry] = []
+    @Published private(set) var error: String?
+
+    func refresh(scenarioID: String) {
+        do {
+            entries = try StorageRegistryBridge.listScenarioSchedules(scenarioID: scenarioID)
+            error = nil
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    func create(scenarioID: String, timezone: String, weekday: UInt8, hour: UInt8, minute: UInt8) {
+        do {
+            try StorageRegistryBridge.createScenarioSchedule(
+                scenarioID: scenarioID, timezone: timezone, weekday: weekday, hour: hour, minute: minute
+            )
+            refresh(scenarioID: scenarioID)
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    func setEnabled(scenarioID: String, scheduleID: String, enabled: Bool) {
+        do {
+            try StorageRegistryBridge.setScenarioScheduleEnabled(
+                scenarioID: scenarioID, scheduleID: scheduleID, enabled: enabled
+            )
+            refresh(scenarioID: scenarioID)
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    func remove(scenarioID: String, scheduleID: String) {
+        do {
+            try StorageRegistryBridge.removeScenarioSchedule(scenarioID: scenarioID, scheduleID: scheduleID)
+            refresh(scenarioID: scenarioID)
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+}
+
 private enum SettingsPanelSection: String, CaseIterable, Hashable, Identifiable {
     case connections
     case scenarios
@@ -105,6 +151,7 @@ struct SettingsPanelView: View {
     @State private var selection: SettingsPanelSection? = .connections
     @State private var isEditingScenario = false
     @State private var editedScenario: ScenarioEntry?
+    @State private var schedulesScenario: ScenarioEntry?
 
     var body: some View {
         NavigationSplitView {
@@ -123,7 +170,12 @@ struct SettingsPanelView: View {
                 case .connections:
                     ConnectionsSettingsView(connections: connections)
                 case .scenarios:
-                    if isEditingScenario {
+                    if let schedulesScenario {
+                        ScenarioSchedulesView(
+                            scenario: schedulesScenario,
+                            done: { self.schedulesScenario = nil }
+                        )
+                    } else if isEditingScenario {
                         ScenarioEditorView(
                             connections: scenarioEndpoints,
                             scenario: editedScenario,
@@ -135,7 +187,8 @@ struct SettingsPanelView: View {
                             scenarios: scenarios,
                             connections: connections.entries,
                             createScenario: beginScenarioCreation,
-                            editScenario: beginScenarioEditing
+                            editScenario: beginScenarioEditing,
+                            editSchedules: { schedulesScenario = $0 }
                         )
                     }
                 case .application:
@@ -153,7 +206,9 @@ struct SettingsPanelView: View {
                         Button("Этот Mac") { connections.addLocalComputer() }
                     }
                 case .scenarios:
-                    Button("Создать сценарий", systemImage: "plus", action: beginScenarioCreation)
+                    if schedulesScenario == nil {
+                        Button("Создать сценарий", systemImage: "plus", action: beginScenarioCreation)
+                    }
                 case .application:
                     EmptyView()
                 }
@@ -184,11 +239,13 @@ struct SettingsPanelView: View {
     }
 
     private func beginScenarioCreation() {
+        schedulesScenario = nil
         editedScenario = nil
         isEditingScenario = true
     }
 
     private func beginScenarioEditing(_ scenario: ScenarioEntry) {
+        schedulesScenario = nil
         editedScenario = scenario
         isEditingScenario = true
     }
@@ -337,6 +394,7 @@ private struct ScenariosSettingsView: View {
     let connections: [StorageEntry]
     let createScenario: () -> Void
     let editScenario: (ScenarioEntry) -> Void
+    let editSchedules: (ScenarioEntry) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -379,6 +437,7 @@ private struct ScenariosSettingsView: View {
                             ))
                             .labelsHidden()
                             Button("Изменить") { editScenario(scenario) }
+                            Button("Расписания") { editSchedules(scenario) }
                         }
                         EndpointLine(
                             title: "Источник",
@@ -426,6 +485,107 @@ private struct ScenariosSettingsView: View {
         case "bidirectional": "Двусторонняя"
         default: direction
         }
+    }
+}
+
+private struct ScenarioSchedulesView: View {
+    let scenario: ScenarioEntry
+    let done: () -> Void
+    @StateObject private var schedules = ScenarioScheduleSettings()
+    @State private var timezone = TimeZone.current.identifier
+    @State private var weekday: UInt8 = 0
+    @State private var time = Date()
+
+    private let weekdays = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .firstTextBaseline) {
+                Button("Назад", systemImage: "chevron.left", action: done)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Расписания").font(.largeTitle.bold())
+                    Text(scenario.name + " · ревизия " + String(scenario.revision))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+
+            SettingsNotice(
+                text: "Расписание сохраняет только время и timezone. Планировщик пока не создаёт Job и не передаёт файлы.",
+                symbol: "clock.badge.exclamationmark"
+            )
+
+            Form {
+                Section("Новое расписание") {
+                    Picker("День", selection: $weekday) {
+                        ForEach(Array(weekdays.enumerated()), id: \.offset) { index, title in
+                            Text(title).tag(UInt8(index))
+                        }
+                    }
+                    DatePicker("Время", selection: $time, displayedComponents: .hourAndMinute)
+                    TextField("IANA timezone", text: $timezone)
+                    HStack {
+                        Spacer()
+                        Button("Добавить расписание", action: create)
+                            .disabled(timezone.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                }
+            }
+            .formStyle(.grouped)
+
+            if let error = schedules.error {
+                SettingsNotice(text: error, symbol: "exclamationmark.triangle")
+            }
+
+            if schedules.entries.isEmpty {
+                SettingsEmptyState(
+                    title: "Расписаний пока нет",
+                    detail: "Добавьте одно или несколько weekly расписаний. Их время хранится с явной IANA timezone.",
+                    symbol: "calendar"
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(schedules.entries) { entry in
+                    HStack(spacing: 12) {
+                        Image(systemName: entry.enabled ? "calendar.badge.clock" : "calendar.badge.exclamationmark")
+                            .foregroundStyle(entry.enabled ? QDTheme.cyan : .secondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(weekdays[Int(entry.weekday)] + " · " + timeTitle(entry))
+                            Text(entry.timezone).font(.caption.monospaced()).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Toggle("Включено", isOn: Binding(
+                            get: { entry.enabled },
+                            set: { schedules.setEnabled(scenarioID: scenario.id, scheduleID: entry.id, enabled: $0) }
+                        ))
+                        .labelsHidden()
+                        Button("Удалить", role: .destructive) {
+                            schedules.remove(scenarioID: scenario.id, scheduleID: entry.id)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+                .listStyle(.inset)
+            }
+        }
+        .padding(24)
+        .onAppear { schedules.refresh(scenarioID: scenario.id) }
+    }
+
+    private func create() {
+        let components = Calendar.current.dateComponents([.hour, .minute], from: time)
+        guard let hour = components.hour, let minute = components.minute else { return }
+        schedules.create(
+            scenarioID: scenario.id,
+            timezone: timezone.trimmingCharacters(in: .whitespacesAndNewlines),
+            weekday: weekday,
+            hour: UInt8(hour),
+            minute: UInt8(minute)
+        )
+    }
+
+    private func timeTitle(_ entry: ScenarioScheduleEntry) -> String {
+        String(format: "%02d:%02d", entry.hour, entry.minute)
     }
 }
 

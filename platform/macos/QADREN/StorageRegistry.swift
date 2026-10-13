@@ -16,6 +16,24 @@ private func scenarioCreate(
 private func scenarioSetEnabled(
     _ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ enabled: UInt8
 ) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_scenario_schedules_list")
+private func scenarioSchedulesList(
+    _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_scenario_schedules_create")
+private func scenarioSchedulesCreate(
+    _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?, _ timezone: UnsafePointer<CChar>?,
+    _ weekday: UInt8, _ hour: UInt8, _ minute: UInt8
+) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_scenario_schedules_set_enabled")
+private func scenarioSchedulesSetEnabled(
+    _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?, _ scheduleID: UnsafePointer<CChar>?,
+    _ enabled: UInt8
+) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_scenario_schedules_remove")
+private func scenarioSchedulesRemove(
+    _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?, _ scheduleID: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_scenarios_update")
 private func scenarioUpdate(
     _ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ name: UnsafePointer<CChar>?,
@@ -61,6 +79,15 @@ struct ScenarioEntry: Decodable, Identifiable {
     let direction: String
     let enabled: Bool
     let revision: UInt64
+}
+struct ScenarioScheduleEntry: Decodable, Identifiable {
+    let id: String
+    let scenario_id: String
+    let timezone: String
+    let weekday: UInt8
+    let hour: UInt8
+    let minute: UInt8
+    let enabled: Bool
 }
 private struct NewConnection: Decodable {
     let id: String
@@ -152,6 +179,58 @@ enum StorageRegistryBridge {
         let _: Bool = try database.withCString { db in
             try id.withCString { value in
                 try unwrap(scenarioSetEnabled(db, value, enabled ? 1 : 0), as: Bool.self)
+            }
+        }
+    }
+
+    static func listScenarioSchedules(scenarioID: String) throws -> [ScenarioScheduleEntry] {
+        let database = try path
+        return try database.withCString { db in
+            try scenarioID.withCString { id in
+                try unwrap(scenarioSchedulesList(db, id), as: [ScenarioScheduleEntry].self)
+            }
+        }
+    }
+
+    static func createScenarioSchedule(
+        scenarioID: String, timezone: String, weekday: UInt8, hour: UInt8, minute: UInt8
+    ) throws {
+        let database = try path
+        let _: NewConnection = try database.withCString { db in
+            try scenarioID.withCString { id in
+                try timezone.withCString { timezone in
+                    try unwrap(
+                        scenarioSchedulesCreate(db, id, timezone, weekday, hour, minute),
+                        as: NewConnection.self
+                    )
+                }
+            }
+        }
+    }
+
+    static func setScenarioScheduleEnabled(
+        scenarioID: String, scheduleID: String, enabled: Bool
+    ) throws {
+        let database = try path
+        let _: Bool = try database.withCString { db in
+            try scenarioID.withCString { scenario in
+                try scheduleID.withCString { schedule in
+                    try unwrap(
+                        scenarioSchedulesSetEnabled(db, scenario, schedule, enabled ? 1 : 0),
+                        as: Bool.self
+                    )
+                }
+            }
+        }
+    }
+
+    static func removeScenarioSchedule(scenarioID: String, scheduleID: String) throws {
+        let database = try path
+        let _: Bool = try database.withCString { db in
+            try scenarioID.withCString { scenario in
+                try scheduleID.withCString { schedule in
+                    try unwrap(scenarioSchedulesRemove(db, scenario, schedule), as: Bool.self)
+                }
             }
         }
     }

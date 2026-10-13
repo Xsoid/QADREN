@@ -506,6 +506,52 @@ impl Registry {
         schedules
     }
 
+    /// Enable or disable one schedule without changing its already claimed
+    /// occurrences. Re-enabling must never replay an older local slot.
+    pub fn set_scenario_schedule_enabled(
+        &self,
+        scenario_id: &str,
+        schedule_id: &str,
+        enabled: bool,
+    ) -> Result<()> {
+        let changed = self.db.execute(
+            "UPDATE scenario_schedules SET enabled=?1 WHERE id=?2 AND scenario_id=?3",
+            params![enabled, schedule_id, scenario_id],
+        )?;
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err(RegistryError::NotFound)
+        }
+    }
+
+    /// Removing a schedule changes only future automatic configuration. Its
+    /// occurrence receipts are removed in the same transaction; no Job is
+    /// submitted, cancelled, or otherwise modified here.
+    pub fn remove_scenario_schedule(&self, scenario_id: &str, schedule_id: &str) -> Result<()> {
+        let transaction = self.db.unchecked_transaction()?;
+        let exists: Option<String> = transaction
+            .query_row(
+                "SELECT id FROM scenario_schedules WHERE id=?1 AND scenario_id=?2",
+                params![schedule_id, scenario_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if exists.is_none() {
+            return Err(RegistryError::NotFound);
+        }
+        transaction.execute(
+            "DELETE FROM schedule_occurrences WHERE schedule_id=?1",
+            [schedule_id],
+        )?;
+        transaction.execute(
+            "DELETE FROM scenario_schedules WHERE id=?1 AND scenario_id=?2",
+            params![schedule_id, scenario_id],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Atomically claim one evaluated local schedule slot. A duplicate claim
     /// is intentionally a no-op, preventing repeated DST hours and restart
     /// catch-up from creating duplicate future Jobs.
@@ -976,6 +1022,21 @@ mod tests {
         assert!(matches!(
             db.create_scenario_schedule(&scenario, "Europe/Samara", 7, 9, 0),
             Err(RegistryError::InvalidSchedule)
+        ));
+
+        let schedule = schedules[0].id.clone();
+        db.set_scenario_schedule_enabled(&scenario, &schedule, false)
+            .unwrap();
+        assert!(!db.list_scenario_schedules(&scenario).unwrap()[0].enabled);
+        assert!(matches!(
+            db.set_scenario_schedule_enabled("other", &schedule, true),
+            Err(RegistryError::NotFound)
+        ));
+        db.remove_scenario_schedule(&scenario, &schedule).unwrap();
+        assert_eq!(db.list_scenario_schedules(&scenario).unwrap().len(), 1);
+        assert!(matches!(
+            db.remove_scenario_schedule(&scenario, &schedule),
+            Err(RegistryError::NotFound)
         ));
     }
 

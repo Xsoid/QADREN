@@ -130,6 +130,80 @@ pub extern "C" fn qadren_scenarios_set_enabled(
 }
 
 #[no_mangle]
+pub extern "C" fn qadren_scenario_schedules_list(
+    path: *const c_char,
+    scenario_id: *const c_char,
+) -> *mut c_char {
+    let Some(scenario_id) = input(scenario_id) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    with_registry(path, |db| {
+        Ok(json!(db
+            .list_scenario_schedules(&scenario_id)?
+            .into_iter()
+            .map(|item| json!({
+                "id": item.id, "scenario_id": item.scenario_id, "timezone": item.timezone,
+                "weekday": item.weekday, "hour": item.hour, "minute": item.minute,
+                "enabled": item.enabled
+            }))
+            .collect::<Vec<Value>>()))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn qadren_scenario_schedules_create(
+    path: *const c_char,
+    scenario_id: *const c_char,
+    timezone: *const c_char,
+    weekday: u8,
+    hour: u8,
+    minute: u8,
+) -> *mut c_char {
+    let (Some(scenario_id), Some(timezone)) = (input(scenario_id), input(timezone)) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    with_registry(path, |db| {
+        Ok(json!({"id": db.create_scenario_schedule(
+            &scenario_id, &timezone, weekday, hour, minute
+        )?}))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn qadren_scenario_schedules_set_enabled(
+    path: *const c_char,
+    scenario_id: *const c_char,
+    schedule_id: *const c_char,
+    enabled: u8,
+) -> *mut c_char {
+    let (Some(scenario_id), Some(schedule_id)) = (input(scenario_id), input(schedule_id)) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    if enabled > 1 {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    }
+    with_registry(path, |db| {
+        db.set_scenario_schedule_enabled(&scenario_id, &schedule_id, enabled == 1)?;
+        Ok(json!(true))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn qadren_scenario_schedules_remove(
+    path: *const c_char,
+    scenario_id: *const c_char,
+    schedule_id: *const c_char,
+) -> *mut c_char {
+    let (Some(scenario_id), Some(schedule_id)) = (input(scenario_id), input(schedule_id)) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    with_registry(path, |db| {
+        db.remove_scenario_schedule(&scenario_id, &schedule_id)?;
+        Ok(json!(true))
+    })
+}
+
+#[no_mangle]
 pub extern "C" fn qadren_scenarios_update(
     path: *const c_char,
     id: *const c_char,
@@ -426,6 +500,52 @@ mod tests {
             serde_json::from_str(unsafe { CStr::from_ptr(created) }.to_str().unwrap()).unwrap();
         unsafe { qadren_registry_free_string(created) };
         let scenario_id = CString::new(scenario["data"]["id"].as_str().unwrap()).unwrap();
+        let timezone = CString::new("Europe/Samara").unwrap();
+        let created_schedule = qadren_scenario_schedules_create(
+            path.as_ptr(),
+            scenario_id.as_ptr(),
+            timezone.as_ptr(),
+            0,
+            9,
+            30,
+        );
+        let schedule: Value = serde_json::from_str(
+            unsafe { CStr::from_ptr(created_schedule) }
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap();
+        unsafe { qadren_registry_free_string(created_schedule) };
+        let schedule_id = CString::new(schedule["data"]["id"].as_str().unwrap()).unwrap();
+        let listed_schedules = qadren_scenario_schedules_list(path.as_ptr(), scenario_id.as_ptr());
+        let schedules: Value = serde_json::from_str(
+            unsafe { CStr::from_ptr(listed_schedules) }
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap();
+        unsafe { qadren_registry_free_string(listed_schedules) };
+        assert_eq!(schedules["data"][0]["timezone"], "Europe/Samara");
+        let disabled_schedule = qadren_scenario_schedules_set_enabled(
+            path.as_ptr(),
+            scenario_id.as_ptr(),
+            schedule_id.as_ptr(),
+            0,
+        );
+        unsafe { qadren_registry_free_string(disabled_schedule) };
+        let removed_schedule = qadren_scenario_schedules_remove(
+            path.as_ptr(),
+            scenario_id.as_ptr(),
+            schedule_id.as_ptr(),
+        );
+        let removed: Value = serde_json::from_str(
+            unsafe { CStr::from_ptr(removed_schedule) }
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(removed["data"], true);
+        unsafe { qadren_registry_free_string(removed_schedule) };
         let disabled = qadren_scenarios_set_enabled(path.as_ptr(), scenario_id.as_ptr(), 0);
         unsafe { qadren_registry_free_string(disabled) };
         let updated_name = CString::new("Updated documents").unwrap();
