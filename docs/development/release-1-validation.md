@@ -61,6 +61,8 @@
 
 `YandexConnection.disconnect()` использует тот же fail-closed протокол: disable → read-only attempt gate → Keychain delete → единый SQLite finalization (`disconnected`, credential reference cleared, connection снова доступно для явной reauthorization). При сбое до finalization запись остаётся disabled; удаление облачных файлов и обращение к провайдеру отсутствуют. Фактические результаты этого изменения фиксируются вместе с SHA в #25.
 
+Локальное `local_filesystem` подключение теперь не попадает в Keychain-only ветку: Remove использует disable → тот же read-only attempt gate → удаление только Registry record. Keychain, локальные пользовательские файлы и provider не затрагиваются. При unresolved attempt запись остаётся disabled для reconciliation/retry. Swift fault-injection runner дополнительно проверяет normal и blocked local flow.
+
 ## Scenario metadata-only dry-run planner — #19 (2026-10-12)
 
 - Rust `scenario_planner` строит детерминированный план только из разрешённых metadata snapshots и последнего подтверждённого `FileSyncState`; он не выполняет I/O, не создаёт Job и не меняет baseline.

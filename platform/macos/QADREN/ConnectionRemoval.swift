@@ -29,6 +29,19 @@ enum ConnectionRemoval {
         try deleteRecord()
     }
 
+    /// Local Filesystem has no credential to delete, but its Registry record
+    /// is still an endpoint for durable Jobs. Apply the same disable and
+    /// unresolved-attempt gate before removing only that local record.
+    static func removeLocal(
+        disable: () throws -> Void,
+        ensureNoUnresolvedAttempts: () throws -> Void,
+        deleteRecord: () throws -> Void
+    ) throws {
+        try disable()
+        try ensureNoUnresolvedAttempts()
+        try deleteRecord()
+    }
+
     /// Disconnect only local credentials while preserving the connection for a
     /// later explicit reauthorization. As with removal, a failed step leaves
     /// the Registry record disabled so no new work can begin accidentally.

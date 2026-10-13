@@ -98,6 +98,32 @@ let second = FakeConnection()
 try first.attempt()
 check(second.present && second.credentialPresent && second.enabled, "other connection remains independent")
 
+let local = FakeConnection()
+try ConnectionRemoval.removeLocal(
+    disable: {
+        local.events.append("disable")
+        local.enabled = false
+    },
+    ensureNoUnresolvedAttempts: { local.events.append("attempts") },
+    deleteRecord: {
+        local.events.append("registry")
+        local.present = false
+    }
+)
+check(!local.present && !local.enabled && local.credentialPresent, "local removal never touches Keychain")
+check(local.events == ["disable", "attempts", "registry"], "local removal ordering")
+
+let blockedLocal = FakeConnection()
+do {
+    try ConnectionRemoval.removeLocal(
+        disable: { blockedLocal.enabled = false },
+        ensureNoUnresolvedAttempts: { throw SimulatedFailure.injected },
+        deleteRecord: { blockedLocal.present = false }
+    )
+    fatalError("unresolved local attempt must stop removal")
+} catch SimulatedFailure.injected {}
+check(blockedLocal.present && !blockedLocal.enabled, "local attempt gate preserves disabled record")
+
 let disconnect = FakeConnection()
 var disconnectedRecord = false
 try ConnectionRemoval.disconnect(

@@ -64,15 +64,29 @@ final class StorageConnections: ObservableObject {
             guard let entry = try StorageRegistryBridge.list().first(where: { $0.id == id }) else {
                 throw StorageError.operation("Connection not found; credentials were not touched")
             }
-            try ConnectionRemoval.run(
-                adapter: entry.adapter,
-                disable: { try StorageRegistryBridge.setEnabled(id: id, enabled: false) },
-                ensureNoUnresolvedAttempts: {
-                    try JobInventory.requireNoUnresolvedAttempts(connectionID: id)
-                },
-                deleteCredential: { try YandexKeychain.delete(id) },
-                deleteRecord: { try StorageRegistryBridge.remove(id: id) }
-            )
+            let disable = { try StorageRegistryBridge.setEnabled(id: id, enabled: false) }
+            let ensureNoUnresolvedAttempts = {
+                try JobInventory.requireNoUnresolvedAttempts(connectionID: id)
+            }
+            let deleteRecord = { try StorageRegistryBridge.remove(id: id) }
+            switch entry.adapter {
+            case "yandex_disk":
+                try ConnectionRemoval.run(
+                    adapter: entry.adapter,
+                    disable: disable,
+                    ensureNoUnresolvedAttempts: ensureNoUnresolvedAttempts,
+                    deleteCredential: { try YandexKeychain.delete(id) },
+                    deleteRecord: deleteRecord
+                )
+            case "local_filesystem":
+                try ConnectionRemoval.removeLocal(
+                    disable: disable,
+                    ensureNoUnresolvedAttempts: ensureNoUnresolvedAttempts,
+                    deleteRecord: deleteRecord
+                )
+            default:
+                throw StorageError.operation("Unsupported connection adapter")
+            }
             refresh()
         } catch {
             // Refresh the listing without discarding the failure message.
