@@ -566,3 +566,9 @@
 Для существующего Scenario в отдельной панели настроек можно создать несколько weekly расписаний, просмотреть их IANA timezone, временно выключить каждое отдельно или удалить. Конфигурация хранится в существующем Rust Registry; SwiftUI обращается к ней только через новые узкие C ABI list/create/enable/remove. Операция удаления расписания в одной SQLite-транзакции сначала удаляет его receipts уже оценённых слотов, затем саму конфигурацию, и не затрагивает Scenario, Job или файлы. Выключение сохраняет receipts, поэтому повторное включение не должно воспроизвести старый слот.
 
 Граница: интерфейс прямо сообщает, что scheduler ещё не создаёт Job. Нет `next run`, фонового таймера, content I/O, Scenario execution, consent или передачи файлов. Native visual/VoiceOver smoke для этого SHA не выполнен; статические Core/FFI и macOS build проверки перечислены в evidence Issue #21.
+
+### Подтверждённый FileSyncState — #19 (2026-10-13)
+
+Registry schema v8 хранит FileSyncState отдельно от строки Scenario: ключ включает Scenario ID, immutable revision и относительный путь; в записи остаются только metadata identity/size/MD5 каждой стороны, без контента и секретов. Запись допускается только при `MetadataVerified` либо более сильном evidence; `Requested`, provider acknowledgement и `UNKNOWN` fail-closed и baseline не продвигают. Новая revision начинает без унаследованного baseline, поэтому её dry-run не может молча использовать состояние другой конфигурации.
+
+Этот пакет не делает adapter scan, не вызывает planner через FFI/UI, не создаёт Job и не подтверждает реальную синхронизацию. Он создаёт только durable contract, который будущий executor обязан вызывать после независимой проверки результата.

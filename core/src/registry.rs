@@ -1,6 +1,8 @@
 //! Persistent metadata-only storage connection registry.
 //! Never stores credentials, tokens, file content or remote delete requests.
 use crate::automation::{AutomaticTriggerResult, ScenarioAutomationState};
+use crate::confirmation::{Confirmation, EvidenceLevel};
+use crate::model::{ConfirmedFileVersion, FileSyncState, ScenarioReference};
 use crate::scheduler::WeeklySchedule;
 use chrono::Weekday;
 use chrono_tz::Tz;
@@ -17,6 +19,8 @@ pub enum RegistryError {
     IntegrityFailed,
     NotFound,
     InvalidSchedule,
+    InvalidSyncState,
+    InsufficientEvidence,
 }
 impl From<rusqlite::Error> for RegistryError {
     fn from(error: rusqlite::Error) -> Self {
@@ -39,8 +43,9 @@ pub struct StorageConnection {
     pub diagnosis: Option<String>,
 }
 
-/// Persisted Scenario metadata. It stores configuration only: never file content,
-/// credentials, a transfer plan, or a confirmed FileSyncState.
+/// Persisted Scenario metadata. The row stores configuration only: never file
+/// content, credentials, or a transfer plan. Confirmed FileSyncState records
+/// live in a separate revision-bound Registry table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scenario {
     pub id: String,
@@ -110,7 +115,7 @@ impl Registry {
         }
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 7 {
+        if version > 8 {
             return Err(RegistryError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -218,6 +223,27 @@ impl Registry {
                     PRIMARY KEY(schedule_id, occurrence_key)
                 );
                 PRAGMA user_version = 7;
+                COMMIT;",
+            )?;
+        }
+        if version <= 7 {
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                CREATE TABLE file_sync_states (
+                    scenario_id TEXT NOT NULL,
+                    scenario_revision INTEGER NOT NULL CHECK(scenario_revision > 0),
+                    relative_path TEXT NOT NULL,
+                    left_object_revision TEXT,
+                    left_size INTEGER,
+                    left_checksum_md5 TEXT,
+                    right_object_revision TEXT,
+                    right_size INTEGER,
+                    right_checksum_md5 TEXT,
+                    PRIMARY KEY(scenario_id,scenario_revision,relative_path),
+                    FOREIGN KEY(scenario_id,scenario_revision)
+                      REFERENCES scenario_revisions(scenario_id,revision) ON DELETE RESTRICT
+                );
+                PRAGMA user_version = 8;
                 COMMIT;",
             )?;
         }
@@ -714,6 +740,102 @@ impl Registry {
             .map_err(Into::into)
     }
 
+    /// Persist one last-confirmed state only after an executor has independently
+    /// verified the operation. Requested/acknowledged/unknown outcomes never
+    /// advance this baseline, and this method performs no scan or adapter I/O.
+    pub fn record_confirmed_file_state(
+        &self,
+        state: &FileSyncState,
+        confirmation: Confirmation,
+    ) -> Result<()> {
+        if !confirmation.meets(EvidenceLevel::MetadataVerified) {
+            return Err(RegistryError::InsufficientEvidence);
+        }
+        if !valid_sync_path(&state.relative_path)
+            || state.scenario.scenario_id.is_empty()
+            || state.scenario.revision == 0
+            || (state.left.is_none() && state.right.is_none())
+            || !valid_confirmed_version(state.left.as_ref())
+            || !valid_confirmed_version(state.right.as_ref())
+        {
+            return Err(RegistryError::InvalidSyncState);
+        }
+        let scenario_exists: Option<String> = self
+            .db
+            .query_row(
+                "SELECT scenario_id FROM scenario_revisions WHERE scenario_id=?1 AND revision=?2",
+                params![state.scenario.scenario_id, state.scenario.revision as i64],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if scenario_exists.is_none() {
+            return Err(RegistryError::NotFound);
+        }
+        self.db.execute(
+            "INSERT INTO file_sync_states(
+                scenario_id,scenario_revision,relative_path,
+                left_object_revision,left_size,left_checksum_md5,
+                right_object_revision,right_size,right_checksum_md5
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+             ON CONFLICT(scenario_id,scenario_revision,relative_path) DO UPDATE SET
+                left_object_revision=excluded.left_object_revision,
+                left_size=excluded.left_size,
+                left_checksum_md5=excluded.left_checksum_md5,
+                right_object_revision=excluded.right_object_revision,
+                right_size=excluded.right_size,
+                right_checksum_md5=excluded.right_checksum_md5",
+            params![
+                state.scenario.scenario_id,
+                state.scenario.revision as i64,
+                state.relative_path,
+                state
+                    .left
+                    .as_ref()
+                    .and_then(|v| v.object_revision.as_deref()),
+                state.left.as_ref().map(|v| v.size as i64),
+                state.left.as_ref().and_then(|v| v.checksum_md5.as_deref()),
+                state
+                    .right
+                    .as_ref()
+                    .and_then(|v| v.object_revision.as_deref()),
+                state.right.as_ref().map(|v| v.size as i64),
+                state.right.as_ref().and_then(|v| v.checksum_md5.as_deref()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Read only the verified baseline belonging to the exact Scenario
+    /// revision. Later edits never silently change an older Job's comparison.
+    pub fn list_confirmed_file_states(
+        &self,
+        reference: &ScenarioReference,
+    ) -> Result<Vec<FileSyncState>> {
+        let mut statement = self.db.prepare(
+            "SELECT relative_path,
+                left_object_revision,left_size,left_checksum_md5,
+                right_object_revision,right_size,right_checksum_md5
+             FROM file_sync_states
+             WHERE scenario_id=?1 AND scenario_revision=?2
+             ORDER BY relative_path",
+        )?;
+        let states = statement
+            .query_map(
+                params![reference.scenario_id, reference.revision as i64],
+                |row| {
+                    Ok(FileSyncState {
+                        scenario: reference.clone(),
+                        relative_path: row.get(0)?,
+                        left: decode_confirmed_version(row, 1, 2, 3)?,
+                        right: decode_confirmed_version(row, 4, 5, 6)?,
+                    })
+                },
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into);
+        states
+    }
+
     fn changed(&self, count: usize) -> Result<()> {
         if count == 0 {
             Err(RegistryError::NotFound)
@@ -733,6 +855,47 @@ fn valid_adapter(adapter: &str) -> bool {
         && adapter
             .bytes()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_' || c == b'-')
+}
+
+fn valid_sync_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+        && !path.chars().any(char::is_control)
+}
+
+fn valid_confirmed_version(version: Option<&ConfirmedFileVersion>) -> bool {
+    let Some(version) = version else { return true };
+    version.object_revision.as_deref().is_none_or(|value| {
+        !value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
+    }) && version
+        .checksum_md5
+        .as_deref()
+        .is_none_or(|value| value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+fn decode_confirmed_version(
+    row: &rusqlite::Row<'_>,
+    revision_index: usize,
+    size_index: usize,
+    checksum_index: usize,
+) -> std::result::Result<Option<ConfirmedFileVersion>, rusqlite::Error> {
+    let object_revision: Option<String> = row.get(revision_index)?;
+    let size: Option<i64> = row.get(size_index)?;
+    let checksum_md5: Option<String> = row.get(checksum_index)?;
+    match (object_revision, size, checksum_md5) {
+        (None, None, None) => Ok(None),
+        (object_revision, Some(size), checksum_md5) if size >= 0 => {
+            Ok(Some(ConfirmedFileVersion {
+                object_revision,
+                size: size as u64,
+                checksum_md5,
+            }))
+        }
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
 }
 
 fn validate_schedule(timezone: &str, weekday: u8, hour: u8, minute: u8) -> Result<()> {
@@ -899,6 +1062,68 @@ mod tests {
         db.set_scenario_enabled(&id, false).unwrap();
         assert!(!db.list_scenarios().unwrap()[0].enabled);
         assert!(matches!(db.remove(&left), Err(RegistryError::Database(_))));
+    }
+
+    #[test]
+    fn confirmed_file_state_requires_evidence_and_stays_bound_to_revision() {
+        let db = Registry::in_memory().unwrap();
+        let left = db.add("local_filesystem", "Left").unwrap();
+        let right = db.add("local_filesystem", "Right").unwrap();
+        let scenario_id = db
+            .create_scenario("Documents", &left, "/", &right, "/archive", "left_to_right")
+            .unwrap();
+        let reference = ScenarioReference {
+            scenario_id: scenario_id.clone(),
+            revision: 1,
+        };
+        let state = FileSyncState {
+            scenario: reference.clone(),
+            relative_path: "report.pdf".into(),
+            left: Some(ConfirmedFileVersion {
+                object_revision: Some("local-1".into()),
+                size: 12,
+                checksum_md5: Some("abcdef0123456789abcdef0123456789".into()),
+            }),
+            right: Some(ConfirmedFileVersion {
+                object_revision: Some("remote-1".into()),
+                size: 12,
+                checksum_md5: Some("abcdef0123456789abcdef0123456789".into()),
+            }),
+        };
+        assert!(matches!(
+            db.record_confirmed_file_state(
+                &state,
+                Confirmation::Confirmed(EvidenceLevel::ProviderAcknowledged)
+            ),
+            Err(RegistryError::InsufficientEvidence)
+        ));
+        db.record_confirmed_file_state(
+            &state,
+            Confirmation::Confirmed(EvidenceLevel::MetadataVerified),
+        )
+        .unwrap();
+        assert_eq!(
+            db.list_confirmed_file_states(&reference).unwrap(),
+            vec![state]
+        );
+
+        db.update_scenario(
+            &scenario_id,
+            ScenarioUpdate {
+                name: "Documents v2",
+                left_connection_id: &left,
+                left_root: "/",
+                right_connection_id: &right,
+                right_root: "/archive",
+                direction: "left_to_right",
+            },
+        )
+        .unwrap();
+        let later = ScenarioReference {
+            scenario_id,
+            revision: 2,
+        };
+        assert!(db.list_confirmed_file_states(&later).unwrap().is_empty());
     }
 
     #[test]
