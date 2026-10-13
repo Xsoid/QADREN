@@ -69,6 +69,11 @@
 - `Create`/`Update` остаются предложениями. Удаление всегда требует отдельного policy decision; изменение destination и одновременные изменения дают conflict. Равенство имени/размера не считается равенством байтов: при отсутствии trusted checksum или provider revision результат `NeedsVerification`.
 - Локально пройден `bash scripts/test-core.sh` с 202 Rust tests. Нет adapter scan, persistence, FFI/UI, Job submission или E2E; #19 остаётся PARTIAL.
 
+### Registry-backed preview composition — #19 (2026-10-13)
+
+- `Registry::plan_scenario_dry_run` загружает только immutable Scenario revision и его revision-bound подтверждённый `FileSyncState`, после чего передаёт caller-supplied metadata snapshots в pure planner. Тест подтверждает, что последующая смена direction не меняет preview старой revision и preview не записывает baseline.
+- Граница намеренная: нет adapter scan, FFI/UI, чтения контента, Job submission, policy decision или записи FileSyncState. Если Registry или planner не может доказать корректный план, метод возвращает ошибку; выполнение не начинается. #19 остаётся PARTIAL до реального авторизованного metadata scan и отдельного execution path.
+
 ## Automation coalescing baseline — #21 (2026-10-12)
 
 - Pure Rust state machine coalesces a burst of automatic triggers into one pending run and keeps exactly one follow-up while a Job is active. Disabled/locally paused Scenario ignores automatic triggers, while a manual request remains admissible.

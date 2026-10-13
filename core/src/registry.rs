@@ -2,7 +2,11 @@
 //! Never stores credentials, tokens, file content or remote delete requests.
 use crate::automation::{AutomaticTriggerResult, ScenarioAutomationState};
 use crate::confirmation::{Confirmation, EvidenceLevel};
-use crate::model::{ConfirmedFileVersion, FileSyncState, ScenarioReference};
+use crate::model::{
+    ConfirmedFileVersion, FileSyncState, ScenarioDraft, ScenarioFilters, ScenarioPolicies,
+    ScenarioReference, StorageEndpoint, SyncDirection,
+};
+use crate::scenario_planner::{self, ObservedFile, PlanItem};
 use crate::scheduler::WeeklySchedule;
 use chrono::Weekday;
 use chrono_tz::Tz;
@@ -21,6 +25,7 @@ pub enum RegistryError {
     InvalidSchedule,
     InvalidSyncState,
     InsufficientEvidence,
+    PlanningFailed,
 }
 impl From<rusqlite::Error> for RegistryError {
     fn from(error: rusqlite::Error) -> Self {
@@ -836,6 +841,52 @@ impl Registry {
         states
     }
 
+    /// Compose a deterministic, read-only dry-run from the exact persisted
+    /// Scenario revision and its confirmed baseline. Snapshots are supplied by
+    /// an already-authorized caller; this method never scans adapters, reads
+    /// content, creates a Job, or advances FileSyncState.
+    pub fn plan_scenario_dry_run(
+        &self,
+        reference: &ScenarioReference,
+        left_snapshot: &[ObservedFile],
+        right_snapshot: &[ObservedFile],
+    ) -> Result<Vec<PlanItem>> {
+        let stored = self
+            .get_scenario_revision(&reference.scenario_id, reference.revision)?
+            .ok_or(RegistryError::NotFound)?;
+        let direction = match stored.direction.as_str() {
+            "left_to_right" => SyncDirection::LeftToRight,
+            "right_to_left" => SyncDirection::RightToLeft,
+            "bidirectional" => SyncDirection::Bidirectional,
+            _ => return Err(RegistryError::PlanningFailed),
+        };
+        let scenario = ScenarioDraft {
+            name: stored.name,
+            left: StorageEndpoint {
+                connection_id: stored.left_connection_id,
+                root: stored.left_root,
+            },
+            right: StorageEndpoint {
+                connection_id: stored.right_connection_id,
+                root: stored.right_root,
+            },
+            direction,
+            // Filters and executable policy decisions are not persisted in the
+            // current Registry schema, so this composition never invents them.
+            filters: ScenarioFilters::default(),
+            policies: ScenarioPolicies::default(),
+        };
+        let baseline = self.list_confirmed_file_states(reference)?;
+        scenario_planner::plan(
+            &scenario,
+            reference,
+            &baseline,
+            left_snapshot,
+            right_snapshot,
+        )
+        .map_err(|_| RegistryError::PlanningFailed)
+    }
+
     fn changed(&self, count: usize) -> Result<()> {
         if count == 0 {
             Err(RegistryError::NotFound)
@@ -1124,6 +1175,63 @@ mod tests {
             revision: 2,
         };
         assert!(db.list_confirmed_file_states(&later).unwrap().is_empty());
+    }
+
+    #[test]
+    fn dry_run_uses_pinned_revision_and_never_advances_baseline() {
+        use crate::scenario_planner::PlanAction;
+
+        let db = Registry::in_memory().unwrap();
+        let left = db.add("local_filesystem", "Left").unwrap();
+        let right = db.add("local_filesystem", "Right").unwrap();
+        let scenario_id = db
+            .create_scenario(
+                "Documents",
+                &left,
+                "/source",
+                &right,
+                "/target",
+                "left_to_right",
+            )
+            .unwrap();
+        let reference = ScenarioReference {
+            scenario_id: scenario_id.clone(),
+            revision: 1,
+        };
+
+        // A later edit must not change an existing revision's preview.
+        db.update_scenario(
+            &scenario_id,
+            ScenarioUpdate {
+                name: "Documents reversed",
+                left_connection_id: &left,
+                left_root: "/source",
+                right_connection_id: &right,
+                right_root: "/target",
+                direction: "right_to_left",
+            },
+        )
+        .unwrap();
+
+        let plan = db
+            .plan_scenario_dry_run(
+                &reference,
+                &[ObservedFile {
+                    relative_path: "new.txt".into(),
+                    object_revision: Some("left-1".into()),
+                    size: 4,
+                    checksum_md5: Some("abcdef0123456789abcdef0123456789".into()),
+                }],
+                &[],
+            )
+            .unwrap();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].relative_path, "new.txt");
+        assert_eq!(plan[0].action, PlanAction::Create { from_left: true });
+        assert!(db
+            .list_confirmed_file_states(&reference)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
