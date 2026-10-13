@@ -557,6 +557,8 @@
 
 Проверено на macOS для этого изменения: `bash scripts/test-core.sh` — PASS (fmt, Clippy, 212 Rust unit tests, включая crash-after-effect → exact reconciliation и partial artifact → сохранение `UNKNOWN`); `bash scripts/build-macos.sh` — PASS (unsigned `dist/QADREN.app`, `Info.plist`).
 
+`JobInventoryTests.swift` дополняет этот mock-slice native Swift→Rust проверкой на временном app-owned root: пустой inventory, Queue → Pause → Resume → Run → durable `completed`, затем отдельный Queue → Cancel без artifact. Команда `bash scripts/test-macos-job-inventory.sh` собирает release Rust static library и этот runner; она не запускает QADREN.app, не использует Application Support пользователя и не читает пользовательское/облачное содержимое. Это ABI/bridge evidence, а не visual UI smoke или реальная передача данных.
+
 ### Настройки: подключения и Scenario configuration — 2026-10-12
 
 «Настройки» остаются отдельным окном и используют реальные секции: независимые `StorageConnection`, сохранённые Scenario и «Настройки приложения». SwiftUI вызывает существующий Rust Registry FFI для list/create/enable/update Scenario; форма сохраняет имя, два connection ID, каталоги, направление и ревизию 1. Изменение конфигурации транзакционно увеличивает revision и сохраняет отдельный immutable snapshot обеих ревизий, не меняя включённость Scenario; закреплённый Job в будущем сможет взять именно свою конфигурацию, а не текущую строку. Включение/выключение также меняет durable Registry. «Настройки приложения» содержат локальную тему в том же левом меню и не смешивают её с настройками синхронизации. В соответствии с D-017 iCloud отсутствует из активных пунктов интерфейса.

@@ -66,6 +66,12 @@ enum JobInventory {
     static func paths() throws -> (database: String, mockStorage: String) {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("QADREN", isDirectory: true)
+        return try paths(in: base)
+    }
+
+    /// Keeps the Rust-owned inventory relocatable for native bridge tests.
+    /// Production callers use `paths()`; callers must supply an app-owned root.
+    static func paths(in base: URL) throws -> (database: String, mockStorage: String) {
         try FileManager.default.createDirectory(
             at: base, withIntermediateDirectories: true,
             attributes: [.posixPermissions: NSNumber(value: 0o700)]
@@ -74,8 +80,11 @@ enum JobInventory {
     }
 
     static func list() throws -> [JobRow] {
-        let path = try paths().database
-        let ptr = path.withCString { jobList($0) }
+        try list(databasePath: paths().database)
+    }
+
+    static func list(databasePath: String) throws -> [JobRow] {
+        let ptr = databasePath.withCString { jobList($0) }
         guard let ptr else { throw StorageError.operation("Job inventory unavailable") }
         defer { jobFree(ptr) }
         let result = try JSONDecoder().decode(JobEnvelope.self, from: Data(String(cString: ptr).utf8))
@@ -83,7 +92,7 @@ enum JobInventory {
             throw StorageError.operation(result.error ?? "Job inventory failed")
         }
         try? FileManager.default.setAttributes(
-            [.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: path
+            [.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: databasePath
         )
         return jobs
     }
@@ -115,10 +124,10 @@ enum JobInventory {
 
     private static func command(
         _ invoke: (UnsafePointer<CChar>?, UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?,
-        jobID: String
+        jobID: String,
+        databasePath: String
     ) throws {
-        let database = try paths().database
-        let pointer = database.withCString { database in
+        let pointer = databasePath.withCString { database in
             jobID.withCString { identifier in invoke(database, identifier) }
         }
         guard let pointer else { throw StorageError.operation("Mock Job command unavailable") }
@@ -129,15 +138,30 @@ enum JobInventory {
 
     /// Queuing changes only QADREN's local SQLite metadata; it creates no file.
     static func queueMockArtifact() throws {
-        try command(queueMockCreate, jobID: "g1-" + UUID().uuidString.lowercased())
+        try queueMockArtifact(
+            jobID: "g1-" + UUID().uuidString.lowercased(),
+            databasePath: paths().database
+        )
+    }
+
+    static func queueMockArtifact(jobID: String, databasePath: String) throws {
+        try command(queueMockCreate, jobID: jobID, databasePath: databasePath)
     }
 
     /// The button invoking this method is the operation-scoped consent for an
     /// app-owned test artifact. No user or cloud content is read.
     static func runMockArtifact(jobID: String) throws {
         let paths = try paths()
-        let pointer = paths.database.withCString { database in
-            paths.mockStorage.withCString { storage in
+        try runMockArtifact(
+            jobID: jobID, databasePath: paths.database, mockStoragePath: paths.mockStorage
+        )
+    }
+
+    static func runMockArtifact(
+        jobID: String, databasePath: String, mockStoragePath: String
+    ) throws {
+        let pointer = databasePath.withCString { database in
+            mockStoragePath.withCString { storage in
                 jobID.withCString { identifier in runMockCreate(database, storage, identifier) }
             }
         }
@@ -165,14 +189,26 @@ enum JobInventory {
     }
 
     static func cancelMockArtifact(jobID: String) throws {
-        try command(cancelMockCreate, jobID: jobID)
+        try cancelMockArtifact(jobID: jobID, databasePath: paths().database)
+    }
+
+    static func cancelMockArtifact(jobID: String, databasePath: String) throws {
+        try command(cancelMockCreate, jobID: jobID, databasePath: databasePath)
     }
 
     static func pauseMockArtifact(jobID: String) throws {
-        try command(pauseMockCreate, jobID: jobID)
+        try pauseMockArtifact(jobID: jobID, databasePath: paths().database)
+    }
+
+    static func pauseMockArtifact(jobID: String, databasePath: String) throws {
+        try command(pauseMockCreate, jobID: jobID, databasePath: databasePath)
     }
 
     static func resumeMockArtifact(jobID: String) throws {
-        try command(resumeMockCreate, jobID: jobID)
+        try resumeMockArtifact(jobID: jobID, databasePath: paths().database)
+    }
+
+    static func resumeMockArtifact(jobID: String, databasePath: String) throws {
+        try command(resumeMockCreate, jobID: jobID, databasePath: databasePath)
     }
 }
