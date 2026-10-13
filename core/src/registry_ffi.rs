@@ -1,11 +1,17 @@
 //! Minimal C ABI for the SQLite connection registry.
 //! Inputs are UTF-8 owned by the caller; JSON output is caller-freed.
 //! No OAuth tokens or file contents are persisted by these methods.
+use crate::model::ScenarioReference;
 use crate::registry::{Registry, ScenarioUpdate};
+use crate::scenario_planner::{ObservedFile, PlanAction, PlanItem, SideChange};
 use chrono::{DateTime, Utc};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::ffi::{c_char, CStr, CString};
 use std::path::Path;
+
+const MAX_DRY_RUN_SNAPSHOT_BYTES: usize = 1_048_576;
+const MAX_DRY_RUN_SNAPSHOT_ENTRIES: usize = 10_000;
 
 fn input(ptr: *const c_char) -> Option<String> {
     if ptr.is_null() {
@@ -21,6 +27,59 @@ fn output(value: Value) -> *mut c_char {
     CString::new(value.to_string())
         .expect("JSON-escaped string never contains literal NUL")
         .into_raw()
+}
+
+#[derive(Deserialize)]
+struct ObservedFileInput {
+    relative_path: String,
+    object_revision: Option<String>,
+    size: u64,
+    checksum_md5: Option<String>,
+}
+
+impl From<ObservedFileInput> for ObservedFile {
+    fn from(value: ObservedFileInput) -> Self {
+        Self {
+            relative_path: value.relative_path,
+            object_revision: value.object_revision,
+            size: value.size,
+            checksum_md5: value.checksum_md5,
+        }
+    }
+}
+
+fn side_change_value(value: SideChange) -> &'static str {
+    match value {
+        SideChange::Unchanged => "unchanged",
+        SideChange::Added => "added",
+        SideChange::Removed => "removed",
+        SideChange::Changed => "changed",
+        SideChange::NeedsVerification => "needs_verification",
+    }
+}
+
+fn plan_action_value(value: PlanAction) -> Value {
+    match value {
+        PlanAction::NoAction => json!({"kind":"no_action"}),
+        PlanAction::Create { from_left } => json!({"kind":"create", "from_left":from_left}),
+        PlanAction::Update { from_left } => json!({"kind":"update", "from_left":from_left}),
+        PlanAction::DeleteRequiresDecision { on_left } => {
+            json!({"kind":"delete_requires_decision", "on_left":on_left})
+        }
+        PlanAction::Conflict { reason } => json!({"kind":"conflict", "reason":reason}),
+        PlanAction::NeedsVerification { reason } => {
+            json!({"kind":"needs_verification", "reason":reason})
+        }
+    }
+}
+
+fn plan_item_value(item: PlanItem) -> Value {
+    json!({
+        "relative_path": item.relative_path,
+        "left": side_change_value(item.left),
+        "right": side_change_value(item.right),
+        "action": plan_action_value(item.action),
+    })
 }
 
 fn with_registry<F>(path: *const c_char, action: F) -> *mut c_char
@@ -127,6 +186,62 @@ pub extern "C" fn qadren_scenarios_set_enabled(
     with_registry(path, |db| {
         db.set_scenario_enabled(&id, enabled == 1)?;
         Ok(json!(true))
+    })
+}
+
+/// Compose a metadata-only dry run for one exact persisted Scenario revision.
+/// Both snapshots are caller-supplied JSON arrays; this function never scans
+/// adapters, reads content, creates a Job, advances FileSyncState, or records
+/// a policy decision.
+#[no_mangle]
+pub extern "C" fn qadren_scenarios_dry_run(
+    path: *const c_char,
+    scenario_id: *const c_char,
+    revision: u64,
+    left_snapshot_json: *const c_char,
+    right_snapshot_json: *const c_char,
+) -> *mut c_char {
+    let (Some(scenario_id), Some(left_json), Some(right_json)) = (
+        input(scenario_id),
+        input(left_snapshot_json),
+        input(right_snapshot_json),
+    ) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    if scenario_id.is_empty() || revision == 0 {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    }
+    if left_json.len() > MAX_DRY_RUN_SNAPSHOT_BYTES || right_json.len() > MAX_DRY_RUN_SNAPSHOT_BYTES
+    {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    }
+    let (Ok(left_snapshot), Ok(right_snapshot)) = (
+        serde_json::from_str::<Vec<ObservedFileInput>>(&left_json),
+        serde_json::from_str::<Vec<ObservedFileInput>>(&right_json),
+    ) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    if left_snapshot.len().saturating_add(right_snapshot.len()) > MAX_DRY_RUN_SNAPSHOT_ENTRIES {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    }
+    let reference = ScenarioReference {
+        scenario_id,
+        revision,
+    };
+    with_registry(path, |db| {
+        let left_snapshot = left_snapshot
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<_>>();
+        let right_snapshot = right_snapshot
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<_>>();
+        Ok(json!(db
+            .plan_scenario_dry_run(&reference, &left_snapshot, &right_snapshot)?
+            .into_iter()
+            .map(plan_item_value)
+            .collect::<Vec<_>>()))
     })
 }
 
@@ -614,6 +729,109 @@ mod tests {
         assert_eq!(scenarios["data"][0]["name"], "Updated documents");
         assert_eq!(scenarios["data"][0]["revision"], 2);
         assert_eq!(scenarios["data"][0]["enabled"], false);
+        std::fs::remove_file(file).unwrap();
+    }
+
+    #[test]
+    fn scenario_dry_run_is_revision_bound_and_read_only_through_ffi() {
+        let file = std::env::temp_dir().join(format!(
+            "qadren-dry-run-ffi-{}-{}.sqlite3",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let database = CString::new(file.to_str().unwrap()).unwrap();
+        let adapter = CString::new("local_filesystem").unwrap();
+        let left_name = CString::new("Left").unwrap();
+        let right_name = CString::new("Right").unwrap();
+        let left_pointer =
+            qadren_registry_add(database.as_ptr(), adapter.as_ptr(), left_name.as_ptr());
+        let left: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(left_pointer) }.to_str().unwrap())
+                .unwrap();
+        unsafe { qadren_registry_free_string(left_pointer) };
+        let right_pointer =
+            qadren_registry_add(database.as_ptr(), adapter.as_ptr(), right_name.as_ptr());
+        let right: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(right_pointer) }.to_str().unwrap())
+                .unwrap();
+        unsafe { qadren_registry_free_string(right_pointer) };
+        let left_id = CString::new(left["data"]["id"].as_str().unwrap()).unwrap();
+        let right_id = CString::new(right["data"]["id"].as_str().unwrap()).unwrap();
+        let name = CString::new("Dry run").unwrap();
+        let root = CString::new("/").unwrap();
+        let direction = CString::new("left_to_right").unwrap();
+        let created = qadren_scenarios_create(
+            database.as_ptr(),
+            name.as_ptr(),
+            left_id.as_ptr(),
+            root.as_ptr(),
+            right_id.as_ptr(),
+            root.as_ptr(),
+            direction.as_ptr(),
+        );
+        let scenario: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(created) }.to_str().unwrap()).unwrap();
+        unsafe { qadren_registry_free_string(created) };
+        let scenario_id = CString::new(scenario["data"]["id"].as_str().unwrap()).unwrap();
+        let left_snapshot = CString::new(
+            r#"[{"relative_path":"new.txt","object_revision":"left-v1","size":3,"checksum_md5":null}]"#,
+        ).unwrap();
+        let right_snapshot = CString::new("[]").unwrap();
+        let plan_pointer = qadren_scenarios_dry_run(
+            database.as_ptr(),
+            scenario_id.as_ptr(),
+            1,
+            left_snapshot.as_ptr(),
+            right_snapshot.as_ptr(),
+        );
+        let plan: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(plan_pointer) }.to_str().unwrap())
+                .unwrap();
+        unsafe { qadren_registry_free_string(plan_pointer) };
+        assert_eq!(plan["data"][0]["relative_path"], "new.txt");
+        assert_eq!(plan["data"][0]["action"]["kind"], "create");
+        assert_eq!(plan["data"][0]["action"]["from_left"], true);
+
+        let listed_pointer = qadren_scenarios_list(database.as_ptr());
+        let listed: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(listed_pointer) }.to_str().unwrap())
+                .unwrap();
+        unsafe { qadren_registry_free_string(listed_pointer) };
+        assert_eq!(listed["data"][0]["revision"], 1);
+
+        let malformed = CString::new("not-json").unwrap();
+        let invalid_pointer = qadren_scenarios_dry_run(
+            database.as_ptr(),
+            scenario_id.as_ptr(),
+            1,
+            malformed.as_ptr(),
+            right_snapshot.as_ptr(),
+        );
+        let invalid: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(invalid_pointer) }.to_str().unwrap())
+                .unwrap();
+        unsafe { qadren_registry_free_string(invalid_pointer) };
+        assert_eq!(invalid["error"], "invalid_input");
+
+        let oversized = CString::new(" ".repeat(MAX_DRY_RUN_SNAPSHOT_BYTES + 1)).unwrap();
+        let oversized_pointer = qadren_scenarios_dry_run(
+            database.as_ptr(),
+            scenario_id.as_ptr(),
+            1,
+            oversized.as_ptr(),
+            right_snapshot.as_ptr(),
+        );
+        let oversized: Value = serde_json::from_str(
+            unsafe { CStr::from_ptr(oversized_pointer) }
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap();
+        unsafe { qadren_registry_free_string(oversized_pointer) };
+        assert_eq!(oversized["error"], "invalid_input");
         std::fs::remove_file(file).unwrap();
     }
 

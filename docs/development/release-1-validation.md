@@ -72,7 +72,9 @@
 ### Registry-backed preview composition — #19 (2026-10-13)
 
 - `Registry::plan_scenario_dry_run` загружает только immutable Scenario revision и его revision-bound подтверждённый `FileSyncState`, после чего передаёт caller-supplied metadata snapshots в pure planner. Тест подтверждает, что последующая смена direction не меняет preview старой revision и preview не записывает baseline.
-- Граница намеренная: нет adapter scan, FFI/UI, чтения контента, Job submission, policy decision или записи FileSyncState. Если Registry или planner не может доказать корректный план, метод возвращает ошибку; выполнение не начинается. #19 остаётся PARTIAL до реального авторизованного metadata scan и отдельного execution path.
+- Rust C ABI `qadren_scenarios_dry_run` принимает только caller-supplied JSON metadata snapshots и exact `scenario_id`/revision, затем возвращает deterministic plan с явными `create`, `update`, `conflict`, `needs_verification` или `delete_requires_decision`. FFI ограничивает каждый JSON payload 1 MiB и суммарно 10 000 entries, не сканирует adapters, не читает content, не создаёт Job, не меняет FileSyncState и не записывает policy decision. Некорректный/слишком большой JSON или revision 0 отклоняются до Registry planning. UI для этого FFI ещё не добавлен.
+
+- Граница намеренная: нет adapter scan, UI, чтения контента, Job submission, policy decision или записи FileSyncState. Если Registry или planner не может доказать корректный план, метод возвращает ошибку; выполнение не начинается. #19 остаётся PARTIAL до реального авторизованного metadata scan и отдельного execution path.
 
 ## Automation coalescing baseline — #21 (2026-10-12)
 
