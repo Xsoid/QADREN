@@ -1,6 +1,6 @@
-# Яндекс Диск: адаптер метаданных
+# Яндекс Диск: metadata и ограниченный upload-контракт
 
-Статус: первая реализация клиента HTTP, **без OAuth UI, Keychain и передачи содержимого**. Issue #2, этап 2 (частично).
+Статус: metadata/OAuth интеграция и ограниченный streaming upload-контракт существуют, но полноценная передача и live E2E не приняты. Issue #16 (частично).
 
 ## Основания
 Официальные документы:
@@ -17,19 +17,18 @@
 
 ## Уже реализовано
 - `YandexMetadataClient` на Rust через HTTPS, 15-секундный timeout.
-- Только `GET /v1/disk/` (квота) и `GET /v1/disk/resources` (пагинация, метаданные).
+- `GET /v1/disk/` (квота) и `GET /v1/disk/resources` (пагинация, метаданные).
 - `StorageAdapter::capabilities()`: metadata=true, read_content=false, write_content=false.
 - Явное различение ошибок 401/403/404/429 и остальных неуспешных HTTP ответов.
-- Нет endpoint скачивания, записи, удаления, перемещения, копирования файлов.
+- Для нового удалённого объекта есть изолированный `upload_from_reader`: сначала получает upload URL с `overwrite=false`, принимает только HTTPS `PUT` без URL credentials и не следует redirect. Он не открывает локальный файл сам, не выполняет retry и различает provider `Accepted`/`Pending` от подтверждённого результата.
+- `reconcile_uploaded_resource` повторно читает только metadata указанного ресурса и сопоставляет точные path, size и валидный provider MD5. Неполные/некорректные ожидания дают `InsufficientEvidence`; метод ничего не записывает, не повторяет upload и не меняет Job.
+- Нет download, delete, move, rename, copy или готового Job execution path.
 - Вспомогательные unit tests с JSON фикстурами, без реального сетевого запроса.
 
 ## Ограничения и этапы проверки
-- HTTP слой ещё не вызывается из SwiftUI; ключи и секреты не поддерживаются в UI.
-- Точный OAuth redirect, клиентская регистрация, PKCE и возврат в приложение **не реализованы**.
-- Token refresh/повторная авторизация требуют отдельного теста согласно фактическим ответам OAuth.
-- API endpoints и формат реальных ответов следует сверить на тестовом аккаунте.
-- Перед разрешением реальных файлов выполнить mock HTTP integration tests, включая 401/429/timeouts и исключение токенов из диагностики.
-- Метаданные не означают подтверждённую резервную копию.
+- Upload не подключён к JobStore/FFI/SwiftUI и не является разрешением запускать передачу. До него требуются durable bound attempt, source/destination consent и capability checks.
+- Нет download: на основном MacBook он остаётся запрещён без отдельного согласия конкретной операции.
+- Token refresh/повторная авторизация и реальные upload/reconciliation надо проверить на тестовом account. API-ответы и metadata нельзя выдавать за live integrity evidence, пока не пройдена такая проверка.
 
 
 ## Проверяемый UI: квота и корень Диска

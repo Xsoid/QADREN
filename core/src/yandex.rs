@@ -79,11 +79,15 @@ pub struct ExpectedResourceMetadata {
     pub md5: String,
 }
 
+fn valid_md5(value: &str) -> bool {
+    value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 pub fn compare_resource_metadata(
     expected: &ExpectedResourceMetadata,
     observed: &Resource,
 ) -> MetadataMatch {
-    if expected.path.is_empty() || expected.md5.is_empty() {
+    if expected.path.is_empty() || !valid_md5(&expected.md5) {
         return MetadataMatch::InsufficientEvidence;
     }
     if observed.path != expected.path || observed.kind != "file" {
@@ -92,7 +96,7 @@ pub fn compare_resource_metadata(
     let (Some(size), Some(md5)) = (observed.size, observed.md5.as_deref()) else {
         return MetadataMatch::InsufficientEvidence;
     };
-    if size == expected.size && md5.eq_ignore_ascii_case(&expected.md5) {
+    if size == expected.size && valid_md5(md5) && md5.eq_ignore_ascii_case(&expected.md5) {
         MetadataMatch::MatchesExpectedMetadata
     } else {
         MetadataMatch::Mismatch
@@ -209,6 +213,26 @@ impl YandexMetadataClient {
             return Err(YandexError::InvalidPath);
         }
         self.get_json("/resources", token, &[("path", path.to_owned())])
+    }
+
+    /// Re-read only provider metadata after a possible upload. A matching
+    /// size and provider MD5 can establish the expected remote object
+    /// metadata, but this method neither retries an upload nor changes a Job
+    /// or its evidence. Incomplete expected identity fails closed before any
+    /// network request.
+    pub fn reconcile_uploaded_resource(
+        &self,
+        token: &str,
+        expected: &ExpectedResourceMetadata,
+    ) -> Result<MetadataMatch> {
+        if expected.path.is_empty() || expected.path.contains(|ch: char| ch.is_control()) {
+            return Err(YandexError::InvalidPath);
+        }
+        if !valid_md5(&expected.md5) {
+            return Ok(MetadataMatch::InsufficientEvidence);
+        }
+        let observed = self.resource_metadata(token, &expected.path)?;
+        Ok(compare_resource_metadata(expected, &observed))
     }
 
     /// Upload content supplied by the caller to a new Yandex Disk path.
@@ -382,7 +406,7 @@ mod tests {
             assert!(request.starts_with("GET /v1/disk/resources?"));
             assert!(request.contains("path=disk%3A%2Fcheck.txt"));
             assert!(request.contains("OAuth test-token"));
-            let body = r#"{"name":"check.txt","path":"disk:/check.txt","type":"file","size":5,"modified":"2026-10-09T00:00:00Z","md5":"abc"}"#;
+            let body = r#"{"name":"check.txt","path":"disk:/check.txt","type":"file","size":5,"modified":"2026-10-09T00:00:00Z","md5":"abcdef0123456789abcdef0123456789"}"#;
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(), body
@@ -396,12 +420,17 @@ mod tests {
                 .unwrap(),
             api_base: format!("http://{address}/v1/disk"),
         };
-        let found = client
-            .resource_metadata("test-token", "disk:/check.txt")
+        let match_result = client
+            .reconcile_uploaded_resource(
+                "test-token",
+                &ExpectedResourceMetadata {
+                    path: "disk:/check.txt".into(),
+                    size: 5,
+                    md5: "abcdef0123456789abcdef0123456789".into(),
+                },
+            )
             .unwrap();
-        assert_eq!(found.path, "disk:/check.txt");
-        assert_eq!(found.size, Some(5));
-        assert_eq!(found.md5.as_deref(), Some("abc"));
+        assert_eq!(match_result, MetadataMatch::MatchesExpectedMetadata);
         server.join().unwrap();
     }
 
@@ -410,7 +439,7 @@ mod tests {
         let expected = ExpectedResourceMetadata {
             path: "disk:/check.txt".into(),
             size: 5,
-            md5: "ABCD".into(),
+            md5: "ABCDEF0123456789ABCDEF0123456789".into(),
         };
         let mut observed = Resource {
             name: "check.txt".into(),
@@ -418,7 +447,7 @@ mod tests {
             kind: "file".into(),
             size: Some(5),
             modified: None,
-            md5: Some("abcd".into()),
+            md5: Some("abcdef0123456789abcdef0123456789".into()),
             revision: None,
             embedded: None,
         };
@@ -436,7 +465,7 @@ mod tests {
             compare_resource_metadata(&expected, &observed),
             MetadataMatch::Mismatch
         );
-        observed.md5 = Some("abcd".into());
+        observed.md5 = Some("abcdef0123456789abcdef0123456789".into());
         observed.path = "disk:/different.txt".into();
         assert_eq!(
             compare_resource_metadata(&expected, &observed),
@@ -455,6 +484,19 @@ mod tests {
             client.resource_metadata("token", "disk:/file\n"),
             Err(YandexError::InvalidPath)
         ));
+        assert_eq!(
+            client
+                .reconcile_uploaded_resource(
+                    "token",
+                    &ExpectedResourceMetadata {
+                        path: "disk:/check.txt".into(),
+                        size: 5,
+                        md5: "not-a-provider-md5".into(),
+                    },
+                )
+                .unwrap(),
+            MetadataMatch::InsufficientEvidence
+        );
     }
 
     #[test]
