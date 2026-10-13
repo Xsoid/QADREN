@@ -511,6 +511,7 @@
 
 - `reconcile_uploaded_resource` делает только `GET /resources` по точному ожидаемому path и сопоставляет path, size и 32-hex provider MD5. Некорректный ожидаемый MD5 останавливает проверку как `InsufficientEvidence` ещё до сети; неполный или иной ответ провайдера не становится успехом.
 - Наблюдение existing durable `copy` attempt переиспользует этот contract после проверки зарегистрированного `connection_id`, Keychain credential reference и provider account UID. Оно остаётся read-only: не повторяет PUT, не читает/скачивает контент, не изменяет Job/evidence/baseline и не подключено к FFI/UI. Mock HTTP test доказывает read-only GET и match metadata; это не live Yandex E2E и не подтверждение реальной передачи. #16 остаётся PARTIAL.
+- Сквозные mock tests фиксируют порядок account UID → resource metadata и доказывают, что даже точное совпадение не меняет `running` Job и не resolves attempt; несовпадающий account UID останавливает путь до lookup ресурса. Токен остаётся только в closure test Keychain resolver и не записывается в Registry/JobStore.
 - Тест с mock API подтверждает отказ от передачи на HTTP URL до чтения входа. НЕТ end-to-end проверки реальным аккаунтом, проверки полного размера/MD5 после загрузки, честного `OutcomeUnknown` в типе ошибки, интеграции со сценариями/очередью, безопасного контроля отмены и retries/backoff; пока не включать автоматические Jobs или рекламировать production-ready. Новый код ещё не прошёл локальный fmt/clippy/tests.
 
 

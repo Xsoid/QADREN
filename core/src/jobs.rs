@@ -1267,6 +1267,8 @@ mod tests {
     use super::*;
     use crate::confirmation::EvidenceLevel;
     use crate::policy::{Decision, OperationScope, ProtectedOperation};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
 
     fn waiting_job(store: &mut JobStore, id: &str) {
         store.enqueue(id, None).unwrap();
@@ -2135,6 +2137,161 @@ mod tests {
         ));
         assert_eq!(db.state("job").unwrap(), Some(JobState::Running));
         assert_eq!(db.unresolved_attempts().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn registered_yandex_reconciliation_checks_identity_and_never_resolves_attempt() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for (index, body) in [
+                r#"{"user":{"uid":"account-42"},"total_space":10,"used_space":1}"#,
+                r#"{"name":"file","path":"disk:/file","type":"file","size":7,"md5":"abcdef0123456789abcdef0123456789"}"#,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                    .unwrap();
+                let mut request = [0u8; 8192];
+                let bytes = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..bytes]);
+                if index == 0 {
+                    assert!(request.starts_with("GET /v1/disk/ HTTP/1.1"));
+                } else {
+                    assert!(request.starts_with("GET /v1/disk/resources?"));
+                    assert!(request.contains("path=disk%3A%2Ffile"));
+                }
+                assert!(request.to_ascii_lowercase().contains("authorization: oauth test-token"));
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(), body
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+
+        let registry = crate::registry::Registry::in_memory().unwrap();
+        let connection = registry.add("yandex_disk", "Test disk").unwrap();
+        registry
+            .set_provider_account_id(&connection, Some("account-42"))
+            .unwrap();
+        registry
+            .set_credential_ref(&connection, Some("keychain:connection"))
+            .unwrap();
+        registry
+            .mark_checked(&connection, "connected", 1, None)
+            .unwrap();
+        let mut store = JobStore::in_memory().unwrap();
+        store.enqueue("job", None).unwrap();
+        store
+            .advance(
+                "job",
+                JobState::Queued,
+                JobState::Running,
+                Confirmation::Unknown,
+            )
+            .unwrap();
+        store
+            .prepare_bound_attempt(
+                "job",
+                "attempt",
+                "copy",
+                &connection,
+                "disk:/file",
+                7,
+                "abcdef0123456789abcdef0123456789",
+            )
+            .unwrap();
+        let client = crate::yandex::YandexMetadataClient::with_test_api_base(format!(
+            "http://{address}/v1/disk"
+        ));
+
+        assert_eq!(
+            store
+                .observe_registered_yandex_attempt(
+                    "job",
+                    "attempt",
+                    &registry,
+                    &client,
+                    |reference| {
+                        assert_eq!(reference, "keychain:connection");
+                        Some("test-token".into())
+                    }
+                )
+                .unwrap(),
+            crate::yandex::MetadataMatch::MatchesExpectedMetadata
+        );
+        server.join().unwrap();
+        assert_eq!(store.state("job").unwrap(), Some(JobState::Running));
+        assert_eq!(store.unresolved_attempts().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn registered_yandex_reconciliation_rejects_account_mismatch_before_resource_lookup() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 8192];
+            let bytes = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..bytes]);
+            assert!(request.starts_with("GET /v1/disk/ HTTP/1.1"));
+            let body = r#"{"user":{"uid":"another-account"},"total_space":10,"used_space":1}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let registry = crate::registry::Registry::in_memory().unwrap();
+        let connection = registry.add("yandex_disk", "Test disk").unwrap();
+        registry
+            .set_provider_account_id(&connection, Some("account-42"))
+            .unwrap();
+        registry
+            .set_credential_ref(&connection, Some("keychain:connection"))
+            .unwrap();
+        registry
+            .mark_checked(&connection, "connected", 1, None)
+            .unwrap();
+        let mut store = JobStore::in_memory().unwrap();
+        store.enqueue("job", None).unwrap();
+        store
+            .advance(
+                "job",
+                JobState::Queued,
+                JobState::Running,
+                Confirmation::Unknown,
+            )
+            .unwrap();
+        store
+            .prepare_bound_attempt(
+                "job",
+                "attempt",
+                "copy",
+                &connection,
+                "disk:/file",
+                7,
+                "abcdef0123456789abcdef0123456789",
+            )
+            .unwrap();
+        let client = crate::yandex::YandexMetadataClient::with_test_api_base(format!(
+            "http://{address}/v1/disk"
+        ));
+
+        assert!(matches!(
+            store.observe_registered_yandex_attempt("job", "attempt", &registry, &client, |_| {
+                Some("test-token".into())
+            }),
+            Err(YandexObservationError::ConnectionNotAuthorized)
+        ));
+        server.join().unwrap();
+        assert_eq!(store.state("job").unwrap(), Some(JobState::Running));
+        assert_eq!(store.unresolved_attempts().unwrap().len(), 1);
     }
 
     #[test]

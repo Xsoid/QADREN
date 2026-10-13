@@ -158,6 +158,18 @@ impl YandexMetadataClient {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_test_api_base(api_base: String) -> Self {
+        Self {
+            http: Client::builder()
+                .timeout(Duration::from_secs(3))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("test HTTP client"),
+            api_base,
+        }
+    }
+
     fn get_json<T: serde::de::DeserializeOwned>(
         &self,
         endpoint: &str,
