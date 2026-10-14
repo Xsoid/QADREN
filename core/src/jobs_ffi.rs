@@ -123,6 +123,72 @@ pub unsafe extern "C" fn qadren_jobs_run_mock_create(
     }
 }
 
+/// Execute one explicit Local Filesystem create-directory Job. Rust persists
+/// the attempt before `mkdir`; the operation never reads user-file contents.
+///
+/// # Safety
+/// Arguments must be valid, NUL-terminated strings for the duration of call.
+#[no_mangle]
+pub unsafe extern "C" fn qadren_jobs_run_local_directory_create(
+    database_path: *const c_char,
+    local_root: *const c_char,
+    connection_id: *const c_char,
+    relative_path: *const c_char,
+    job_id: *const c_char,
+) -> *mut c_char {
+    let (
+        Some(database_path),
+        Some(local_root),
+        Some(connection_id),
+        Some(relative_path),
+        Some(job_id),
+    ) = (
+        input(database_path),
+        input(local_root),
+        input(connection_id),
+        input(relative_path),
+        input(job_id),
+    )
+    else {
+        return response(json!({"ok": false, "error": "invalid_request"}));
+    };
+    match crate::job_execution::run_local_directory_create(
+        Path::new(database_path),
+        Path::new(local_root),
+        connection_id,
+        Path::new(relative_path),
+        job_id,
+    ) {
+        Ok(crate::job_execution::LocalDirectoryCreateStatus::Completed) => {
+            response(json!({"ok": true, "data": {"status": "completed"}}))
+        }
+        Ok(crate::job_execution::LocalDirectoryCreateStatus::Existing(state)) => response(
+            json!({"ok": true, "data": {"status": format!("{:?}", state).to_ascii_lowercase(), "existing": true}}),
+        ),
+        Err(crate::job_execution::LocalDirectoryCreateError::InvalidRequest) => {
+            response(json!({"ok": false, "error": "invalid_request"}))
+        }
+        Err(crate::job_execution::LocalDirectoryCreateError::TargetExists) => {
+            response(json!({"ok": false, "error": "target_exists"}))
+        }
+        Err(crate::job_execution::LocalDirectoryCreateError::CapabilityUnavailable) => {
+            response(json!({"ok": false, "error": "local_capability_unavailable"}))
+        }
+        Err(crate::job_execution::LocalDirectoryCreateError::VerificationFailed) => {
+            response(json!({"ok": false, "error": "verification_failed"}))
+        }
+        Err(crate::job_execution::LocalDirectoryCreateError::OutcomeUnknown(_)) => {
+            response(json!({"ok": false, "error": "outcome_unknown"}))
+        }
+        Err(crate::job_execution::LocalDirectoryCreateError::Local(_)) => {
+            response(json!({"ok": false, "error": "local_operation_failed"}))
+        }
+        Err(crate::job_execution::LocalDirectoryCreateError::Store(_)) => {
+            response(json!({"ok": false, "error": "job_store_unavailable"}))
+        }
+    }
+}
+
 /// Read-only reconciliation for one app-owned UNKNOWN G1 mock Job.  It never
 /// starts another create operation; a durable expectation and exact metadata
 /// match are required before the existing attempt can be completed.
@@ -513,5 +579,40 @@ mod tests {
             .unwrap()
             .contains("\"unresolved\":false"));
         unsafe { qadren_jobs_free_string(unaffected_response) };
+    }
+
+    #[test]
+    fn local_directory_command_executes_through_the_c_abi() {
+        let base = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join(format!(
+                "qadren-ffi-local-directory-{}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        fs::create_dir(&base).unwrap();
+        let database = CString::new(base.join("jobs.sqlite3").to_str().unwrap()).unwrap();
+        let root = CString::new(base.to_str().unwrap()).unwrap();
+        let connection = CString::new("local-connection-a").unwrap();
+        let relative = CString::new("created-by-ffi").unwrap();
+        let job = CString::new("local-mkdir-ffi").unwrap();
+        let response = unsafe {
+            qadren_jobs_run_local_directory_create(
+                database.as_ptr(),
+                root.as_ptr(),
+                connection.as_ptr(),
+                relative.as_ptr(),
+                job.as_ptr(),
+            )
+        };
+        assert!(unsafe { CStr::from_ptr(response) }
+            .to_str()
+            .unwrap()
+            .contains("completed"));
+        unsafe { qadren_jobs_free_string(response) };
+        assert!(base.join("created-by-ffi").is_dir());
     }
 }

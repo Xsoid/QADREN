@@ -516,6 +516,7 @@ private struct FileManagerPane: View {
     let title: String
     @ObservedObject var workspace: LocalWorkspace
     @State private var selected = Set<String>()
+    @State private var newDirectoryName = ""
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -532,6 +533,14 @@ private struct FileManagerPane: View {
                         Text(workspace.relativePath.isEmpty ? "/" : "/" + workspace.relativePath).font(.caption.monospaced()).textSelection(.enabled)
                         Spacer()
                         if !selected.isEmpty { Text("Выбрано: \(selected.count)").font(.caption).foregroundStyle(.secondary) }
+                    }
+                    HStack(spacing: 8) {
+                        TextField("Имя новой папки", text: $newDirectoryName)
+                        Button("Создать папку") {
+                            workspace.createDirectory(named: newDirectoryName)
+                            newDirectoryName = ""
+                        }
+                        .disabled(newDirectoryName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
                 }.padding(.horizontal, 18)
                 List(workspace.entries) { entry in

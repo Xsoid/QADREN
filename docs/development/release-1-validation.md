@@ -8,6 +8,12 @@
 
 **Исторический scope Release 1 (2026-10-12, заменён D-018):** загрузка/скачивание и синхронизация между Яндекс Диском и локальными директориями. Он больше не является acceptance текущего локального релиза: Release 1 ограничен Local↔Local; контроллер Яндекс Диска — post-release. iCloud adapter/container/sync/backup, native spike и E2E не являются acceptance. Упоминания iCloud File Provider ниже — безопасность Local FS, не iCloud integration. [D-017](../decisions/D-017-defer-icloud.md), [D-018](../decisions/D-018-local-first-priorities.md).
 
+## Local controller mkdir slice (2026-10-14)
+
+- `qadren_jobs_run_local_directory_create` executes one explicit `local_mkdir_new` through the Rust `JobStore`: it persists a bound attempt before `mkdir`, fails on an existing target without overwrite, verifies the resulting directory metadata, and completes atomically with the receipt.
+- `LocalWorkspace` offers `Создать папку` for a selected local root; the native bridge test `bash scripts/test-macos-local-workspace.sh` creates a unique test root, verifies the listed directory, and confirms collision rejection.
+- This is deliberately **not** content copy or Local↔Local synchronization. macOS content reads remain fail-closed because opening a File Provider placeholder could materialize it. Unknown post-effect outcomes are not retried blindly.
+
 ## Dispatcher workspace shell (2026-10-12)
 
 - macOS-клиент больше не собирает все технические элементы в одну прокручиваемую страницу. Корневая навигация разделена на два пространства: `Рабочая панель` для мониторинга и оперативных действий и `Настройка сценариев` для подключений, будущих правил и назначения Worker. Очередь и двухпанельный файловый менеджер открываются внутри рабочей панели, а не становятся конкурирующими корневыми разделами.

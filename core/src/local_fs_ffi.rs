@@ -10,6 +10,11 @@ fn input<'a>(pointer: *const c_char) -> Option<&'a str> {
         .flatten()
         .filter(|s| !s.is_empty())
 }
+fn input_allow_empty<'a>(pointer: *const c_char) -> Option<&'a str> {
+    (!pointer.is_null())
+        .then(|| unsafe { CStr::from_ptr(pointer) }.to_str().ok())
+        .flatten()
+}
 fn response(value: serde_json::Value) -> *mut c_char {
     CString::new(value.to_string()).unwrap().into_raw()
 }
@@ -21,7 +26,9 @@ pub unsafe extern "C" fn qadren_local_list(
     root: *const c_char,
     relative: *const c_char,
 ) -> *mut c_char {
-    let (Some(root), Some(relative)) = (input(root), input(relative)) else {
+    // An empty relative path is the pinned root listing, not an invalid
+    // request. The root itself must still be explicit and non-empty.
+    let (Some(root), Some(relative)) = (input(root), input_allow_empty(relative)) else {
         return response(json!({"ok":false,"error":"invalid_request"}));
     };
     match LocalFilesystem::open(Path::new(root)).and_then(|fs| fs.list(Path::new(relative))) {
@@ -56,5 +63,35 @@ pub unsafe extern "C" fn qadren_local_mkdir(
 pub unsafe extern "C" fn qadren_local_free_string(pointer: *mut c_char) {
     if !pointer.is_null() {
         drop(CString::from_raw(pointer));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn root_listing_accepts_an_empty_relative_path() {
+        let root_path = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join(format!(
+                "qadren-local-ffi-root-{}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        std::fs::create_dir(&root_path).unwrap();
+        let root = CString::new(root_path.to_str().unwrap()).unwrap();
+        let relative = CString::new("").unwrap();
+        let result = unsafe { qadren_local_list(root.as_ptr(), relative.as_ptr()) };
+        assert!(unsafe { CStr::from_ptr(result) }
+            .to_str()
+            .unwrap()
+            .contains("\"ok\":true"));
+        unsafe { qadren_local_free_string(result) };
+        std::fs::remove_dir(&root_path).unwrap();
     }
 }

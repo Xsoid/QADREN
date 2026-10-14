@@ -2,6 +2,7 @@
 //! It never contacts a provider or reads user/cloud content.
 use crate::confirmation::{Confirmation, EvidenceLevel};
 use crate::jobs::{JobStore, JobStoreError};
+use crate::local_fs::{LocalError, LocalFilesystem};
 use crate::model::JobState;
 use crate::verification::{OperationVerifier, VerifiedReceipt};
 use std::fs::{self, OpenOptions};
@@ -14,6 +15,16 @@ const MOCK_CONTENT: &[u8] = b"QADREN G1 mock create artifact\n";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MockCreateStatus {
     Queued,
+    Completed,
+    Existing(JobState),
+}
+
+/// Result of one non-destructive Local Filesystem controller action.
+/// Directory creation is intentionally the first macOS-capable real operation:
+/// it never opens user-file content and therefore cannot hydrate a File
+/// Provider placeholder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalDirectoryCreateStatus {
     Completed,
     Existing(JobState),
 }
@@ -39,6 +50,17 @@ pub enum MockCreateError {
     SimulatedCrashAfterEffect,
 }
 
+#[derive(Debug)]
+pub enum LocalDirectoryCreateError {
+    InvalidRequest,
+    TargetExists,
+    CapabilityUnavailable,
+    VerificationFailed,
+    OutcomeUnknown(LocalError),
+    Local(LocalError),
+    Store(JobStoreError),
+}
+
 impl From<JobStoreError> for MockCreateError {
     fn from(value: JobStoreError) -> Self {
         Self::Store(value)
@@ -48,6 +70,12 @@ impl From<JobStoreError> for MockCreateError {
 impl From<std::io::Error> for MockCreateError {
     fn from(value: std::io::Error) -> Self {
         Self::Io(value)
+    }
+}
+
+impl From<JobStoreError> for LocalDirectoryCreateError {
+    fn from(value: JobStoreError) -> Self {
+        Self::Store(value)
     }
 }
 
@@ -281,6 +309,79 @@ pub fn reconcile_mock_create(
     Ok(MockReconciliationStatus::Completed)
 }
 
+/// Execute one explicit Local Filesystem create-directory Job through the
+/// durable Rust JobStore. The target is created with no-overwrite semantics.
+/// This is deliberately not a content-copy controller: macOS content reads
+/// remain fail-closed until residency protection has a proven safe boundary.
+pub fn run_local_directory_create(
+    database_path: &Path,
+    local_root: &Path,
+    connection_id: &str,
+    relative_path: &Path,
+    job_id: &str,
+) -> Result<LocalDirectoryCreateStatus, LocalDirectoryCreateError> {
+    if !valid_job_id(job_id) || connection_id.is_empty() || relative_path.as_os_str().is_empty() {
+        return Err(LocalDirectoryCreateError::InvalidRequest);
+    }
+    let local = LocalFilesystem::open(local_root).map_err(LocalDirectoryCreateError::Local)?;
+    if !local.capabilities().operations.create_directory {
+        return Err(LocalDirectoryCreateError::CapabilityUnavailable);
+    }
+    let target_path = relative_path
+        .to_str()
+        .filter(|path| !path.is_empty())
+        .ok_or(LocalDirectoryCreateError::InvalidRequest)?;
+    let mut store = JobStore::open(database_path)?;
+    if let Some(existing) = store.get(job_id)? {
+        return Ok(LocalDirectoryCreateStatus::Existing(existing.state));
+    }
+    store.enqueue(job_id, None)?;
+    store.advance(
+        job_id,
+        JobState::Queued,
+        JobState::Running,
+        Confirmation::Confirmed(EvidenceLevel::Requested),
+    )?;
+    let attempt_id = format!("{job_id}-attempt-1");
+    // A directory has no content checksum, but JobStore requires a fixed
+    // expectation shape. The empty-content MD5 is an immutable sentinel;
+    // verification below proves directory type, not file-content integrity.
+    store.prepare_bound_attempt(
+        job_id,
+        &attempt_id,
+        "local_mkdir_new",
+        connection_id,
+        target_path,
+        0,
+        "d41d8cd98f00b204e9800998ecf8427e",
+    )?;
+    match local.create_directory(relative_path) {
+        Ok(()) => {}
+        Err(LocalError::AlreadyExists) => {
+            store.fail_attempt_before_effect(job_id, &attempt_id)?;
+            return Err(LocalDirectoryCreateError::TargetExists);
+        }
+        Err(error @ LocalError::OutcomeUnknown(_)) => {
+            // Keep the active durable attempt. Reopening JobStore changes it to
+            // UNKNOWN; no retry or cleanup is attempted by this controller.
+            return Err(LocalDirectoryCreateError::OutcomeUnknown(error));
+        }
+        Err(error) => return Err(LocalDirectoryCreateError::Local(error)),
+    }
+    match local.stat(relative_path) {
+        Ok(entry) if entry.is_directory => {}
+        _ => return Err(LocalDirectoryCreateError::VerificationFailed),
+    }
+    let receipt = VerifiedReceipt::metadata_verified(
+        &attempt_id,
+        "local_mkdir_new",
+        connection_id,
+        target_path,
+    );
+    store.complete_attempt(job_id, &attempt_id, &receipt)?;
+    Ok(LocalDirectoryCreateStatus::Completed)
+}
+
 fn run_mock_create_inner(
     database_path: &Path,
     storage_root: &Path,
@@ -368,6 +469,24 @@ mod tests {
         ));
         fs::create_dir(&base).unwrap();
         (base.join("jobs.sqlite3"), base.join("mock-storage"))
+    }
+
+    // `temp_dir()` may be a symlinked macOS path (`/var` → `/private/var`),
+    // which the Local Filesystem adapter correctly rejects. Keep Local FS
+    // controller fixtures under Cargo's physical target directory instead.
+    fn local_fixture(name: &str) -> (PathBuf, PathBuf) {
+        let base = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join(format!(
+                "qadren-local-controller-{name}-{}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        fs::create_dir_all(&base).unwrap();
+        (base.join("jobs.sqlite3"), base.join("local-root"))
     }
 
     #[test]
@@ -569,5 +688,53 @@ mod tests {
         ));
         assert!(!database.exists());
         assert!(!storage.exists());
+    }
+
+    #[test]
+    fn local_directory_controller_persists_and_verifies_no_overwrite_creation() {
+        let (database, root) = local_fixture("complete");
+        fs::create_dir(&root).unwrap();
+        assert_eq!(
+            run_local_directory_create(
+                &database,
+                &root,
+                "local-connection-a",
+                Path::new("created"),
+                "local-mkdir-1",
+            )
+            .unwrap(),
+            LocalDirectoryCreateStatus::Completed
+        );
+        assert!(root.join("created").is_dir());
+        let store = JobStore::open(&database).unwrap();
+        assert_eq!(
+            store.state("local-mkdir-1").unwrap(),
+            Some(JobState::Completed)
+        );
+        assert!(store.unresolved_attempts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn local_directory_controller_never_replaces_existing_entry() {
+        let (database, root) = local_fixture("occupied");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("occupied"), b"preserve").unwrap();
+        assert!(matches!(
+            run_local_directory_create(
+                &database,
+                &root,
+                "local-connection-a",
+                Path::new("occupied"),
+                "local-mkdir-occupied",
+            ),
+            Err(LocalDirectoryCreateError::TargetExists)
+        ));
+        assert_eq!(fs::read(root.join("occupied")).unwrap(), b"preserve");
+        let store = JobStore::open(&database).unwrap();
+        assert_eq!(
+            store.state("local-mkdir-occupied").unwrap(),
+            Some(JobState::Failed)
+        );
+        assert!(store.unresolved_attempts().unwrap().is_empty());
     }
 }
