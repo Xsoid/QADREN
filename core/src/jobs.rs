@@ -58,6 +58,14 @@ impl From<JobStoreError> for YandexObservationError {
     }
 }
 
+/// Result of an authenticated, read-only Yandex reconciliation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum YandexReconciliationStatus {
+    Completed,
+    StillUnknown,
+    Existing(JobState),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredJob {
     pub id: String,
@@ -1132,6 +1140,55 @@ impl JobStore {
             return Err(YandexObservationError::ConnectionNotAuthorized);
         }
         self.observe_yandex_attempt(job_id, attempt_id, &connection.id, client, &token)
+    }
+
+    /// Reconcile one durable UNKNOWN copy attempt through the registered
+    /// Yandex connection. It never uploads, downloads, retries, deletes, or
+    /// changes the Registry. Only exact account-bound metadata proof can
+    /// atomically resolve the attempt and complete its Job.
+    pub fn reconcile_registered_yandex_attempt<F>(
+        &mut self,
+        job_id: &str,
+        attempt_id: &str,
+        registry: &crate::registry::Registry,
+        client: &crate::yandex::YandexMetadataClient,
+        resolve_credential: F,
+    ) -> std::result::Result<YandexReconciliationStatus, YandexObservationError>
+    where
+        F: FnOnce(&str) -> Option<String>,
+    {
+        self.check_storage_identity()?;
+        let Some(job) = self.get(job_id)? else {
+            return Err(JobStoreError::NotFound.into());
+        };
+        if job.state != JobState::Unknown {
+            return Ok(YandexReconciliationStatus::Existing(job.state));
+        }
+        let expected = self
+            .expected_metadata(job_id, attempt_id)?
+            .ok_or(JobStoreError::MissingEvidence)?;
+        match self.observe_registered_yandex_attempt(
+            job_id,
+            attempt_id,
+            registry,
+            client,
+            resolve_credential,
+        )? {
+            crate::yandex::MetadataMatch::MatchesExpectedMetadata => {
+                let receipt = crate::verification::VerifiedReceipt::metadata_verified(
+                    attempt_id,
+                    &expected.operation_kind,
+                    &expected.target_connection_id,
+                    &expected.target_path,
+                );
+                self.complete_attempt(job_id, attempt_id, &receipt)?;
+                Ok(YandexReconciliationStatus::Completed)
+            }
+            crate::yandex::MetadataMatch::Mismatch
+            | crate::yandex::MetadataMatch::InsufficientEvidence => {
+                Ok(YandexReconciliationStatus::StillUnknown)
+            }
+        }
     }
 
     /// Perform a read-only provider metadata lookup for this exact recorded target.
@@ -2415,7 +2472,7 @@ mod tests {
     }
 
     #[test]
-    fn registered_yandex_reconciliation_checks_identity_and_never_resolves_attempt() {
+    fn registered_yandex_reconciliation_completes_only_exact_unknown_attempt() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
@@ -2480,13 +2537,21 @@ mod tests {
                 "abcdef0123456789abcdef0123456789",
             )
             .unwrap();
+        store
+            .advance(
+                "job",
+                JobState::Running,
+                JobState::Unknown,
+                Confirmation::Unknown,
+            )
+            .unwrap();
         let client = crate::yandex::YandexMetadataClient::with_test_api_base(format!(
             "http://{address}/v1/disk"
         ));
 
         assert_eq!(
             store
-                .observe_registered_yandex_attempt(
+                .reconcile_registered_yandex_attempt(
                     "job",
                     "attempt",
                     &registry,
@@ -2497,11 +2562,11 @@ mod tests {
                     }
                 )
                 .unwrap(),
-            crate::yandex::MetadataMatch::MatchesExpectedMetadata
+            YandexReconciliationStatus::Completed
         );
         server.join().unwrap();
-        assert_eq!(store.state("job").unwrap(), Some(JobState::Running));
-        assert_eq!(store.unresolved_attempts().unwrap().len(), 1);
+        assert_eq!(store.state("job").unwrap(), Some(JobState::Completed));
+        assert!(store.unresolved_attempts().unwrap().is_empty());
     }
 
     #[test]
