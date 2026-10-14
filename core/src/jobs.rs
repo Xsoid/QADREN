@@ -2433,6 +2433,65 @@ mod tests {
     }
 
     #[test]
+    fn disabled_yandex_connection_cannot_reconcile_unknown_attempt() {
+        let registry = crate::registry::Registry::in_memory().unwrap();
+        let connection = registry.add("yandex_disk", "Test disk").unwrap();
+        registry
+            .set_provider_account_id(&connection, Some("account-42"))
+            .unwrap();
+        registry
+            .set_credential_ref(&connection, Some("keychain:connection"))
+            .unwrap();
+        registry
+            .mark_checked(&connection, "connected", 1, None)
+            .unwrap();
+        registry.set_enabled(&connection, false).unwrap();
+
+        let mut store = JobStore::in_memory().unwrap();
+        store.enqueue("job", None).unwrap();
+        store
+            .advance(
+                "job",
+                JobState::Queued,
+                JobState::Running,
+                Confirmation::Unknown,
+            )
+            .unwrap();
+        store
+            .prepare_bound_attempt(
+                "job",
+                "attempt",
+                "copy",
+                &connection,
+                "disk:/file",
+                7,
+                "abcdef0123456789abcdef0123456789",
+            )
+            .unwrap();
+        store
+            .advance(
+                "job",
+                JobState::Running,
+                JobState::Unknown,
+                Confirmation::Unknown,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            store.reconcile_registered_yandex_attempt(
+                "job",
+                "attempt",
+                &registry,
+                &crate::yandex::YandexMetadataClient::new().unwrap(),
+                |_| panic!("disabled connection must not resolve credentials"),
+            ),
+            Err(YandexObservationError::ConnectionNotAuthorized)
+        ));
+        assert_eq!(store.state("job").unwrap(), Some(JobState::Unknown));
+        assert_eq!(store.unresolved_attempts().unwrap().len(), 1);
+    }
+
+    #[test]
     fn read_only_yandex_inspection_cannot_resolve_job() {
         let mut db = JobStore::in_memory().unwrap();
         db.enqueue("job", None).unwrap();
