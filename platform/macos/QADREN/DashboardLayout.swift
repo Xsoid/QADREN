@@ -37,6 +37,9 @@ final class DashboardLayoutStore: ObservableObject {
 
     private let defaults: UserDefaults
     private var panelID: String?
+    private var undoStack: [[MonitoringWidgetLayout]] = []
+    private var redoStack: [[MonitoringWidgetLayout]] = []
+    private let historyLimit = 50
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -54,8 +57,14 @@ final class DashboardLayoutStore: ObservableObject {
         widgets.filter { !$0.isVisible }
     }
 
+    var canUndo: Bool { !undoStack.isEmpty }
+
+    var canRedo: Bool { !redoStack.isEmpty }
+
     func load(panelID: String) {
         self.panelID = panelID
+        undoStack.removeAll()
+        redoStack.removeAll()
         let key = Self.storageKey(for: panelID)
         guard let data = defaults.data(forKey: key),
               let decoded = try? JSONDecoder().decode([MonitoringWidgetLayout].self, from: data),
@@ -70,18 +79,37 @@ final class DashboardLayoutStore: ObservableObject {
         guard let index = widgets.firstIndex(where: { $0.kind == kind }) else { return }
         let destination = index + offset
         guard widgets.indices.contains(destination) else { return }
+        recordUndoState()
         widgets.swapAt(index, destination)
         save()
     }
 
     func setVisible(_ kind: MonitoringWidgetKind, isVisible: Bool) {
         guard let index = widgets.firstIndex(where: { $0.kind == kind }) else { return }
+        guard widgets[index].isVisible != isVisible else { return }
+        recordUndoState()
         widgets[index].isVisible = isVisible
         save()
     }
 
     func reset() {
+        guard widgets != defaultWidgets else { return }
+        recordUndoState()
         widgets = defaultWidgets
+        save()
+    }
+
+    func undo() {
+        guard let previous = undoStack.popLast() else { return }
+        redoStack.append(widgets)
+        widgets = previous
+        save()
+    }
+
+    func redo() {
+        guard let next = redoStack.popLast() else { return }
+        undoStack.append(widgets)
+        widgets = next
         save()
     }
 
@@ -92,6 +120,14 @@ final class DashboardLayoutStore: ObservableObject {
     private func isValid(_ candidate: [MonitoringWidgetLayout]) -> Bool {
         candidate.count == MonitoringWidgetKind.allCases.count
             && Set(candidate.map(\.kind)) == Set(MonitoringWidgetKind.allCases)
+    }
+
+    private func recordUndoState() {
+        undoStack.append(widgets)
+        if undoStack.count > historyLimit {
+            undoStack.removeFirst(undoStack.count - historyLimit)
+        }
+        redoStack.removeAll()
     }
 
     private func save() {

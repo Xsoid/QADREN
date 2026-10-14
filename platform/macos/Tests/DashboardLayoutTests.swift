@@ -20,6 +20,17 @@ struct DashboardLayoutTests {
         store.move(.connections, by: -1)
         store.setVisible(.jobs, isVisible: false)
 
+        check(store.canUndo, "layout edits enable undo")
+        store.undo()
+        check(store.hiddenWidgets.isEmpty, "undo restores widget visibility")
+        check(store.widgets.map(\.kind) == [.system, .jobs, .connections, .queue], "undo preserves earlier ordering edit")
+        check(store.canRedo, "undo enables redo")
+        store.undo()
+        check(store.widgets.map(\.kind) == MonitoringWidgetKind.allCases, "second undo restores default ordering")
+        store.redo()
+        store.redo()
+        check(store.hiddenWidgets.map(\.kind) == [.jobs], "redo restores the full edit sequence")
+
         let restored = DashboardLayoutStore(defaults: defaults)
         restored.load(panelID: panelID)
         check(restored.widgets.map(\.kind) == [.system, .jobs, .connections, .queue], "widget order persists per panel")
@@ -35,6 +46,14 @@ struct DashboardLayoutTests {
         recovered.load(panelID: corruptPanel)
         check(recovered.visibleWidgets.count == MonitoringWidgetKind.allCases.count, "corrupt layout falls back safely")
         check(defaults.data(forKey: DashboardLayoutStore.storageKey(for: corruptPanel)) == Data("not-json".utf8), "corrupt layout is not erased during recovery")
+
+        let bounded = DashboardLayoutStore(defaults: defaults)
+        bounded.load(panelID: "bounded-history")
+        for index in 0..<55 {
+            bounded.setVisible(.system, isVisible: !index.isMultiple(of: 2))
+        }
+        for _ in 0..<50 { bounded.undo() }
+        check(!bounded.canUndo, "layout history retains no more than fifty states")
 
         print("Dashboard layout native tests passed")
     }

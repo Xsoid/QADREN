@@ -43,6 +43,18 @@ struct MainView: View {
                         Button(isEditingLayout ? "Готово" : "Компоновка", systemImage: "rectangle.3.group.bubble") {
                             isEditingLayout.toggle()
                         }
+                        Button("Отменить компоновку", systemImage: "arrow.uturn.backward") {
+                            dashboardLayout.undo()
+                        }
+                        .disabled(!isEditingLayout || !dashboardLayout.canUndo)
+                        .keyboardShortcut("z", modifiers: .command)
+                        .help("Отменить последнее изменение компоновки")
+                        Button("Вернуть компоновку", systemImage: "arrow.uturn.forward") {
+                            dashboardLayout.redo()
+                        }
+                        .disabled(!isEditingLayout || !dashboardLayout.canRedo)
+                        .keyboardShortcut("z", modifiers: [.command, .shift])
+                        .help("Вернуть отменённое изменение компоновки")
                         Menu("Добавить виджет", systemImage: "plus.rectangle.on.rectangle") {
                             ForEach(dashboardLayout.hiddenWidgets) { widget in
                                 Button(widget.kind.title) {
