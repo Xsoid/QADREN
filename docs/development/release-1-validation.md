@@ -14,6 +14,12 @@
 - `LocalWorkspace` offers `Создать папку` only after the user has selected both a local root and an enabled `StorageConnection`; the real `connection_id` is recorded in the Job attempt, so normal disconnect/remove gating can see it. Rust independently reopens the Registry and rejects missing, non-Local or disabled connections before I/O. The native bridge test `bash scripts/test-macos-local-workspace.sh` creates a unique test root, verifies the listed directory, and confirms collision rejection.
 - This is deliberately **not** content copy or Local↔Local synchronization. macOS content reads remain fail-closed because opening a File Provider placeholder could materialize it. Unknown post-effect outcomes are not retried blindly.
 
+## Native UI acceptance utilities — #26 (2026-10-15)
+
+- `./script/build_and_run.sh --verify --theme light` builds the real unsigned `dist/QADREN.app`, starts it with a process-only `light` override and confirms the QADREN process. The override is a launch argument and does not change the user's durable theme preference; `dark` and `system` are available by the same path.
+- A light-theme native dashboard inspection found that a nonempty Registry could incorrectly give the Connections widget a green ready indicator while all entries were `offline` or `disconnected`. The widget now derives its aggregate and row status from the enabled Registry entries: error and authorization states take priority; all unavailable entries are offline; mixed statuses are unknown; all disabled entries are paused.
+- Current evidence is build/process verification and the deterministic Dashboard layout runner. Repeat native screenshots of the Monitoring window after the status correction, narrow-window review and keyboard/VoiceOver checks remain **BLOCKED**, not passed, because the desktop automation could not retain that independently opened window in focus.
+
 ## Dispatcher workspace shell (2026-10-12)
 
 - macOS-клиент больше не собирает все технические элементы в одну прокручиваемую страницу. Корневая навигация разделена на два пространства: `Рабочая панель` для мониторинга и оперативных действий и `Настройка сценариев` для подключений, будущих правил и назначения Worker. Очередь и двухпанельный файловый менеджер открываются внутри рабочей панели, а не становятся конкурирующими корневыми разделами.

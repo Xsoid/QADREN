@@ -14,7 +14,7 @@
 
 ## Разработка
 
-Локальная сборка: `bash scripts/test-core.sh` для Rust fmt/Clippy/tests; `bash scripts/build-macos.sh` для unsigned macOS developer bundle `dist/QADREN.app`. Для обычного developer launch использовать `./script/build_and_run.sh`: он останавливает прежний процесс, собирает этот bundle и запускает его как macOS app; `--verify` дополнительно подтверждает процесс. Команды не заменяют реальный E2E. Локальная сборка требует Rust toolchain и Xcode на Mac разработчика. Сборку Rust и Swift держать воспроизводимой: зафиксировать toolchain в манифестах после выбора версий, использовать lockfile и минимальный build script. Не загружать бинарники зависимостей из непроверенных источников в release pipeline.
+Локальная сборка: `bash scripts/test-core.sh` для Rust fmt/Clippy/tests; `bash scripts/build-macos.sh` для unsigned macOS developer bundle `dist/QADREN.app`. Для обычного developer launch использовать `./script/build_and_run.sh`: он останавливает прежний процесс, собирает этот bundle и запускает его как macOS app; `--verify` дополнительно подтверждает процесс. Для непостоянной native-приёмки тем можно добавить `--theme dark`, `--theme light` или `--theme system`: override передаётся лишь запущенному процессу и не меняет настройку пользователя. Команды не заменяют реальный E2E. Локальная сборка требует Rust toolchain и Xcode на Mac разработчика. Сборку Rust и Swift держать воспроизводимой: зафиксировать toolchain в манифестах после выбора версий, использовать lockfile и минимальный build script. Не загружать бинарники зависимостей из непроверенных источников в release pipeline.
 
 ## Релизный конвейер (проектируется)
 

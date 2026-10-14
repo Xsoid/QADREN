@@ -221,11 +221,12 @@ struct MainView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         ForEach(widget.density == .expanded ? connections.entries : Array(connections.entries.prefix(4))) { entry in
                             HStack(spacing: 8) {
-                                Image(systemName: entry.enabled ? "externaldrive.fill" : "externaldrive")
-                                    .foregroundStyle(entry.enabled ? QDTheme.cyan : .secondary)
+                                let status = connectionStatusKind(for: entry)
+                                Image(systemName: status.symbol)
+                                    .foregroundStyle(status.color)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(entry.name).lineLimit(1)
-                                    Text("\(adapterTitle(entry.adapter)) · \(entry.status)")
+                                    Text("\(adapterTitle(entry.adapter)) · \(connectionStatusTitle(for: entry))")
                                         .font(.caption).foregroundStyle(.secondary)
                                 }
                                 Spacer()
@@ -359,7 +360,38 @@ struct MainView: View {
     }
     private var connectionWidgetStatus: QDStatusKind {
         if connections.error != nil { return .failed }
-        return connections.entries.isEmpty ? .waiting : .ready
+        let enabled = connections.entries.filter(\.enabled)
+        guard !connections.entries.isEmpty else { return .waiting }
+        guard !enabled.isEmpty else { return .paused }
+        let statuses = enabled.map(connectionStatusKind(for:))
+        if statuses.contains(.failed) { return .failed }
+        if statuses.contains(.needsAction) { return .needsAction }
+        if statuses.allSatisfy({ $0 == .ready }) { return .ready }
+        if statuses.allSatisfy({ $0 == .offline }) { return .offline }
+        return .unknown
+    }
+
+    private func connectionStatusKind(for entry: StorageEntry) -> QDStatusKind {
+        guard entry.enabled else { return .paused }
+        return switch entry.status {
+        case "connected": .ready
+        case "requires_auth": .needsAction
+        case "error": .failed
+        case "offline", "disconnected": .offline
+        default: .unknown
+        }
+    }
+
+    private func connectionStatusTitle(for entry: StorageEntry) -> String {
+        guard entry.enabled else { return "выключено" }
+        return switch entry.status {
+        case "connected": "подключено"
+        case "requires_auth": "нужна авторизация"
+        case "error": "ошибка"
+        case "offline": "нет связи"
+        case "disconnected": "отключено"
+        default: "статус не подтверждён"
+        }
     }
     private var monitoringAlert: String? {
         if let jobError { return "Журнал заданий: " + jobError }
