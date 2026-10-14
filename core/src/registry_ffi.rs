@@ -1,9 +1,11 @@
 //! Minimal C ABI for the SQLite connection registry.
 //! Inputs are UTF-8 owned by the caller; JSON output is caller-freed.
 //! No OAuth tokens or file contents are persisted by these methods.
+use crate::jobs::JobStore;
 use crate::model::ScenarioReference;
 use crate::registry::{Registry, ScenarioUpdate};
 use crate::scenario_planner::{ObservedFile, PlanAction, PlanItem, SideChange};
+use crate::schedule_dispatch::dispatch_pending_schedule_jobs;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -335,6 +337,57 @@ pub extern "C" fn qadren_scenario_schedules_due(
             }))
             .collect::<Vec<Value>>()))
     })
+}
+
+/// Stage due automatic schedule slots and submit their durable outbox through
+/// the existing JobStore. This only creates queued, revision-pinned Job
+/// records: it never runs a Scenario, touches adapters, reads content, or
+/// grants consent for a transfer.
+#[no_mangle]
+pub extern "C" fn qadren_scenario_schedules_dispatch(
+    registry_path: *const c_char,
+    job_store_path: *const c_char,
+    after: *const c_char,
+    through: *const c_char,
+) -> *mut c_char {
+    let (Some(registry_path), Some(job_store_path), Some(after), Some(through)) = (
+        input(registry_path),
+        input(job_store_path),
+        input(after),
+        input(through),
+    ) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    if registry_path.trim().is_empty() || job_store_path.trim().is_empty() {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    }
+    let (Ok(after), Ok(through)) = (
+        DateTime::parse_from_rfc3339(&after),
+        DateTime::parse_from_rfc3339(&through),
+    ) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    let after = after.with_timezone(&Utc);
+    let through = through.with_timezone(&Utc);
+    if through < after {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    }
+    let result = (|| {
+        let registry = Registry::open(Path::new(&registry_path))?;
+        let staged = registry.stage_due_schedule_occurrences(after, through)?;
+        let mut jobs = JobStore::open(Path::new(&job_store_path))
+            .map_err(|_| crate::registry::RegistryError::IntegrityFailed)?;
+        let dispatched = dispatch_pending_schedule_jobs(&registry, &mut jobs)
+            .map_err(|_| crate::registry::RegistryError::IntegrityFailed)?;
+        Ok::<_, crate::registry::RegistryError>(json!({
+            "staged": staged,
+            "dispatched": dispatched,
+        }))
+    })();
+    match result {
+        Ok(value) => output(json!({"ok":true,"data":value})),
+        Err(_) => output(json!({"ok":false,"error":"scheduler_unavailable"})),
+    }
 }
 
 #[no_mangle]
@@ -900,6 +953,65 @@ mod tests {
         unsafe { qadren_registry_free_string(oversized_pointer) };
         assert_eq!(oversized["error"], "invalid_input");
         std::fs::remove_file(file).unwrap();
+    }
+
+    #[test]
+    fn schedule_dispatch_stages_and_queues_a_pinned_job_through_ffi() {
+        let base = std::env::temp_dir().join(format!(
+            "qadren-schedule-dispatch-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&base).unwrap();
+        let registry_path = base.join("registry.sqlite3");
+        let job_path = base.join("jobs.sqlite3");
+        let registry = Registry::open(&registry_path).unwrap();
+        let left = registry.add("local_filesystem", "Left").unwrap();
+        let right = registry.add("local_filesystem", "Right").unwrap();
+        let scenario = registry
+            .create_scenario("Documents", &left, "/", &right, "/archive", "left_to_right")
+            .unwrap();
+        registry
+            .create_scenario_schedule(&scenario, "UTC", 0, 9, 30)
+            .unwrap();
+        drop(registry);
+
+        let registry_path = CString::new(registry_path.to_str().unwrap()).unwrap();
+        let job_path = CString::new(job_path.to_str().unwrap()).unwrap();
+        let after = CString::new("2026-10-12T09:29:00Z").unwrap();
+        let through = CString::new("2026-10-12T09:30:00Z").unwrap();
+        let first_pointer = qadren_scenario_schedules_dispatch(
+            registry_path.as_ptr(),
+            job_path.as_ptr(),
+            after.as_ptr(),
+            through.as_ptr(),
+        );
+        let first: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(first_pointer) }.to_str().unwrap())
+                .unwrap();
+        unsafe { qadren_registry_free_string(first_pointer) };
+        assert_eq!(first["data"]["staged"], 1);
+        assert_eq!(first["data"]["dispatched"], 1);
+        let second_pointer = qadren_scenario_schedules_dispatch(
+            registry_path.as_ptr(),
+            job_path.as_ptr(),
+            after.as_ptr(),
+            through.as_ptr(),
+        );
+        let second: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(second_pointer) }.to_str().unwrap())
+                .unwrap();
+        unsafe { qadren_registry_free_string(second_pointer) };
+        assert_eq!(second["data"]["staged"], 0);
+        assert_eq!(second["data"]["dispatched"], 0);
+        let jobs = JobStore::open(Path::new(job_path.to_str().unwrap())).unwrap();
+        let jobs = jobs.list_jobs().unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].scenario_id.as_deref(), Some(scenario.as_str()));
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

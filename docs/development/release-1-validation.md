@@ -95,6 +95,12 @@
 - Registry and JobStore deliberately remain separate SQLite databases. A restart after the JobStore commit but before the outbox acknowledgement observes the same Job identity/revision and marks the request dispatched without creating another Job. A mismatching existing Job fails closed.
 - This is not a scheduler service or transfer path: catch-up policy/window ownership, event debounce, queue priority/aging, FFI/UI runtime and Scenario execution remain unimplemented.
 
+### Scheduler dispatch C ABI — #21 (2026-10-14)
+
+- `qadren_scenario_schedules_dispatch` accepts explicit RFC 3339 UTC bounds plus Registry and JobStore paths, stages every due slot, then drains the durable outbox through the same Rust dispatcher.
+- The ABI returns only `staged` and `dispatched` counts. It creates queued revision-pinned Jobs and does not execute a Scenario, touch any adapter, read content, or imply transfer consent.
+- The ABI regression proves first invocation stages and queues one Job and a repeated invocation returns zero/zero; this preserves restart idempotency at the native boundary.
+
 ## Scoped destructive-operation consent — #20 (2026-10-12)
 
 - Pure Rust policy gate допускает destructive operation только с explicit accepted decision для точных operation, connection, relative path и срока. Нет решения, deny, expiry или несовпадение scope означают fail-closed.
