@@ -73,7 +73,11 @@ struct DashboardLayoutTests {
         let recovered = DashboardLayoutStore(defaults: defaults)
         recovered.load(panelID: corruptPanel)
         check(recovered.visibleWidgets.count == MonitoringWidgetKind.allCases.count, "corrupt layout falls back safely")
+        check(recovered.recoveredFromInvalidLayout, "corrupt layout is reported to the monitoring UI")
         check(defaults.data(forKey: DashboardLayoutStore.storageKey(for: corruptPanel)) == Data("not-json".utf8), "corrupt layout is not erased during recovery")
+
+        recovered.setGridScale(.compact)
+        check(!recovered.recoveredFromInvalidLayout, "a deliberate replacement clears the recovery notice")
 
         let bounded = DashboardLayoutStore(defaults: defaults)
         bounded.load(panelID: "bounded-history")

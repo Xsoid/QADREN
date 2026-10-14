@@ -124,6 +124,10 @@ final class DashboardLayoutStore: ObservableObject {
         MonitoringWidgetLayout(kind: $0, isVisible: true)
     }
     @Published private(set) var gridScale: MonitoringGridScale = .regular
+    /// A saved layout can be unreadable after an interrupted preference write or
+    /// an incompatible manual edit. The original bytes are intentionally kept;
+    /// this flag lets the UI explain why the safe default is on screen.
+    @Published private(set) var recoveredFromInvalidLayout = false
 
     private let defaults: UserDefaults
     private var panelID: String?
@@ -155,6 +159,7 @@ final class DashboardLayoutStore: ObservableObject {
         self.panelID = panelID
         undoStack.removeAll()
         redoStack.removeAll()
+        recoveredFromInvalidLayout = false
         let key = Self.storageKey(for: panelID)
         guard let data = defaults.data(forKey: key) else {
             widgets = defaultWidgets
@@ -174,6 +179,7 @@ final class DashboardLayoutStore: ObservableObject {
         }
         widgets = defaultWidgets
         gridScale = .regular
+        recoveredFromInvalidLayout = true
     }
 
     func move(_ kind: MonitoringWidgetKind, by offset: Int) {
@@ -257,6 +263,7 @@ final class DashboardLayoutStore: ObservableObject {
     private func save() {
         guard let panelID, let data = try? JSONEncoder().encode(currentState) else { return }
         defaults.set(data, forKey: Self.storageKey(for: panelID))
+        recoveredFromInvalidLayout = false
     }
 
     private func restore(_ state: MonitoringLayoutState) {

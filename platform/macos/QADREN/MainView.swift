@@ -104,19 +104,47 @@ struct MainView: View {
     private var monitoringDashboard: some View {
         ScrollView {
             VStack(spacing: 10) {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: CGFloat(dashboardLayout.gridScale.minimumWidth)), spacing: 10)], spacing: 10) {
-                    ForEach(dashboardLayout.visibleWidgets) { widget in
-                        monitoringWidget(widget)
+                if let alert = monitoringAlert {
+                    HStack(alignment: .top, spacing: 8) {
+                        QDStatusLabel(kind: .failed, text: "Требуется внимание")
+                        Text(alert)
+                            .font(.caption)
+                            .foregroundStyle(QDTheme.color(.primaryText, for: colorScheme))
+                            .textSelection(.enabled)
+                        Spacer(minLength: 0)
                     }
+                    .padding(12)
+                    .background(QDTheme.color(.panel, for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(QDTheme.danger, lineWidth: 1)
+                    }
+                    .padding(.horizontal, 12).padding(.top, 12)
+                    .accessibilityElement(children: .combine)
                 }
-                .padding(12)
+
+                if dashboardLayout.visibleWidgets.isEmpty {
+                    QDEmptyState(
+                        title: "На панели нет виджетов",
+                        detail: "Откройте режим компоновки, чтобы вернуть скрытые виджеты или сбросить раскладку.",
+                        symbol: "rectangle.3.group"
+                    )
+                    .padding(12)
+                } else {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: CGFloat(dashboardLayout.gridScale.minimumWidth)), spacing: 10)], spacing: 10) {
+                        ForEach(dashboardLayout.visibleWidgets) { widget in
+                            monitoringWidget(widget)
+                        }
+                    }
+                    .padding(12)
+                }
 
                 HStack(spacing: 8) {
                     QDStatusLabel(kind: workerStatusKind, text: "Worker: \(workerStatus)")
                     Divider().frame(height: 14)
                     Text("Обновлено по запросу").font(.caption).foregroundStyle(.secondary)
                     Spacer()
-                    Text("Внимание: не поддерживается Core").font(.caption).foregroundStyle(.secondary)
+                    QDStatusLabel(kind: .unsupported, text: "Файловые операции пока недоступны")
                 }
                 .padding(.horizontal, 12).padding(.bottom, 8)
             }
@@ -154,7 +182,7 @@ struct MainView: View {
                 } else if visibleJobs.isEmpty {
                     QDEmptyState(title: "Заданий нет", detail: "История появится после безопасного выполнения через общий Job Engine.", symbol: "tray")
                 } else {
-                    JobList(jobs: visibleJobs, onRun: runMockJob, onPause: pauseMockJob, onResume: resumeMockJob, onCancel: cancelMockJob)
+                    JobList(jobs: visibleJobs)
                 }
             }
         case .queue:
@@ -177,10 +205,12 @@ struct MainView: View {
                 }
             }
         case .connections:
-            QDWidgetFrame(title: "Подключения", symbol: "externaldrive", actions: {
+            QDWidgetFrame(title: "Подключения", symbol: "externaldrive", status: connectionWidgetStatus, actions: {
                 layoutActions(for: widget)
             }) {
-                if widget.density == .compact {
+                if let error = connections.error {
+                    QDEmptyState(title: "Подключения недоступны", detail: error, symbol: "exclamationmark.triangle")
+                } else if widget.density == .compact {
                     QDMetric(value: "\(connections.entries.count)", label: "подключений", provenance: "локальный Registry")
                 } else if connections.entries.isEmpty {
                     VStack(alignment: .leading, spacing: 10) {
@@ -256,7 +286,7 @@ struct MainView: View {
                     if visibleJobs.isEmpty {
                         EmptyWorkspaceState(title: "Очередь пуста", detail: "Задания появятся после реализации реальных сценариев или безопасных ручных файловых операций.", symbol: "tray")
                     } else {
-                        JobList(jobs: visibleJobs, onRun: runMockJob, onPause: pauseMockJob, onResume: resumeMockJob, onCancel: cancelMockJob)
+                        JobList(jobs: visibleJobs)
                     }
                 }
             }.padding(28)
@@ -310,11 +340,24 @@ struct MainView: View {
         }
     }
     private var jobWidgetStatus: QDStatusKind {
+        if jobError != nil { return .failed }
         if visibleJobs.contains(where: { $0.state == "unknown" }) { return .unknown }
         if visibleJobs.contains(where: { $0.state == "running" }) { return .active }
         if visibleJobs.contains(where: { $0.state == "paused" }) { return .paused }
         if visibleJobs.contains(where: { $0.state == "queued" }) { return .waiting }
         return visibleJobs.isEmpty ? .waiting : .ready
+    }
+    private var connectionWidgetStatus: QDStatusKind {
+        if connections.error != nil { return .failed }
+        return connections.entries.isEmpty ? .waiting : .ready
+    }
+    private var monitoringAlert: String? {
+        if let jobError { return "Журнал заданий: " + jobError }
+        if let error = connections.error { return "Подключения: " + error }
+        if dashboardLayout.recoveredFromInvalidLayout {
+            return "Сохранённую раскладку не удалось прочитать. Показана безопасная стандартная панель; исходная запись не удалена."
+        }
+        return nil
     }
     private var coreStatus: String {
         switch CoreBridge.status {
@@ -332,26 +375,6 @@ struct MainView: View {
     /// It is retained for safe diagnostics, but is never product queue data.
     private var visibleJobs: [JobRow] {
         jobs.filter { !$0.id.hasPrefix("g1-") }
-    }
-    private func queueMockJob() {
-        do { try JobInventory.queueMockArtifact(); refreshJobs() }
-        catch { jobError = error.localizedDescription }
-    }
-    private func runMockJob(_ jobID: String) {
-        do { try JobInventory.runMockArtifact(jobID: jobID); refreshJobs() }
-        catch { jobError = error.localizedDescription; refreshJobs() }
-    }
-    private func cancelMockJob(_ jobID: String) {
-        do { try JobInventory.cancelMockArtifact(jobID: jobID); refreshJobs() }
-        catch { jobError = error.localizedDescription; refreshJobs() }
-    }
-    private func pauseMockJob(_ jobID: String) {
-        do { try JobInventory.pauseMockArtifact(jobID: jobID); refreshJobs() }
-        catch { jobError = error.localizedDescription; refreshJobs() }
-    }
-    private func resumeMockJob(_ jobID: String) {
-        do { try JobInventory.resumeMockArtifact(jobID: jobID); refreshJobs() }
-        catch { jobError = error.localizedDescription; refreshJobs() }
     }
 }
 
@@ -459,10 +482,6 @@ private struct EmptyWorkspaceState: View {
 
 private struct JobList: View {
     let jobs: [JobRow]
-    let onRun: (String) -> Void
-    let onPause: (String) -> Void
-    let onResume: (String) -> Void
-    let onCancel: (String) -> Void
     var body: some View {
         VStack(spacing: 0) {
             ForEach(jobs) { job in
@@ -474,14 +493,6 @@ private struct JobList: View {
                     }
                     Spacer()
                     Text(jobStateTitle(job.state)).font(.callout.weight(.medium))
-                    if job.id.hasPrefix("g1-") && job.state == "queued" {
-                        Button("Запустить") { onRun(job.id) }
-                        Button("Приостановить") { onPause(job.id) }
-                        Button("Отменить", role: .destructive) { onCancel(job.id) }
-                    } else if job.id.hasPrefix("g1-") && job.state == "paused" {
-                        Button("Возобновить") { onResume(job.id) }
-                        Button("Отменить", role: .destructive) { onCancel(job.id) }
-                    }
                 }.padding(.vertical, 10)
                 if job.id != jobs.last?.id { Divider() }
             }
@@ -496,6 +507,7 @@ private func jobStateTitle(_ state: String) -> String {
     case "completed": "Завершено"
     case "cancelled": "Отменено"
     case "running": "Выполняется"
+    case "unknown": "Результат неизвестен"
     default: state
     }
 }

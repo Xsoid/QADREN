@@ -222,10 +222,7 @@ struct SettingsPanelView: View {
             ToolbarItemGroup(placement: .primaryAction) {
                 switch selection ?? .connections {
                 case .connections:
-                    Menu("Добавить подключение", systemImage: "plus") {
-                        Button("Яндекс Диск") { connections.addYandex() }
-                        Button("Этот Mac") { connections.addLocalComputer() }
-                    }
+                    Button("Добавить этот Mac", systemImage: "plus") { connections.addLocalComputer() }
                 case .scenarios:
                     if schedulesScenario == nil {
                         Button("Создать сценарий", systemImage: "plus", action: beginScenarioCreation)
@@ -335,7 +332,7 @@ private struct ConnectionsSettingsView: View {
                 if connections.entries.isEmpty && !connections.hasLegacyYandexToken {
                     SettingsEmptyState(
                         title: "Подключений пока нет",
-                    detail: "Добавьте Яндекс Диск или этот Mac как отдельную точку синхронизации.",
+                    detail: "Добавьте этот Mac как отдельную локальную точку синхронизации. Яндекс Диск отложен до P3.",
                         symbol: "externaldrive.badge.plus"
                     )
                     .frame(maxWidth: .infinity, minHeight: 280)
@@ -343,7 +340,7 @@ private struct ConnectionsSettingsView: View {
                 ForEach(connections.entries) { entry in
                     GroupBox {
                         if entry.adapter == "yandex_disk" {
-                            YandexConnectionCard(
+                            ParkedYandexConnectionCard(
                                 entry: entry,
                                 onRemove: { connections.remove(entry.id) },
                                 onRename: { connections.rename(entry.id, name: $0) },
@@ -371,6 +368,49 @@ private struct ConnectionsSettingsView: View {
             }
             .frame(maxWidth: 900, alignment: .leading)
             .padding(24)
+        }
+    }
+}
+
+/// D-018 parks Yandex work through P2. Existing local records and Keychain
+/// credentials remain manageable, but this screen must not offer OAuth or API
+/// calls as a current local-release capability.
+private struct ParkedYandexConnectionCard: View {
+    let entry: StorageEntry
+    let onRemove: () -> Void
+    let onRename: (String) -> Void
+    let onSetEnabled: (Bool) -> Void
+    @State private var name: String
+    @State private var confirmRemoval = false
+
+    init(entry: StorageEntry, onRemove: @escaping () -> Void, onRename: @escaping (String) -> Void, onSetEnabled: @escaping (Bool) -> Void) {
+        self.entry = entry
+        self.onRemove = onRemove
+        self.onRename = onRename
+        self.onSetEnabled = onSetEnabled
+        _name = State(initialValue: entry.name)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Яндекс Диск · подключение " + String(entry.id.prefix(8)))
+                .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                TextField("Название подключения", text: $name)
+                Button("Переименовать") { onRename(name) }
+                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || name == entry.name)
+                Toggle("Включено", isOn: Binding(get: { entry.enabled }, set: { onSetEnabled($0) }))
+            }
+            SettingsNotice(
+                text: "Интеграция Яндекс Диска отложена до P3. QADREN сохраняет локальную запись и Keychain credential, но не запускает OAuth или API-вызовы из этого окна.",
+                symbol: "pause.circle"
+            )
+            Button("Удалить локальное подключение", role: .destructive) { confirmRemoval = true }
+        }
+        .confirmationDialog("Удалить это локальное подключение QADREN?", isPresented: $confirmRemoval) {
+            Button("Удалить подключение", role: .destructive, action: onRemove)
+        } message: {
+            Text("Будут удалены только локальная запись QADREN и её Keychain credential. Файлы на Яндекс Диске не изменятся.")
         }
     }
 }
