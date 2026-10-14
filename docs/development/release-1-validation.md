@@ -84,7 +84,8 @@
 - SQLite v6 хранит несколько валидированных расписаний на Scenario (IANA timezone, weekday, время). Это configuration-only слой: оценка времени, catch-up и создание Job ещё не подключены.
 - SQLite v7 atomically claims evaluated occurrence keys. Повторный DST slot и повтор после restart возвращают уже занятый key и не могут породить второй будущий Job.
 - `Registry::due_schedule_occurrences` читает enabled schedules только enabled/unpaused Scenario и детерминированно возвращает DST-safe кандидаты за заданный UTC interval. Это не claim и не Job submission: без атомарного JobStore/outbox bridge запись receipt до Job остаётся небезопасной при crash. C ABI принимает явные RFC 3339 UTC bounds и также остаётся read-only.
-- Локально пройдены `bash scripts/test-core.sh` с 221 Rust tests и `bash scripts/build-macos.sh`. Restart-тест подтверждает сохранение pending/pause. Нет clock/DST evaluator, priority aging, FFI/UI или Job submission; #21 остаётся PARTIAL.
+- Settings показывает для выбранного Scenario до пяти реальных кандидатов на следующие 14 дней через этот C ABI. Пустой список честно означает, что в этом окне нет подходящего enabled/unpaused расписания; экран не создаёт Job, не claim-ит occurrence и не выполняет adapter/content I/O.
+- `scripts/test-macos-scenario-schedules.sh` создаёт отдельный временный Registry и проверяет Swift/FFI bridge: enabled weekly UTC schedule возвращает ровно один ожидаемый slot, а повторный read-only запрос не меняет его. Локально пройдены `bash scripts/test-core.sh` с 231 Rust tests, native runner, `bash scripts/test-macos-job-inventory.sh`, `bash scripts/test-macos-keychain.sh` и `bash scripts/build-macos.sh`. Restart-тест подтверждает сохранение pending/pause. Нет catch-up orchestration, event debounce, priority aging, атомарного claim+Job/outbox bridge или Job submission; #21 остаётся PARTIAL.
 
 ## Scoped destructive-operation consent — #20 (2026-10-12)
 

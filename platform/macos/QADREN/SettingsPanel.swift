@@ -80,13 +80,21 @@ final class ScenarioSettings: ObservableObject {
 @MainActor
 final class ScenarioScheduleSettings: ObservableObject {
     @Published private(set) var entries: [ScenarioScheduleEntry] = []
+    @Published private(set) var upcoming: [ScenarioScheduleOccurrence] = []
     @Published private(set) var error: String?
 
     func refresh(scenarioID: String) {
         do {
             entries = try StorageRegistryBridge.listScenarioSchedules(scenarioID: scenarioID)
+            let now = Date()
+            upcoming = try StorageRegistryBridge.dueScenarioSchedules(
+                after: now,
+                through: now.addingTimeInterval(14 * 24 * 60 * 60)
+            )
+            .filter { $0.scenario_id == scenarioID }
             error = nil
         } catch {
+            upcoming = []
             self.error = error.localizedDescription
         }
     }
@@ -511,7 +519,7 @@ private struct ScenarioSchedulesView: View {
             }
 
             SettingsNotice(
-                text: "Расписание сохраняет только время и timezone. Планировщик пока не создаёт Job и не передаёт файлы.",
+                text: "Показаны только кандидаты на 14 дней. Просмотр не создаёт Job и не передаёт файлы.",
                 symbol: "clock.badge.exclamationmark"
             )
 
@@ -535,6 +543,26 @@ private struct ScenarioSchedulesView: View {
 
             if let error = schedules.error {
                 SettingsNotice(text: error, symbol: "exclamationmark.triangle")
+            }
+
+            if !schedules.upcoming.isEmpty {
+                GroupBox("Ближайшие кандидаты") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(schedules.upcoming.prefix(5)) { occurrence in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(occurrence.occurrence_key)
+                                    .font(.body.monospaced())
+                                Text("Расписание " + String(occurrence.schedule_id.prefix(8)))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        Text("Это read-only расчёт по сохранённым настройкам. Запуск и подтверждение кандидата пока не реализованы.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
 
             if schedules.entries.isEmpty {

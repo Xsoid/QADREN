@@ -20,6 +20,10 @@ private func scenarioSetEnabled(
 private func scenarioSchedulesList(
     _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_scenario_schedules_due")
+private func scenarioSchedulesDue(
+    _ path: UnsafePointer<CChar>?, _ after: UnsafePointer<CChar>?, _ through: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_scenario_schedules_create")
 private func scenarioSchedulesCreate(
     _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?, _ timezone: UnsafePointer<CChar>?,
@@ -88,6 +92,13 @@ struct ScenarioScheduleEntry: Decodable, Identifiable {
     let hour: UInt8
     let minute: UInt8
     let enabled: Bool
+}
+struct ScenarioScheduleOccurrence: Decodable, Identifiable, Equatable {
+    let scenario_id: String
+    let schedule_id: String
+    let occurrence_key: String
+
+    var id: String { scenario_id + ":" + schedule_id + ":" + occurrence_key }
 }
 private struct NewConnection: Decodable {
     let id: String
@@ -188,6 +199,27 @@ enum StorageRegistryBridge {
         return try database.withCString { db in
             try scenarioID.withCString { id in
                 try unwrap(scenarioSchedulesList(db, id), as: [ScenarioScheduleEntry].self)
+            }
+        }
+    }
+
+    /// Returns scheduler candidates only. The Core deliberately does not claim
+    /// these slots or create Jobs until it has an atomic JobStore/outbox boundary.
+    static func dueScenarioSchedules(
+        after: Date, through: Date, databasePath: String? = nil
+    ) throws -> [ScenarioScheduleOccurrence] {
+        let database = try databasePath ?? path
+        let formatter = ISO8601DateFormatter()
+        let afterValue = formatter.string(from: after)
+        let throughValue = formatter.string(from: through)
+        return try database.withCString { db in
+            try afterValue.withCString { lowerBound in
+                try throughValue.withCString { upperBound in
+                    try unwrap(
+                        scenarioSchedulesDue(db, lowerBound, upperBound),
+                        as: [ScenarioScheduleOccurrence].self
+                    )
+                }
             }
         }
     }
