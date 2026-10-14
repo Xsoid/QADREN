@@ -354,12 +354,9 @@ struct MainView: View {
         }
     }
     private var jobWidgetStatus: QDStatusKind {
-        if jobError != nil { return .failed }
-        if visibleJobs.contains(where: { $0.state == "unknown" }) { return .unknown }
-        if visibleJobs.contains(where: { $0.state == "running" }) { return .active }
-        if visibleJobs.contains(where: { $0.state == "paused" }) { return .paused }
-        if visibleJobs.contains(where: { $0.state == "queued" }) { return .waiting }
-        return visibleJobs.isEmpty ? .waiting : .ready
+        statusKind(for: JobPresentationStatus.aggregate(
+            visibleJobs.map(\.state), inventoryFailed: jobError != nil
+        ))
     }
     private var connectionWidgetStatus: QDStatusKind {
         statusKind(for: connectionPresentationStatus)
@@ -389,6 +386,18 @@ struct MainView: View {
         case .disconnected: .offline
         case .paused: .paused
         case .waiting: .waiting
+        case .unknown: .unknown
+        }
+    }
+
+    private func statusKind(for status: JobPresentationStatus) -> QDStatusKind {
+        switch status {
+        case .ready: .ready
+        case .active: .active
+        case .waiting: .waiting
+        case .paused: .paused
+        case .needsAction: .needsAction
+        case .failed: .failed
         case .unknown: .unknown
         }
     }

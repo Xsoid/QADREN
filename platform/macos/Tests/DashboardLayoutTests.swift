@@ -99,6 +99,16 @@ struct DashboardLayoutTests {
         check(ConnectionPresentationStatus(enabled: true, registryStatus: "unrecognized") == .unknown, "unrecognized entry is not assumed ready")
         check(ConnectionPresentationStatus(enabled: false, registryStatus: "connected").title == "выключено", "disabled entry does not expose a ready title")
 
+        check(JobPresentationStatus.aggregate([], inventoryFailed: false) == .waiting, "empty JobStore is waiting")
+        check(JobPresentationStatus.aggregate(["completed", "cancelled"], inventoryFailed: false) == .ready, "terminal Jobs do not look active")
+        check(JobPresentationStatus.aggregate(["queued", "completed"], inventoryFailed: false) == .waiting, "queued Job is not hidden by terminal history")
+        check(JobPresentationStatus.aggregate(["paused", "queued"], inventoryFailed: false) == .paused, "paused Job outranks queue")
+        check(JobPresentationStatus.aggregate(["running", "paused"], inventoryFailed: false) == .active, "running Job outranks paused queue")
+        check(JobPresentationStatus.aggregate(["unknown", "running"], inventoryFailed: false) == .unknown, "unknown Job outranks activity")
+        check(JobPresentationStatus.aggregate(["waiting_for_decision", "unknown"], inventoryFailed: false) == .needsAction, "decision requirement outranks unknown status")
+        check(JobPresentationStatus.aggregate(["failed", "waiting_for_decision"], inventoryFailed: false) == .failed, "failed Job outranks decision requirement")
+        check(JobPresentationStatus.aggregate(["completed"], inventoryFailed: true) == .failed, "JobStore read failure outranks historical completion")
+
         print("Dashboard layout native tests passed")
     }
 }
