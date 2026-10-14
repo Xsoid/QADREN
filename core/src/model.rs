@@ -32,9 +32,10 @@ pub enum JobState {
 }
 
 impl JobState {
-    /// Completed and Failed describe a *verified* terminal result. Cancelled
-    /// means no effect attempt was active when the user stopped the Job.
-    /// Unknown is never treated as a failure eligible for blind retry.
+    /// Completed requires a verified effect. Failed means the executor proved
+    /// it stopped without an ambiguous effect. Cancelled means no effect
+    /// attempt was active when the user stopped the Job. Unknown is never
+    /// treated as a failure eligible for blind retry.
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }

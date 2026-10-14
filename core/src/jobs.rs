@@ -233,7 +233,7 @@ impl JobStore {
 
     fn initialize(db: Connection, owner_lock: Option<Connection>) -> Result<Self> {
         let version: i32 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 8 {
+        if version > 9 {
             return Err(JobStoreError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -349,8 +349,6 @@ impl JobStore {
                  );
                  INSERT INTO job_attempts_new
                    SELECT attempt_id,job_id,status,operation_kind,target_connection_id,target_path FROM job_attempts;
-                 CREATE UNIQUE INDEX one_active_attempt_per_job_new
-                   ON job_attempts_new(job_id) WHERE status='active';
                  CREATE TABLE attempt_verifications_new (
                    attempt_id TEXT PRIMARY KEY NOT NULL REFERENCES job_attempts_new(attempt_id),
                    evidence_level TEXT NOT NULL CHECK (evidence_level IN
@@ -395,6 +393,49 @@ impl JobStore {
                    ON operation_decisions(job_id, consumed);
                  PRAGMA user_version = 8;
                  COMMIT;",
+            )?;
+        }
+        if version <= 8 {
+            // A known refusal before the adapter can create an effect is not
+            // UNKNOWN. Rebuild the attempt graph to distinguish it from both
+            // verified resolution and an ambiguous active/unknown attempt.
+            db.execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                 BEGIN IMMEDIATE;
+                 CREATE TABLE job_attempts_new (
+                   attempt_id TEXT PRIMARY KEY NOT NULL,
+                   job_id TEXT NOT NULL REFERENCES jobs(id),
+                   status TEXT NOT NULL CHECK (status IN ('active','unknown','resolved','failed_before_effect')),
+                   operation_kind TEXT,
+                   target_connection_id TEXT,
+                   target_path TEXT,
+                   UNIQUE(job_id, attempt_id)
+                 );
+                 INSERT INTO job_attempts_new
+                   SELECT attempt_id,job_id,status,operation_kind,target_connection_id,target_path FROM job_attempts;
+                 CREATE TABLE attempt_verifications_new (
+                   attempt_id TEXT PRIMARY KEY NOT NULL REFERENCES job_attempts_new(attempt_id),
+                   evidence_level TEXT NOT NULL CHECK (evidence_level IN
+                     ('metadata_verified','content_verified'))
+                 );
+                 INSERT INTO attempt_verifications_new SELECT attempt_id,evidence_level FROM attempt_verifications;
+                 CREATE TABLE attempt_expectations_new (
+                   attempt_id TEXT PRIMARY KEY NOT NULL REFERENCES job_attempts_new(attempt_id),
+                   expected_size INTEGER NOT NULL CHECK(expected_size >= 0),
+                   expected_md5 TEXT NOT NULL CHECK(length(expected_md5) = 32)
+                 );
+                 INSERT INTO attempt_expectations_new SELECT attempt_id,expected_size,expected_md5 FROM attempt_expectations;
+                 DROP TABLE attempt_expectations;
+                 DROP TABLE attempt_verifications;
+                 DROP TABLE job_attempts;
+                 ALTER TABLE job_attempts_new RENAME TO job_attempts;
+                 ALTER TABLE attempt_verifications_new RENAME TO attempt_verifications;
+                 ALTER TABLE attempt_expectations_new RENAME TO attempt_expectations;
+                 CREATE UNIQUE INDEX one_active_attempt_per_job
+                   ON job_attempts(job_id) WHERE status='active';
+                 PRAGMA user_version = 9;
+                 COMMIT;
+                 PRAGMA foreign_keys = ON;",
             )?;
         }
         db.pragma_update(None, "foreign_keys", "ON")?;
@@ -533,7 +574,7 @@ impl JobStore {
         // is active or has an unresolved outcome.
         if matches!(next, JobState::Completed | JobState::Cancelled) {
             let unresolved: i64 = tx.query_row(
-                "SELECT count(*) FROM job_attempts WHERE job_id=?1 AND status!='resolved'",
+                "SELECT count(*) FROM job_attempts WHERE job_id=?1 AND status IN ('active','unknown')",
                 [id],
                 |row| row.get(0),
             )?;
@@ -582,7 +623,7 @@ impl JobStore {
             return Err(JobStoreError::InvalidTransition);
         }
         let unresolved: i64 = tx.query_row(
-            "SELECT count(*) FROM job_attempts WHERE job_id=?1 AND status!='resolved'",
+            "SELECT count(*) FROM job_attempts WHERE job_id=?1 AND status IN ('active','unknown')",
             [id],
             |row| row.get(0),
         )?;
@@ -624,7 +665,7 @@ impl JobStore {
             return Err(JobStoreError::InvalidTransition);
         }
         let unresolved: i64 = tx.query_row(
-            "SELECT count(*) FROM job_attempts WHERE job_id=?1 AND status!='resolved'",
+            "SELECT count(*) FROM job_attempts WHERE job_id=?1 AND status IN ('active','unknown')",
             [id],
             |row| row.get(0),
         )?;
@@ -686,7 +727,7 @@ impl JobStore {
             Some(_) => return Err(JobStoreError::InvalidTransition),
         }
         let unresolved: i64 = tx.query_row(
-            "SELECT count(*) FROM job_attempts WHERE job_id=?1 AND status!='resolved'",
+            "SELECT count(*) FROM job_attempts WHERE job_id=?1 AND status IN ('active','unknown')",
             [job_id],
             |row| row.get(0),
         )?;
@@ -844,7 +885,7 @@ impl JobStore {
             return Err(JobStoreError::InvalidTransition);
         }
         let pending: i64 = tx.query_row(
-            "SELECT count(*) FROM job_attempts WHERE job_id=?1 AND status!='resolved'",
+            "SELECT count(*) FROM job_attempts WHERE job_id=?1 AND status IN ('active','unknown')",
             [job_id],
             |row| row.get(0),
         )?;
@@ -905,7 +946,7 @@ impl JobStore {
             return Err(JobStoreError::InvalidTransition);
         }
         let pending: i64 = tx.query_row(
-            "SELECT count(*) FROM job_attempts WHERE job_id=?1 AND status!='resolved'",
+            "SELECT count(*) FROM job_attempts WHERE job_id=?1 AND status IN ('active','unknown')",
             [job_id],
             |row| row.get(0),
         )?;
@@ -1209,12 +1250,64 @@ impl JobStore {
         Ok(())
     }
 
+    /// Record a refusal that the adapter proves occurred before it could make
+    /// an external effect (for example, an atomic create-new collision).
+    /// This is intentionally distinct from verification: no receipt is
+    /// fabricated, and any I/O result that could be ambiguous stays UNKNOWN.
+    pub fn fail_attempt_before_effect(&mut self, job_id: &str, attempt_id: &str) -> Result<()> {
+        self.check_storage_identity()?;
+        let tx = self.db.transaction()?;
+        let state: Option<String> = tx
+            .query_row("SELECT state FROM jobs WHERE id=?1", [job_id], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        if state.as_deref() != Some("running") {
+            return Err(JobStoreError::InvalidTransition);
+        }
+        if JobState::Running
+            .transition(
+                JobState::Failed,
+                Confirmation::Confirmed(crate::confirmation::EvidenceLevel::Requested),
+            )
+            .is_err()
+        {
+            return Err(JobStoreError::InvalidTransition);
+        }
+        let changed_attempt = tx.execute(
+            "UPDATE job_attempts SET status='failed_before_effect'
+             WHERE job_id=?1 AND attempt_id=?2 AND status='active'",
+            params![job_id, attempt_id],
+        )?;
+        if changed_attempt != 1 {
+            return Err(JobStoreError::InvalidTransition);
+        }
+        let changed_job = tx.execute(
+            "UPDATE jobs SET state='failed' WHERE id=?1 AND state='running'",
+            [job_id],
+        )?;
+        if changed_job != 1 {
+            return Err(JobStoreError::InvalidTransition);
+        }
+        tx.execute(
+            "INSERT INTO job_events(job_id,state,kind)
+             VALUES (?1,'failed','attempt_failed_before_effect')",
+            [job_id],
+        )?;
+        tx.execute(
+            "INSERT INTO job_events(job_id,state,kind) VALUES (?1,'failed','transition')",
+            [job_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Inventory for operator investigation. Never changes or retries attempts.
     pub fn unresolved_attempts(&self) -> Result<Vec<UnresolvedAttempt>> {
         self.check_storage_identity()?;
         let mut statement = self.db.prepare(
             "SELECT attempt_id,job_id,status,operation_kind,target_connection_id,target_path
-             FROM job_attempts WHERE status!='resolved' ORDER BY job_id,attempt_id",
+             FROM job_attempts WHERE status IN ('active','unknown') ORDER BY job_id,attempt_id",
         )?;
         let rows = statement.query_map([], |row| {
             let operation_kind: Option<String> = row.get(3)?;
@@ -1248,7 +1341,7 @@ impl JobStore {
         let blocked: i64 = self.db.query_row(
             "SELECT EXISTS(
                 SELECT 1 FROM job_attempts
-                WHERE status != 'resolved'
+                WHERE status IN ('active','unknown')
                   AND (target_connection_id = ?1 OR target_connection_id IS NULL)
             )",
             [connection_id],
@@ -1773,6 +1866,56 @@ mod tests {
     }
 
     #[test]
+    fn proven_pre_effect_refusal_fails_without_creating_an_unknown_attempt() {
+        let mut db = JobStore::in_memory().unwrap();
+        db.enqueue("job", None).unwrap();
+        db.advance(
+            "job",
+            JobState::Queued,
+            JobState::Running,
+            Confirmation::Unknown,
+        )
+        .unwrap();
+        db.prepare_bound_attempt(
+            "job",
+            "attempt",
+            "create_new",
+            "connection",
+            "new-file",
+            1,
+            "900150983cd24fb0d6963f7d28e17f72",
+        )
+        .unwrap();
+
+        db.fail_attempt_before_effect("job", "attempt").unwrap();
+
+        assert_eq!(db.state("job").unwrap(), Some(JobState::Failed));
+        assert!(db.unresolved_attempts().unwrap().is_empty());
+        let status: String = db
+            .db
+            .query_row(
+                "SELECT status FROM job_attempts WHERE attempt_id='attempt'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "failed_before_effect");
+        assert!(matches!(
+            db.resolve_attempt(
+                "job",
+                "attempt",
+                &crate::verification::test_bound_receipt(
+                    "attempt",
+                    "create_new",
+                    "connection",
+                    "new-file"
+                )
+            ),
+            Err(JobStoreError::InvalidTransition)
+        ));
+    }
+
+    #[test]
     fn migrates_v3_attempts_without_erasing_unknown_state() {
         let connection = Connection::open_in_memory().unwrap();
         connection
@@ -1864,7 +2007,7 @@ mod tests {
             .db
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 8);
+        assert_eq!(version, 9);
     }
 
     #[test]

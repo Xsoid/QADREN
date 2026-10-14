@@ -330,7 +330,17 @@ fn run_mock_create_inner(
     } else {
         MOCK_CONTENT
     };
-    storage.create_new(&target_name, written_content)?;
+    match storage.create_new(&target_name, written_content) {
+        Ok(()) => {}
+        Err(MockCreateError::OccupiedTarget) => {
+            // `create_new` failed atomically before this attempt could publish
+            // a destination. Persist the known no-effect outcome instead of
+            // converting it to UNKNOWN on the next process open.
+            store.fail_attempt_before_effect(job_id, &attempt_id)?;
+            return Err(MockCreateError::OccupiedTarget);
+        }
+        Err(error) => return Err(error),
+    }
     if fault == Some(MockFault::CrashAfterEffect) {
         // Deliberately return before resolution: reopening the durable store
         // classifies the active effect as UNKNOWN and forbids blind replay.
@@ -405,11 +415,15 @@ mod tests {
         fs::create_dir(&storage).unwrap();
         let target = storage.join("job-1.qadren-g1-test");
         fs::write(&target, b"existing bytes").unwrap();
-        assert!(matches!(
-            run_mock_create(&database, &storage, "job-1", true),
-            Err(MockCreateError::OccupiedTarget)
-        ));
+        let result = run_mock_create(&database, &storage, "job-1", true);
+        assert!(
+            matches!(result, Err(MockCreateError::OccupiedTarget)),
+            "expected a known pre-effect collision, got {result:?}"
+        );
         assert_eq!(fs::read(target).unwrap(), b"existing bytes");
+        let store = JobStore::open(&database).unwrap();
+        assert_eq!(store.state("job-1").unwrap(), Some(JobState::Failed));
+        assert!(store.unresolved_attempts().unwrap().is_empty());
     }
 
     #[test]
