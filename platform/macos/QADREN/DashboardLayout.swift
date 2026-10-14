@@ -19,11 +19,53 @@ enum MonitoringWidgetKind: String, CaseIterable, Codable, Identifiable {
     }
 }
 
+/// The amount of secondary information shown by one widget. This is local
+/// presentation state, not a request to recalculate or mutate Core state.
+enum MonitoringWidgetDensity: String, CaseIterable, Codable, Identifiable {
+    case compact
+    case regular
+    case expanded
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .compact: "Компактно"
+        case .regular: "Обычно"
+        case .expanded: "Подробно"
+        }
+    }
+}
+
 struct MonitoringWidgetLayout: Codable, Identifiable, Equatable {
     let kind: MonitoringWidgetKind
     var isVisible: Bool
+    var density: MonitoringWidgetDensity
 
     var id: MonitoringWidgetKind { kind }
+
+    init(
+        kind: MonitoringWidgetKind,
+        isVisible: Bool,
+        density: MonitoringWidgetDensity = .regular
+    ) {
+        self.kind = kind
+        self.isVisible = isVisible
+        self.density = density
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case kind
+        case isVisible
+        case density
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        kind = try container.decode(MonitoringWidgetKind.self, forKey: .kind)
+        isVisible = try container.decode(Bool.self, forKey: .isVisible)
+        density = try container.decodeIfPresent(MonitoringWidgetDensity.self, forKey: .density) ?? .regular
+    }
 }
 
 /// Local-only presentation state for one monitoring window. It never owns Jobs,
@@ -89,6 +131,14 @@ final class DashboardLayoutStore: ObservableObject {
         guard widgets[index].isVisible != isVisible else { return }
         recordUndoState()
         widgets[index].isVisible = isVisible
+        save()
+    }
+
+    func setDensity(_ kind: MonitoringWidgetKind, density: MonitoringWidgetDensity) {
+        guard let index = widgets.firstIndex(where: { $0.kind == kind }) else { return }
+        guard widgets[index].density != density else { return }
+        recordUndoState()
+        widgets[index].density = density
         save()
     }
 

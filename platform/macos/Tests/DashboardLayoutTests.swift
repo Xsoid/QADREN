@@ -19,8 +19,14 @@ struct DashboardLayoutTests {
 
         store.move(.connections, by: -1)
         store.setVisible(.jobs, isVisible: false)
+        store.setDensity(.connections, density: .expanded)
 
         check(store.canUndo, "layout edits enable undo")
+        store.undo()
+        check(store.widgets.first(where: { $0.kind == .connections })?.density == .regular, "undo restores widget density")
+        store.redo()
+        check(store.widgets.first(where: { $0.kind == .connections })?.density == .expanded, "redo restores widget density")
+        store.undo()
         store.undo()
         check(store.hiddenWidgets.isEmpty, "undo restores widget visibility")
         check(store.widgets.map(\.kind) == [.system, .jobs, .connections, .queue], "undo preserves earlier ordering edit")
@@ -29,12 +35,24 @@ struct DashboardLayoutTests {
         check(store.widgets.map(\.kind) == MonitoringWidgetKind.allCases, "second undo restores default ordering")
         store.redo()
         store.redo()
+        store.redo()
         check(store.hiddenWidgets.map(\.kind) == [.jobs], "redo restores the full edit sequence")
+        check(store.widgets.first(where: { $0.kind == .connections })?.density == .expanded, "redo persists the density edit")
 
         let restored = DashboardLayoutStore(defaults: defaults)
         restored.load(panelID: panelID)
         check(restored.widgets.map(\.kind) == [.system, .jobs, .connections, .queue], "widget order persists per panel")
         check(restored.hiddenWidgets.map(\.kind) == [.jobs], "hidden widget persists per panel")
+        check(restored.widgets.first(where: { $0.kind == .connections })?.density == .expanded, "widget density persists per panel")
+
+        let legacyPanel = "legacy-layout"
+        let legacyJSON = """
+        [{"kind":"system","isVisible":true},{"kind":"jobs","isVisible":true},{"kind":"queue","isVisible":true},{"kind":"connections","isVisible":true}]
+        """
+        defaults.set(Data(legacyJSON.utf8), forKey: DashboardLayoutStore.storageKey(for: legacyPanel))
+        let legacy = DashboardLayoutStore(defaults: defaults)
+        legacy.load(panelID: legacyPanel)
+        check(legacy.widgets.allSatisfy { $0.density == .regular }, "legacy layouts default missing density safely")
 
         let otherPanel = DashboardLayoutStore(defaults: defaults)
         otherPanel.load(panelID: "panel-b")

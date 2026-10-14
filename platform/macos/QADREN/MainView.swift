@@ -120,15 +120,24 @@ struct MainView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     QDStatusLabel(kind: workerStatusKind, text: workerStatus)
                     LabeledContent("Ядро", value: coreStatus)
-                    Text("Источник: локальный Core; содержимое файлов не читается.")
-                        .font(.caption2).foregroundStyle(.secondary)
+                    if widget.density != .compact {
+                        Text("Источник: локальный Core; содержимое файлов не читается.")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                    if widget.density == .expanded {
+                        LabeledContent("Режим", value: "только метаданные")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
         case .jobs:
             QDWidgetFrame(title: "Задания", symbol: "arrow.triangle.2.circlepath", status: jobWidgetStatus, actions: {
                 layoutActions(for: widget)
             }) {
-                if visibleJobs.isEmpty {
+                if widget.density == .compact {
+                    QDMetric(value: "\(visibleJobs.count)", label: "в инвентаре", provenance: "локальный JobStore")
+                } else if visibleJobs.isEmpty {
                     QDEmptyState(title: "Заданий нет", detail: "История появится после безопасного выполнения через общий Job Engine.", symbol: "tray")
                 } else {
                     JobList(jobs: visibleJobs, onRun: runMockJob, onPause: pauseMockJob, onResume: resumeMockJob, onCancel: cancelMockJob)
@@ -140,23 +149,33 @@ struct MainView: View {
             }) {
                 HStack(alignment: .top, spacing: 24) {
                     QDMetric(value: "\(visibleJobs.count)", label: "в инвентаре", provenance: "локальный JobStore")
-                    QDMetric(value: nil, label: "ETA", provenance: "не поддерживается")
+                    if widget.density != .compact {
+                        QDMetric(value: nil, label: "ETA", provenance: "не поддерживается")
+                    }
                 }
-                Text("Порядок, прогресс и оценка времени появятся только когда их подтвердит Core.")
-                    .font(.caption).foregroundStyle(.secondary)
+                if widget.density != .compact {
+                    Text("Порядок, прогресс и оценка времени появятся только когда их подтвердит Core.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if widget.density == .expanded {
+                    Text("Источник: локальный JobStore; автоматическое исполнение не заявлено.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
             }
         case .connections:
             QDWidgetFrame(title: "Подключения", symbol: "externaldrive", actions: {
                 layoutActions(for: widget)
             }) {
-                if connections.entries.isEmpty {
+                if widget.density == .compact {
+                    QDMetric(value: "\(connections.entries.count)", label: "подключений", provenance: "локальный Registry")
+                } else if connections.entries.isEmpty {
                     VStack(alignment: .leading, spacing: 10) {
                         Text("Подключения ещё не настроены.").foregroundStyle(.secondary)
                         Button("Открыть настройки") { openWindow(id: "scenario-settings") }
                     }
                 } else {
                     VStack(alignment: .leading, spacing: 8) {
-                        ForEach(connections.entries.prefix(4)) { entry in
+                        ForEach(widget.density == .expanded ? connections.entries : Array(connections.entries.prefix(4))) { entry in
                             HStack(spacing: 8) {
                                 Image(systemName: entry.enabled ? "externaldrive.fill" : "externaldrive")
                                     .foregroundStyle(entry.enabled ? QDTheme.cyan : .secondary)
@@ -196,6 +215,21 @@ struct MainView: View {
             }
             .labelStyle(.iconOnly)
             .help("Скрыть виджет")
+            Menu("Плотность виджета", systemImage: "rectangle.3.group") {
+                ForEach(MonitoringWidgetDensity.allCases) { density in
+                    Button {
+                        dashboardLayout.setDensity(widget.kind, density: density)
+                    } label: {
+                        if widget.density == density {
+                            Label(density.title, systemImage: "checkmark")
+                        } else {
+                            Text(density.title)
+                        }
+                    }
+                }
+            }
+            .labelStyle(.iconOnly)
+            .help("Плотность виджета")
         }
     }
 
