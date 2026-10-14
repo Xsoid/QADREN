@@ -73,14 +73,38 @@ pub extern "C" fn qadren_yandex_list_folder(
     input: *const c_char,
     path: *const c_char,
 ) -> *mut c_char {
-    let (Some(access), Some(path)) = (parse_token(input), parse_token(path)) else {
+    let (Some(input_value), Some(path)) = (parse_token(input), parse_token(path)) else {
         return export(json!({"ok": false, "error": "invalid_request"}));
     };
     let result = YandexMetadataClient::new()
         .map_err(safe_error)
         .and_then(|client| {
             client
-                .list_folder(&access, &path, 0, 50)
+                .list_folder(&input_value, &path, 0, 50)
+                .map_err(safe_error)
+        });
+    match result {
+        Ok(folder) => export(json!({"ok": true, "data": folder})),
+        Err(error) => export(json!({"ok": false, "error": error})),
+    }
+}
+
+/// Lists one bounded metadata page from a Yandex Disk directory. This never
+/// requests file bytes and does not persist the access token or listing.
+#[no_mangle]
+pub extern "C" fn qadren_yandex_list_folder_page(
+    input: *const c_char,
+    path: *const c_char,
+    offset: u64,
+) -> *mut c_char {
+    let (Some(input_value), Some(path)) = (parse_token(input), parse_token(path)) else {
+        return export(json!({"ok": false, "error": "invalid_request"}));
+    };
+    let result = YandexMetadataClient::new()
+        .map_err(safe_error)
+        .and_then(|client| {
+            client
+                .list_folder(&input_value, &path, offset, 50)
                 .map_err(safe_error)
         });
     match result {
@@ -101,19 +125,28 @@ pub unsafe extern "C" fn qadren_yandex_free_string(ptr: *mut c_char) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn decode_and_free_response(ptr: *mut c_char) -> String {
+        let response = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_owned();
+        unsafe { qadren_yandex_free_string(ptr) };
+        response
+    }
+
     #[test]
     fn missing_token_returns_non_secret_error() {
         let ptr = qadren_yandex_disk_info(std::ptr::null());
-        let text = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_owned();
-        unsafe { qadren_yandex_free_string(ptr) };
-        assert!(text.contains("invalid_token"));
+        assert!(decode_and_free_response(ptr).contains("invalid_token"));
     }
 
     #[test]
     fn folder_listing_rejects_missing_inputs_without_network_access() {
         let ptr = qadren_yandex_list_folder(std::ptr::null(), std::ptr::null());
-        let text = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_owned();
-        unsafe { qadren_yandex_free_string(ptr) };
-        assert!(text.contains("invalid_request"));
+        assert!(decode_and_free_response(ptr).contains("invalid_request"));
+    }
+
+    #[test]
+    fn folder_page_rejects_missing_inputs_without_network_access() {
+        let ptr = qadren_yandex_list_folder_page(std::ptr::null(), std::ptr::null(), 50);
+        assert!(decode_and_free_response(ptr).contains("invalid_request"));
     }
 }

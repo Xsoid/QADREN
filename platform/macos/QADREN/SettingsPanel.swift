@@ -727,6 +727,7 @@ private struct ScenarioEndpointPicker: View {
     @Binding var selection: String
     @Binding var root: String
     @State private var items: [DiskItem] = []
+    @State private var nextOffset: UInt64?
     @State private var loading = false
     @State private var error: String?
     @StateObject private var localWorkspace = LocalWorkspace()
@@ -742,14 +743,14 @@ private struct ScenarioEndpointPicker: View {
                 }
             }
             .labelsHidden()
-            .onChange(of: selection) { _ in root = "/"; items = []; error = nil; loadDirectory() }
+            .onChange(of: selection) { _ in root = "/"; items = []; nextOffset = nil; error = nil; loadDirectory() }
             HStack {
                 Text(root).font(.caption.monospaced()).lineLimit(1).help(root)
                 Spacer()
                 if connection?.adapter == "local_filesystem" {
                     Button("Выбрать папку…") { chooseLocalFolder() }
                 } else {
-                    Button("Обновить", systemImage: "arrow.clockwise", action: loadDirectory).disabled(loading)
+                    Button("Обновить", systemImage: "arrow.clockwise") { loadDirectory() }.disabled(loading)
                 }
             }
             if connection?.adapter == "local_filesystem" {
@@ -776,6 +777,11 @@ private struct ScenarioEndpointPicker: View {
                     .buttonStyle(.plain).disabled(item.kind != "dir")
                 }
                 .listStyle(.inset)
+                if let nextOffset {
+                    Button("Показать ещё", systemImage: "ellipsis") { loadDirectory(offset: nextOffset) }
+                        .disabled(loading)
+                        .accessibilityHint("Запрашивает следующую страницу метаданных каталога без загрузки содержимого файлов")
+                }
             }
         }
         .padding(16)
@@ -790,18 +796,26 @@ private struct ScenarioEndpointPicker: View {
         localWorkspace.selectRoot(url.path)
         root = url.path
     }
-    private func loadDirectory() {
+    private func loadDirectory(offset: UInt64 = 0) {
         guard let connection, connection.adapter == "yandex_disk" else { return }
         guard let token = (try? YandexKeychain.read(connection.id)) ?? nil else {
             error = "Подключите Яндекс Диск, чтобы просмотреть только метаданные каталогов."; return
         }
+        if offset == 0 { items = []; nextOffset = nil }
         loading = true; error = nil
         let folder = root == "/" ? "disk:/" : root
         Task.detached {
-            let result = Result { try DiskMetadataBridge.folder(token: token, path: folder) }
+            let result = Result { try DiskMetadataBridge.folderPage(accessValue: token, path: folder, offset: offset) }
             await MainActor.run {
                 loading = false
-                switch result { case .success(let listing): items = listing.items; case .failure(let failure): error = failure.localizedDescription }
+                switch result {
+                case .success(let listing):
+                    items = offset == 0 ? listing.items : items + listing.items
+                    let consumed = listing.offset.addingReportingOverflow(UInt64(listing.items.count))
+                    nextOffset = !listing.items.isEmpty && !consumed.overflow && consumed.partialValue < listing.total ? consumed.partialValue : nil
+                case .failure(let failure):
+                    error = failure.localizedDescription
+                }
             }
         }
     }

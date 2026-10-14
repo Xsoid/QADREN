@@ -67,6 +67,7 @@ struct DiskItem: Decodable, Identifiable {
 struct DiskListing: Decodable {
     let items: [DiskItem]
     let total: UInt64
+    let offset: UInt64
 }
 private struct RootResource: Decodable {
     let embedded: DiskListing?
@@ -115,8 +116,11 @@ enum DiskMetadataBridge {
         return listing
     }
     static func folder(token: String, path: String) throws -> DiskListing {
-        let pointer = token.withCString { token in
-            path.withCString { path in yandexFolder(token, path) }
+        try folderPage(accessValue: token, path: path, offset: 0)
+    }
+    static func folderPage(accessValue: String, path: String, offset: UInt64) throws -> DiskListing {
+        let pointer = accessValue.withCString { value in
+            path.withCString { path in yandexFolderPage(value, path, offset) }
         }
         guard let pointer else { throw BridgeFailure.message("No response from Rust") }
         defer { yandexFree(pointer) }
@@ -135,6 +139,10 @@ enum DiskMetadataBridge {
 private enum BridgeFailure: Error {
     case message(String)
 }
+
+@_silgen_name("qadren_yandex_list_folder_page")
+private func yandexFolderPage(_ value: UnsafePointer<CChar>?, _ path: UnsafePointer<CChar>?, _ offset: UInt64) -> UnsafeMutablePointer<CChar>?
+
 extension BridgeFailure: LocalizedError {
     var errorDescription: String? {
         if case let .message(message) = self { return message }

@@ -447,6 +447,43 @@ mod tests {
     }
 
     #[test]
+    fn folder_page_uses_bounded_metadata_get_with_requested_offset() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut bytes = [0u8; 8192];
+            let size = stream.read(&mut bytes).unwrap();
+            let request = String::from_utf8_lossy(&bytes[..size]);
+            assert!(request.starts_with("GET /v1/disk/resources?"));
+            assert!(request.contains("path=disk%3A%2FArchive"));
+            assert!(request.contains("limit=50"));
+            assert!(request.contains("offset=50"));
+            assert!(request.contains("OAuth test-token"));
+            let body = r#"{"name":"Archive","path":"disk:/Archive","type":"dir","_embedded":{"items":[{"name":"next","path":"disk:/Archive/next","type":"dir"}],"limit":50,"offset":50,"total":101}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let client = YandexMetadataClient::with_test_api_base(format!("http://{address}/v1/disk"));
+        let page = client
+            .list_folder("test-token", "disk:/Archive", 50, 50)
+            .unwrap();
+        server.join().unwrap();
+        let listing = page.embedded.unwrap();
+        assert_eq!(listing.offset, 50);
+        assert_eq!(listing.total, 101);
+        assert_eq!(listing.items[0].path, "disk:/Archive/next");
+    }
+
+    #[test]
     fn metadata_comparison_fails_closed_on_missing_or_mismatched_fields() {
         let expected = ExpectedResourceMetadata {
             path: "disk:/check.txt".into(),

@@ -736,16 +736,17 @@ mod tests {
         assert_eq!(due["data"][0]["schedule_id"], schedule_id.to_str().unwrap());
         let paused_pointer =
             qadren_scenario_automation_set_paused(path.as_ptr(), scenario_id.as_ptr(), 1);
-        let paused: Value = serde_json::from_str(
-            unsafe { CStr::from_ptr(paused_pointer) }.to_str().unwrap(),
-        )
-        .unwrap();
+        let paused: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(paused_pointer) }.to_str().unwrap())
+                .unwrap();
         assert_eq!(paused["data"], true);
         unsafe { qadren_registry_free_string(paused_pointer) };
         let paused_due_pointer =
             qadren_scenario_schedules_due(path.as_ptr(), after.as_ptr(), through.as_ptr());
         let paused_due: Value = serde_json::from_str(
-            unsafe { CStr::from_ptr(paused_due_pointer) }.to_str().unwrap(),
+            unsafe { CStr::from_ptr(paused_due_pointer) }
+                .to_str()
+                .unwrap(),
         )
         .unwrap();
         assert!(paused_due["data"].as_array().unwrap().is_empty());
