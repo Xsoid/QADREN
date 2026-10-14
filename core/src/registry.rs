@@ -107,6 +107,17 @@ pub struct DueScheduleOccurrence {
     pub occurrence_key: OccurrenceKey,
 }
 
+/// A durable request to create one automatic Job. It is intentionally kept in
+/// the Registry database: a schedule slot is never consumed unless its
+/// submission request was committed in the same transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleOutboxEntry {
+    pub id: i64,
+    pub job_id: String,
+    pub scenario_id: String,
+    pub scenario_revision: u64,
+}
+
 pub struct Registry {
     db: Connection,
 }
@@ -129,7 +140,7 @@ impl Registry {
         }
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 8 {
+        if version > 9 {
             return Err(RegistryError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -259,6 +270,26 @@ impl Registry {
                 );
                 PRAGMA user_version = 8;
                 COMMIT;",
+            )?;
+        }
+        if version <= 8 {
+            // The Registry and JobStore are separate SQLite databases. This
+            // outbox makes claiming a schedule slot and preserving the future
+            // Job submission one transaction; dispatch is then idempotent.
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE schedule_job_outbox (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    schedule_id TEXT NOT NULL REFERENCES scenario_schedules(id) ON DELETE RESTRICT,
+                    occurrence_key TEXT NOT NULL,
+                    job_id TEXT NOT NULL UNIQUE,
+                    scenario_id TEXT NOT NULL REFERENCES scenarios(id) ON DELETE RESTRICT,
+                    scenario_revision INTEGER NOT NULL CHECK(scenario_revision > 0),
+                    dispatched INTEGER NOT NULL DEFAULT 0 CHECK(dispatched IN (0,1)),
+                    UNIQUE(schedule_id,occurrence_key)
+                 );
+                 PRAGMA user_version = 9;
+                 COMMIT;",
             )?;
         }
         Ok(Self { db })
@@ -547,9 +578,8 @@ impl Registry {
     }
 
     /// Evaluate enabled schedules for enabled, locally unpaused Scenarios in
-    /// `(after, through]`. The result is deliberately read-only: claiming an
-    /// occurrence before durable Job submission could lose a run on crash, so
-    /// the future Job/outbox bridge must own that atomic boundary.
+    /// `(after, through]`. The result is deliberately read-only; callers that
+    /// need durable submission must pass it to `stage_due_schedule_occurrences`.
     pub fn due_schedule_occurrences(
         &self,
         after: DateTime<Utc>,
@@ -616,6 +646,112 @@ impl Registry {
             ))
         });
         Ok(due)
+    }
+
+    /// Persist every currently due slot with a Job submission request.  This
+    /// does not open JobStore or execute a Job; it only closes the crash gap
+    /// between a schedule receipt and future submission.
+    pub fn stage_due_schedule_occurrences(
+        &self,
+        after: DateTime<Utc>,
+        through: DateTime<Utc>,
+    ) -> Result<usize> {
+        let due = self.due_schedule_occurrences(after, through)?;
+        let transaction = self.db.unchecked_transaction()?;
+        let mut staged = 0;
+        for occurrence in due {
+            let claimed = transaction.execute(
+                "INSERT OR IGNORE INTO schedule_occurrences(schedule_id,occurrence_key)
+                 SELECT ss.id,?2 FROM scenario_schedules ss
+                 JOIN scenarios s ON s.id=ss.scenario_id
+                 LEFT JOIN scenario_automation a ON a.scenario_id=s.id
+                 WHERE ss.id=?1 AND ss.scenario_id=?3 AND ss.enabled=1 AND s.enabled=1
+                   AND COALESCE(a.locally_paused,0)=0",
+                params![
+                    occurrence.schedule_id,
+                    occurrence.occurrence_key.0,
+                    occurrence.scenario_id
+                ],
+            )?;
+            if claimed == 0 {
+                continue;
+            }
+            // The complete bounded, validated tuple is retained rather than
+            // hashed: Job identity must not rely on collision resistance.
+            let job_id = format!(
+                "schedule-{}-{}",
+                occurrence.schedule_id, occurrence.occurrence_key.0
+            );
+            let inserted = transaction.execute(
+                "INSERT INTO schedule_job_outbox(
+                    schedule_id,occurrence_key,job_id,scenario_id,scenario_revision
+                 ) SELECT ss.id,?2,?3,s.id,s.revision
+                   FROM scenario_schedules ss JOIN scenarios s ON s.id=ss.scenario_id
+                   LEFT JOIN scenario_automation a ON a.scenario_id=s.id
+                   WHERE ss.id=?1 AND ss.scenario_id=?4 AND ss.enabled=1 AND s.enabled=1
+                     AND COALESCE(a.locally_paused,0)=0",
+                params![
+                    occurrence.schedule_id,
+                    occurrence.occurrence_key.0,
+                    job_id,
+                    occurrence.scenario_id
+                ],
+            )?;
+            // The same transaction predicates make this unreachable except
+            // for corruption; rolling back preserves the slot for retry.
+            if inserted != 1 {
+                return Err(RegistryError::IntegrityFailed);
+            }
+            staged += 1;
+        }
+        transaction.commit()?;
+        Ok(staged)
+    }
+
+    pub fn pending_schedule_job_outbox(&self) -> Result<Vec<ScheduleOutboxEntry>> {
+        let mut statement = self.db.prepare(
+            "SELECT id,job_id,scenario_id,scenario_revision
+             FROM schedule_job_outbox WHERE dispatched=0 ORDER BY id",
+        )?;
+        let entries = statement
+            .query_map([], |row| {
+                let revision: i64 = row.get(3)?;
+                Ok(ScheduleOutboxEntry {
+                    id: row.get(0)?,
+                    job_id: row.get(1)?,
+                    scenario_id: row.get(2)?,
+                    scenario_revision: revision as u64,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(RegistryError::from)?;
+        Ok(entries)
+    }
+
+    /// Mark only an existing pending outbox request dispatched. The caller
+    /// must have durably observed/created the exact Job first.
+    pub fn mark_schedule_job_dispatched(&self, outbox_id: i64) -> Result<bool> {
+        if outbox_id <= 0 {
+            return Err(RegistryError::InvalidSchedule);
+        }
+        let changed = self.db.execute(
+            "UPDATE schedule_job_outbox SET dispatched=1 WHERE id=?1 AND dispatched=0",
+            [outbox_id],
+        )?;
+        if changed == 0 {
+            let exists: Option<i64> = self
+                .db
+                .query_row(
+                    "SELECT id FROM schedule_job_outbox WHERE id=?1",
+                    [outbox_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if exists.is_none() {
+                return Err(RegistryError::NotFound);
+            }
+        }
+        Ok(changed == 1)
     }
 
     /// Enable or disable one schedule without changing its already claimed

@@ -14,6 +14,7 @@ pub mod policy;
 pub mod registry;
 pub mod registry_ffi;
 pub mod scenario_planner;
+pub mod schedule_dispatch;
 pub mod scheduler;
 pub mod verification;
 pub mod yandex;
