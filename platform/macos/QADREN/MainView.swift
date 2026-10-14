@@ -68,6 +68,20 @@ struct MainView: View {
                             Button("Сбросить компоновку") { dashboardLayout.reset() }
                         }
                         .disabled(!isEditingLayout)
+                        Menu("Размер сетки", systemImage: "rectangle.grid.1x2") {
+                            ForEach(MonitoringGridScale.allCases) { scale in
+                                Button {
+                                    dashboardLayout.setGridScale(scale)
+                                } label: {
+                                    if dashboardLayout.gridScale == scale {
+                                        Label(scale.title, systemImage: "checkmark")
+                                    } else {
+                                        Text(scale.title)
+                                    }
+                                }
+                            }
+                        }
+                        .disabled(!isEditingLayout)
                     }
                     Button("Обновить", systemImage: "arrow.clockwise") { refreshCurrentWorkspace() }
                 }
@@ -90,7 +104,7 @@ struct MainView: View {
     private var monitoringDashboard: some View {
         ScrollView {
             VStack(spacing: 10) {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 270), spacing: 10)], spacing: 10) {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: CGFloat(dashboardLayout.gridScale.minimumWidth)), spacing: 10)], spacing: 10) {
                     ForEach(dashboardLayout.visibleWidgets) { widget in
                         monitoringWidget(widget)
                     }

@@ -20,8 +20,14 @@ struct DashboardLayoutTests {
         store.move(.connections, by: -1)
         store.setVisible(.jobs, isVisible: false)
         store.setDensity(.connections, density: .expanded)
+        store.setGridScale(.spacious)
 
         check(store.canUndo, "layout edits enable undo")
+        store.undo()
+        check(store.gridScale == .regular, "undo restores grid scale")
+        store.redo()
+        check(store.gridScale == .spacious, "redo restores grid scale")
+        store.undo()
         store.undo()
         check(store.widgets.first(where: { $0.kind == .connections })?.density == .regular, "undo restores widget density")
         store.redo()
@@ -36,14 +42,17 @@ struct DashboardLayoutTests {
         store.redo()
         store.redo()
         store.redo()
+        store.redo()
         check(store.hiddenWidgets.map(\.kind) == [.jobs], "redo restores the full edit sequence")
         check(store.widgets.first(where: { $0.kind == .connections })?.density == .expanded, "redo persists the density edit")
+        check(store.gridScale == .spacious, "redo persists the grid scale edit")
 
         let restored = DashboardLayoutStore(defaults: defaults)
         restored.load(panelID: panelID)
         check(restored.widgets.map(\.kind) == [.system, .jobs, .connections, .queue], "widget order persists per panel")
         check(restored.hiddenWidgets.map(\.kind) == [.jobs], "hidden widget persists per panel")
         check(restored.widgets.first(where: { $0.kind == .connections })?.density == .expanded, "widget density persists per panel")
+        check(restored.gridScale == .spacious, "grid scale persists per panel")
 
         let legacyPanel = "legacy-layout"
         let legacyJSON = """
@@ -53,6 +62,7 @@ struct DashboardLayoutTests {
         let legacy = DashboardLayoutStore(defaults: defaults)
         legacy.load(panelID: legacyPanel)
         check(legacy.widgets.allSatisfy { $0.density == .regular }, "legacy layouts default missing density safely")
+        check(legacy.gridScale == .regular, "legacy array layouts default missing grid scale safely")
 
         let otherPanel = DashboardLayoutStore(defaults: defaults)
         otherPanel.load(panelID: "panel-b")

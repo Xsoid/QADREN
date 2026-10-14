@@ -37,6 +37,32 @@ enum MonitoringWidgetDensity: String, CaseIterable, Codable, Identifiable {
     }
 }
 
+/// Canvas sizing changes the adaptive grid's reflow threshold for one panel.
+/// It deliberately does not scale the app chrome or a widget's content density.
+enum MonitoringGridScale: String, CaseIterable, Codable, Identifiable {
+    case compact
+    case regular
+    case spacious
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .compact: "Компактная"
+        case .regular: "Обычная"
+        case .spacious: "Просторная"
+        }
+    }
+
+    var minimumWidth: Double {
+        switch self {
+        case .compact: 230
+        case .regular: 270
+        case .spacious: 360
+        }
+    }
+}
+
 struct MonitoringWidgetLayout: Codable, Identifiable, Equatable {
     let kind: MonitoringWidgetKind
     var isVisible: Bool
@@ -68,6 +94,27 @@ struct MonitoringWidgetLayout: Codable, Identifiable, Equatable {
     }
 }
 
+private struct MonitoringLayoutState: Codable, Equatable {
+    var widgets: [MonitoringWidgetLayout]
+    var gridScale: MonitoringGridScale
+
+    init(widgets: [MonitoringWidgetLayout], gridScale: MonitoringGridScale = .regular) {
+        self.widgets = widgets
+        self.gridScale = gridScale
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case widgets
+        case gridScale
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        widgets = try container.decode([MonitoringWidgetLayout].self, forKey: .widgets)
+        gridScale = try container.decodeIfPresent(MonitoringGridScale.self, forKey: .gridScale) ?? .regular
+    }
+}
+
 /// Local-only presentation state for one monitoring window. It never owns Jobs,
 /// connections, or file operations; a corrupt saved layout falls back safely
 /// without overwriting the original data.
@@ -76,11 +123,12 @@ final class DashboardLayoutStore: ObservableObject {
     @Published private(set) var widgets = MonitoringWidgetKind.allCases.map {
         MonitoringWidgetLayout(kind: $0, isVisible: true)
     }
+    @Published private(set) var gridScale: MonitoringGridScale = .regular
 
     private let defaults: UserDefaults
     private var panelID: String?
-    private var undoStack: [[MonitoringWidgetLayout]] = []
-    private var redoStack: [[MonitoringWidgetLayout]] = []
+    private var undoStack: [MonitoringLayoutState] = []
+    private var redoStack: [MonitoringLayoutState] = []
     private let historyLimit = 50
 
     init(defaults: UserDefaults = .standard) {
@@ -108,13 +156,24 @@ final class DashboardLayoutStore: ObservableObject {
         undoStack.removeAll()
         redoStack.removeAll()
         let key = Self.storageKey(for: panelID)
-        guard let data = defaults.data(forKey: key),
-              let decoded = try? JSONDecoder().decode([MonitoringWidgetLayout].self, from: data),
-              isValid(decoded) else {
+        guard let data = defaults.data(forKey: key) else {
             widgets = defaultWidgets
+            gridScale = .regular
             return
         }
-        widgets = decoded
+        if let decoded = try? JSONDecoder().decode(MonitoringLayoutState.self, from: data),
+           isValid(decoded.widgets) {
+            restore(decoded)
+            return
+        }
+        if let legacyWidgets = try? JSONDecoder().decode([MonitoringWidgetLayout].self, from: data),
+           isValid(legacyWidgets) {
+            widgets = legacyWidgets
+            gridScale = .regular
+            return
+        }
+        widgets = defaultWidgets
+        gridScale = .regular
     }
 
     func move(_ kind: MonitoringWidgetKind, by offset: Int) {
@@ -142,29 +201,44 @@ final class DashboardLayoutStore: ObservableObject {
         save()
     }
 
-    func reset() {
-        guard widgets != defaultWidgets else { return }
+    func setGridScale(_ gridScale: MonitoringGridScale) {
+        guard self.gridScale != gridScale else { return }
         recordUndoState()
-        widgets = defaultWidgets
+        self.gridScale = gridScale
+        save()
+    }
+
+    func reset() {
+        guard currentState != defaultState else { return }
+        recordUndoState()
+        restore(defaultState)
         save()
     }
 
     func undo() {
         guard let previous = undoStack.popLast() else { return }
-        redoStack.append(widgets)
-        widgets = previous
+        redoStack.append(currentState)
+        restore(previous)
         save()
     }
 
     func redo() {
         guard let next = redoStack.popLast() else { return }
-        undoStack.append(widgets)
-        widgets = next
+        undoStack.append(currentState)
+        restore(next)
         save()
     }
 
     private var defaultWidgets: [MonitoringWidgetLayout] {
         MonitoringWidgetKind.allCases.map { MonitoringWidgetLayout(kind: $0, isVisible: true) }
+    }
+
+    private var defaultState: MonitoringLayoutState {
+        MonitoringLayoutState(widgets: defaultWidgets)
+    }
+
+    private var currentState: MonitoringLayoutState {
+        MonitoringLayoutState(widgets: widgets, gridScale: gridScale)
     }
 
     private func isValid(_ candidate: [MonitoringWidgetLayout]) -> Bool {
@@ -173,7 +247,7 @@ final class DashboardLayoutStore: ObservableObject {
     }
 
     private func recordUndoState() {
-        undoStack.append(widgets)
+        undoStack.append(currentState)
         if undoStack.count > historyLimit {
             undoStack.removeFirst(undoStack.count - historyLimit)
         }
@@ -181,7 +255,12 @@ final class DashboardLayoutStore: ObservableObject {
     }
 
     private func save() {
-        guard let panelID, let data = try? JSONEncoder().encode(widgets) else { return }
+        guard let panelID, let data = try? JSONEncoder().encode(currentState) else { return }
         defaults.set(data, forKey: Self.storageKey(for: panelID))
+    }
+
+    private func restore(_ state: MonitoringLayoutState) {
+        widgets = state.widgets
+        gridScale = state.gridScale
     }
 }
