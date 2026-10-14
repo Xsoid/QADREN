@@ -24,6 +24,14 @@ private func scenarioSchedulesList(
 private func scenarioSchedulesDue(
     _ path: UnsafePointer<CChar>?, _ after: UnsafePointer<CChar>?, _ through: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_scenario_automation_get")
+private func scenarioAutomationGet(
+    _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_scenario_automation_set_paused")
+private func scenarioAutomationSetPaused(
+    _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?, _ paused: UInt8
+) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_scenario_schedules_create")
 private func scenarioSchedulesCreate(
     _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?, _ timezone: UnsafePointer<CChar>?,
@@ -99,6 +107,10 @@ struct ScenarioScheduleOccurrence: Decodable, Identifiable, Equatable {
     let occurrence_key: String
 
     var id: String { scenario_id + ":" + schedule_id + ":" + occurrence_key }
+}
+struct ScenarioAutomationEntry: Decodable, Equatable {
+    let locally_paused: Bool
+    let pending_automatic_run: Bool
 }
 private struct NewConnection: Decodable {
     let id: String
@@ -199,6 +211,30 @@ enum StorageRegistryBridge {
         return try database.withCString { db in
             try scenarioID.withCString { id in
                 try unwrap(scenarioSchedulesList(db, id), as: [ScenarioScheduleEntry].self)
+            }
+        }
+    }
+
+    static func scenarioAutomation(
+        scenarioID: String, databasePath: String? = nil
+    ) throws -> ScenarioAutomationEntry {
+        let database = try databasePath ?? path
+        return try database.withCString { db in
+            try scenarioID.withCString { id in
+                try unwrap(scenarioAutomationGet(db, id), as: ScenarioAutomationEntry.self)
+            }
+        }
+    }
+
+    static func setScenarioLocallyPaused(
+        scenarioID: String, paused: Bool, databasePath: String? = nil
+    ) throws {
+        let database = try databasePath ?? path
+        let _: Bool = try database.withCString { db in
+            try scenarioID.withCString { id in
+                try unwrap(
+                    scenarioAutomationSetPaused(db, id, paused ? 1 : 0), as: Bool.self
+                )
             }
         }
     }

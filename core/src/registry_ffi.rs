@@ -266,6 +266,45 @@ pub extern "C" fn qadren_scenario_schedules_list(
     })
 }
 
+/// Read durable automatic-trigger state for one Scenario. This is registry
+/// metadata only; it neither evaluates schedules nor inspects or changes Jobs.
+#[no_mangle]
+pub extern "C" fn qadren_scenario_automation_get(
+    path: *const c_char,
+    scenario_id: *const c_char,
+) -> *mut c_char {
+    let Some(scenario_id) = input(scenario_id) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    with_registry(path, |db| {
+        let state = db.scenario_automation_snapshot(&scenario_id)?;
+        Ok(json!({
+            "locally_paused": state.locally_paused,
+            "pending_automatic_run": state.pending_automatic_run
+        }))
+    })
+}
+
+/// Change only the local automatic-trigger pause state for one Scenario.
+/// Pending automatic work is cleared when pausing; Jobs remain owned by JobStore.
+#[no_mangle]
+pub extern "C" fn qadren_scenario_automation_set_paused(
+    path: *const c_char,
+    scenario_id: *const c_char,
+    paused: u8,
+) -> *mut c_char {
+    let Some(scenario_id) = input(scenario_id) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    if paused > 1 {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    }
+    with_registry(path, |db| {
+        db.set_scenario_locally_paused(&scenario_id, paused == 1)?;
+        Ok(json!(true))
+    })
+}
+
 /// Evaluate schedule candidates over a caller-supplied UTC interval. This is
 /// observation only: it does not claim occurrences or submit Jobs.
 #[no_mangle]
@@ -648,6 +687,17 @@ mod tests {
             serde_json::from_str(unsafe { CStr::from_ptr(created) }.to_str().unwrap()).unwrap();
         unsafe { qadren_registry_free_string(created) };
         let scenario_id = CString::new(scenario["data"]["id"].as_str().unwrap()).unwrap();
+        let initial_automation_pointer =
+            qadren_scenario_automation_get(path.as_ptr(), scenario_id.as_ptr());
+        let initial_automation: Value = serde_json::from_str(
+            unsafe { CStr::from_ptr(initial_automation_pointer) }
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(initial_automation["data"]["locally_paused"], false);
+        assert_eq!(initial_automation["data"]["pending_automatic_run"], false);
+        unsafe { qadren_registry_free_string(initial_automation_pointer) };
         let timezone = CString::new("Europe/Samara").unwrap();
         let created_schedule = qadren_scenario_schedules_create(
             path.as_ptr(),
@@ -684,6 +734,22 @@ mod tests {
         assert_eq!(due["data"].as_array().unwrap().len(), 1);
         assert_eq!(due["data"][0]["scenario_id"], scenario_id.to_str().unwrap());
         assert_eq!(due["data"][0]["schedule_id"], schedule_id.to_str().unwrap());
+        let paused_pointer =
+            qadren_scenario_automation_set_paused(path.as_ptr(), scenario_id.as_ptr(), 1);
+        let paused: Value = serde_json::from_str(
+            unsafe { CStr::from_ptr(paused_pointer) }.to_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(paused["data"], true);
+        unsafe { qadren_registry_free_string(paused_pointer) };
+        let paused_due_pointer =
+            qadren_scenario_schedules_due(path.as_ptr(), after.as_ptr(), through.as_ptr());
+        let paused_due: Value = serde_json::from_str(
+            unsafe { CStr::from_ptr(paused_due_pointer) }.to_str().unwrap(),
+        )
+        .unwrap();
+        assert!(paused_due["data"].as_array().unwrap().is_empty());
+        unsafe { qadren_registry_free_string(paused_due_pointer) };
         let disabled_schedule = qadren_scenario_schedules_set_enabled(
             path.as_ptr(),
             scenario_id.as_ptr(),

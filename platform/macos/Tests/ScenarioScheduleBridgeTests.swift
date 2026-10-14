@@ -101,6 +101,28 @@ struct ScenarioScheduleBridgeTests {
         let scenarioID = try createScenario(database: database, leftID: leftID, rightID: rightID)
         try createSchedule(database: database, scenarioID: scenarioID)
 
+        var automation = try StorageRegistryBridge.scenarioAutomation(
+            scenarioID: scenarioID, databasePath: database
+        )
+        check(!automation.locally_paused, "new Scenario automation starts unpaused")
+        try StorageRegistryBridge.setScenarioLocallyPaused(
+            scenarioID: scenarioID, paused: true, databasePath: database
+        )
+        automation = try StorageRegistryBridge.scenarioAutomation(
+            scenarioID: scenarioID, databasePath: database
+        )
+        check(automation.locally_paused, "Swift bridge persists local automatic-trigger pause")
+
+        let pausedOccurrences = try StorageRegistryBridge.dueScenarioSchedules(
+            after: utc("2026-10-18T00:00:00Z"),
+            through: utc("2026-10-20T00:00:00Z"),
+            databasePath: database
+        )
+        check(pausedOccurrences.isEmpty, "paused Scenario yields no automatic candidates")
+        try StorageRegistryBridge.setScenarioLocallyPaused(
+            scenarioID: scenarioID, paused: false, databasePath: database
+        )
+
         let occurrences = try StorageRegistryBridge.dueScenarioSchedules(
             after: utc("2026-10-18T00:00:00Z"),
             through: utc("2026-10-20T00:00:00Z"),

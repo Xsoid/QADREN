@@ -81,11 +81,15 @@ final class ScenarioSettings: ObservableObject {
 final class ScenarioScheduleSettings: ObservableObject {
     @Published private(set) var entries: [ScenarioScheduleEntry] = []
     @Published private(set) var upcoming: [ScenarioScheduleOccurrence] = []
+    @Published private(set) var automation = ScenarioAutomationEntry(
+        locally_paused: false, pending_automatic_run: false
+    )
     @Published private(set) var error: String?
 
     func refresh(scenarioID: String) {
         do {
             entries = try StorageRegistryBridge.listScenarioSchedules(scenarioID: scenarioID)
+            automation = try StorageRegistryBridge.scenarioAutomation(scenarioID: scenarioID)
             let now = Date()
             upcoming = try StorageRegistryBridge.dueScenarioSchedules(
                 after: now,
@@ -95,6 +99,15 @@ final class ScenarioScheduleSettings: ObservableObject {
             error = nil
         } catch {
             upcoming = []
+            self.error = error.localizedDescription
+        }
+    }
+
+    func setLocallyPaused(scenarioID: String, paused: Bool) {
+        do {
+            try StorageRegistryBridge.setScenarioLocallyPaused(scenarioID: scenarioID, paused: paused)
+            refresh(scenarioID: scenarioID)
+        } catch {
             self.error = error.localizedDescription
         }
     }
@@ -524,6 +537,15 @@ private struct ScenarioSchedulesView: View {
             )
 
             Form {
+                Section("Автоматизация") {
+                    Toggle("Приостановить автоматические триггеры", isOn: Binding(
+                        get: { schedules.automation.locally_paused },
+                        set: { schedules.setLocallyPaused(scenarioID: scenario.id, paused: $0) }
+                    ))
+                    Text("Приостановка сохраняется локально, очищает только ожидающий автоматический запуск и не меняет существующие Job. Ручные запросы остаются отдельным путём.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Section("Новое расписание") {
                     Picker("День", selection: $weekday) {
                         ForEach(Array(weekdays.enumerated()), id: \.offset) { index, title in
