@@ -17,7 +17,7 @@
 | Scheduler | `scheduler.rs`, `schedule_dispatch.rs` и dispatch FFI (`1223e8f`) | Outbox→queued Job есть; самостоятельного таймера, фонового жизненного цикла, event debounce и исполнения Scenario нет |
 | UI theme/widget | `DesignSystem.swift`, `DashboardLayout.swift`, `DashboardLayoutTests.swift` | **Уже реализовано частично:** QDTheme/QDWidgetFrame/QDLogo, per-window order/visibility, density, grid scale, Undo/Redo/persistence. Нужна визуальная и нативная приёмка, не реализация с нуля |
 | UI windows/settings | `QADRENApp.swift`, `MainView.swift`, `SettingsPanel.swift` | Dashboard adaptive grid, отдельные Monitoring/Settings/File Manager, MenuBarExtra. Расширение интеграции и доступность ещё частичны; `MainView` содержит legacy/mock actions |
-| Yandex | `yandex.rs`, `yandex_ffi.rs`, `YandexConnection.swift` | Реальный код OAuth/metadata/upload и mock-тесты сохраняются, **P3 PARKED LAST**; live E2E не подтверждён; UI сейчас ещё предлагает Add/Connect/API — привести к состоянию deferred в #26 без удаления tokens/connections |
+| Yandex | `yandex.rs`, `yandex_ffi.rs`, `YandexConnection.swift` | Реальный код OAuth/metadata/upload и mock-тесты сохраняются, но контроллер **вынесен за Release 1**; live E2E не подтверждён; #26 убирает активные Add/Connect/API flows без удаления tokens/connections |
 | iCloud | `ICloudAvailability.swift` (legacy metadata/status) | #17 `closed/not_planned`; не развивать, UI integration отсутствует/не нужна; Local FS guards остаются |
 | Background service | Нативные окна и `workerStatus` | Независимая служба после закрытия UI **не доказана**, #23 P2 |
 | Распространение | `scripts/build-macos.sh`, `.github/workflows/bootstrap.yml` | Unsigned dev bundle в скрипте; native install/sign/restart/packaging и CI диагностика ещё нужны |
@@ -27,7 +27,7 @@
 - **P0 сейчас — только #26:** довести существующий `DesignSystem`/widget dashboard с нативной UI и build-приёмкой; **#13 архивируется как superseded/not planned**, а не VERIFIED: её baseline-аудит выполнен, остатки переданы в #26 (UI/macOS tests), #24 (GitHub Actions pre-runner failure, runtime resources/release), #25 (Keychain/legacy migration/recovery).
 - **P1:** #15 Local FS; #18 Job engine; #20 policy; #25 remove/disconnect coordination. Acceptance — одна реальная локальная операция через единственный JobStore и проверяемое durable outcome. #22 двухпанельный UI и #19 локальные Scenario могут разрабатываться в независимых безопасных частях.
 - **P2:** #21 scheduler runtime и catch-up; #23 независимая служба + завершающая интеграция UI; #24 безопасность/сборка/локальный дистрибутив.
-- **P3 последний, пока parked:** #16 Яндекс API/live интеграция. Сохранить исходники, доступность провайдера сейчас не является gate P0–P2.
+- **P3 post-release, parked:** #16 контроллер Яндекс Диска. Сохранить исходники; он не является Release 1 gate.
 - **Бессрочно parked:** #17 iCloud, закрыта. #2/#7/#14 уже закрыты, без повторной реализации.
 
 Открытые issues **PARTIAL**, если не пройдён полный DoD; не закрывать по одному свежему коммиту или числу unit tests. #26 создана [отдельно](https://github.com/Xsoid/QADREN/issues/26), чтобы UI P0 не зависел от фоновой службы #23 P2.

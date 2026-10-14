@@ -1,19 +1,19 @@
 # QADREN — план интеграции UI для Codex и acceptance
 
-> **Обновление после push 2026-10-14 / D-018:** существующие `DesignSystem.swift`, `DashboardLayout.swift`, `DashboardLayoutTests.swift`, `MainView.swift`, `SettingsPanel.swift`, `QADRENApp.swift` уже реализуют базовый виджетный canvas, сохранение порядка/видимости/плотности/gridScale, Undo/Redo, мультиоконность и настройки. Ниже исходная последовательность UI-A–F — **чек-лист проверки и завершения**, не указание повторно создать эти классы. Приоритет #26 P0, #23 служба P2. Яндекс P3/PARKED, iCloud вне scope. [Срез](../development/current-state-audit.md).
+> **Обновление после push 2026-10-14 / D-018:** существующие `DesignSystem.swift`, `DashboardLayout.swift`, `DashboardLayoutTests.swift`, `MainView.swift`, `SettingsPanel.swift`, `QADRENApp.swift` уже реализуют базовый виджетный canvas, сохранение порядка/видимости/плотности/gridScale, Undo/Redo, мультиоконность и настройки. Ниже исходная последовательность UI-A–F — **чек-лист проверки и завершения**, не указание повторно создать эти классы. Приоритет #26 P0, #23 служба P2. Контроллер Яндекс Диска вынесен за Release 1, iCloud вне scope. [Срез](../development/current-state-audit.md).
 
 ## 0. Границы и фактический baseline
 
 Эта документация — **визуально-поведенческий контракт**, а не приказ сейчас создать несуществующие Core API. Исторический baseline до push 14 октября (не применять без проверки): `QADRENApp.swift` имеет WindowGroup monitoring, окно `scenario-settings`, MenuBarExtra. `MainView.swift` — dashboard status tiles, jobs list, две local metadata panels, connections/OAuth setup; `StorageConnections.swift`, `YandexConnection.swift`, `LocalWorkspace.swift`, `JobInventory.swift` существуют. Первый полноценный Rust Job execution/independent worker service ещё проходит дорожные gates. **Перед реализацией проверить HEAD**, этот список может устареть.
 
-UI не должен изобретать data pipeline, вторую очередь, runtime history или registry. Активный адаптер локального релиза P0–P2 — Local FS; Yandex UI/feature-work P3/PARKED, existing records/tokens preserve. iCloud connection/sync/backup UI исключены из активной реализации (D-017). Все изменения в `main`; не создавай feature/docs branches, не предлагай автоматический переход Work. Завершение документации не закрывает Issue #23.
+UI не должен изобретать data pipeline, вторую очередь, runtime history или registry. Активный контроллер Release 1 — Local FS; Yandex UI/feature-work вынесен за релиз, existing records/tokens preserve. iCloud connection/sync/backup UI исключены из активной реализации (D-017). Все изменения в `main`; не создавай feature/docs branches, не предлагай автоматический переход Work. Завершение документации не закрывает Issue #23.
 
 ### Актуализированная P0-проверка #26
 
 - При ошибке чтения JobStore/Registry мониторинг показывает приоритетное доступное предупреждение и ошибочное состояние соответствующего виджета; ошибку нельзя выдать за спокойный empty/success state.
 - Если сохранённая раскладка повреждена, `DashboardLayoutStore` показывает безопасную стандартную панель, не стирает исходные байты и сообщает об этом в monitoring; уведомление исчезает только после осознанного сохранения новой раскладки.
 - Пользователь может скрыть все виджеты: тогда canvas показывает доступное empty state с точной инструкцией вернуть виджеты через layout mode.
-- В P0–P2 Settings предлагает создать только Local FS connection. Уже существующий Yandex connection можно переименовать, выключить или локально удалить с сохранением правила «облачные объекты не трогаются», но UI не предлагает OAuth или API calls до P3.
+- В Release 1 Settings предлагает создать только Local FS connection. Уже существующий Yandex connection можно переименовать, выключить или локально удалить с сохранением правила «облачные объекты не трогаются», но UI не предлагает OAuth или API calls без нового post-release решения.
 
 ## 1. Матрица соответствия текущего кода
 

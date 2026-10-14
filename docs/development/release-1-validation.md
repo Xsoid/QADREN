@@ -1,4 +1,4 @@
-> **Текущая приёмка D-018 / 2026-10-14:** P0 UI/foundation и P1–P2 локальная функциональность **не требуют** доступного Яндекс API, OAuth/live E2E и Apple iCloud. Яндекс — последний P3, iCloud вне активного scope. Старые таблицы ниже, обозначенные cloud-first, относятся к историческому плану и не должны блокировать локальный релиз; существенные локальные tests/consent/no-overwrite/UNKNOWN/recovery остаются обязательными. Настоящий `main` после push содержит больше кода, чем baseline этой хронологической матрицы: см. [актуальный аудит](current-state-audit.md).
+> **Текущая приёмка D-018 / 2026-10-14:** Release 1 P0 UI/foundation и P1–P2 локальная функциональность **не включают контроллер Яндекс Диска** и не требуют доступного API, OAuth/live E2E или Apple iCloud. Яндекс вынесен в post-release scope, iCloud вне активного scope. Старые таблицы ниже, обозначенные cloud-first, относятся к историческому плану и не должны блокировать локальный релиз; существенные локальные tests/consent/no-overwrite/UNKNOWN/recovery остаются обязательными. Настоящий `main` после push содержит больше кода, чем baseline этой хронологической матрицы: см. [актуальный аудит](current-state-audit.md).
 
 # Release 1 — матрица проверок и доказательства
 
@@ -6,7 +6,7 @@
 
 Отметка «реализовано» или успешная компиляция **не** заменяет проверку поведения. Тест в mock-хранилище не является проверкой настоящего Keychain/облака.
 
-**Scope Release 1 (2026-10-12):** загрузка/скачивание и синхронизация между Яндекс Диском и локальными директориями, только реально подтверждённые capabilities. iCloud adapter/container/sync/backup, native spike и E2E не являются acceptance. Упоминания iCloud File Provider ниже — безопасность Local FS, не iCloud integration. [D-017](../decisions/D-017-defer-icloud.md).
+**Исторический scope Release 1 (2026-10-12, заменён D-018):** загрузка/скачивание и синхронизация между Яндекс Диском и локальными директориями. Он больше не является acceptance текущего локального релиза: Release 1 ограничен Local↔Local; контроллер Яндекс Диска — post-release. iCloud adapter/container/sync/backup, native spike и E2E не являются acceptance. Упоминания iCloud File Provider ниже — безопасность Local FS, не iCloud integration. [D-017](../decisions/D-017-defer-icloud.md), [D-018](../decisions/D-018-local-first-priorities.md).
 
 ## Dispatcher workspace shell (2026-10-12)
 
