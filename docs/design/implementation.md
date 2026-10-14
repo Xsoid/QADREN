@@ -1,10 +1,12 @@
 # QADREN — план интеграции UI для Codex и acceptance
 
+> **Обновление после push 2026-10-14 / D-018:** существующие `DesignSystem.swift`, `DashboardLayout.swift`, `DashboardLayoutTests.swift`, `MainView.swift`, `SettingsPanel.swift`, `QADRENApp.swift` уже реализуют базовый виджетный canvas, сохранение порядка/видимости/плотности/gridScale, Undo/Redo, мультиоконность и настройки. Ниже исходная последовательность UI-A–F — **чек-лист проверки и завершения**, не указание повторно создать эти классы. Приоритет #26 P0, #23 служба P2. Яндекс P3/PARKED, iCloud вне scope. [Срез](../development/current-state-audit.md).
+
 ## 0. Границы и фактический baseline
 
-Эта документация — **визуально-поведенческий контракт**, а не приказ сейчас создать несуществующие Core API. На 2026-10-12 в `main`: `QADRENApp.swift` имеет WindowGroup monitoring, окно `scenario-settings`, MenuBarExtra. `MainView.swift` — dashboard status tiles, jobs list, две local metadata panels, connections/OAuth setup; `StorageConnections.swift`, `YandexConnection.swift`, `LocalWorkspace.swift`, `JobInventory.swift` существуют. Первый полноценный Rust Job execution/independent worker service ещё проходит дорожные gates. **Перед реализацией проверить HEAD**, этот список может устареть.
+Эта документация — **визуально-поведенческий контракт**, а не приказ сейчас создать несуществующие Core API. Исторический baseline до push 14 октября (не применять без проверки): `QADRENApp.swift` имеет WindowGroup monitoring, окно `scenario-settings`, MenuBarExtra. `MainView.swift` — dashboard status tiles, jobs list, две local metadata panels, connections/OAuth setup; `StorageConnections.swift`, `YandexConnection.swift`, `LocalWorkspace.swift`, `JobInventory.swift` существуют. Первый полноценный Rust Job execution/independent worker service ещё проходит дорожные gates. **Перед реализацией проверить HEAD**, этот список может устареть.
 
-UI не должен изобретать data pipeline, вторую очередь, runtime history или registry. Активные подключения Release 1 — Яндекс Диск и Local FS. iCloud connection/sync/backup UI исключены из активной реализации (D-017). Все изменения в `main`; не создавай feature/docs branches, не предлагай автоматический переход Work. Завершение документации не закрывает Issue #23.
+UI не должен изобретать data pipeline, вторую очередь, runtime history или registry. Активный адаптер локального релиза P0–P2 — Local FS; Yandex UI/feature-work P3/PARKED, existing records/tokens preserve. iCloud connection/sync/backup UI исключены из активной реализации (D-017). Все изменения в `main`; не создавай feature/docs branches, не предлагай автоматический переход Work. Завершение документации не закрывает Issue #23.
 
 ## 1. Матрица соответствия текущего кода
 
@@ -21,11 +23,11 @@ UI не должен изобретать data pipeline, вторую очере
 
 ## 2. Вертикальная последовательность (не новые большие Epic)
 
-**UI-A — дизайн-токены и logo.** Подключить существующий `assets/qadren-logo.png` в Assets.xcassets/target без изменения пикселей; построить один SwiftUI semantic theme, системные light/dark variants и CSS/demo независимы. SwiftUI snapshot-превью кнопки, статуса, progress, mini-widget; провести контрастную проверку.
+**UI-A — дизайн-токены и logo (PARTIAL IN MAIN; audit/finish).** Проверить существующие QDTheme/QDLogo и при необходимости подключить существующий `assets/qadren-logo.png` в Assets.xcassets/target без изменения пикселей; построить один SwiftUI semantic theme, системные light/dark variants и CSS/demo независимы. SwiftUI snapshot-превью кнопки, статуса, progress, mini-widget; провести контрастную проверку.
 
-**UI-B — chrome и dashboard.** Создать reusable `QDWidgetFrame`, standard headers, states, hardcoded `PreviewFixtures` только в `#Preview`/тестах, не runtime. Заменить постоянную навигацию по разделам на single dashboard grid. Настоящие data providers пока отображают read-only/unsupported.
+**UI-B — chrome и dashboard (PARTIAL IN MAIN; audit/finish).** Проверить существующий reusable `QDWidgetFrame`, standard headers, states, hardcoded `PreviewFixtures` только в `#Preview`/тестах, не runtime. Заменить постоянную навигацию по разделам на single dashboard grid. Настоящие data providers пока отображают read-only/unsupported.
 
-**UI-C — сохранение и multiwindow.** Dashboard `panelID`, type registry, grid sizing+reflow, layout editing with catalog, config/Undo/Redo, независимые window state/zoom/density/filters, persist+restore. Ни одного одновременно работающего второго Job runner.
+**UI-C — сохранение и multiwindow (PARTIAL IN MAIN; audit/finish).** Существующий DashboardLayoutStore, Dashboard `panelID`, type registry, grid sizing+reflow, layout editing with catalog, config/Undo/Redo, независимые window state/zoom/density/filters, persist+restore. Ни одного одновременно работающего второго Job runner.
 
 **UI-D — реальные данные и safety.** Подключить активные Jobs, connections, events, Worker state через существующие Swift/FFI models с реальными evidence/freshness. При отсутствии API — honest `not available`. Commands только после capability check/Core policy. Consent/UNKNOWN/conflict из Rust contracts, никаких blind retries.
 

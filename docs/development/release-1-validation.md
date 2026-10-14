@@ -1,3 +1,5 @@
+> **Текущая приёмка D-018 / 2026-10-14:** P0 UI/foundation и P1–P2 локальная функциональность **не требуют** доступного Яндекс API, OAuth/live E2E и Apple iCloud. Яндекс — последний P3, iCloud вне активного scope. Старые таблицы ниже, обозначенные cloud-first, относятся к историческому плану и не должны блокировать локальный релиз; существенные локальные tests/consent/no-overwrite/UNKNOWN/recovery остаются обязательными. Настоящий `main` после push содержит больше кода, чем baseline этой хронологической матрицы: см. [актуальный аудит](current-state-audit.md).
+
 # Release 1 — матрица проверок и доказательства
 
 Статус: рабочий контрольный документ для [Epic #12](https://github.com/Xsoid/QADREN/issues/12), [#13](https://github.com/Xsoid/QADREN/issues/13), [#25](https://github.com/Xsoid/QADREN/issues/25).
