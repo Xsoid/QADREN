@@ -277,13 +277,7 @@ pub fn reconcile_mock_create(
     let Some(receipt) = verifier.verify(&attempt.attempt_id) else {
         return Ok(MockReconciliationStatus::StillUnknown);
     };
-    store.resolve_attempt(job_id, &attempt.attempt_id, &receipt)?;
-    store.advance(
-        job_id,
-        JobState::Unknown,
-        JobState::Completed,
-        receipt.confirmation(),
-    )?;
+    store.complete_attempt(job_id, &attempt.attempt_id, &receipt)?;
     Ok(MockReconciliationStatus::Completed)
 }
 
@@ -355,13 +349,7 @@ fn run_mock_create_inner(
     let receipt = verifier
         .verify(&attempt_id)
         .ok_or(MockCreateError::VerificationFailed)?;
-    store.resolve_attempt(job_id, &attempt_id, &receipt)?;
-    store.advance(
-        job_id,
-        JobState::Running,
-        JobState::Completed,
-        receipt.confirmation(),
-    )?;
+    store.complete_attempt(job_id, &attempt_id, &receipt)?;
     Ok(MockCreateStatus::Completed)
 }
 

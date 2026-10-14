@@ -1250,6 +1250,95 @@ impl JobStore {
         Ok(())
     }
 
+    /// Atomically persist a verified receipt and terminal Job completion.
+    ///
+    /// This is the normal executor/reconciliation success boundary. Keeping
+    /// the attempt resolution and Job state in one SQLite transaction avoids a
+    /// crash leaving a resolved attempt under a durable UNKNOWN Job that can no
+    /// longer be reconciled or retried safely.
+    pub fn complete_attempt(
+        &mut self,
+        job_id: &str,
+        attempt_id: &str,
+        receipt: &crate::verification::VerifiedReceipt,
+    ) -> Result<()> {
+        self.check_storage_identity()?;
+        if receipt.attempt_id() != attempt_id {
+            return Err(JobStoreError::UntrustedEvidence);
+        }
+        let stored_binding: Option<(Option<String>, Option<String>, Option<String>)> = self
+            .db
+            .query_row(
+                "SELECT operation_kind,target_connection_id,target_path
+                     FROM job_attempts WHERE job_id=?1 AND attempt_id=?2",
+                params![job_id, attempt_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        if let Some((Some(kind), Some(connection), Some(path))) = stored_binding {
+            if receipt.operation_kind() != Some(kind.as_str())
+                || receipt.target_connection_id() != Some(connection.as_str())
+                || receipt.target_path() != Some(path.as_str())
+            {
+                return Err(JobStoreError::UntrustedEvidence);
+            }
+        } else {
+            return Err(JobStoreError::UntrustedEvidence);
+        }
+        let evidence = receipt.confirmation();
+        if !evidence.meets(crate::confirmation::EvidenceLevel::MetadataVerified) {
+            return Err(JobStoreError::MissingEvidence);
+        }
+        let tx = self.db.transaction()?;
+        let state: Option<String> = tx
+            .query_row("SELECT state FROM jobs WHERE id=?1", [job_id], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        let Some(state) = state else {
+            return Err(JobStoreError::NotFound);
+        };
+        let current = parse_state(&state)?;
+        if current.transition(JobState::Completed, evidence).is_err() {
+            return Err(JobStoreError::InvalidTransition);
+        }
+        let updated_attempt = tx.execute(
+            "UPDATE job_attempts SET status='resolved'
+             WHERE job_id=?1 AND attempt_id=?2 AND status IN ('active','unknown')",
+            params![job_id, attempt_id],
+        )?;
+        if updated_attempt != 1 {
+            return Err(JobStoreError::InvalidTransition);
+        }
+        let level = match evidence {
+            Confirmation::Confirmed(crate::confirmation::EvidenceLevel::ContentVerified) => {
+                "content_verified"
+            }
+            _ => "metadata_verified",
+        };
+        tx.execute(
+            "INSERT INTO attempt_verifications(attempt_id,evidence_level) VALUES (?1,?2)",
+            params![attempt_id, level],
+        )?;
+        let updated_job = tx.execute(
+            "UPDATE jobs SET state='completed' WHERE id=?1 AND state=?2",
+            params![job_id, state],
+        )?;
+        if updated_job != 1 {
+            return Err(JobStoreError::InvalidTransition);
+        }
+        tx.execute(
+            "INSERT INTO job_events(job_id,state,kind) VALUES (?1,'completed','attempt_resolved')",
+            [job_id],
+        )?;
+        tx.execute(
+            "INSERT INTO job_events(job_id,state,kind) VALUES (?1,'completed','transition')",
+            [job_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Record a refusal that the adapter proves occurred before it could make
     /// an external effect (for example, an atomic create-new collision).
     /// This is intentionally distinct from verification: no receipt is
@@ -1863,6 +1952,49 @@ mod tests {
             })
             .unwrap();
         assert_eq!(total, 1);
+    }
+
+    #[test]
+    fn verified_completion_updates_attempt_and_job_together() {
+        let mut db = JobStore::in_memory().unwrap();
+        db.enqueue("job", None).unwrap();
+        db.advance(
+            "job",
+            JobState::Queued,
+            JobState::Running,
+            Confirmation::Unknown,
+        )
+        .unwrap();
+        db.prepare_bound_attempt(
+            "job",
+            "attempt",
+            "copy",
+            "destination",
+            "/new-file",
+            1,
+            "900150983cd24fb0d6963f7d28e17f72",
+        )
+        .unwrap();
+
+        let receipt =
+            crate::verification::test_bound_receipt("attempt", "copy", "destination", "/new-file");
+        db.complete_attempt("job", "attempt", &receipt).unwrap();
+
+        assert_eq!(db.state("job").unwrap(), Some(JobState::Completed));
+        assert!(db.unresolved_attempts().unwrap().is_empty());
+        let evidence: String = db
+            .db
+            .query_row(
+                "SELECT evidence_level FROM attempt_verifications WHERE attempt_id='attempt'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(evidence, "metadata_verified");
+        assert!(matches!(
+            db.complete_attempt("job", "attempt", &receipt),
+            Err(JobStoreError::InvalidTransition)
+        ));
     }
 
     #[test]
