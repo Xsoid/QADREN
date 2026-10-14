@@ -6,6 +6,9 @@ struct MainView: View {
     @StateObject private var connections = StorageConnections()
     @StateObject private var localWorkspace = LocalWorkspace()
     @StateObject private var rightLocalWorkspace = LocalWorkspace()
+    @StateObject private var dashboardLayout = DashboardLayoutStore()
+    @SceneStorage("qadren.monitoring.panel-id") private var monitoringPanelID = ""
+    @State private var isEditingLayout = false
     @State private var jobs: [JobRow] = []
     @State private var jobError: String?
     let workspace: DispatcherSection
@@ -36,11 +39,36 @@ struct MainView: View {
                 }
                 if workspace == .monitoring || workspace == .files {
                     Button("Новая панель", systemImage: "macwindow.on.rectangle") { openWindow(id: "monitoring") }
+                    if workspace == .monitoring {
+                        Button(isEditingLayout ? "Готово" : "Компоновка", systemImage: "rectangle.3.group.bubble") {
+                            isEditingLayout.toggle()
+                        }
+                        Menu("Добавить виджет", systemImage: "plus.rectangle.on.rectangle") {
+                            ForEach(dashboardLayout.hiddenWidgets) { widget in
+                                Button(widget.kind.title) {
+                                    dashboardLayout.setVisible(widget.kind, isVisible: true)
+                                }
+                            }
+                            if dashboardLayout.hiddenWidgets.isEmpty {
+                                Text("Все стандартные виджеты уже на панели")
+                            }
+                            Divider()
+                            Button("Сбросить компоновку") { dashboardLayout.reset() }
+                        }
+                        .disabled(!isEditingLayout)
+                    }
                     Button("Обновить", systemImage: "arrow.clockwise") { refreshCurrentWorkspace() }
                 }
             }
         }
-        .onAppear { refreshJobs() }
+        .onAppear {
+            if workspace == .monitoring {
+                let panelID = monitoringPanelID.isEmpty ? UUID().uuidString : monitoringPanelID
+                monitoringPanelID = panelID
+                dashboardLayout.load(panelID: panelID)
+            }
+            refreshJobs()
+        }
     }
 
     private var monitoringWorkspace: some View {
@@ -51,60 +79,8 @@ struct MainView: View {
         ScrollView {
             VStack(spacing: 10) {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 270), spacing: 10)], spacing: 10) {
-                    QDWidgetFrame(title: "Система", symbol: "cpu", status: workerStatusKind) {
-                        VStack(alignment: .leading, spacing: 10) {
-                            QDStatusLabel(kind: workerStatusKind, text: workerStatus)
-                            LabeledContent("Ядро", value: coreStatus)
-                            Text("Источник: локальный Core; содержимое файлов не читается.")
-                                .font(.caption2).foregroundStyle(.secondary)
-                        }
-                    }
-
-                    QDWidgetFrame(title: "Задания", symbol: "arrow.triangle.2.circlepath", status: jobWidgetStatus) {
-                        if visibleJobs.isEmpty {
-                            QDEmptyState(
-                                title: "Заданий нет",
-                                detail: "История появится после безопасного выполнения через общий Job Engine.",
-                                symbol: "tray"
-                            )
-                        } else {
-                            JobList(jobs: visibleJobs, onRun: runMockJob, onPause: pauseMockJob, onResume: resumeMockJob, onCancel: cancelMockJob)
-                        }
-                    }
-
-                    QDWidgetFrame(title: "Очередь", symbol: "list.number") {
-                        HStack(alignment: .top, spacing: 24) {
-                            QDMetric(value: "\(visibleJobs.count)", label: "в инвентаре", provenance: "локальный JobStore")
-                            QDMetric(value: nil, label: "ETA", provenance: "не поддерживается")
-                        }
-                        Text("Порядок, прогресс и оценка времени появятся только когда их подтвердит Core.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-
-                    QDWidgetFrame(title: "Подключения", symbol: "externaldrive") {
-                        if connections.entries.isEmpty {
-                            VStack(alignment: .leading, spacing: 10) {
-                                Text("Подключения ещё не настроены.").foregroundStyle(.secondary)
-                                Button("Открыть настройки") { openWindow(id: "scenario-settings") }
-                            }
-                        } else {
-                            VStack(alignment: .leading, spacing: 8) {
-                                ForEach(connections.entries.prefix(4)) { entry in
-                                    HStack(spacing: 8) {
-                                        Image(systemName: entry.enabled ? "externaldrive.fill" : "externaldrive")
-                                            .foregroundStyle(entry.enabled ? QDTheme.cyan : .secondary)
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text(entry.name).lineLimit(1)
-                                            Text("\(adapterTitle(entry.adapter)) · \(entry.status)")
-                                                .font(.caption).foregroundStyle(.secondary)
-                                        }
-                                        Spacer()
-                                    }
-                                }
-                                Button("Настроить подключения") { openWindow(id: "scenario-settings") }
-                                    .font(.caption)
-                            }
-                        }
+                    ForEach(dashboardLayout.visibleWidgets) { widget in
+                        monitoringWidget(widget)
                     }
                 }
                 .padding(12)
@@ -120,6 +96,95 @@ struct MainView: View {
             }
         }
         .background(QDTheme.color(.canvas, for: colorScheme))
+    }
+
+    @ViewBuilder
+    private func monitoringWidget(_ widget: MonitoringWidgetLayout) -> some View {
+        switch widget.kind {
+        case .system:
+            QDWidgetFrame(title: "Система", symbol: "cpu", status: workerStatusKind, actions: {
+                layoutActions(for: widget)
+            }) {
+                VStack(alignment: .leading, spacing: 10) {
+                    QDStatusLabel(kind: workerStatusKind, text: workerStatus)
+                    LabeledContent("Ядро", value: coreStatus)
+                    Text("Источник: локальный Core; содержимое файлов не читается.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+        case .jobs:
+            QDWidgetFrame(title: "Задания", symbol: "arrow.triangle.2.circlepath", status: jobWidgetStatus, actions: {
+                layoutActions(for: widget)
+            }) {
+                if visibleJobs.isEmpty {
+                    QDEmptyState(title: "Заданий нет", detail: "История появится после безопасного выполнения через общий Job Engine.", symbol: "tray")
+                } else {
+                    JobList(jobs: visibleJobs, onRun: runMockJob, onPause: pauseMockJob, onResume: resumeMockJob, onCancel: cancelMockJob)
+                }
+            }
+        case .queue:
+            QDWidgetFrame(title: "Очередь", symbol: "list.number", actions: {
+                layoutActions(for: widget)
+            }) {
+                HStack(alignment: .top, spacing: 24) {
+                    QDMetric(value: "\(visibleJobs.count)", label: "в инвентаре", provenance: "локальный JobStore")
+                    QDMetric(value: nil, label: "ETA", provenance: "не поддерживается")
+                }
+                Text("Порядок, прогресс и оценка времени появятся только когда их подтвердит Core.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        case .connections:
+            QDWidgetFrame(title: "Подключения", symbol: "externaldrive", actions: {
+                layoutActions(for: widget)
+            }) {
+                if connections.entries.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Подключения ещё не настроены.").foregroundStyle(.secondary)
+                        Button("Открыть настройки") { openWindow(id: "scenario-settings") }
+                    }
+                } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(connections.entries.prefix(4)) { entry in
+                            HStack(spacing: 8) {
+                                Image(systemName: entry.enabled ? "externaldrive.fill" : "externaldrive")
+                                    .foregroundStyle(entry.enabled ? QDTheme.cyan : .secondary)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(entry.name).lineLimit(1)
+                                    Text("\(adapterTitle(entry.adapter)) · \(entry.status)")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                            }
+                        }
+                        Button("Настроить подключения") { openWindow(id: "scenario-settings") }
+                            .font(.caption)
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func layoutActions(for widget: MonitoringWidgetLayout) -> some View {
+        if isEditingLayout {
+            Button("Переместить раньше", systemImage: "arrow.left") {
+                dashboardLayout.move(widget.kind, by: -1)
+            }
+            .disabled(dashboardLayout.widgets.first?.kind == widget.kind)
+            .labelStyle(.iconOnly)
+            .help("Переместить раньше")
+            Button("Переместить позже", systemImage: "arrow.right") {
+                dashboardLayout.move(widget.kind, by: 1)
+            }
+            .disabled(dashboardLayout.widgets.last?.kind == widget.kind)
+            .labelStyle(.iconOnly)
+            .help("Переместить позже")
+            Button("Скрыть виджет", systemImage: "eye.slash") {
+                dashboardLayout.setVisible(widget.kind, isVisible: false)
+            }
+            .labelStyle(.iconOnly)
+            .help("Скрыть виджет")
+        }
     }
 
     private var jobsWorkspace: some View {

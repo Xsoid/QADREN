@@ -581,6 +581,12 @@
 
 Для этого среза выполнены `bash scripts/test-core.sh` и `bash scripts/build-macos.sh`; native visual/VoiceOver smoke отдельно не выполнялся.
 
+### Monitoring layout: per-window local composition — #23 (2026-10-14)
+
+- Monitoring сохраняет локальный порядок и видимость четырёх существующих виджетов (`Система`, `Задания`, `Очередь`, `Подключения`) отдельно для каждого SwiftUI scene через `@SceneStorage` panel ID и `UserDefaults`. В режиме «Компоновка» можно переставить или скрыть виджет; временный каталог возвращает только скрытые стандартные виджеты, а сброс восстанавливает baseline. Постоянного Sidebar, произвольных HTML-виджетов и второго data/Job слоя нет.
+- Сохранены только presentation fields. Layout не меняет Job, Scenario, StorageConnection, Worker или файлы. Повреждённый сохранённый JSON открывается с безопасным default layout, при этом исходная запись не удаляется автоматически.
+- `bash scripts/test-macos-dashboard-layout.sh` проверяет persistence порядка/visibility, независимость двух panel ID и fail-safe recovery повреждённого layout. Native app был открыт для inspection monitoring surface; последующее UI automation connection прервалось, поэтому visual/VoiceOver acceptance для нового layout остаётся BLOCKED и не заявляется как PASS.
+
 ### Расписания Scenario: durable configuration UI — #21 (2026-10-13)
 
 Для существующего Scenario в отдельной панели настроек можно создать несколько weekly расписаний, просмотреть их IANA timezone, временно выключить каждое отдельно или удалить. Конфигурация хранится в существующем Rust Registry; SwiftUI обращается к ней только через новые узкие C ABI list/create/enable/remove. Операция удаления расписания в одной SQLite-транзакции сначала удаляет его receipts уже оценённых слотов, затем саму конфигурацию, и не затрагивает Scenario, Job или файлы. Выключение сохраняет receipts, поэтому повторное включение не должно воспроизвести старый слот.
