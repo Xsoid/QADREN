@@ -4,6 +4,7 @@ use reqwest::blocking::Client;
 use reqwest::header::{HeaderValue, AUTHORIZATION};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
+use std::io::{self, Read};
 use std::time::Duration;
 
 const API: &str = "https://cloud-api.yandex.net/v1/disk";
@@ -116,6 +117,71 @@ pub enum UploadOutcome {
     Accepted,
     /// Provider queued asynchronous work; result must be reconciled.
     Pending,
+}
+
+/// Streams exactly the byte count that was durably bound to an upload attempt.
+/// The final source read probes for both early EOF and trailing bytes before
+/// exposing the final chunk to HTTP. A mismatch therefore makes the PUT
+/// outcome ambiguous instead of allowing a declared size to misrepresent the
+/// source stream.
+struct ExactSizeReader<R> {
+    inner: R,
+    remaining: u64,
+}
+
+impl<R: Read> ExactSizeReader<R> {
+    fn new(inner: R, expected_size: u64) -> Self {
+        Self {
+            inner,
+            remaining: expected_size,
+        }
+    }
+}
+
+impl<R: Read> Read for ExactSizeReader<R> {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        if output.is_empty() {
+            return Ok(0);
+        }
+        if self.remaining == 0 {
+            let mut trailing = [0_u8; 1];
+            return match self.inner.read(&mut trailing)? {
+                0 => Ok(0),
+                _ => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "upload source exceeds declared size",
+                )),
+            };
+        }
+
+        let maximum = usize::try_from(self.remaining.saturating_add(1))
+            .unwrap_or(usize::MAX)
+            .min(output.len());
+        let count = self.inner.read(&mut output[..maximum])?;
+        if count == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "upload source ended before declared size",
+            ));
+        }
+        if count as u64 > self.remaining {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "upload source exceeds declared size",
+            ));
+        }
+        if count as u64 == self.remaining {
+            let mut trailing = [0_u8; 1];
+            if self.inner.read(&mut trailing)? != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "upload source exceeds declared size",
+                ));
+            }
+        }
+        self.remaining -= count as u64;
+        Ok(count)
+    }
 }
 
 #[derive(Deserialize)]
@@ -280,7 +346,15 @@ impl YandexMetadataClient {
         {
             return Err(YandexError::UnsafeTransferUrl);
         }
-        let body = reqwest::blocking::Body::sized(source, expected_size);
+        let mut exact_source = ExactSizeReader::new(source, expected_size);
+        // A zero-length HTTP body may never poll its reader, so force the
+        // exact-size guard before initiating the PUT in that special case.
+        if expected_size == 0 {
+            exact_source
+                .read(&mut [0_u8; 1])
+                .map_err(|_| YandexError::UploadOutcomeUnknown)?;
+        }
+        let body = reqwest::blocking::Body::sized(exact_source, expected_size);
         let response = self
             .http
             .put(parsed)
@@ -324,6 +398,33 @@ impl YandexMetadataClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upload_reader_rejects_short_or_long_source_before_final_chunk() {
+        let mut exact = ExactSizeReader::new(std::io::Cursor::new(b"content".to_vec()), 7);
+        let mut bytes = Vec::new();
+        exact.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"content");
+
+        let mut short = ExactSizeReader::new(std::io::Cursor::new(b"short".to_vec()), 7);
+        assert_eq!(short.read(&mut [0_u8; 16]).unwrap(), 5);
+        assert_eq!(
+            short.read(&mut [0_u8; 16]).unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+
+        let mut long = ExactSizeReader::new(std::io::Cursor::new(b"content+".to_vec()), 7);
+        assert_eq!(
+            long.read(&mut [0_u8; 16]).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+
+        let mut zero_with_bytes = ExactSizeReader::new(std::io::Cursor::new(vec![1]), 0);
+        assert_eq!(
+            zero_with_bytes.read(&mut [0_u8; 1]).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
 
     // Local loopback mock: verifies HTTP status mapping and no content transfers.
     fn mocked_client(

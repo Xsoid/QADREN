@@ -511,6 +511,7 @@
 
 - По просьбе ускорить проект начата независимая работа #16 без фиктивного закрытия #15. Это параллельное начало, а не снятие блокирующих гарантий безопасности.
 - `a7e874d`, `8738354`, `020c72b`, `e69891f`: реализован минимальный путь upload: GET подписанного ресурса `/resources/upload?overwrite=false`, проверка HTTPS/PUT/отсутствия URL credentials, потоковый HTTP PUT фиксированной заявленной длины без открытия файлов на Mac, отдельный `UploadOutcome::Accepted/Pending`; запрещены HTTP redirects в производственном клиенте. Ошибка PUT считается возможным неизвестным состоянием удалённого файла и требует внешнего reconciliation; метод не выполняет автоматических retries.
+- Upload reader теперь проверяет точное соответствие фактической длины durable `expected_size`: short source и trailing bytes обнаруживаются до передачи последнего chunk (для нулевого expected size — до PUT). Несовпадение не объявляется успешной копией: результат остаётся `UploadOutcomeUnknown` и требует reconciliation. Это не вычисляет MD5 source и не заменяет remote metadata verification.
 
 ### Yandex upload metadata reconciliation contract — #16 (2026-10-13)
 
