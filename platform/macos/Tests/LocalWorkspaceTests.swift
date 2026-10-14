@@ -12,7 +12,9 @@ struct LocalWorkspaceTests {
         let workspace = LocalWorkspace()
         workspace.selectRoot(root.path)
         let database = root.appendingPathComponent("jobs.sqlite3").path
-        try workspace.createDirectory(named: "created", databasePath: database)
+        try workspace.createDirectory(
+            named: "created", connectionID: "test-local-connection", databasePath: database
+        )
 
         var isDirectory: ObjCBool = false
         let exists = FileManager.default.fileExists(
@@ -27,7 +29,9 @@ struct LocalWorkspaceTests {
         }
 
         do {
-            try workspace.createDirectory(named: "created", databasePath: database)
+            try workspace.createDirectory(
+                named: "created", connectionID: "test-local-connection", databasePath: database
+            )
             throw NSError(domain: "QADRENTests", code: 2, userInfo: [NSLocalizedDescriptionKey: "existing directory was accepted"])
         } catch {
             guard FileManager.default.fileExists(atPath: root.appendingPathComponent("created").path) else {

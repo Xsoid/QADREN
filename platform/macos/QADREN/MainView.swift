@@ -298,18 +298,28 @@ struct MainView: View {
             WorkspaceHeader(title: "Файловый менеджер", subtitle: "Две локальные панели метаданных") { EmptyView() }
                 .padding(.horizontal, 28).padding(.vertical, 18)
             HStack(spacing: 0) {
-                FileManagerPane(title: "Левая панель", workspace: localWorkspace)
+                FileManagerPane(
+                    title: "Левая панель", workspace: localWorkspace,
+                    localConnections: localConnections
+                )
                 Divider()
-                FileManagerPane(title: "Правая панель", workspace: rightLocalWorkspace)
+                FileManagerPane(
+                    title: "Правая панель", workspace: rightLocalWorkspace,
+                    localConnections: localConnections
+                )
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            Notice(text: "Доступны только метаданные. Предпросмотр содержимого, создание папок, копирование, перемещение, переименование и удаление выключены до реализации их безопасных Job-путей.", symbol: "shield")
+            Notice(text: "Создание новой папки доступно только через выбранное локальное подключение и Rust JobStore. Предпросмотр содержимого, копирование, перемещение, переименование и удаление остаются выключенными до реализации их безопасных Job-путей.", symbol: "shield")
                 .padding(16)
         }
     }
 
     private var scenarioSettingsWorkspace: some View {
         SettingsPanelView(connections: connections)
+    }
+
+    private var localConnections: [StorageEntry] {
+        connections.entries.filter { $0.adapter == "local_filesystem" && $0.enabled }
     }
 
     private func refreshCurrentWorkspace() {
@@ -515,8 +525,10 @@ private func jobStateTitle(_ state: String) -> String {
 private struct FileManagerPane: View {
     let title: String
     @ObservedObject var workspace: LocalWorkspace
+    let localConnections: [StorageEntry]
     @State private var selected = Set<String>()
     @State private var newDirectoryName = ""
+    @State private var selectedConnectionID = ""
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -535,12 +547,25 @@ private struct FileManagerPane: View {
                         if !selected.isEmpty { Text("Выбрано: \(selected.count)").font(.caption).foregroundStyle(.secondary) }
                     }
                     HStack(spacing: 8) {
+                        Picker("Подключение", selection: $selectedConnectionID) {
+                            Text("Выберите подключение").tag("")
+                            ForEach(localConnections) { connection in
+                                Text(connection.name).tag(connection.id)
+                            }
+                        }
+                        .frame(maxWidth: 220)
                         TextField("Имя новой папки", text: $newDirectoryName)
                         Button("Создать папку") {
-                            workspace.createDirectory(named: newDirectoryName)
+                            workspace.createDirectory(
+                                named: newDirectoryName,
+                                connectionID: selectedConnectionID
+                            )
                             newDirectoryName = ""
                         }
-                        .disabled(newDirectoryName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(
+                            !selectedConnectionIsAvailable
+                                || newDirectoryName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        )
                     }
                 }.padding(.horizontal, 18)
                 List(workspace.entries) { entry in
@@ -562,6 +587,10 @@ private struct FileManagerPane: View {
             }
             if let error = workspace.error { Notice(text: error, symbol: "exclamationmark.triangle").padding(12) }
         }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+    }
+
+    private var selectedConnectionIsAvailable: Bool {
+        localConnections.contains { $0.id == selectedConnectionID }
     }
 }
 

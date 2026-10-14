@@ -34,9 +34,13 @@ private struct LocalJobEnvelope: Decodable { let ok: Bool; let error: String? }
     func up() { guard !relativePath.isEmpty else { return }; relativePath = relativePath.split(separator: "/").dropLast().joined(separator: "/"); refresh() }
     /// The button that calls this is the explicit, operation-scoped user action.
     /// Rust owns the Job attempt, no-overwrite mkdir and final verification.
-    func createDirectory(named name: String) {
+    func createDirectory(named name: String, connectionID: String) {
         do {
-            try createDirectory(named: name, databasePath: JobInventory.paths().database)
+            try createDirectory(
+                named: name,
+                connectionID: connectionID,
+                databasePath: JobInventory.paths().database
+            )
         } catch {
             self.error = error.localizedDescription
         }
@@ -44,8 +48,12 @@ private struct LocalJobEnvelope: Decodable { let ok: Bool; let error: String? }
 
     /// Test seam for the native bridge. Production uses the app-owned JobStore
     /// selected above; callers cannot bypass the Rust executor.
-    func createDirectory(named name: String, databasePath: String) throws {
+    func createDirectory(named name: String, connectionID: String, databasePath: String) throws {
         guard let root else { return }
+        guard !connectionID.isEmpty else {
+            error = "Выберите активное локальное подключение"
+            return
+        }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !trimmed.contains("/") else {
             error = "Имя папки не должно быть пустым или содержать /"
@@ -55,7 +63,7 @@ private struct LocalJobEnvelope: Decodable { let ok: Bool; let error: String? }
         do {
             let pointer = databasePath.withCString { database in
                 root.withCString { root in
-                    "local-workspace".withCString { connection in
+                    connectionID.withCString { connection in
                         target.withCString { target in
                             ("local-mkdir-" + UUID().uuidString.lowercased()).withCString { jobID in
                                 createLocalDirectoryJob(database, root, connection, target, jobID)
