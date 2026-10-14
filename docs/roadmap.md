@@ -8,16 +8,22 @@
 - Существующий metadata-only Яндекс адаптер не выдается за готовую передачу.
 - Не изменять рабочий код только ради терминологии без миграционного плана.
 
-## Релиз 1 — полноценный локальный QADREN
+## Обновлённая исполнимая очередь D-018 — 2026-10-14
 
-**Scope freeze (D-017, 2026-10-12):** загрузка/скачивание файлов и синхронизация между Яндекс Диском и локальными директориями. Приоритет Local→Yandex, Yandex→Local (с индивидуальным согласием на основной MacBook), Local↔Local; прочие пары только при доказанных capabilities. iCloud sync/backup исключены из активной разработки и релизных критериев.
+**Новый приоритет владельца: фундамент и интерфейсы → локальные операции → автономный локальный продукт → Яндекс Диск в самом конце.** iCloud отложен бессрочно. Это переопределяет прежний Release 1 cloud-first scope. [Решение](decisions/D-018-local-first-priorities.md) · [аудит](development/current-state-audit.md).
 
-1. **Core/адаптеры**: Scenario/Job/StorageConnection/FileSyncState; Local Filesystem и metadata/content capabilities Яндекс Диска; без iCloud adapter.
-2. **Исполнение**: односторонняя/двусторонняя синхронизация, политики удаления/конфликтов, идемпотентность, проверки целостности, паузы, recovery.
-3. **Триггеры/очередь**: несколько timezone-aware расписаний, интеллектуальный debounce изменений, catch-up и follow-up, ручной приоритет с aging.
-4. **Файловый менеджер**: два подключения, ручные Jobs, безопасные copy/move/delete/rename/mkdir, drag-drop, multiselect.
-5. **UX/UI**: основные панели, готовые виджеты, масштаб/плотность/темы, timeline, дерево Jobs, контекстные подтверждения, полная локальная сессия.
-6. **Фон**: независимо запускаемая служба, расширенный системный индикатор, отдельная команда остановки.
+| Приоритет | Issues | Исполнимый результат / gate |
+|---|---|---|
+| **P0 / NOW** | #13, #26 | Подтверждённый main/CI baseline; общая SwiftUI дизайн-система, мониторинг как компонуемое полотно виджетов, отдельная настройка, честные empty/unsupported/UNKNOWN states |
+| **P1 / LOCAL CORE** | #15, #18, #20, #25 | Проверяемая безопасная цепочка UI→Rust JobStore→Local FS→verification→SQLite→UI; no-overwrite, durable attempts, consent, recovery; нет второго Job engine |
+| **P1–P2 / LOCAL PRODUCT** | #19, #22 | Local Scenario dry-run/one-way затем two-way conflict; двухпанельный менеджер, реальные read-only metadata и операции только через Job |
+| **P2 / AUTONOMY** | #21, #23, #24 | Scheduler/queue, независимая фоновая служба, устойчивый многоконный UI, локальный дистрибутив и проверка безопасности Local↔Local |
+| **P3 / LAST, PARKED** | #16 | Яндекс Диск; никакой новой API/transfer/OAuth/live E2E работы до нового решения владельца и проверки доступности API. Код и mock tests сохранять |
+| **INDEFINITE PARKED** | #17 (closed) | iCloud: не реализовывать, не создавать зависимости, не проводить entitlements/spike |
+
+**Для P0:** не ждать выполнения G1/G2/Yandex, не изобретать runtime-данные. **Для P1:** G1 app-owned mock уже существует в `job_execution.rs`; не переписывать его как отсутствующий. Следующий критерий — **реальная локальная, безопасная, привязанная к Job операция**, а не новый mock. В P2 не смешивать readiness фоновой службы с готовностью интерфейсных компонентов.
+
+**Локальные release gates:** успешная сборка и тесты на зафиксированном SHA; UI без mock-метрик; сценарий Local↔Local с recovery/consent; работающая независимая служба и установка. **Cloud gate отдельный:** провайдер доступен, контракт актуален, live E2E и safety proven. P0–P2 не блокируются P3. Политики из `docs/policies/` остаются обязательными.
 
 ### Приёмочные сценарии релиза 1
 
@@ -57,50 +63,6 @@ BackupSet, резервные версии и восстановление ст�
 Нельзя тестировать сохранность только happy-path. Нужны обрывы связи, API 429/5xx, истечение токенов, частичная запись, повторные уведомления, смена времени/DST, недоступность назначения, race между delete/reconnect и локальной паузой. Результаты тестов фиксировать отдельно от планов.
 
 
-## Исполнимая карта зависимостей — актуализация 2026-10-11
+## Правило актуальности
 
-Линейные фразы «блокируется предыдущим этапом» в старых Issue заменяются следующими **контрактными**, а не календарными зависимостями. Нельзя закрывать Issue по числу тестов: требуется её функциональный DoD. Закрытая #14 — baseline моделей, **не** готовый runtime transfer contract.
-
-| Поток | Issue | Для начала требуется | Готовность |
-|---|---|---|---|
-| Baseline/contract stabilization | #13, #14 | Текущий main, #2/#7 | Отдельные проверки ещё открыты |
-| Local FS | #15 | Общие capability/error/safety contracts | Частичная реализация; destructive и macOS read блокированы |
-| Yandex content | #16 | Yandex metadata/OAuth + transfer contract | Streaming PUT создан, E2E не доказан |
-| Durable execution | #18 | Модели #14 + JobStore; mock adapter | Не ждать завершения #15/#16; iCloud вне scope |
-| Policy and recovery | #20, #25 | Контракты attempts/consent; можно параллельно #18 | Общие правила формируются, connection races открыты |
-| Scenario | #19 | Типы #14; для реального sync нужен Job runner #18 | Модель есть, execution отсутствует |
-| Scheduler | #21 | Durable Scenario/Job submission API; fake clock tests параллельно | Не ждать UI |
-| File manager | #22 | Metadata browse + Job commands; UI можно развивать с mock | Не ждать scheduler |
-| SwiftUI and service | #23 | Rust API + FFI; service extraction после первого vertical slice | Старт исполнения in-process согласован |
-| Integration/release | #24 | Сквозные gates G1–G6 и решение о distribution | Не готово |
-
-### Гейты
-
-- **G0 Контракты:** владелец Job, capability/consent, проверка evidence, UNKNOWN/reconciliation, error schema, FFI ABI и ownership согласованы; нет дублирующих движков.
-- **G1 Эталонная вертикаль:** создать **новый** файл без overwrite через команду → JobStore → adapter/mock → read-only verification → SQLite → UI; тесты no-consent, existing destination, partial transfer, fail-after-effect, kill/restart и duplicate attempt.
-- **G2 Межадаптерная операция:** та же система проводит потоковую передачу между двумя поддерживаемыми адаптерами; source read policy соблюдается; подтверждённая live test и fault matrix.
-- **G3 Сценарий:** one-way plan и повторная сверка, затем two-way + conflict; FileSyncState только после подтверждения.
-- **G4 Защита:** bulk deletion/overwrite, collision, consent, disconnect races, UNKNOWN recovery.
-- **G5 Автоматизация:** scheduler, UI lifecycle и та же Rust engine в самостоятельной фоновой службе; закрытие UI не прекращает работу.
-- **G6 Release:** реальные macOS Local FS, Яндекс OAuth/content и sync проверки, измерения и выбранная модель distribution + соответствующие Gatekeeper/signing/notarization проверки, без iCloud.
-
-### Порядок передачи Codex
-
-1. Один компактный contract/baseline пакет для #13/#14/#18/#20, без переработки работающего metadata OAuth/Registry.
-2. G1 с mock/no-overwrite и durable результатом, затем реальный Yandex upload + reconcile (#16) и разрешённый Local FS integration (#15).
-3. Параллельно FFI/UI commands (#22/#23), Scenario diff и тесты scheduler на виртуальных часах (#19/#21), без iCloud native spike.
-4. На G2–G4 выполнить интеграцию, только потом опасные операции при доказанных гарантиях.
-5. G5 service extraction без второго движка, G6 выпуск.
-
-Реализация одной компоненты не блокирует разработку независимой. Общий `main` требует последовательной интеграции изменений и регрессионных проверок. Не закрывать #15/#16/#18 до их собственных критериев.
-
-
-### Очередь самостоятельной работы после передачи
-
-**Первая готовая задача: #18 (G1).** Не начинать новую архитектурную подготовку или ещё один metadata UI. Уже существуют `jobs.rs` (JobStore/attempts), `jobs_ffi.rs` (read-only inventory), `JobInventory.swift` и список Jobs в `MainView.swift`; перечисленное не равно исполнению Job. Codex должен сделать полностью работающую no-overwrite mock вертикаль с проверкой и durable result, потом FFI command и UI. Native smoke и live provider E2E отмечать отдельно, пока не выполнены.
-
-После G1 приоритеты определяются реальными зависимостями: (1) #16 content/remote reconciliation и #15 только safe Local FS; (2) #20/#25 policy/disconnect concurrency; (3) параллельно #19 Scenario planning и #22 UI; (4) #21 и #23 lifecycle; (5) #24 release. Если зависимость не достигнута, делать независимые тесты/контракты, но не объявлять интеграцию готовой.
-
-**Разделять статусы:** `PLANNED` — разработка не начата; `PARTIAL` — код существует, функциональный acceptance не выполнен; `BLOCKED` — указан конкретный внешний blocker и кто его снимает; `VERIFIED` — acceptance пройден на указанном SHA/окружении. Отдельный статус `READY FOR CODEX` означает достаточность формулировки Issue, **не** готовность функции и не право закрыть её.
-
-**Handoff каждой задачи:** текущее состояние, SHA, существующие API, изменённые файлы, фактически выполненные проверки, ограничения, следующий gate и нужны ли действия владельца. Хранить в Issue; не создавать самостоятельные session logs в дереве проекта. Следовать `docs/development/engineering-rules.md`.
+Исторический план G0–G6 от 2026-10-11 заменён исполнимой очередью D-018 выше. Контракты надёжности (bound attempts, UNKNOWN, read-only reconciliation, consent, no-overwrite) сохраняются, но не навязывают облачный порядок. Статусы и SHA сверять по [аудиту](development/current-state-audit.md), GitHub `main` и локальному рабочему дереву перед любым Codex-пакетом.
