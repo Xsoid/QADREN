@@ -140,6 +140,8 @@ enum StorageRegistryBridge {
         }
     }
 
+    static func databasePath() throws -> String { try path }
+
     private static func unwrap<T: Decodable>(
         _ pointer: UnsafeMutablePointer<CChar>?, as: T.Type
     ) throws -> T {
@@ -349,8 +351,8 @@ enum StorageRegistryBridge {
         return result.id
     }
 
-    static func addLocalComputer(name: String = "Этот Mac") throws -> String {
-        let database = try path
+    static func addLocalComputer(name: String = "Этот Mac", databasePath: String? = nil) throws -> String {
+        let database = try databasePath ?? path
         let result: NewConnection = try database.withCString { db in
             try "local_filesystem".withCString { adapter in
                 try name.withCString { label in

@@ -12,8 +12,12 @@ struct LocalWorkspaceTests {
         let workspace = LocalWorkspace()
         workspace.selectRoot(root.path)
         let database = root.appendingPathComponent("jobs.sqlite3").path
+        let registry = root.appendingPathComponent("connections.sqlite3").path
+        let connection = try StorageRegistryBridge.addLocalComputer(
+            name: "Test Local", databasePath: registry
+        )
         try workspace.createDirectory(
-            named: "created", connectionID: "test-local-connection", databasePath: database
+            named: "created", connectionID: connection, databasePath: database, registryPath: registry
         )
 
         var isDirectory: ObjCBool = false
@@ -30,7 +34,7 @@ struct LocalWorkspaceTests {
 
         do {
             try workspace.createDirectory(
-                named: "created", connectionID: "test-local-connection", databasePath: database
+                named: "created", connectionID: connection, databasePath: database, registryPath: registry
             )
             throw NSError(domain: "QADRENTests", code: 2, userInfo: [NSLocalizedDescriptionKey: "existing directory was accepted"])
         } catch {

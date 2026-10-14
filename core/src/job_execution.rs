@@ -4,6 +4,7 @@ use crate::confirmation::{Confirmation, EvidenceLevel};
 use crate::jobs::{JobStore, JobStoreError};
 use crate::local_fs::{LocalError, LocalFilesystem};
 use crate::model::JobState;
+use crate::registry::Registry;
 use crate::verification::{OperationVerifier, VerifiedReceipt};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -55,10 +56,21 @@ pub enum LocalDirectoryCreateError {
     InvalidRequest,
     TargetExists,
     CapabilityUnavailable,
+    ConnectionUnavailable,
     VerificationFailed,
     OutcomeUnknown(LocalError),
     Local(LocalError),
     Store(JobStoreError),
+}
+
+fn enabled_local_connection(registry_path: &Path, connection_id: &str) -> bool {
+    let Ok(registry) = Registry::open(registry_path) else {
+        return false;
+    };
+    matches!(
+        registry.get(connection_id),
+        Ok(Some(connection)) if connection.adapter == "local_filesystem" && connection.enabled
+    )
 }
 
 impl From<JobStoreError> for MockCreateError {
@@ -315,6 +327,7 @@ pub fn reconcile_mock_create(
 /// remain fail-closed until residency protection has a proven safe boundary.
 pub fn run_local_directory_create(
     database_path: &Path,
+    registry_path: &Path,
     local_root: &Path,
     connection_id: &str,
     relative_path: &Path,
@@ -322,6 +335,9 @@ pub fn run_local_directory_create(
 ) -> Result<LocalDirectoryCreateStatus, LocalDirectoryCreateError> {
     if !valid_job_id(job_id) || connection_id.is_empty() || relative_path.as_os_str().is_empty() {
         return Err(LocalDirectoryCreateError::InvalidRequest);
+    }
+    if !enabled_local_connection(registry_path, connection_id) {
+        return Err(LocalDirectoryCreateError::ConnectionUnavailable);
     }
     let local = LocalFilesystem::open(local_root).map_err(LocalDirectoryCreateError::Local)?;
     if !local.capabilities().operations.create_directory {
@@ -355,6 +371,12 @@ pub fn run_local_directory_create(
         0,
         "d41d8cd98f00b204e9800998ecf8427e",
     )?;
+    // Disconnect may have raced with Job preparation. No I/O has begun, so
+    // record the proven pre-effect refusal instead of touching the root.
+    if !enabled_local_connection(registry_path, connection_id) {
+        store.fail_attempt_before_effect(job_id, &attempt_id)?;
+        return Err(LocalDirectoryCreateError::ConnectionUnavailable);
+    }
     match local.create_directory(relative_path) {
         Ok(()) => {}
         Err(LocalError::AlreadyExists) => {
@@ -474,7 +496,7 @@ mod tests {
     // `temp_dir()` may be a symlinked macOS path (`/var` → `/private/var`),
     // which the Local Filesystem adapter correctly rejects. Keep Local FS
     // controller fixtures under Cargo's physical target directory instead.
-    fn local_fixture(name: &str) -> (PathBuf, PathBuf) {
+    fn local_fixture(name: &str) -> (PathBuf, PathBuf, PathBuf, String) {
         let base = std::env::current_dir()
             .unwrap()
             .join("target")
@@ -486,7 +508,15 @@ mod tests {
                     .as_nanos()
             ));
         fs::create_dir_all(&base).unwrap();
-        (base.join("jobs.sqlite3"), base.join("local-root"))
+        let registry_path = base.join("connections.sqlite3");
+        let registry = Registry::open(&registry_path).unwrap();
+        let connection = registry.add("local_filesystem", "Test Local").unwrap();
+        (
+            base.join("jobs.sqlite3"),
+            registry_path,
+            base.join("local-root"),
+            connection,
+        )
     }
 
     #[test]
@@ -692,13 +722,14 @@ mod tests {
 
     #[test]
     fn local_directory_controller_persists_and_verifies_no_overwrite_creation() {
-        let (database, root) = local_fixture("complete");
+        let (database, registry, root, connection) = local_fixture("complete");
         fs::create_dir(&root).unwrap();
         assert_eq!(
             run_local_directory_create(
                 &database,
+                &registry,
                 &root,
-                "local-connection-a",
+                &connection,
                 Path::new("created"),
                 "local-mkdir-1",
             )
@@ -716,14 +747,15 @@ mod tests {
 
     #[test]
     fn local_directory_controller_never_replaces_existing_entry() {
-        let (database, root) = local_fixture("occupied");
+        let (database, registry, root, connection) = local_fixture("occupied");
         fs::create_dir(&root).unwrap();
         fs::write(root.join("occupied"), b"preserve").unwrap();
         assert!(matches!(
             run_local_directory_create(
                 &database,
+                &registry,
                 &root,
-                "local-connection-a",
+                &connection,
                 Path::new("occupied"),
                 "local-mkdir-occupied",
             ),
@@ -736,5 +768,25 @@ mod tests {
             Some(JobState::Failed)
         );
         assert!(store.unresolved_attempts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn local_directory_controller_refuses_disabled_or_missing_connection_before_io() {
+        let (database, registry_path, root, connection) = local_fixture("disabled");
+        let registry = Registry::open(&registry_path).unwrap();
+        registry.set_enabled(&connection, false).unwrap();
+        assert!(matches!(
+            run_local_directory_create(
+                &database,
+                &registry_path,
+                &root,
+                &connection,
+                Path::new("must-not-exist"),
+                "local-mkdir-disabled",
+            ),
+            Err(LocalDirectoryCreateError::ConnectionUnavailable)
+        ));
+        assert!(!database.exists());
+        assert!(!root.exists());
     }
 }

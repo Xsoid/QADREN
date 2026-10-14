@@ -11,7 +11,7 @@
 ## Local controller mkdir slice (2026-10-14)
 
 - `qadren_jobs_run_local_directory_create` executes one explicit `local_mkdir_new` through the Rust `JobStore`: it persists a bound attempt before `mkdir`, fails on an existing target without overwrite, verifies the resulting directory metadata, and completes atomically with the receipt.
-- `LocalWorkspace` offers `Создать папку` only after the user has selected both a local root and an enabled `StorageConnection`; the real `connection_id` is recorded in the Job attempt, so normal disconnect/remove gating can see it. The native bridge test `bash scripts/test-macos-local-workspace.sh` creates a unique test root, verifies the listed directory, and confirms collision rejection.
+- `LocalWorkspace` offers `Создать папку` only after the user has selected both a local root and an enabled `StorageConnection`; the real `connection_id` is recorded in the Job attempt, so normal disconnect/remove gating can see it. Rust independently reopens the Registry and rejects missing, non-Local or disabled connections before I/O. The native bridge test `bash scripts/test-macos-local-workspace.sh` creates a unique test root, verifies the listed directory, and confirms collision rejection.
 - This is deliberately **not** content copy or Local↔Local synchronization. macOS content reads remain fail-closed because opening a File Provider placeholder could materialize it. Unknown post-effect outcomes are not retried blindly.
 
 ## Dispatcher workspace shell (2026-10-12)

@@ -131,6 +131,7 @@ pub unsafe extern "C" fn qadren_jobs_run_mock_create(
 #[no_mangle]
 pub unsafe extern "C" fn qadren_jobs_run_local_directory_create(
     database_path: *const c_char,
+    registry_path: *const c_char,
     local_root: *const c_char,
     connection_id: *const c_char,
     relative_path: *const c_char,
@@ -138,12 +139,14 @@ pub unsafe extern "C" fn qadren_jobs_run_local_directory_create(
 ) -> *mut c_char {
     let (
         Some(database_path),
+        Some(registry_path),
         Some(local_root),
         Some(connection_id),
         Some(relative_path),
         Some(job_id),
     ) = (
         input(database_path),
+        input(registry_path),
         input(local_root),
         input(connection_id),
         input(relative_path),
@@ -154,6 +157,7 @@ pub unsafe extern "C" fn qadren_jobs_run_local_directory_create(
     };
     match crate::job_execution::run_local_directory_create(
         Path::new(database_path),
+        Path::new(registry_path),
         Path::new(local_root),
         connection_id,
         Path::new(relative_path),
@@ -173,6 +177,9 @@ pub unsafe extern "C" fn qadren_jobs_run_local_directory_create(
         }
         Err(crate::job_execution::LocalDirectoryCreateError::CapabilityUnavailable) => {
             response(json!({"ok": false, "error": "local_capability_unavailable"}))
+        }
+        Err(crate::job_execution::LocalDirectoryCreateError::ConnectionUnavailable) => {
+            response(json!({"ok": false, "error": "local_connection_unavailable"}))
         }
         Err(crate::job_execution::LocalDirectoryCreateError::VerificationFailed) => {
             response(json!({"ok": false, "error": "verification_failed"}))
@@ -595,13 +602,18 @@ mod tests {
             ));
         fs::create_dir(&base).unwrap();
         let database = CString::new(base.join("jobs.sqlite3").to_str().unwrap()).unwrap();
+        let registry_path = base.join("connections.sqlite3");
+        let registry = crate::registry::Registry::open(&registry_path).unwrap();
+        let connection_id = registry.add("local_filesystem", "Test Local").unwrap();
+        let registry = CString::new(registry_path.to_str().unwrap()).unwrap();
         let root = CString::new(base.to_str().unwrap()).unwrap();
-        let connection = CString::new("local-connection-a").unwrap();
+        let connection = CString::new(connection_id).unwrap();
         let relative = CString::new("created-by-ffi").unwrap();
         let job = CString::new("local-mkdir-ffi").unwrap();
         let response = unsafe {
             qadren_jobs_run_local_directory_create(
                 database.as_ptr(),
+                registry.as_ptr(),
                 root.as_ptr(),
                 connection.as_ptr(),
                 relative.as_ptr(),

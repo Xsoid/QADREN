@@ -5,7 +5,7 @@ import Foundation
 @_silgen_name("qadren_local_free_string") private func localFree(_ pointer: UnsafeMutablePointer<CChar>?)
 @_silgen_name("qadren_jobs_run_local_directory_create")
 private func createLocalDirectoryJob(
-    _ database: UnsafePointer<CChar>?, _ root: UnsafePointer<CChar>?, _ connection: UnsafePointer<CChar>?,
+    _ database: UnsafePointer<CChar>?, _ registry: UnsafePointer<CChar>?, _ root: UnsafePointer<CChar>?, _ connection: UnsafePointer<CChar>?,
     _ relative: UnsafePointer<CChar>?, _ jobID: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
 
@@ -39,7 +39,8 @@ private struct LocalJobEnvelope: Decodable { let ok: Bool; let error: String? }
             try createDirectory(
                 named: name,
                 connectionID: connectionID,
-                databasePath: JobInventory.paths().database
+                databasePath: JobInventory.paths().database,
+                registryPath: StorageRegistryBridge.databasePath()
             )
         } catch {
             self.error = error.localizedDescription
@@ -48,7 +49,7 @@ private struct LocalJobEnvelope: Decodable { let ok: Bool; let error: String? }
 
     /// Test seam for the native bridge. Production uses the app-owned JobStore
     /// selected above; callers cannot bypass the Rust executor.
-    func createDirectory(named name: String, connectionID: String, databasePath: String) throws {
+    func createDirectory(named name: String, connectionID: String, databasePath: String, registryPath: String) throws {
         guard let root else { return }
         guard !connectionID.isEmpty else {
             error = "Выберите активное локальное подключение"
@@ -62,11 +63,13 @@ private struct LocalJobEnvelope: Decodable { let ok: Bool; let error: String? }
         let target = relativePath.isEmpty ? trimmed : relativePath + "/" + trimmed
         do {
             let pointer = databasePath.withCString { database in
-                root.withCString { root in
-                    connectionID.withCString { connection in
-                        target.withCString { target in
-                            ("local-mkdir-" + UUID().uuidString.lowercased()).withCString { jobID in
-                                createLocalDirectoryJob(database, root, connection, target, jobID)
+                registryPath.withCString { registry in
+                    root.withCString { root in
+                        connectionID.withCString { connection in
+                            target.withCString { target in
+                                ("local-mkdir-" + UUID().uuidString.lowercased()).withCString { jobID in
+                                    createLocalDirectoryJob(database, registry, root, connection, target, jobID)
+                                }
                             }
                         }
                     }
