@@ -244,8 +244,7 @@ struct SettingsPanelView: View {
 
     private var scenarioEndpoints: [StorageEntry] {
         var endpoints = connections.entries.filter {
-            ($0.enabled || $0.id == editedScenario?.left_connection_id || $0.id == editedScenario?.right_connection_id)
-                && ($0.adapter == "yandex_disk" || $0.adapter == "local_filesystem")
+            $0.enabled && $0.adapter == "local_filesystem"
         }
         if !endpoints.contains(where: { $0.adapter == "local_filesystem" }) {
             endpoints.append(StorageEntry(
@@ -498,7 +497,15 @@ private struct ScenariosSettingsView: View {
                             ))
                             .labelsHidden()
                             Button("Изменить") { editScenario(scenario) }
+                                .disabled(!isLocalScenario(scenario))
+                                .help(isLocalScenario(scenario)
+                                      ? "Изменить локальный сценарий"
+                                      : "Сценарий с Яндекс Диском отложен до P3")
                             Button("Расписания") { editSchedules(scenario) }
+                                .disabled(!isLocalScenario(scenario))
+                                .help(isLocalScenario(scenario)
+                                      ? "Настроить расписания локального сценария"
+                                      : "Сценарий с Яндекс Диском отложен до P3")
                         }
                         EndpointLine(
                             title: "Источник",
@@ -510,9 +517,7 @@ private struct ScenariosSettingsView: View {
                             connection: connectionName(scenario.right_connection_id),
                             root: scenario.right_root
                         )
-                        Text(scenario.enabled
-                             ? "Автоматизация и запуск ещё недоступны: Core пока не создаёт Job из Scenario."
-                             : "Автоматические триггеры для этого сценария выключены.")
+                        Text(scenarioStatus(scenario))
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     .padding(.vertical, 6)
@@ -531,9 +536,23 @@ private struct ScenariosSettingsView: View {
     }
 
     private var supportedConnections: [StorageEntry] {
-        connections.filter {
-            $0.enabled && ($0.adapter == "yandex_disk" || $0.adapter == "local_filesystem")
+        connections.filter { $0.enabled && $0.adapter == "local_filesystem" }
+    }
+
+    private func isLocalScenario(_ scenario: ScenarioEntry) -> Bool {
+        let endpointIDs = [scenario.left_connection_id, scenario.right_connection_id]
+        return endpointIDs.allSatisfy { id in
+            connections.first(where: { $0.id == id })?.adapter == "local_filesystem"
         }
+    }
+
+    private func scenarioStatus(_ scenario: ScenarioEntry) -> String {
+        if !isLocalScenario(scenario) {
+            return "Сценарий использует Яндекс Диск и отложен до P3. Его запуск, изменение и расписания недоступны; запись сохранена локально."
+        }
+        return scenario.enabled
+            ? "Автоматизация и запуск ещё недоступны: Core пока не создаёт Job из Scenario."
+            : "Автоматические триггеры для этого сценария выключены."
     }
 
     private func adapterTitle(_ adapter: String) -> String {
