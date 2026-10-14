@@ -220,17 +220,20 @@ struct MainView: View {
                 } else {
                     VStack(alignment: .leading, spacing: 8) {
                         ForEach(widget.density == .expanded ? connections.entries : Array(connections.entries.prefix(4))) { entry in
+                            let status = connectionStatusKind(for: entry)
+                            let statusTitle = connectionStatusTitle(for: entry)
                             HStack(spacing: 8) {
-                                let status = connectionStatusKind(for: entry)
                                 Image(systemName: status.symbol)
                                     .foregroundStyle(status.color)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(entry.name).lineLimit(1)
-                                    Text("\(adapterTitle(entry.adapter)) · \(connectionStatusTitle(for: entry))")
+                                    Text("\(adapterTitle(entry.adapter)) · \(statusTitle)")
                                         .font(.caption).foregroundStyle(.secondary)
                                 }
                                 Spacer()
                             }
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityLabel("\(entry.name), \(adapterTitle(entry.adapter)), \(statusTitle)")
                         }
                         Button("Настроить подключения") { openWindow(id: "scenario-settings") }
                             .font(.caption)
