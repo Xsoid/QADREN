@@ -87,6 +87,18 @@ struct DashboardLayoutTests {
         for _ in 0..<50 { bounded.undo() }
         check(!bounded.canUndo, "layout history retains no more than fifty states")
 
+        check(ConnectionPresentationStatus.aggregate([], registryFailed: false) == .waiting, "empty Registry is waiting")
+        check(ConnectionPresentationStatus.aggregate([.paused], registryFailed: false) == .paused, "all disabled connections are paused")
+        check(ConnectionPresentationStatus.aggregate([.offline, .disconnected], registryFailed: false) == .offline, "offline and disconnected connections stay offline")
+        check(ConnectionPresentationStatus.aggregate([.ready, .offline], registryFailed: false) == .unknown, "mixed connection states are not presented as ready")
+        check(ConnectionPresentationStatus.aggregate([.ready, .needsAction], registryFailed: false) == .needsAction, "authorization need outranks ready state")
+        check(ConnectionPresentationStatus.aggregate([.needsAction, .failed], registryFailed: false) == .failed, "failure outranks authorization need")
+        check(ConnectionPresentationStatus.aggregate([.ready], registryFailed: true) == .failed, "Registry failure outranks entry state")
+        check(ConnectionPresentationStatus(enabled: true, registryStatus: "disconnected") == .disconnected, "disconnected entry retains its precise state")
+        check(ConnectionPresentationStatus(enabled: true, registryStatus: "disconnected").title == "отключено", "disconnected entry retains its precise title")
+        check(ConnectionPresentationStatus(enabled: true, registryStatus: "unrecognized") == .unknown, "unrecognized entry is not assumed ready")
+        check(ConnectionPresentationStatus(enabled: false, registryStatus: "connected").title == "выключено", "disabled entry does not expose a ready title")
+
         print("Dashboard layout native tests passed")
     }
 }

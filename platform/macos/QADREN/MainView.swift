@@ -359,38 +359,34 @@ struct MainView: View {
         return visibleJobs.isEmpty ? .waiting : .ready
     }
     private var connectionWidgetStatus: QDStatusKind {
-        if connections.error != nil { return .failed }
-        let enabled = connections.entries.filter(\.enabled)
-        guard !connections.entries.isEmpty else { return .waiting }
-        guard !enabled.isEmpty else { return .paused }
-        let statuses = enabled.map(connectionStatusKind(for:))
-        if statuses.contains(.failed) { return .failed }
-        if statuses.contains(.needsAction) { return .needsAction }
-        if statuses.allSatisfy({ $0 == .ready }) { return .ready }
-        if statuses.allSatisfy({ $0 == .offline }) { return .offline }
-        return .unknown
+        statusKind(for: connectionPresentationStatus)
     }
 
     private func connectionStatusKind(for entry: StorageEntry) -> QDStatusKind {
-        guard entry.enabled else { return .paused }
-        return switch entry.status {
-        case "connected": .ready
-        case "requires_auth": .needsAction
-        case "error": .failed
-        case "offline", "disconnected": .offline
-        default: .unknown
-        }
+        statusKind(for: ConnectionPresentationStatus(enabled: entry.enabled, registryStatus: entry.status))
     }
 
     private func connectionStatusTitle(for entry: StorageEntry) -> String {
-        guard entry.enabled else { return "выключено" }
-        return switch entry.status {
-        case "connected": "подключено"
-        case "requires_auth": "нужна авторизация"
-        case "error": "ошибка"
-        case "offline": "нет связи"
-        case "disconnected": "отключено"
-        default: "статус не подтверждён"
+        ConnectionPresentationStatus(enabled: entry.enabled, registryStatus: entry.status).title
+    }
+
+    private var connectionPresentationStatus: ConnectionPresentationStatus {
+        ConnectionPresentationStatus.aggregate(
+            connections.entries.map { ConnectionPresentationStatus(enabled: $0.enabled, registryStatus: $0.status) },
+            registryFailed: connections.error != nil
+        )
+    }
+
+    private func statusKind(for status: ConnectionPresentationStatus) -> QDStatusKind {
+        switch status {
+        case .ready: .ready
+        case .needsAction: .needsAction
+        case .failed: .failed
+        case .offline: .offline
+        case .disconnected: .offline
+        case .paused: .paused
+        case .waiting: .waiting
+        case .unknown: .unknown
         }
     }
     private var monitoringAlert: String? {
