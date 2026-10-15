@@ -30,7 +30,7 @@ Machine-readable table — [tokens.json](tokens.json). Below is the semantics; d
 | grid, gap, inset, header, corner | general rhythmic space |
 | compact, regular, expanded | **content** density, not total window scale |
 
-The main dark palette is almost black with a blue undertone, layers are dark blue. The main accent is electric cyan `#0CB9F2`, additional blue `#2A80FF`. Red — only for danger/errors, amber — user decisions, lilac-grey — uncertainty; green — only for verified compliant status. Do not replace everything with green in `Worker report` without evidence.
+The main dark palette is almost black with a blue undertone, layers are dark blue. The main accent is electric cyan `#0CB9F2`, additional blue `#2A80FF`. Red — only for danger/errors, amber — user decisions, lilac-grey — uncertainty; green — only for verified compliant status. Do not replace everything with green in `Worker report` without evidence. The light theme uses the separate darker `semantic.light` status tokens from `tokens.json`; it does not place the bright dark-theme accents as regular text on a white panel.
 
 ## 4. Geometry and grid
 

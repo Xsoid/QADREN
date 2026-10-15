@@ -30,6 +30,10 @@ enum QDColorRole {
     case primaryText, secondaryText, disabledText
 }
 
+enum QDSemanticColor: CaseIterable {
+    case active, ready, waiting, needsAction, failed, unknown, neutral
+}
+
 enum QDTheme {
     static func color(_ role: QDColorRole, for scheme: ColorScheme) -> Color {
         let dark = scheme == .dark
@@ -52,6 +56,60 @@ enum QDTheme {
     static let warning = Color(hex: 0xFFB347)
     static let danger = Color(hex: 0xFF6376)
     static let unknown = Color(hex: 0xB4A1F5)
+
+    static func semanticColor(_ semantic: QDSemanticColor, for scheme: ColorScheme) -> Color {
+        Color(hex: semanticHex(semantic, for: scheme))
+    }
+
+    static func semanticContrastRatio(_ semantic: QDSemanticColor, for scheme: ColorScheme) -> Double {
+        contrastRatio(
+            foreground: semanticHex(semantic, for: scheme),
+            background: scheme == .dark ? 0x0B1B2A : 0xFFFFFF
+        )
+    }
+
+    private static func semanticHex(_ semantic: QDSemanticColor, for scheme: ColorScheme) -> UInt32 {
+        if scheme == .dark {
+            return switch semantic {
+            case .active: 0x0CB9F2
+            case .ready: 0x24CE86
+            case .waiting: 0x2A80FF
+            case .needsAction: 0xFFB347
+            case .failed: 0xFF6376
+            case .unknown: 0xB4A1F5
+            case .neutral: 0xA9C2D2
+            }
+        }
+        return switch semantic {
+        case .active: 0x006C98
+        case .ready: 0x087443
+        case .waiting: 0x245E99
+        case .needsAction: 0x8A4B00
+        case .failed: 0xB3261E
+        case .unknown: 0x6550A5
+        case .neutral: 0x385869
+        }
+    }
+
+    private static func contrastRatio(foreground: UInt32, background: UInt32) -> Double {
+        let foregroundLuminance = relativeLuminance(foreground)
+        let backgroundLuminance = relativeLuminance(background)
+        let lighter = max(foregroundLuminance, backgroundLuminance)
+        let darker = min(foregroundLuminance, backgroundLuminance)
+        return (lighter + 0.05) / (darker + 0.05)
+    }
+
+    private static func relativeLuminance(_ hex: UInt32) -> Double {
+        let channels = [
+            Double((hex >> 16) & 0xFF) / 255,
+            Double((hex >> 8) & 0xFF) / 255,
+            Double(hex & 0xFF) / 255,
+        ]
+        let linear = channels.map { channel in
+            channel <= 0.04045 ? channel / 12.92 : pow((channel + 0.055) / 1.055, 2.4)
+        }
+        return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+    }
 }
 
 private extension Color {
@@ -69,15 +127,15 @@ private extension Color {
 enum QDStatusKind: Equatable {
     case ready, active, waiting, paused, needsAction, failed, unknown, offline, unsupported
 
-    var color: Color {
+    func color(for scheme: ColorScheme) -> Color {
         switch self {
-        case .ready: QDTheme.success
-        case .active: QDTheme.cyan
-        case .waiting, .paused: QDTheme.blue
-        case .needsAction: QDTheme.warning
-        case .failed: QDTheme.danger
-        case .unknown: QDTheme.unknown
-        case .offline, .unsupported: Color.secondary
+        case .ready: QDTheme.semanticColor(.ready, for: scheme)
+        case .active: QDTheme.semanticColor(.active, for: scheme)
+        case .waiting, .paused: QDTheme.semanticColor(.waiting, for: scheme)
+        case .needsAction: QDTheme.semanticColor(.needsAction, for: scheme)
+        case .failed: QDTheme.semanticColor(.failed, for: scheme)
+        case .unknown: QDTheme.semanticColor(.unknown, for: scheme)
+        case .offline, .unsupported: QDTheme.semanticColor(.neutral, for: scheme)
         }
     }
 
@@ -99,11 +157,12 @@ enum QDStatusKind: Equatable {
 struct QDStatusLabel: View {
     let kind: QDStatusKind
     let text: String
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         Label(text, systemImage: kind.symbol)
             .font(.caption.weight(.medium))
-            .foregroundStyle(kind.color)
+            .foregroundStyle(kind.color(for: colorScheme))
             .accessibilityLabel(text)
     }
 }
@@ -151,12 +210,12 @@ struct QDWidgetFrame<Content: View, Actions: View>: View {
             HStack(spacing: 8) {
                 Image(systemName: symbol)
                     .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(QDTheme.cyan)
+                    .foregroundStyle(QDTheme.color(.focus, for: colorScheme))
                 Text(title).font(.system(size: 13, weight: .semibold))
                 if let status {
                     Image(systemName: status.symbol)
                         .font(.caption)
-                        .foregroundStyle(status.color)
+                        .foregroundStyle(status.color(for: colorScheme))
                 }
                 Spacer(minLength: 0)
                 actions
@@ -169,7 +228,12 @@ struct QDWidgetFrame<Content: View, Actions: View>: View {
         .background(QDTheme.color(.panel, for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(status == .needsAction ? QDTheme.warning : QDTheme.color(.stroke, for: colorScheme), lineWidth: 1)
+                .stroke(
+                    status == .needsAction
+                        ? QDTheme.semanticColor(.needsAction, for: colorScheme)
+                        : QDTheme.color(.stroke, for: colorScheme),
+                    lineWidth: 1
+                )
         }
     }
 }

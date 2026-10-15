@@ -115,6 +115,11 @@ struct DashboardLayoutTests {
         check(JobQueueSummary(states: ["running", "queued", "queued", "unknown", "completed", "cancelled"]) == JobQueueSummary(active: 1, waiting: 2, unknown: 1), "Queue counters use only actual live JobStore states")
         check(JobQueueSummary(states: ["waiting_for_decision", "failed"]) == JobQueueSummary(active: 0, waiting: 0, unknown: 0), "decision and failed Jobs are not misrepresented as active or queued")
 
+        for semantic in QDSemanticColor.allCases {
+            check(QDTheme.semanticContrastRatio(semantic, for: .light) >= 4.5, "light semantic status text meets 4.5:1 contrast")
+            check(QDTheme.semanticContrastRatio(semantic, for: .dark) >= 4.5, "dark semantic status text meets 4.5:1 contrast")
+        }
+
         print("Dashboard layout native tests passed")
     }
 }

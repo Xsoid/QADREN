@@ -25,7 +25,7 @@ struct MainView: View {
             case .files: filesWorkspace
             }
         }
-        .tint(QDTheme.cyan)
+        .tint(QDTheme.color(.focus, for: colorScheme))
         .navigationTitle(workspace.title)
         .background(TitlebarLogoAccessory().frame(width: 0, height: 0))
         .toolbar {
@@ -117,7 +117,7 @@ struct MainView: View {
                     .background(QDTheme.color(.panel, for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                     .overlay {
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .stroke(QDTheme.danger, lineWidth: 1)
+                            .stroke(QDTheme.semanticColor(.failed, for: colorScheme), lineWidth: 1)
                     }
                     .padding(.horizontal, 12).padding(.top, 12)
                     .accessibilityElement(children: .combine)
@@ -233,7 +233,7 @@ struct MainView: View {
                             let statusTitle = connectionStatusTitle(for: entry)
                             HStack(spacing: 8) {
                                 Image(systemName: status.symbol)
-                                    .foregroundStyle(status.color)
+                                    .foregroundStyle(status.color(for: colorScheme))
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(entry.name).lineLimit(1)
                                     Text("\(adapterTitle(entry.adapter)) · \(statusTitle)")
@@ -536,13 +536,14 @@ private struct EmptyWorkspaceState: View {
 
 private struct JobList: View {
     let jobs: [JobRow]
+    @Environment(\.colorScheme) private var colorScheme
     var body: some View {
         VStack(spacing: 0) {
             ForEach(jobs) { job in
                 let presentation = JobPresentationStatus(state: job.state)
                 let status = jobStatusKind(for: presentation)
                 HStack(spacing: 12) {
-                    Image(systemName: status.symbol).foregroundStyle(status.color)
+                    Image(systemName: status.symbol).foregroundStyle(status.color(for: colorScheme))
                     VStack(alignment: .leading, spacing: 3) {
                         Text(job.id).textSelection(.enabled)
                         Text(job.scenario_id == nil ? "Разовое задание" : "Задание сценария").font(.caption).foregroundStyle(.secondary)
