@@ -50,6 +50,16 @@ struct LocalWorkspaceTests {
                 NSLocalizedDescriptionKey: "existing local Job reconciliation failed: \(workspace.error ?? "none")"
             ])
         }
+        try workspace.findDirectoryReconciliations(
+            connectionID: connection,
+            databasePath: database,
+            registryPath: registry
+        )
+        guard workspace.reconciliationJobIDs.isEmpty, workspace.error == nil else {
+            throw NSError(domain: "QADRENTests", code: 6, userInfo: [
+                NSLocalizedDescriptionKey: "completed local Job appeared in reconciliation inventory"
+            ])
+        }
 
         do {
             try workspace.createDirectory(

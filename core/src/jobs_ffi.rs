@@ -263,6 +263,54 @@ pub unsafe extern "C" fn qadren_jobs_reconcile_local_directory_create(
     }
 }
 
+/// List existing UNKNOWN Local Filesystem directory-create Jobs that are
+/// durably bound to the supplied root and enabled connection. This inventory
+/// operation never inspects a target path, completes a Job, or retries an
+/// effect. JobStore retains its normal restart-to-UNKNOWN rule.
+///
+/// # Safety
+/// Arguments must be valid, NUL-terminated strings for the duration of call.
+#[no_mangle]
+pub unsafe extern "C" fn qadren_jobs_list_local_directory_reconciliations(
+    database_path: *const c_char,
+    registry_path: *const c_char,
+    local_root: *const c_char,
+    connection_id: *const c_char,
+) -> *mut c_char {
+    let (Some(database_path), Some(registry_path), Some(local_root), Some(connection_id)) = (
+        input(database_path),
+        input(registry_path),
+        input(local_root),
+        input(connection_id),
+    ) else {
+        return response(json!({"ok": false, "error": "invalid_request"}));
+    };
+    match crate::job_execution::local_directory_reconciliation_candidates(
+        Path::new(database_path),
+        Path::new(registry_path),
+        Path::new(local_root),
+        connection_id,
+    ) {
+        Ok(candidates) => response(json!({
+            "ok": true,
+            "data": candidates.into_iter().map(|candidate| json!({"job_id": candidate.job_id})).collect::<Vec<_>>()
+        })),
+        Err(crate::job_execution::LocalDirectoryCreateError::InvalidRequest) => {
+            response(json!({"ok": false, "error": "invalid_request"}))
+        }
+        Err(crate::job_execution::LocalDirectoryCreateError::ConnectionUnavailable) => {
+            response(json!({"ok": false, "error": "local_connection_unavailable"}))
+        }
+        Err(crate::job_execution::LocalDirectoryCreateError::Local(_)) => {
+            response(json!({"ok": false, "error": "reconciliation_unavailable"}))
+        }
+        Err(crate::job_execution::LocalDirectoryCreateError::Store(_)) => {
+            response(json!({"ok": false, "error": "job_store_unavailable"}))
+        }
+        Err(_) => response(json!({"ok": false, "error": "reconciliation_failed"})),
+    }
+}
+
 /// Read-only reconciliation for one app-owned UNKNOWN G1 mock Job.  It never
 /// starts another create operation; a durable expectation and exact metadata
 /// match are required before the existing attempt can be completed.
@@ -746,6 +794,19 @@ mod tests {
         let root = CString::new(base.to_str().unwrap()).unwrap();
         let connection = CString::new(connection_id).unwrap();
         let job = CString::new(job_id).unwrap();
+        let candidates = unsafe {
+            qadren_jobs_list_local_directory_reconciliations(
+                database.as_ptr(),
+                registry.as_ptr(),
+                root.as_ptr(),
+                connection.as_ptr(),
+            )
+        };
+        assert!(unsafe { CStr::from_ptr(candidates) }
+            .to_str()
+            .unwrap()
+            .contains("local-mkdir-ffi-reconcile"));
+        unsafe { qadren_jobs_free_string(candidates) };
         let response = unsafe {
             qadren_jobs_reconcile_local_directory_create(
                 database.as_ptr(),

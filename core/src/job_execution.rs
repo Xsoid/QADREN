@@ -39,6 +39,14 @@ pub enum LocalDirectoryReconciliationStatus {
     Existing(JobState),
 }
 
+/// A durable Local Filesystem directory-create Job that can be inspected for
+/// reconciliation in the currently opened root. This is inventory metadata;
+/// it is not evidence that the directory was created.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalDirectoryReconciliationCandidate {
+    pub job_id: String,
+}
+
 /// Result of a read-only check of an UNKNOWN mock operation.  This never
 /// retries a write: only an exact match with the durable expectation can
 /// resolve the existing attempt.
@@ -486,6 +494,47 @@ pub fn reconcile_local_directory_create(
     );
     store.complete_attempt(job_id, &attempt.attempt_id, &receipt)?;
     Ok(LocalDirectoryReconciliationStatus::Completed)
+}
+
+/// List UNKNOWN Local Filesystem directory-create Jobs bound to exactly this
+/// opened root and Local connection. This does not inspect target paths,
+/// create directories, retry effects, or complete a Job. Opening JobStore may
+/// preserve its existing restart rule that turns an interrupted active attempt
+/// into UNKNOWN before this inventory is returned.
+pub fn local_directory_reconciliation_candidates(
+    database_path: &Path,
+    registry_path: &Path,
+    local_root: &Path,
+    connection_id: &str,
+) -> Result<Vec<LocalDirectoryReconciliationCandidate>, LocalDirectoryCreateError> {
+    if connection_id.is_empty() {
+        return Err(LocalDirectoryCreateError::InvalidRequest);
+    }
+    if !enabled_local_connection(registry_path, connection_id) {
+        return Err(LocalDirectoryCreateError::ConnectionUnavailable);
+    }
+    let local = LocalFilesystem::open(local_root).map_err(LocalDirectoryCreateError::Local)?;
+    let root_identity = local_root_identity_key(&local)?;
+    let store = JobStore::open(database_path)?;
+    let mut candidates = Vec::new();
+    for attempt in store.unresolved_attempts()? {
+        if attempt.status != "unknown"
+            || attempt.operation_kind.as_deref() != Some("local_mkdir_new")
+            || attempt.target_connection_id.as_deref() != Some(connection_id)
+            || store
+                .attempt_root_identity(&attempt.job_id, &attempt.attempt_id)?
+                .as_deref()
+                != Some(root_identity.as_str())
+        {
+            continue;
+        }
+        candidates.push(LocalDirectoryReconciliationCandidate {
+            job_id: attempt.job_id,
+        });
+    }
+    candidates.sort_by(|left, right| left.job_id.cmp(&right.job_id));
+    candidates.dedup_by(|left, right| left.job_id == right.job_id);
+    Ok(candidates)
 }
 
 fn run_mock_create_inner(

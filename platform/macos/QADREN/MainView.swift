@@ -602,7 +602,11 @@ private struct FileManagerPane: View {
                                 || newDirectoryName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         )
                     }
-                    if let jobID = workspace.reconciliationJobID {
+                    Button("Показать неопределённые операции") {
+                        workspace.findDirectoryReconciliations(connectionID: selectedConnectionID)
+                    }
+                    .disabled(!selectedConnectionIsAvailable)
+                    ForEach(workspace.reconciliationJobIDs, id: \.self) { jobID in
                         HStack(spacing: 8) {
                             Text("Создание папки требует проверки")
                                 .font(.caption)
