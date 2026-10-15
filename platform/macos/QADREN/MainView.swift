@@ -354,7 +354,7 @@ struct MainView: View {
         }
     }
     private var jobWidgetStatus: QDStatusKind {
-        statusKind(for: JobPresentationStatus.aggregate(
+        jobStatusKind(for: JobPresentationStatus.aggregate(
             visibleJobs.map(\.state), inventoryFailed: jobError != nil
         ))
     }
@@ -390,17 +390,6 @@ struct MainView: View {
         }
     }
 
-    private func statusKind(for status: JobPresentationStatus) -> QDStatusKind {
-        switch status {
-        case .ready: .ready
-        case .active: .active
-        case .waiting: .waiting
-        case .paused: .paused
-        case .needsAction: .needsAction
-        case .failed: .failed
-        case .unknown: .unknown
-        }
-    }
     private var monitoringAlert: String? {
         if let jobError { return "Журнал заданий: " + jobError }
         if let error = connections.error { return "Подключения: " + error }
@@ -535,30 +524,36 @@ private struct JobList: View {
     var body: some View {
         VStack(spacing: 0) {
             ForEach(jobs) { job in
+                let presentation = JobPresentationStatus(state: job.state)
+                let status = jobStatusKind(for: presentation)
                 HStack(spacing: 12) {
-                    Image(systemName: job.state == "paused" ? "pause.circle" : "circle.dashed").foregroundStyle(job.state == "paused" ? Color.orange : Color.accentColor)
+                    Image(systemName: status.symbol).foregroundStyle(status.color)
                     VStack(alignment: .leading, spacing: 3) {
                         Text(job.id).textSelection(.enabled)
                         Text(job.scenario_id == nil ? "Разовое задание" : "Задание сценария").font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Text(jobStateTitle(job.state)).font(.callout.weight(.medium))
+                    Text(presentation.title).font(.callout.weight(.medium))
                 }.padding(.vertical, 10)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("\(job.id), \(presentation.title)")
                 if job.id != jobs.last?.id { Divider() }
             }
         }
     }
 }
 
-private func jobStateTitle(_ state: String) -> String {
-    switch state {
-    case "queued": "В очереди"
-    case "paused": "Приостановлено"
-    case "completed": "Завершено"
-    case "cancelled": "Отменено"
-    case "running": "Выполняется"
-    case "unknown": "Результат неизвестен"
-    default: state
+private func jobStatusKind(for status: JobPresentationStatus) -> QDStatusKind {
+    switch status {
+    case .ready: .ready
+    case .active: .active
+    case .waiting: .waiting
+    case .paused: .paused
+    case .needsAction: .needsAction
+    case .failed: .failed
+    case .unknown: .unknown
+    case .completed: .ready
+    case .cancelled: .paused
     }
 }
 

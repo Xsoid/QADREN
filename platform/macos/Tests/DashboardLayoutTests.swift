@@ -108,6 +108,10 @@ struct DashboardLayoutTests {
         check(JobPresentationStatus.aggregate(["waiting_for_decision", "unknown"], inventoryFailed: false) == .unknown, "unknown Job is never hidden by a decision requirement")
         check(JobPresentationStatus.aggregate(["failed", "waiting_for_decision"], inventoryFailed: false) == .failed, "failed Job outranks decision requirement")
         check(JobPresentationStatus.aggregate(["completed"], inventoryFailed: true) == .failed, "JobStore read failure outranks historical completion")
+        check(JobPresentationStatus(state: "waiting_for_decision").title == "Требует решения", "decision state has a localized title")
+        check(JobPresentationStatus(state: "failed").title == "Ошибка", "failed state has a localized title")
+        check(JobPresentationStatus(state: "cancelled").title == "Отменено", "cancelled state remains distinct from completion")
+        check(JobPresentationStatus(state: "unexpected") == .unknown, "unknown JobStore value does not look successful")
 
         print("Dashboard layout native tests passed")
     }
