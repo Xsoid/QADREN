@@ -177,6 +177,7 @@ struct MainView: View {
             QDWidgetFrame(title: "Задания", symbol: "arrow.triangle.2.circlepath", status: jobWidgetStatus, actions: {
                 layoutActions(for: widget)
             }) {
+                QDStatusLabel(kind: jobWidgetStatus, text: "Задания: \(jobPresentationStatus.title)")
                 if widget.density == .compact {
                     QDMetric(value: "\(visibleJobs.count)", label: "в инвентаре", provenance: "локальный JobStore")
                 } else if visibleJobs.isEmpty {
@@ -186,22 +187,30 @@ struct MainView: View {
                 }
             }
         case .queue:
-            QDWidgetFrame(title: "Очередь", symbol: "list.number", actions: {
+            QDWidgetFrame(title: "Очередь", symbol: "list.number", status: jobWidgetStatus, actions: {
                 layoutActions(for: widget)
             }) {
-                HStack(alignment: .top, spacing: 24) {
-                    QDMetric(value: "\(visibleJobs.count)", label: "в инвентаре", provenance: "локальный JobStore")
-                    if widget.density != .compact {
-                        QDMetric(value: nil, label: "ETA", provenance: "не поддерживается")
+                if let jobError {
+                    QDEmptyState(title: "Очередь недоступна", detail: jobError, symbol: "exclamationmark.triangle")
+                } else {
+                    QDStatusLabel(kind: jobWidgetStatus, text: "Очередь: \(jobPresentationStatus.title)")
+                    if widget.density == .compact {
+                        QDMetric(value: "\(visibleJobs.count)", label: "в инвентаре", provenance: "локальный JobStore")
+                    } else {
+                        HStack(alignment: .top, spacing: 18) {
+                            QDMetric(value: "\(jobQueueSummary.active)", label: "выполняется", provenance: "локальный JobStore")
+                            QDMetric(value: "\(jobQueueSummary.waiting)", label: "в очереди", provenance: "локальный JobStore")
+                            QDMetric(value: "\(jobQueueSummary.unknown)", label: "неизвестно", provenance: "требует сверки")
+                        }
                     }
-                }
-                if widget.density != .compact {
-                    Text("Порядок, прогресс и оценка времени появятся только когда их подтвердит Core.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                if widget.density == .expanded {
-                    Text("Источник: локальный JobStore; автоматическое исполнение не заявлено.")
-                        .font(.caption2).foregroundStyle(.secondary)
+                    if widget.density != .compact {
+                        Text("Порядок, прогресс и оценка времени появятся только когда их подтвердит Core.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    if widget.density == .expanded {
+                        Text("Источник: локальный JobStore; автоматическое исполнение не заявлено.")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
                 }
             }
         case .connections:
@@ -353,10 +362,16 @@ struct MainView: View {
         default: .unknown
         }
     }
-    private var jobWidgetStatus: QDStatusKind {
-        jobStatusKind(for: JobPresentationStatus.aggregate(
+    private var jobPresentationStatus: JobPresentationStatus {
+        JobPresentationStatus.aggregate(
             visibleJobs.map(\.state), inventoryFailed: jobError != nil
-        ))
+        )
+    }
+    private var jobWidgetStatus: QDStatusKind {
+        jobStatusKind(for: jobPresentationStatus)
+    }
+    private var jobQueueSummary: JobQueueSummary {
+        JobQueueSummary(states: visibleJobs.map(\.state))
     }
     private var connectionWidgetStatus: QDStatusKind {
         statusKind(for: connectionPresentationStatus)

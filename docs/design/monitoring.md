@@ -63,6 +63,11 @@ Priority from first to last: (1) blocking consent/conflict/UNKNOWN and errors; (
 
 Do not degrade critical status indication in compact mode; if the full text does not fit, leave the icon + available name and put details in the inspector.
 
+The Queue derives its status and active/waiting/unknown counters only from the
+read-only JobStore inventory. If that inventory cannot be read, it shows an
+unavailable state instead of zero counters. Terminal history, failed Jobs, and
+Jobs awaiting a decision are not presented as active or queued work.
+
 ## 7. Mode specifications
 
 **Monitoring:** layout fixed; data may refresh; view interactions active; no edit grid.

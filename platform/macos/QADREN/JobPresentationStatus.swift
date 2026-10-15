@@ -53,3 +53,25 @@ enum JobPresentationStatus: Equatable {
         }
     }
 }
+
+/// Counts only the states that affect the live Queue presentation. The source
+/// is the read-only JobStore inventory; terminal history is intentionally not
+/// presented as active work or a risk.
+struct JobQueueSummary: Equatable {
+    let active: Int
+    let waiting: Int
+    let unknown: Int
+
+    init(active: Int, waiting: Int, unknown: Int) {
+        self.active = active
+        self.waiting = waiting
+        self.unknown = unknown
+    }
+
+    init(states: [String]) {
+        let presentations = states.map(JobPresentationStatus.init(state:))
+        active = presentations.filter { $0 == .active }.count
+        waiting = presentations.filter { $0 == .waiting }.count
+        unknown = presentations.filter { $0 == .unknown }.count
+    }
+}

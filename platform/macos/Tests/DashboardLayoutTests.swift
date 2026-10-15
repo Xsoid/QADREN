@@ -112,6 +112,8 @@ struct DashboardLayoutTests {
         check(JobPresentationStatus(state: "failed").title == "Ошибка", "failed state has a localized title")
         check(JobPresentationStatus(state: "cancelled").title == "Отменено", "cancelled state remains distinct from completion")
         check(JobPresentationStatus(state: "unexpected") == .unknown, "unknown JobStore value does not look successful")
+        check(JobQueueSummary(states: ["running", "queued", "queued", "unknown", "completed", "cancelled"]) == JobQueueSummary(active: 1, waiting: 2, unknown: 1), "Queue counters use only actual live JobStore states")
+        check(JobQueueSummary(states: ["waiting_for_decision", "failed"]) == JobQueueSummary(active: 0, waiting: 0, unknown: 0), "decision and failed Jobs are not misrepresented as active or queued")
 
         print("Dashboard layout native tests passed")
     }
