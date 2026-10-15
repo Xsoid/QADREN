@@ -16,9 +16,14 @@ struct LocalWorkspaceTests {
         let connection = try StorageRegistryBridge.addLocalComputer(
             name: "Test Local", databasePath: registry
         )
-        try workspace.createDirectory(
+        let createdJobID = try workspace.createDirectory(
             named: "created", connectionID: connection, databasePath: database, registryPath: registry
         )
+        guard let createdJobID else {
+            throw NSError(domain: "QADRENTests", code: 4, userInfo: [
+                NSLocalizedDescriptionKey: "local directory Job did not return an identifier"
+            ])
+        }
 
         var isDirectory: ObjCBool = false
         let exists = FileManager.default.fileExists(
@@ -29,6 +34,20 @@ struct LocalWorkspaceTests {
         guard exists, isDirectory.boolValue, listed else {
             throw NSError(domain: "QADRENTests", code: 1, userInfo: [
                 NSLocalizedDescriptionKey: "local directory was not created and listed: exists=\(exists) directory=\(isDirectory.boolValue) listed=\(listed) workspaceError=\(workspace.error ?? "none")"
+            ])
+        }
+
+        // The completed Job is not retried. This only exercises the same
+        // narrow Swift-to-Rust reconciliation ABI used for UNKNOWN Jobs.
+        try workspace.reconcileDirectoryCreate(
+            jobID: createdJobID,
+            connectionID: connection,
+            databasePath: database,
+            registryPath: registry
+        )
+        guard workspace.error == nil else {
+            throw NSError(domain: "QADRENTests", code: 5, userInfo: [
+                NSLocalizedDescriptionKey: "existing local Job reconciliation failed: \(workspace.error ?? "none")"
             ])
         }
 

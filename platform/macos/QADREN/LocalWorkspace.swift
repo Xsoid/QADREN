@@ -8,16 +8,25 @@ private func createLocalDirectoryJob(
     _ database: UnsafePointer<CChar>?, _ registry: UnsafePointer<CChar>?, _ root: UnsafePointer<CChar>?, _ connection: UnsafePointer<CChar>?,
     _ relative: UnsafePointer<CChar>?, _ jobID: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_jobs_reconcile_local_directory_create")
+private func reconcileLocalDirectoryJob(
+    _ database: UnsafePointer<CChar>?, _ registry: UnsafePointer<CChar>?, _ root: UnsafePointer<CChar>?, _ connection: UnsafePointer<CChar>?,
+    _ jobID: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
 
 struct LocalWorkspaceEntry: Decodable, Identifiable { let name: String; let is_directory: Bool; let size: UInt64; var id: String { name } }
 private struct LocalEnvelope<T: Decodable>: Decodable { let ok: Bool; let data: T?; let error: String? }
-private struct LocalJobEnvelope: Decodable { let ok: Bool; let error: String? }
+private struct LocalJobResult: Decodable { let status: String; let reconciled: Bool? }
+private struct LocalJobEnvelope: Decodable { let ok: Bool; let data: LocalJobResult?; let error: String? }
 
 @MainActor final class LocalWorkspace: ObservableObject {
     @Published private(set) var root: String?
     @Published private(set) var relativePath = ""
     @Published private(set) var entries: [LocalWorkspaceEntry] = []
     @Published private(set) var error: String?
+    /// This exists only after Rust reports a potentially effected mkdir as
+    /// UNKNOWN. It is an explicit user action, never an automatic retry.
+    @Published private(set) var reconciliationJobID: String?
 
     func chooseRoot() {
         let panel = NSOpenPanel(); panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false
@@ -34,9 +43,9 @@ private struct LocalJobEnvelope: Decodable { let ok: Bool; let error: String? }
     func up() { guard !relativePath.isEmpty else { return }; relativePath = relativePath.split(separator: "/").dropLast().joined(separator: "/"); refresh() }
     /// The button that calls this is the explicit, operation-scoped user action.
     /// Rust owns the Job attempt, no-overwrite mkdir and final verification.
-    func createDirectory(named name: String, connectionID: String) {
+    @discardableResult func createDirectory(named name: String, connectionID: String) -> String? {
         do {
-            try createDirectory(
+            return try createDirectory(
                 named: name,
                 connectionID: connectionID,
                 databasePath: JobInventory.paths().database,
@@ -44,30 +53,32 @@ private struct LocalJobEnvelope: Decodable { let ok: Bool; let error: String? }
             )
         } catch {
             self.error = error.localizedDescription
+            return nil
         }
     }
 
     /// Test seam for the native bridge. Production uses the app-owned JobStore
     /// selected above; callers cannot bypass the Rust executor.
-    func createDirectory(named name: String, connectionID: String, databasePath: String, registryPath: String) throws {
-        guard let root else { return }
+    @discardableResult func createDirectory(named name: String, connectionID: String, databasePath: String, registryPath: String) throws -> String? {
+        guard let root else { return nil }
         guard !connectionID.isEmpty else {
             error = "Выберите активное локальное подключение"
-            return
+            return nil
         }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !trimmed.contains("/") else {
             error = "Имя папки не должно быть пустым или содержать /"
-            return
+            return nil
         }
         let target = relativePath.isEmpty ? trimmed : relativePath + "/" + trimmed
+        let jobID = "local-mkdir-" + UUID().uuidString.lowercased()
         do {
             let pointer = databasePath.withCString { database in
                 registryPath.withCString { registry in
                     root.withCString { root in
                         connectionID.withCString { connection in
                             target.withCString { target in
-                                ("local-mkdir-" + UUID().uuidString.lowercased()).withCString { jobID in
+                                jobID.withCString { jobID in
                                     createLocalDirectoryJob(database, registry, root, connection, target, jobID)
                                 }
                             }
@@ -78,12 +89,70 @@ private struct LocalJobEnvelope: Decodable { let ok: Bool; let error: String? }
             guard let pointer else { throw StorageError.operation("Local Job unavailable") }
             defer { localFree(pointer) }
             let result = try JSONDecoder().decode(LocalJobEnvelope.self, from: Data(String(cString: pointer).utf8))
-            guard result.ok else { throw StorageError.operation(result.error ?? "Local Job failed") }
+            guard result.ok else {
+                if result.error == "outcome_unknown" {
+                    reconciliationJobID = jobID
+                    throw StorageError.operation(
+                        "Результат создания папки не подтверждён. Проверьте операцию до повторной попытки."
+                    )
+                }
+                throw StorageError.operation(result.error ?? "Local Job failed")
+            }
+            reconciliationJobID = nil
             error = nil
             refresh()
+            return jobID
         } catch {
             self.error = error.localizedDescription
             throw error
+        }
+    }
+
+    /// Inspect the stored UNKNOWN mkdir attempt through Rust. This does not
+    /// create a directory, repeat a request, or read file contents.
+    func reconcileDirectoryCreate(jobID: String, connectionID: String) {
+        do {
+            try reconcileDirectoryCreate(
+                jobID: jobID,
+                connectionID: connectionID,
+                databasePath: JobInventory.paths().database,
+                registryPath: StorageRegistryBridge.databasePath()
+            )
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    func reconcileDirectoryCreate(jobID: String, connectionID: String, databasePath: String, registryPath: String) throws {
+        guard let root else { return }
+        guard !jobID.isEmpty, !connectionID.isEmpty else {
+            error = "Выберите исходное локальное подключение"
+            return
+        }
+        let pointer = databasePath.withCString { database in
+            registryPath.withCString { registry in
+                root.withCString { root in
+                    connectionID.withCString { connection in
+                        jobID.withCString { identifier in
+                            reconcileLocalDirectoryJob(database, registry, root, connection, identifier)
+                        }
+                    }
+                }
+            }
+        }
+        guard let pointer else { throw StorageError.operation("Local reconciliation unavailable") }
+        defer { localFree(pointer) }
+        let result = try JSONDecoder().decode(LocalJobEnvelope.self, from: Data(String(cString: pointer).utf8))
+        guard result.ok, let data = result.data else {
+            throw StorageError.operation(result.error ?? "Local reconciliation failed")
+        }
+        if data.reconciled == true || data.status == "completed" {
+            reconciliationJobID = nil
+            error = nil
+            refresh()
+        } else {
+            reconciliationJobID = jobID
+            error = "Результат операции всё ещё не подтверждён. Повтор не выполнен."
         }
     }
     private func call<T: Decodable>(_ operation: (UnsafePointer<CChar>?, UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?, root: String, relative: String) throws -> T {

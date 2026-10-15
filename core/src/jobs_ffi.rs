@@ -196,6 +196,73 @@ pub unsafe extern "C" fn qadren_jobs_run_local_directory_create(
     }
 }
 
+/// Read-only reconciliation for one UNKNOWN Local Filesystem directory-create
+/// Job. This never starts another mkdir; Rust requires the exact durable root
+/// identity, connection, operation and directory metadata before completion.
+///
+/// # Safety
+/// Arguments must be valid, NUL-terminated strings for the duration of call.
+#[no_mangle]
+pub unsafe extern "C" fn qadren_jobs_reconcile_local_directory_create(
+    database_path: *const c_char,
+    registry_path: *const c_char,
+    local_root: *const c_char,
+    connection_id: *const c_char,
+    job_id: *const c_char,
+) -> *mut c_char {
+    let (
+        Some(database_path),
+        Some(registry_path),
+        Some(local_root),
+        Some(connection_id),
+        Some(job_id),
+    ) = (
+        input(database_path),
+        input(registry_path),
+        input(local_root),
+        input(connection_id),
+        input(job_id),
+    )
+    else {
+        return response(json!({"ok": false, "error": "invalid_request"}));
+    };
+    match crate::job_execution::reconcile_local_directory_create(
+        Path::new(database_path),
+        Path::new(registry_path),
+        Path::new(local_root),
+        connection_id,
+        job_id,
+    ) {
+        Ok(crate::job_execution::LocalDirectoryReconciliationStatus::Completed) => {
+            response(json!({"ok": true, "data": {"status": "completed", "reconciled": true}}))
+        }
+        Ok(crate::job_execution::LocalDirectoryReconciliationStatus::StillUnknown) => {
+            response(json!({"ok": true, "data": {"status": "unknown", "reconciled": false}}))
+        }
+        Ok(crate::job_execution::LocalDirectoryReconciliationStatus::Existing(state)) => response(
+            json!({"ok": true, "data": {"status": format!("{:?}", state).to_ascii_lowercase(), "existing": true, "reconciled": false}}),
+        ),
+        Err(crate::job_execution::LocalDirectoryCreateError::InvalidRequest) => {
+            response(json!({"ok": false, "error": "invalid_request"}))
+        }
+        Err(crate::job_execution::LocalDirectoryCreateError::ConnectionUnavailable) => {
+            response(json!({"ok": false, "error": "local_connection_unavailable"}))
+        }
+        Err(crate::job_execution::LocalDirectoryCreateError::Store(
+            crate::jobs::JobStoreError::NotFound,
+        )) => response(json!({"ok": false, "error": "not_found"})),
+        // Root or target inspection errors never become successful recovery.
+        Err(crate::job_execution::LocalDirectoryCreateError::Local(_))
+        | Err(crate::job_execution::LocalDirectoryCreateError::VerificationFailed) => {
+            response(json!({"ok": false, "error": "reconciliation_unavailable"}))
+        }
+        Err(crate::job_execution::LocalDirectoryCreateError::Store(_)) => {
+            response(json!({"ok": false, "error": "job_store_unavailable"}))
+        }
+        Err(_) => response(json!({"ok": false, "error": "reconciliation_failed"})),
+    }
+}
+
 /// Read-only reconciliation for one app-owned UNKNOWN G1 mock Job.  It never
 /// starts another create operation; a durable expectation and exact metadata
 /// match are required before the existing attempt can be completed.
@@ -626,5 +693,74 @@ mod tests {
             .contains("completed"));
         unsafe { qadren_jobs_free_string(response) };
         assert!(base.join("created-by-ffi").is_dir());
+    }
+
+    #[test]
+    fn local_directory_reconciliation_requires_the_same_root_through_the_c_abi() {
+        let base = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join(format!(
+                "qadren-ffi-local-reconcile-{}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        fs::create_dir(&base).unwrap();
+        let database_path = base.join("jobs.sqlite3");
+        let registry_path = base.join("connections.sqlite3");
+        let registry = crate::registry::Registry::open(&registry_path).unwrap();
+        let connection_id = registry.add("local_filesystem", "Test Local").unwrap();
+        let local = crate::local_fs::LocalFilesystem::open(&base).unwrap();
+        let identity = local.root_identity().unwrap();
+        let root_identity = format!("unix:{}:{}", identity.device, identity.inode);
+        let job_id = "local-mkdir-ffi-reconcile";
+        let mut store = JobStore::open(&database_path).unwrap();
+        store.enqueue(job_id, None).unwrap();
+        store
+            .advance(
+                job_id,
+                JobState::Queued,
+                JobState::Running,
+                Confirmation::Confirmed(crate::confirmation::EvidenceLevel::Requested),
+            )
+            .unwrap();
+        store
+            .prepare_bound_attempt_with_root_identity(
+                job_id,
+                "local-mkdir-ffi-reconcile-attempt-1",
+                "local_mkdir_new",
+                &connection_id,
+                "created-by-reconciliation",
+                0,
+                "d41d8cd98f00b204e9800998ecf8427e",
+                &root_identity,
+            )
+            .unwrap();
+        drop(store);
+        fs::create_dir(base.join("created-by-reconciliation")).unwrap();
+
+        let database = CString::new(database_path.to_str().unwrap()).unwrap();
+        let registry = CString::new(registry_path.to_str().unwrap()).unwrap();
+        let root = CString::new(base.to_str().unwrap()).unwrap();
+        let connection = CString::new(connection_id).unwrap();
+        let job = CString::new(job_id).unwrap();
+        let response = unsafe {
+            qadren_jobs_reconcile_local_directory_create(
+                database.as_ptr(),
+                registry.as_ptr(),
+                root.as_ptr(),
+                connection.as_ptr(),
+                job.as_ptr(),
+            )
+        };
+        assert!(unsafe { CStr::from_ptr(response) }
+            .to_str()
+            .unwrap()
+            .contains("\"reconciled\":true"));
+        unsafe { qadren_jobs_free_string(response) };
+        let store = JobStore::open(&database_path).unwrap();
+        assert_eq!(store.state(job_id).unwrap(), Some(JobState::Completed));
     }
 }
