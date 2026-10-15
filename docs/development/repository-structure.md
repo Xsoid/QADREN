@@ -1,6 +1,6 @@
-# Структура репозитория
+# Repository Structure
 
-Статус: историческая карта начальной структуры; актуальный `main` содержит больше модулей. Новых директорий и пакетов без необходимости не создавать. Активны Яндекс Диск и Local FS; iCloud отложен.
+Status: historical map of the initial structure; the current `main` contains more modules. Do not create new directories and packages without necessity. Yandex Disk and Local FS are active; iCloud is postponed.
 
 ```text
 QADREN/
@@ -18,21 +18,21 @@ QADREN/
 │   ├── development/
 │   ├── policies/
 │   └── roadmap.md
-├── core/             # Rust workspace; создавать при начале кода
-├── platform/macos/   # SwiftUI app + платформенные проверки Local FS/Keychain
-└── tests/            # общие сценарии при необходимости
+├── core/             # Rust workspace; create when coding starts
+├── platform/macos/   # SwiftUI app + platform checks Local FS/Keychain
+└── tests/            # general scenarios if necessary
 ```
 
-Это карта владения ответственностями, не требование заранее заполнить все директории. Можно объединить crates при отсутствии самостоятельной ценности разделения. Не плодить bootstrap boilerplate.
+This is a map of responsibility ownership, not a requirement to fill all directories in advance. You can combine crates if separation has no independent value. Do not create excessive bootstrap boilerplate.
 
-## Направление зависимостей
+## Dependency Direction
 
-- UI -> тонкий слой команд/состояния -> Core.
-- Core -> абстрактный контракт Storage Adapter, но не конкретный macOS UI.
-- Отложенная macOS iCloud implementation не создаёт зависимость Release 1; см. D-017. Актуальный Local FS использует платформенные проверки и доступ к директориям.
-- Яндекс adapter -> официальный API; не зависит от SwiftUI.
-- Тесты -> контракт и поведение, а не внутренние детали UI.
+- UI -> thin layer of commands/state -> Core.
+- Core -> abstract Storage Adapter contract, but not a concrete macOS UI.
+- Postponed macOS iCloud implementation does not create a Release 1 dependency; see D-017. Current Local FS uses platform checks and directory access.
+- Yandex adapter -> official API; does not depend on SwiftUI.
+- Tests -> contract and behavior, not internal UI details.
 
-## Источник истины
+## Source of Truth
 
-Документация находится в **этом** репозитории и версионируется с кодом. Внешний AI-контроллер может ссылаться на неё, но не должен поддерживать альтернативный источник правил QADREN.
+Documentation is in **this** repository and is versioned with the code. An external AI controller can refer to it, but it must not maintain an alternative source of QADREN rules.

@@ -1,112 +1,53 @@
-# QADREN — правила для AI-агентов и Codex
+# QADREN — agent rules
 
-Этот файл — начальная точка контекста для любого агента, меняющего QADREN.
+## Authority and scope
 
-## Текущий порядок исполнения — D-018 (2026-10-14)
+- The owner's explicit product decisions, active ADRs, and safety policies have priority.
+- Use `llms.txt` and `docs/README.md` as the project indexes. The linked canonical document owns each detailed contract.
+- Do not duplicate architecture, UI, release, test, or workflow requirements in this file.
+- If code and a canonical document disagree, report the conflict. Do not silently change the architecture.
+- Work directly in `main`. Do not create branches, PRs, or deployment actions unless the owner asks.
 
-**P0:** стабилизировать фактический `main` и нативные интерфейсы QADREN (дизайн-система, полотно виджетов мониторинга, настройки, меню macOS); UI можно делать на существующих read-only API и изолированных preview fixtures **до** готовности облаков. **P1:** безопасное локальное исполнение Local↔Local через единственный Rust JobStore, Scenario/Policy/recovery и файловый менеджер. **P2:** scheduler, самостоятельная фоновая служба, локальный дистрибутив. **P3 / post-release: контроллер Яндекс Диска вынесен за Release 1.** Не делать новых API/OAuth/transfer/live E2E до нового решения владельца, но сохранять имеющийся код, credentials и offline regression tests. **iCloud — отложен бессрочно**, #17 closed/not planned; не реализовывать adapter, entitlements, UI или native spike. Guards File Provider в Local FS обязательны. [D-018](docs/decisions/D-018-local-first-priorities.md) имеет приоритет над старым cloud-first планом D-017, roadmap и текстом issues.
+## Safety invariants
 
-**Перед новым Codex-пакетом:** прочитать [аудит состояния](docs/development/current-state-audit.md), сопоставить GitHub HEAD с локальными непушенными коммитами и последними комментариями issues. После push 14 октября актуальный код до `1223e8f` доступен в `main`; CI на последующих docs-commit также красный, включая run `38599805324` (rust и macos). Причина без логов не установлена. Отдельно проверять точный HEAD и не выдавать локальные проверки за GitHub CI. Работа строго в `main`, без новых веток/обязательных PR/Work.
+- Keep Rust as the cross-platform core and SwiftUI as the macOS UI.
+- Release 1 uses Local Filesystem. Yandex Disk is post-release. iCloud is not planned.
+- Use one Rust JobStore. A `Scenario` defines synchronization rules. A `Job` is one execution or one manual file operation.
+- Keep each `StorageConnection` independent. Bind OAuth and Keychain state to `connection_id`.
+- Do not save secrets in SQLite, Git, logs, or HTTP URLs.
+- Remove and Disconnect change only local state. They must not delete provider objects.
+- Do not download content to the primary MacBook without explicit consent for that operation.
+- Before an external effect, save a durable attempt and check capability, consent, destination state, and no-overwrite.
+- If proof of an effect is lost, use `UNKNOWN` and read-only reconciliation. Do not retry blindly.
+- Keep destructive Local Filesystem operations fail-closed until concurrent-change protection is proven.
+- Do not add content versioning, runtime BackupSet, scenario dependencies, or remote Worker protocol to Release 1.
 
-## Стабильность issues и защита от деградации требований
+## Documentation language
 
-- **Не создавать новую issue при пересмотре приоритета или этапа уже существующей:** сохранить номер, историю и критерии приёмки. Для дочерних задач использовать **ровно один** текущий приоритет P0/P1/P2/P3; избегать диапазонов вида `P1–P2`. Разные стадии одной функции выполнять внутри прежней issue.
-- Новые отдельные issues создавать лишь для действительно независимой функции/дефекта без подходящей существующей задачи и после проверки списка. Не плодить аудиты, валидации и «планы продолжения».
-- Обновление документации **не является разрешением урезать** подтверждённые safety-инварианты, функциональные критерии или историю без явного решения. Прежде чем удалять/заменять существенный раздел — проверить diff и перенести действующие требования в канонический документ; исторический текст в issues помечать как исторический, не как текущую очередь.
-- Канонические документы: D-018 — продуктовый порядок, `docs/roadmap.md` — единая очередь, `docs/architecture/` и `docs/design/` — предметные контракты, `docs/policies/` — обязательная безопасность. История Git позволяет прочитать прежние планы, **но не должна требоваться для понимания текущих обязательных требований**.
-- #13 закрыта как superseded, а не `verified`; оставшиеся проверки распределены в #26, #24, #25. На текущем этапе **единственная активная P0 issue — #26**.
+Write new and changed project documentation, `llms.txt`, and future Issue titles and bodies in English and ASD-STE100 style. Use short active sentences and exact technical names. Do not claim full ASD-STE100 compliance without an approved-dictionary check. Speak to the owner in Russian. Do not rewrite existing Issue history unless the owner asks.
 
-## Перед работой
+## AI Docs Hub boundaries
 
-1. Прочитать `README.md`, `docs/README.md` и **`docs/architecture/backup-model.md`**; для задач реализации — `docs/roadmap.md`.
-2. Прочитать профильные документы в `docs/architecture/`, `docs/policies/`.
-3. Проверить `docs/decisions/README.md`, `docs/architecture/technology-stack.md` и `docs/development/engineering-rules.md`.
-4. Сформулировать границы задачи, что уже утверждено, что остаётся неподтверждённым, какие тесты нужны.
-
-## Обязательный дизайн-контракт интерфейсов
-
-Для изменений интерфейса (`MainView.swift`, окон, виджетов, настройки, MenuBarExtra) до редактирования прочитать [`docs/design/README.md`](docs/design/README.md), [визуальный язык](docs/design/visual-language.md), [widget system](docs/design/widget-system.md), [мониторинг](docs/design/monitoring.md), [настройки](docs/design/settings.md) и [UI acceptance](docs/design/implementation.md). Взять исходный логотип **`assets/qadren-logo.png`**, не создавать заменяющий знак. Мониторинг — виджетное полотно **без постоянного Sidebar**; каталог виджетов появляется только в режиме компоновки. В настройках навигация допустима. HTML-прототип содержит вымышленные данные и не служит источником Core logic. Реализация обязана переиспользовать текущий SwiftUI/FFI, не внедрять фиктивные показатели, не обходить safety policies.
-
-## Не нарушать
-
-- Rust — кроссплатформенное ядро; SwiftUI — нативный macOS UI; активный адаптер Release 1 — Local Filesystem; контроллер Яндекс Диска сохранён в коде, но вынесен за релиз. Swift/Apple iCloud adapter — только возможный будущий этап.
-- UI, платформа и адаптер не должны захватывать общую бизнес-логику.
-- Не вводить обязательные внешние runtimes конечному пользователю.
-- Соблюдать D-016: один adapter/provider поддерживает множество независимых StorageConnection; никогда не возвращать singleton Keychain `default`, не ограничивать по внешнему account ID. OAuth/Keychain состояние принадлежит `connection_id`.
-- Секреты никогда не сохранять в SQLite, Git, логах, адресах HTTP; Client ID — публичная конфигурация сборки, Client Secret — не часть настольного приложения.
-- Любые операции Remove/Disconnect меняют только локальные соединения и их полномочия; ни один такой UI action не вправе удалять объекты в облаке.
-- QADREN не инициирует скачивание содержимого на основной MacBook без предварительного согласования; не вмешивается в iCloud/macOS и другие приложения.
-- Делегированный job выполняет только Worker; Controller мониторит отчёт.
-- В текущем релизе **нет собственного версионирования содержимого**. Защищать от опасных удалений/перезаписей, сохранять служебную историю синхронизации; BackupSet — только в истории Git и будущем ADR.
-- Первый релиз — полноценная **локальная** версия; удалённые Worker и межузловой протокол — следующий этап и отдельное решение.
-- `Scenario` описывает правила синхронизации, `Job` — конкретное исполнение и разовые файловые операции; не создавать постоянный сценарий при ручном копировании.
-- Local Filesystem — отдельный активный адаптер. Если iCloud когда-либо возвращается в план, возможная интеграция ограничена собственным контейнером и проверенными правами Apple; сейчас не реализовывать.
-- Не реализовывать зависимости между сценариями в текущей версии.
-- Не имитировать готовность API/Apple entitlements без тестов.
-
-## Изменение и проверка
-
-Работать законченными функциональными пакетами с проверяемыми критериями приёмки. Обновлять документацию вместе с кодом. Проверять форматирование, тесты, ошибки, security review и сборку; в результате перечислять реально исполненные проверки и известные ограничения. Никогда не помечать планируемую проверку как прошедшую.
-
-Полные правила: [разработка](docs/development/engineering-rules.md), [тесты](docs/development/testing-and-quality.md), [сборки](docs/development/build-and-release.md).
-
-
-## Единый порядок работы: чат, Codex, AI-Docs-Hub
-
-Этот файл обязателен для любого исполнителя. AI-Docs-Hub предоставляет индекс, routing, проверки и review, но **не** определяет архитектуру QADREN. Правила одинаковы с Hub и без него. Система должна собираться и разрабатываться без работающего Hub.
-
-### Приоритет и вход в задачу
-
-1. Явные продуктовые решения пользователя, `docs/policies/`, действующие ADR (`docs/decisions/`).
-2. `docs/architecture/`, фактические контракты текущего `main`. Несовпадение кода и документации — диагностируемая проблема, а не разрешение молча заменить архитектуру.
-3. Этот `AGENTS.md`, `docs/development/`, `docs/roadmap.md`, Epic #12 и выбранная дочерняя Issue.
-4. Hub templates/managed block — только технические инструкции по инструментам; продуктовые требования переопределять запрещено.
-
-Перед любой работой: зафиксировать HEAD SHA и состояние дерева; прочитать указанную документацию и Issue; инвентаризировать существующие Rust/SQLite/Swift/FFI API, тесты и migrations; сформулировать результат, что не меняем, безопасность, зависимости, acceptance и fault matrix. Не дублировать JobStore, Registry, verifier или архитектурные документы.
-
-### Самостоятельная реализация
-
-- Работать непосредственно в `main`, без обязательных PR, лишних веток и GitHub Actions. Не переходить в Work автоматически.
-- Реализовывать функциональный вертикальный срез, а не бесконечную серию технических микропатчей. Подготовка документации не даёт автоматического разрешения менять продуктовый код.
-- Исполнение G1 первоначально in-process SwiftUI, но единственный Job engine, durable attempt и reconciliation находятся в Rust. Перенос того же engine в независимую службу — отдельный gate до Release 1.
-- До внешнего эффекта сохранить конкретную попытку; проверить capabilities, согласие, актуальность назначения и no-overwrite. После возможного эффекта при потере доказательства — UNKNOWN и read-only reconciliation, никогда blind retry.
-- Destructive Local FS fail-closed до доказанной защиты от конкурентных изменений; возможный выпуск с ограничениями отдельно согласовывается. Способ распространения Mac App Store/напрямую открыт до native feasibility test.
-- Ни runtime BackupSet, ни собственного версионирования содержимого, ни неявной QADREN-загрузки облачных файлов на основной MacBook без согласия на конкретную операцию; не вмешиваться в системную iCloud синхронизацию.
-
-### Проверка и публикация
-
-Запустить `bash scripts/test-core.sh`, на поддерживаемом Mac `bash scripts/build-macos.sh` и релевантные native/adapter/integration tests. Review diff, correctness, ownership, ABI/migrations, race/consent/secrets, content safety; провести code review и security review. Hub quality gate можно использовать дополнительно, но он не заменяет реально выполненные команды и живые интеграционные проверки. В случае недоступности среды помечать проверки как BLOCKED/SKIPPED; **не публиковать небезопасный функционал с заявлением, что он проверен**. Зафиксировать SHA, среду, результаты, пробелы и acceptance в Issue. Закрывать Issue только после подтверждённой приёмки.
-
-### Безопасное подключение AI-Docs-Hub
-
-Первый onboarding и scaffold — dry-run; проверить список файлов, diff, project namespace, docs include/exclude и фильтры секретов. Write только после проверки. Существующие непустые `AGENTS.md`, `docs/` и ADR нельзя заменять шаблонами, перемещать, дублировать или переписывать генератором. Hub может идемпотентно обновлять **только собственный ограниченный managed block** в `AGENTS.md` и локальный project binding. Для Hub нет права изменять архитектуру или публиковать патчи в обход review. Не переносить credentials, содержимое пользовательских файлов, transfer artifacts или SQLite в индексы и отчёты Hub. При конфликте требований остановить только конфликтующую правку, зафиксировать расхождение и продолжить независимые задачи.
-
-Подробный жизненный цикл: `docs/development/engineering-rules.md`; гейты и зависимости: `docs/roadmap.md`; проверка результата: `docs/development/release-1-validation.md`.
-
-## Экономия лимитов Codex (ChatGPT Plus)
-
-**Предпочтительная модель для QADREN — GPT-5.6 Terra** (из подтверждённого пользователем списка Codex: GPT-6 Astra, GPT-5.6 Sol, GPT-5.6 Terra, GPT-5.6 Luna, GPT-5.5). Начинать onboarding AI-Docs-Hub, inventory, G1 и типовые задачи на Terra с умеренным уровнем reasoning, если выбор effort доступен. Простые механические исправления допускают более экономичный уровень усилий. Не повышать модель до Astra/дорогого режима автоматически: при действительно трудной безопасности, гонках, recovery или блокере сперва сузить вопрос и объяснить владельцу необходимость дорогого запуска; получить разрешение перед повышением. Не делать высокозатратные повторные полные аудиты/ревью без нового риска. Кэшировать понимание через актуальные Issue и документы, не создавать дублирующие state-файлы.
-
-**Ограничение:** AGENTS.md задаёт предпочтения агенту, но **не может программно выбрать модель Codex, изменить тариф, квоты или переключить модель в интерфейсе**. Выбранная пользователем модель в сессии имеет приоритет как фактическая конфигурация; если агент не имеет доступа к смене модели, он продолжает работу на выбранной модели и сообщает о несоответствии предпочтению только когда это существенно. Не выдавать рекомендацию Terra за гарантию наименьшей стоимости или фактически проверенного расхода лимитов.
+The Hub indexes, routes, verifies, and reviews. It does not define QADREN architecture. It can update only its managed blocks in this file and local project metadata. Do not index secrets, user content, transfer artifacts, or local databases.
 
 <!-- BEGIN AI DOCS HUB PROJECT LIFECYCLE -->
 ## AI Docs Hub Project Lifecycle
 
-- Перед commit, push или PR сначала выполнить Hub pre-publish gate для текущего patch fingerprint.
-- Code review и security review относятся к точной версии diff; после изменения patch они становятся stale и повторяются.
-- Hub выполняет deterministic verification и хранит local-only metadata; semantic review запускается явно через Codex.
-- Не публиковать patch при failed verification, stale/incomplete review или unresolved blocking finding.
-- Для проекта qadren использовать project-scoped Hub tools и не смешивать контекст других проектов.
+- Before commit, push, or PR, first perform the Hub pre-publish gate for the current patch fingerprint.
+- Code review and security review refer to the exact version of the diff; after the patch changes, they become stale and you must repeat them.
+- The Hub performs deterministic verification and stores local-only metadata; semantic review starts explicitly through Codex.
+- Do not publish a patch if there is failed verification, stale/incomplete review, or an unresolved blocking finding.
+- For the qadren project, use project-scoped Hub tools and do not mix context from other projects.
 <!-- END AI DOCS HUB PROJECT LIFECYCLE -->
 
 <!-- BEGIN AI DOCS HUB CODEBASE MEMORY -->
 ## Codebase Memory
 
-- Для этого проекта Codebase Memory используется только с project scope `qadren`.
-- Документацию, ADR, runbooks и project policies сначала искать через AI Docs Hub.
-- Для symbols, definitions, calls, dependencies, routes и blast radius сначала использовать Codebase Memory MCP.
-- Обычные `rg` и чтение файлов остаются fallback, если graph coverage неполный или нужен source of truth.
-- `manage_adr`, cross-project wildcard, `delete_project`, `ingest_traces` и repository persistence запрещены.
-- Если документация и code graph расходятся, проверить исходный код и явно сообщить о конфликте с путями.
-- После первого подключения или изменения MCP-конфигурации перезапустить Codex, чтобы новая сессия загрузила server tools.
+- For this project, Codebase Memory is used only with the project scope `qadren`.
+- Search for documentation, ADR, runbooks, and project policies first through AI Docs Hub.
+- For symbols, definitions, calls, dependencies, routes, and blast radius, first use the Codebase Memory MCP.
+- Standard `rg` and file reading remain the fallback if graph coverage is incomplete or if the source of truth is needed.
+- `manage_adr`, cross-project wildcard, `delete_project`, `ingest_traces`, and repository persistence are forbidden.
+- If documentation and the code graph disagree, check the source code and explicitly report the conflict with paths.
+- After the first connection or a change to the MCP configuration, restart Codex so the new session loads the server tools.
 <!-- END AI DOCS HUB CODEBASE MEMORY -->

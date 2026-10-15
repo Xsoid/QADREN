@@ -1,45 +1,45 @@
-# QADREN — аудит текущего `main` и расхождений с задачами
+# QADREN — audit of current `main` and discrepancies with tasks
 
-**Проверено 2026-10-14, после push пользователя.** Срез продуктового кода — commit [`1223e8f`](https://github.com/Xsoid/QADREN/commit/1223e8f29f94), в `main` также внесён D-018 и обновления документов. **Аудит по чтению кода и GitHub API**, а не новая нативная тестовая сборка. Ранний отчёт о SHA `44538fe` от 12 октября **устарел**: ранее локальные работы 13–14 октября теперь находятся в `main`.
+**Verified 2026-10-14, after user push.** Product code snapshot — commit [`1223e8f`](https://github.com/Xsoid/QADREN/commit/1223e8f29f94). D-018 and document updates are also integrated into `main`. **Audit based on code reading and GitHub API**, not a new native test build. The early report for SHA `44538fe` from 12 October is **obsolete**: local work from 13–14 October is now in `main`.
 
-## Границы проверки и CI
+## Verification Boundaries and CI
 
-Осмотрены GitHub дерево исходников, документация, все issues, последовательность коммитов, файлы реализации, GitHub Actions runs. Последние проверенные CI jobs на `b1a3a22` — `rust: failure` и `macos: failure`, run [38599805324](https://github.com/Xsoid/QADREN/actions/runs/38599805324). API не вернул step details; скачивание логов ранее вернуло NOT_FOUND. **Причина отказа не установлена.** Локальные PASS из комментариев issues до push — свидетельства автора о проверках этих коммитов, но не заменяют независимую свежую проверку HEAD; не объявлять ни компиляцию, ни нативную визуальную приёмку доказанными.
+The following are inspected: GitHub source tree, documentation, all issues, commit sequence, implementation files, and GitHub Actions runs. The latest verified CI jobs on `b1a3a22` are `rust: failure` and `macos: failure`, run [38599805324](https://github.com/Xsoid/QADREN/actions/runs/38599805324). The API did not return step details; downloading logs previously returned NOT_FOUND. **The cause of failure is not determined.** Local PASS results from issue comments before the push are author statements regarding those commits, but they do not replace an independent fresh verification of HEAD; neither compilation nor native visual acceptance is declared proven.
 
-## Матрица исходников и статусов
+## Source and Status Matrix
 
-| Область | Наличие в `main` | Что реально осталось |
+| Area | Presence in `main` | Actual Remaining Status |
 |---|---|---|
-| Rust Core/SQLite/FFI | `model.rs`, `registry.rs`, `jobs.rs`, `jobs_ffi.rs`, `confirmation.rs`, `policy.rs` | Модули существуют; нет доказанной production Local↔Local execution через Job |
-| Mock G1 Job | `job_execution.rs` — app-owned no-overwrite create + durable attempt/verification/recovery tests | Не повторять; перейти к безопасной **реальной Local FS** вертикали #18/#15 |
-| Local FS | `local_fs.rs`, `local_fs_unix.rs`, `local_fs_ffi.rs`, `LocalWorkspace.swift` | API метаданных/операций/guards есть; UI→Job→Local FS→verified SQLite E2E не подтверждено |
-| Scenario | `scenario_planner.rs`, Registry revisions/FileSyncState, dry-run FFI | Реальные metadata snapshots→Job submission→sync/recovery и конфликты не доказаны |
-| Scheduler | `scheduler.rs`, `schedule_dispatch.rs` и dispatch FFI (`1223e8f`) | Outbox→queued Job есть; самостоятельного таймера, фонового жизненного цикла, event debounce и исполнения Scenario нет |
-| UI theme/widget | `DesignSystem.swift`, `DashboardLayout.swift`, `DashboardLayoutTests.swift` | **Уже реализовано частично:** QDTheme/QDWidgetFrame/QDLogo, per-window order/visibility, density, grid scale, Undo/Redo/persistence. Нужна визуальная и нативная приёмка, не реализация с нуля |
-| UI windows/settings | `QADRENApp.swift`, `MainView.swift`, `SettingsPanel.swift` | Dashboard adaptive grid, отдельные Monitoring/Settings/File Manager, MenuBarExtra. Расширение интеграции и доступность ещё частичны; `MainView` содержит legacy/mock actions |
-| Yandex | `yandex.rs`, `yandex_ffi.rs`, `YandexConnection.swift` | Реальный код OAuth/metadata/upload и mock-тесты сохраняются, но контроллер **вынесен за Release 1**; live E2E не подтверждён; #26 убирает активные Add/Connect/API flows без удаления tokens/connections |
-| iCloud | `ICloudAvailability.swift` (legacy metadata/status) | #17 `closed/not_planned`; не развивать, UI integration отсутствует/не нужна; Local FS guards остаются |
-| Background service | Нативные окна и `workerStatus` | Независимая служба после закрытия UI **не доказана**, #23 P2 |
-| Распространение | `scripts/build-macos.sh`, `.github/workflows/bootstrap.yml` | Unsigned dev bundle в скрипте; native install/sign/restart/packaging и CI диагностика ещё нужны |
+| Rust Core/SQLite/FFI | `model.rs`, `registry.rs`, `jobs.rs`, `jobs_ffi.rs`, `confirmation.rs`, `policy.rs` | Modules exist; no proven production Local↔Local execution via Job |
+| Mock G1 Job | `job_execution.rs` — app-owned no-overwrite create + durable attempt/verification/recovery tests | Do not repeat; move to secure **real Local FS** vertical #18/#15 |
+| Local FS | `local_fs.rs`, `local_fs_unix.rs`, `local_fs_ffi.rs`, `LocalWorkspace.swift` | Metadata/operations/guards API exists; UI→Job→Local FS→verified SQLite E2E is not confirmed |
+| Scenario | `scenario_planner.rs`, Registry revisions/FileSyncState, dry-run FFI | Real metadata snapshots→Job submission→sync/recovery and conflicts are not proven |
+| Scheduler | `scheduler.rs`, `schedule_dispatch.rs` and dispatch FFI (`1223e8f`) | Outbox→queued Job exists; independent timer, background lifecycle, event debounce, and Scenario execution are absent |
+| UI theme/widget | `DesignSystem.swift`, `DashboardLayout.swift`, `DashboardLayoutTests.swift` | **Partially implemented:** QDTheme/QDWidgetFrame/QDLogo, per-window order/visibility, density, grid scale, Undo/Redo/persistence. Visual and native acceptance is required, not implementation from scratch |
+| UI windows/settings | `QADRENApp.swift`, `MainView.swift`, `SettingsPanel.swift` | Dashboard adaptive grid, separate Monitoring/Settings/File Manager, MenuBarExtra. Integration extension and accessibility are still partial; `MainView` contains legacy/mock actions |
+| Yandex | `yandex.rs`, `yandex_ffi.rs`, `YandexConnection.swift` | Real OAuth/metadata/upload code and mock tests remain, but the controller is **moved beyond Release 1**; live E2E is not confirmed; #26 removes active Add/Connect/API flows without deleting tokens/connections |
+| iCloud | `ICloudAvailability.swift` (legacy metadata/status) | #17 `closed/not_planned`; do not develop, UI integration is absent/not required; Local FS guards remain |
+| Background service | Native windows and `workerStatus` | Independent service after UI closure is **not proven**, #23 P2 |
+| Distribution | `scripts/build-macos.sh`, `.github/workflows/bootstrap.yml` | Unsigned dev bundle in script; native install/sign/restart/packaging and CI diagnostics are still required |
 
-## Issues — управляемая очередь (D-018)
+## Issues — Managed Queue (D-018)
 
-- **P0 сейчас — только #26:** довести существующий `DesignSystem`/widget dashboard с нативной UI и build-приёмкой; **#13 архивируется как superseded/not planned**, а не VERIFIED: её baseline-аудит выполнен, остатки переданы в #26 (UI/macOS tests), #24 (GitHub Actions pre-runner failure, runtime resources/release), #25 (Keychain/legacy migration/recovery).
-- **P1:** #15 Local FS; #18 Job engine; #20 policy; #25 remove/disconnect coordination. Acceptance — одна реальная локальная операция через единственный JobStore и проверяемое durable outcome. #22 двухпанельный UI и #19 локальные Scenario могут разрабатываться в независимых безопасных частях.
-- **P2:** #21 scheduler runtime и catch-up; #23 независимая служба + завершающая интеграция UI; #24 безопасность/сборка/локальный дистрибутив.
-- **P3 post-release, parked:** #16 контроллер Яндекс Диска. Сохранить исходники; он не является Release 1 gate.
-- **Бессрочно parked:** #17 iCloud, закрыта. #2/#7/#14 уже закрыты, без повторной реализации.
+- **P0 now — only #26:** complete existing `DesignSystem`/widget dashboard with native UI and build acceptance; **#13 is archived as superseded/not planned**, not VERIFIED: its baseline audit is complete, remainders are transferred to #26 (UI/macOS tests), #24 (GitHub Actions pre-runner failure, runtime resources/release), and #25 (Keychain/legacy migration/recovery).
+- **P1:** #15 Local FS; #18 Job engine; #20 policy; #25 remove/disconnect coordination. Acceptance — one real local operation via a single JobStore and a verifiable durable outcome. #22 dual-pane UI and #19 local Scenarios may be developed in independent secure parts.
+- **P2:** #21 scheduler runtime and catch-up; #23 independent service + final UI integration; #24 security/build/local distribution.
+- **P3 post-release, parked:** #16 Yandex Disk controller. Preserve sources; it is not a Release 1 gate.
+- **Indefinitely parked:** #17 iCloud, closed. #2/#7/#14 are already closed, without re-implementation.
 
-Открытые issues **PARTIAL**, если не пройдён полный DoD; не закрывать по одному свежему коммиту или числу unit tests. #26 создана [отдельно](https://github.com/Xsoid/QADREN/issues/26), чтобы UI P0 не зависел от фоновой службы #23 P2.
+Open issues are **PARTIAL** if the full DoD is not passed; do not close based on a single fresh commit or number of unit tests. #26 is created [separately](https://github.com/Xsoid/QADREN/issues/26) so that UI P0 does not depend on background service #23 P2.
 
-## Приоритетные расхождения
+## Priority Discrepancies
 
-1. Проектный `main` теперь содержит UI widget canvas/layout; старые UI-A/B/C «создать с нуля» неактуальны. Переиспользовать существующее.
-2. Дизайн-система и логотип существуют, но не доказана native dark/light/VoiceOver, screenshot и макетная приёмка.
-3. Первый реальный Local controller slice — `local_mkdir_new`: кнопка файлового менеджера вызывает Rust JobStore, который до `mkdir` сохраняет attempt, использует no-overwrite и подтверждает тип созданной папки. Это не перенос файлов и не подтверждает готовность Local↔Local copy; чтение содержимого на macOS остаётся fail-closed из-за File Provider safety.
-4. Яндекс-подключение исторически присутствует в коде/UI (`SettingsPanel.swift` / `YandexConnectionCard`), но решение владельца — отложить контроллер за Release 1. Не запускать новые API-разработки. Скрытие/disable новых flows делать без уничтожения существующих credentials.
-4. Старые Release 1 тексты связывают локальный выпуск с Yandex OAuth/content/E2E. D-018 **разрывает эту зависимость**, требует local-first.
-5. CI на GitHub сейчас red (для docs и кодовых commits). Логи недоступны: оформить воспроизводимую диагностику, не гадать и не считать тесты пройденными.
-6. Отсутствие независимого Worker и живой Local↔Local синхронизации нельзя компенсировать виджетом или mock demo.
+1. Project `main` now contains UI widget canvas/layout; old UI-A/B/C "create from scratch" tasks are obsolete. Reuse existing components.
+2. Design system and logo exist, but native dark/light/VoiceOver, screenshot, and layout acceptance are not proven.
+3. The first real Local controller slice is `local_mkdir_new`: the file manager button calls the Rust JobStore, which saves the attempt before `mkdir`, uses no-overwrite, and confirms the type of created folder. This is not file transfer and does not confirm Local↔Local copy readiness; reading content on macOS remains fail-closed due to File Provider safety.
+4. Yandex connection is historically present in code/UI (`SettingsPanel.swift` / `YandexConnectionCard`), but the owner decision is to postpone the controller beyond Release 1. Do not start new API developments. Hide/disable new flows without destroying existing credentials.
+5. Old Release 1 texts link the local release to Yandex OAuth/content/E2E. D-018 **breaks this dependency** and requires local-first.
+6. CI on GitHub is currently red (for docs and code commits). Logs are unavailable: establish reproducible diagnostics, do not guess, and do not consider tests passed.
+7. The absence of an independent Worker and live Local↔Local synchronization cannot be compensated by a widget or mock demo.
 
-**Следующий исполнимый результат:** #26 завершить визуально проверяемый P0 без переписывания текущих компонентов; инфраструктурная диагностика CI зафиксирована в #24, Keychain в #25; затем связка #18/#15/#20 с реальной Local FS. Действовать прямо в `main` с обязательной проверкой фактического SHA. Исторические G0–G6 и старые cloud requirements — не активная очередь.
+**Next executable result:** complete #26 visually verifiable P0 without rewriting current components; CI infrastructure diagnostics are recorded in #24, Keychain in #25; then link #18/#15/#20 with real Local FS. Work directly in `main` with mandatory verification of the actual SHA. Historical G0–G6 and old cloud requirements are not in the active queue.

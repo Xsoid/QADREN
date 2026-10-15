@@ -1,0 +1,77 @@
+# QADREN
+
+QADREN is a cross-platform system for file transfer and file synchronization.
+It manages independent storage connections and application nodes.
+
+## Current scope
+
+Read `docs/decisions/D-018-local-first-priorities.md` first.
+
+- Release 1 has a local-first scope.
+- P0 is the native macOS UI and the Rust/SQLite/FFI foundation.
+- P1 is safe Local Filesystem to Local Filesystem execution through one Rust JobStore.
+- P2 is the scheduler, an independent local service, and local distribution.
+- Yandex Disk is post-release work. Do not add API, OAuth, transfer, or live E2E work without a new owner decision.
+- iCloud is not planned. Do not add an adapter, entitlement, UI, or feasibility test.
+
+## Required reading
+
+Read these files before you change QADREN:
+
+1. `AGENTS.md`
+2. `README.md`
+3. `docs/README.md`
+4. `docs/architecture/backup-model.md`
+5. `docs/decisions/README.md`
+6. `docs/architecture/technology-stack.md`
+7. `docs/development/engineering-rules.md`
+8. `docs/development/current-state-audit.md`
+9. `docs/roadmap.md`
+
+Read the matching design documents before you change the macOS UI.
+Read the matching policy documents before you change storage, transfer, or destructive actions.
+
+## Non-negotiable rules
+
+- Keep Rust as the cross-platform core. Keep SwiftUI as the macOS UI.
+- Use one Rust JobStore. Do not add a second job engine.
+- A `Scenario` describes synchronization rules. A `Job` is one execution or one manual file operation.
+- Keep each `StorageConnection` independent. Store OAuth and Keychain state by `connection_id`.
+- Do not store secrets in SQLite, Git, logs, or HTTP URLs.
+- Do not delete cloud objects when the user selects Remove or Disconnect in the UI.
+- Do not download file content to the primary MacBook without explicit consent for that operation.
+- Before an external effect, save a durable attempt. Check capability, consent, destination state, and no-overwrite.
+- If proof of an external effect is lost, set the result to `UNKNOWN`. Reconcile in read-only mode. Do not retry blindly.
+- Fail closed for destructive Local Filesystem work until concurrent-change protection is proven.
+- Do not add content versioning, runtime BackupSet, scenario dependencies, or remote Worker protocol to Release 1.
+
+## Documentation and communication
+
+Write new and changed project documentation in English in ASD-STE100 style.
+Use short active sentences and exact technical names.
+Do not claim full ASD-STE100 compliance without an approved-dictionary check.
+Write future Issue titles and bodies in the same style.
+Do not rewrite existing Issue history unless the owner asks for it.
+
+## Verification
+
+Record the exact SHA and the worktree state before you change files.
+Run `bash scripts/test-core.sh`.
+On a supported Mac, run `bash scripts/build-macos.sh`.
+Run the relevant native, adapter, and integration tests.
+Report only checks that you ran. Mark unavailable checks as BLOCKED or SKIPPED.
+Do not say that local checks are GitHub CI checks.
+
+Before commit, push, or PR, run the project-scoped AI Docs Hub pre-publish gate for the exact patch. Then run code review and security review for that same patch.
+
+## Canonical documents
+
+- Product order: `docs/decisions/D-018-local-first-priorities.md`
+- Current work queue: `docs/roadmap.md`
+- System contracts: `docs/architecture/`
+- UI contracts: `docs/design/`
+- Safety rules: `docs/policies/`
+- Engineering rules: `docs/development/engineering-rules.md`
+- Current evidence: `docs/development/current-state-audit.md`
+
+If code and documentation disagree, inspect the source and report the conflict. Do not silently change the architecture.

@@ -1,25 +1,25 @@
-# Политика локальных загрузок
+# Local Download Policy
 
-Статус: **принято**. Действует специально для **основного MacBook** и операций **QADREN**.
+Status: **accepted**. This policy is valid only for the **main MacBook** and **QADREN** operations.
 
-## Базовый запрет
+## Basic Prohibition
 
-QADREN **не инициирует скачивание содержимого облачного файла в локальное хранилище главного MacBook** без предварительного явного согласования с пользователем. Размер файла не имеет значения. Проверка целостности, резервирование и восстановление не являются исключениями.
+QADREN **does not start the download of cloud file content to the local storage of the main MacBook** without previous explicit agreement from the user. File size is not important. Integrity checks, backup, and recovery are not exceptions.
 
-Перед запросом указать по возможности файлы/набор, источник, причину, назначение, ожидаемый объём и полномочия операции. Отсутствие ответа — не согласие. Разрешение имеет ограниченную область действия, не становится глобальным бессрочным разрешением.
+Before the request, specify the files/set, source, reason, purpose, expected volume, and operation authority if possible. No answer is not agreement. Permission has a limited scope; it does not become a global permanent permission.
 
-## Что разрешено автоматически
+## Allowed Automatic Actions
 
-Получение метаданных, списков, размеров, дат, идентификаторов и доступных серверных хешей **без загрузки содержимого**. Если API требует загрузки содержимого для получения информации, действует базовый запрет.
+Retrieval of metadata, lists, sizes, dates, identifiers, and available server hashes **without downloading content**. If the API requires a content download to get information, the basic prohibition applies.
 
-## Границы правила
+## Rule Boundaries
 
-- Не пытаться блокировать или изменять обычную работу iCloud Drive в macOS.
-- Не мешать другим приложениям получать доступ к файлам.
-- Не считать уже выполненную системную синхронизацию со стороны macOS нарушением.
-- Чтение QADREN уже находящегося локально файла и операции, способные вызвать его материализацию, требуют отдельной проверки и аккуратного разграничения в реализации, чтобы не инициировать запрещённую загрузку.
-- На **другом Mac, назначенном Worker**, могут действовать отличающиеся, явно установленные политики: он может автоматически загружать данные для своих заданий.
+- Do not try to block or change the normal operation of iCloud Drive in macOS.
+- Do not prevent other applications from accessing files.
+- Do not consider system synchronization already performed by macOS as a violation.
+- QADREN reading of a file that is already local, and operations that can cause its materialization, require separate verification and careful separation in the implementation to not start a prohibited download.
+- On **another Mac designated as a Worker**, different explicitly established policies may apply: it can download data automatically for its tasks.
 
-## Делегирование
+## Delegation
 
-Согласование загрузки на главный MacBook не требуется для передачи, которую независимо выполняет другой уполномоченный Worker в рамках своих правил. Controller не выполняет делегированное задание и не загружает его содержимое для повторной проверки.
+Agreement for download to the main MacBook is not required for a transfer that another authorized Worker performs independently within its rules. The Controller does not perform the delegated task and does not download its content for re-verification.

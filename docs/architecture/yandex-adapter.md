@@ -1,43 +1,42 @@
-# Яндекс Диск: metadata и ограниченный upload-контракт
+# Yandex Disk: metadata and limited upload contract
 
-Статус: metadata/OAuth интеграция и ограниченный streaming upload-контракт существуют, но полноценная передача и live E2E не приняты. Issue #16 (частично).
+Status: metadata/OAuth integration and limited streaming upload contract exist, but full transfer and live E2E are not accepted. Issue #16 (partial).
 
-## Основания
-Официальные документы:
+## Basis
+Official documents:
 - REST API: https://yandex.com/dev/disk/rest/
 - OAuth authorization code + PKCE: https://yandex.ru/dev/id/doc/ru/codes/code-url
-- Регистрация приложения: https://yandex.ru/dev/id/doc/en/register-client
+- Application registration: https://yandex.ru/dev/id/doc/en/register-client
 
-## Выбранная модель
-- OAuth Authorization Code с PKCE S256, системный браузер и защита параметром state.
-- Для native public client **не хранить client_secret в приложении**; Яндекс документирует возможность PKCE без секрета.
-- Client ID / redirect URI необходимо зарегистрировать и подтвердить до полноценного OAuth.
-- Токен хранится в Keychain; Rust-клиент получает его только на время API-операции из платформенного слоя. Ни в Git, ни в SQLite, ни в логах токен хранить нельзя.
-- Первоначально запрашивать права чтения, точный scope проверить в кабинете Яндекс OAuth перед добавлением авторизации.
+## Selected model
+- OAuth Authorization Code with PKCE S256, system browser, and state parameter protection.
+- For native public client: **do not store client_secret in the application**; Yandex documents the possibility of PKCE without a secret.
+- Client ID / redirect URI must be registered and confirmed before full OAuth.
+- The token is stored in the Keychain; the Rust client receives it from the platform layer only for the duration of the API operation. Do not store the token in Git, SQLite, or logs.
+- Request read permissions first; verify the exact scope in the Yandex OAuth cabinet before adding authorization.
 
-## Уже реализовано
-- `YandexMetadataClient` на Rust через HTTPS, 15-секундный timeout.
-- `GET /v1/disk/` (квота) и `GET /v1/disk/resources` (пагинация, метаданные).
+## Implementation status
+- `YandexMetadataClient` in Rust via HTTPS, 15-second timeout.
+- `GET /v1/disk/` (quota) and `GET /v1/disk/resources` (pagination, metadata).
 - `StorageAdapter::capabilities()`: metadata=true, read_content=false, write_content=false.
-- Явное различение ошибок 401/403/404/429 и остальных неуспешных HTTP ответов.
-- Для нового удалённого объекта есть изолированный `upload_from_reader`: сначала получает upload URL с `overwrite=false`, принимает только HTTPS `PUT` без URL credentials и не следует redirect. Он не открывает локальный файл сам, не выполняет retry и различает provider `Accepted`/`Pending` от подтверждённого результата.
-- `reconcile_uploaded_resource` повторно читает только metadata указанного ресурса и сопоставляет точные path, size и валидный provider MD5. Неполные/некорректные ожидания дают `InsufficientEvidence`; метод ничего не записывает, не повторяет upload и не меняет Job.
-- Нет download, delete, move, rename, copy или готового Job execution path.
-- Вспомогательные unit tests с JSON фикстурами, без реального сетевого запроса.
+- Explicit distinction between 401/403/404/429 errors and other unsuccessful HTTP responses.
+- For a new remote object, there is an isolated `upload_from_reader`: it first obtains an upload URL with `overwrite=false`, accepts only HTTPS `PUT` without URL credentials, and does not follow redirects. It does not open the local file itself, does not perform retries, and distinguishes between provider `Accepted`/`Pending` and a confirmed result.
+- `reconcile_uploaded_resource` reads only the metadata of the specified resource and matches the exact path, size, and valid provider MD5. Incomplete/incorrect expectations result in `InsufficientEvidence`; the method does not write data, does not repeat the upload, and does not change the Job.
+- No download, delete, move, rename, copy, or completed Job execution path.
+- Auxiliary unit tests with JSON fixtures, without real network requests.
 
-## Ограничения и этапы проверки
-- Upload не подключён к JobStore/FFI/SwiftUI и не является разрешением запускать передачу. До него требуются durable bound attempt, source/destination consent и capability checks.
-- Нет download: на основном MacBook он остаётся запрещён без отдельного согласия конкретной операции.
-- Token refresh/повторная авторизация и реальные upload/reconciliation надо проверить на тестовом account. API-ответы и metadata нельзя выдавать за live integrity evidence, пока не пройдена такая проверка.
+## Limitations and verification steps
+- Upload is not connected to JobStore/FFI/SwiftUI and does not permit the start of a transfer. Before upload, durable bound attempt, source/destination consent, and capability checks are required.
+- No download: on the main MacBook, it remains prohibited without separate consent for a specific operation.
+- Token refresh/re-authorization and real upload/reconciliation must be verified on a test account. API responses and metadata cannot be used as live integrity evidence until this verification is complete.
 
+## UI under verification: quota and Disk root
 
-## Проверяемый UI: квота и корень Диска
+PR #4 adds C ABI functions for **read-only** Rust requests:
+- `qadren_yandex_disk_info`: `GET /v1/disk/` — volume.
+- `qadren_yandex_list_root`: `GET /v1/disk/resources?path=disk:/&limit=50&offset=0` — first 50 entries of the root.
+- `qadren_yandex_free_string` frees the JSON response received from Rust.
 
-В PR #4 добавлены C ABI функции для **только читающих** запросов Rust:
-- `qadren_yandex_disk_info`: `GET /v1/disk/` — объём.
-- `qadren_yandex_list_root`: `GET /v1/disk/resources?path=disk:/&limit=50&offset=0` — первые 50 записей корня.
-- `qadren_yandex_free_string` освобождает JSON-ответ, полученный от Rust.
+Swift passes the token from the Keychain to Rust **in memory**, starts a blocking request not in the UI thread, and displays the total/used/free volume and the list of names. API responses and secrets are not logged. Errors are passed as safe codes, for example: `unauthorized`, `forbidden`, `network_error`.
 
-Swift передаёт токен из Keychain в Rust **в памяти**, запускает блокирующий запрос не в UI-потоке и отображает общий/занятый/свободный объём и список имён. Ответы API и секреты не логируются. Ошибки передаются как безопасные коды, например `unauthorized`, `forbidden`, `network_error`.
-
-Важно: это только первая страница каталога, а не полное дерево и не подтверждение резервного копирования. Для проверки на MacBook: обновить ветку, собрать приложение, войти (или использовать Keychain), убедиться в появлении квоты и имён, нажать Refresh. Не присылать в GitHub токены или приватные имена файлов в логах/скриншотах без маскировки.
+Important: this is only the first page of the catalog, not the full tree and not confirmation of a backup. For verification on MacBook: update the branch, build the application, log in (or use Keychain), verify that the quota and names appear, and press Refresh. Do not send tokens or private file names in logs/screenshots to GitHub without masking.

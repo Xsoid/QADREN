@@ -1,57 +1,55 @@
-# Тестирование и критерии качества
+# Testing and Quality Criteria
 
-Статус: обязательная стратегия. Bootstrap CI реализован в `.github/workflows/bootstrap.yml`; дополнительные интеграционные проверки подключаются по мере реализации соответствующих возможностей.
+Status: mandatory strategy. Bootstrap CI is implemented in `.github/workflows/bootstrap.yml`; additional integration checks are added as the corresponding features are implemented.
 
-## Пирамида проверок
+## Test Pyramid
 
-1. **Rust unit tests:** правила Scenario/Job/FileSyncState, ревизий, конфликтов, удалений, переходов состояний и policy engine (по мере реализации).
-2. **Adapter contract tests:** имитаторы API с неполными метаданными, задержками, ошибками авторизации и повторными ответами.
-3. **Integration tests:** Rust/Swift FFI, Keychain, Яндекс API и Local Filesystem с тестовыми учётными данными/каталогами. iCloud adapter, entitlement и интеграционные проверки исключены из Release 1.
-4. **End-to-end:** две папки/два хранилища, реальные копии, сбои, восстановление исполнения из служебного состояния (без хранения исторических версий содержимого).
-5. **Ресурсы:** idle CPU/RAM, локальный диск, сетевые байты, размер подписанного приложения.
+1. **Rust unit tests:** Scenario/Job/FileSyncState rules, revisions, conflicts, deletions, state transitions, and policy engine (as implemented).
+2. **Adapter contract tests:** API mocks with incomplete metadata, delays, authorization errors, and repeated responses.
+3. **Integration tests:** Rust/Swift FFI, Keychain, Yandex API, and Local Filesystem with test credentials/directories. iCloud adapter, entitlement, and integration checks are excluded from Release 1.
+4. **End-to-end:** two folders/two storages, real copies, failures, execution recovery from service state (without storage of historical content versions).
+5. **Resources:** idle CPU/RAM, local disk, network bytes, signed application size.
 
-## Обязательные сценарии на каждую операцию с данными
+## Mandatory Scenarios for Each Data Operation
 
-- Обрыв передачи; недозагруженный временный объект.
-- Перезапуск между передачей и подтверждением.
-- Двойной запуск одного задания, повтор после timeout.
-- Истечение токена, rate limit, недоступность облака.
-- Конфликт независимых версий, массовое удаление.
-- Неверная/отсутствующая контрольная сумма.
-- Основной MacBook: скачивание по инициативе QADREN **без подтверждения не запускается**, включая проверку и восстановление.
-- Делегирование: Controller не загружает содержимое и не запускает тот же job.
-- Яндекс Диск: успешный API-ответ сам по себе не доказывает целостность записанной копии; Local FS запрещает скрытую материализацию iCloud/File Provider placeholders.
+- Transfer interruption; under-downloaded temporary object.
+- Restart between transfer and confirmation.
+- Double start of one job, repeat after timeout.
+- Token expiration, rate limit, cloud unavailability.
+- Conflict of independent versions, mass deletion.
+- Incorrect/missing checksum.
+- Primary MacBook: download initiated by QADREN **does not start without confirmation**, including verification and recovery.
+- Delegation: Controller does not download content and does not start the same job.
+- Yandex Disk: a successful API response does not prove the integrity of the written copy; Local FS prohibits hidden materialization of iCloud/File Provider placeholders.
 
-## Перед публикацией в main / релизом
+## Before Publication to main / Release
 
-- Форматирование и статический анализ Rust: `bash scripts/test-core.sh` (Rust fmt, clippy и tests); CI уже запускает этот скрипт.
-- `cargo test`, платформенные Swift tests и интеграционные сценарии по доступным окружениям. Для native Swift→Rust Job inventory bridge: `bash scripts/test-macos-job-inventory.sh`; он использует только временный app-owned mock root и не запускает QADREN.app. Для реального Local controller `mkdir` bridge: `bash scripts/test-macos-local-workspace.sh`; он создаёт и удаляет только уникальный test root в checkout и проверяет no-overwrite. Для фактического macOS Keychain lifecycle: `bash scripts/test-macos-keychain.sh`; runner использует непредсказуемый test-only connection ID, проверяет store/read/update/delete/idempotent delete и убирает только этот test item.
-- Dependency/security review, проверка отсутствия секретов, проверка обновлённых документов.
-- Компиляция release для macOS, проверка комплектности .app и зависимостей.
-- Подпись/notarization и clean-install smoke test при выпуске для пользователей.
-- При неполном наборе проверок отчёт в рабочей Issue и итоговый handoff содержат явный перечень **не выполнено**. Публикация напрямую в `main` не освобождает от code review и security review.
+- Rust formatting and static analysis: `bash scripts/test-core.sh` (Rust fmt, clippy, and tests); CI already runs this script.
+- `cargo test`, platform Swift tests, and integration scenarios for available environments. For native Swift→Rust Job inventory bridge: `bash scripts/test-macos-job-inventory.sh`; it uses only a temporary app-owned mock root and does not start QADREN.app. For real Local controller `mkdir` bridge: `bash scripts/test-macos-local-workspace.sh`; it creates and deletes only a unique test root in the checkout and verifies no-overwrite. For actual macOS Keychain lifecycle: `bash scripts/test-macos-keychain.sh`; the runner uses an unpredictable test-only connection ID, verifies store/read/update/delete/idempotent delete, and removes only this test item.
+- Dependency/security review, verification of no secrets, verification of updated documents.
+- Release compilation for macOS, verification of .app completeness and dependencies.
+- Signing/notarization and clean-install smoke test during release to users.
+- If the test set is incomplete, the report in the working Issue and the final handoff must contain an explicit list of **not performed** items. Publication directly to `main` does not remove the requirement for code review and security review.
 
-Пороги производительности и поддерживаемые версии ОС установить после baseline прототипа. iCloud sync/backup, entitlement spike и iCloud E2E — вне активных задач и release gate по D-017. Проверки обычных macOS File Provider safety guards у локального адаптера сохраняются.
+Establish performance thresholds and supported OS versions after the baseline prototype. iCloud sync/backup, entitlement spike, and iCloud E2E are outside active tasks and the release gate per D-017. Checks for standard macOS File Provider safety guards for the local adapter are maintained.
 
+## Acceptance Evidence for Autonomous Agent
 
-## Acceptance evidence для автономного агента
+Record for each gate and Issue: `base SHA` and final `HEAD`, command, OS/toolchain version, status PASS/FAIL/BLOCKED/SKIPPED, evidence source (unit/mock/native/live), commit link, and untested scenarios. Do not extrapolate Rust test results to macOS Keychain, Apple entitlements, or real cloud API. Mac checks performed by the user are valid only for the presented SHA and commands.
 
-Фиксировать по каждому gate и Issue: `base SHA` и итоговый `HEAD`, команду, ОС/версию toolchain, статус PASS/FAIL/BLOCKED/SKIPPED, источник свидетельства (unit/mock/native/live), ссылку на коммит и непроверенные сценарии. Не экстраполировать прохождение Rust тестов на macOS Keychain, Apple entitlements или реальное облачное API. Проверки на Mac, выполненные пользователем, учитываются только для предъявленного SHA и команд.
+If a Mac is unavailable, perform available Rust/static checks and stop **only the corresponding native gate**; do not declare release-ready. If the Hub is unavailable, run standard commands and review without the Hub. CI is optional and does not prove real integration by itself.
 
-При недоступном Mac выполнять доступные Rust/статические проверки и останавливать **только соответствующий native gate**; не объявлять release-ready. При отсутствии Hub запускать штатные команды и review без Hub. CI необязателен и сам по себе не доказывает реальную интеграцию.
+## Codex Transfer Verification (without changing product code)
 
+Before independent execution of #18, perform one **read-only rehearsal** in a new Codex session. This is a check of the transferred context quality, not a request to start implementation.
 
-## Проверка передачи Codex (без изменения продуктового кода)
+**Rehearsal Task:** read `AGENTS.md`, Epic #12, Issue #18, `docs/roadmap.md`, profile policies, and current code. Without commits or file editing, provide:
+1. Exact current HEAD and `git status -sb` (if the local tree is available); if the environment is unavailable, state that the check is not performed.
+2. A map of **existing** `JobStore`, `jobs_ffi.rs`, `JobInventory.swift`, `verification.rs`, `local_fs.rs` APIs with the exact difference between read-only inventory and execution.
+3. One minimal functional G1 acceptance scope: no-overwrite mock create, durable attempt until effect, verified/UNKNOWN outcome, FFI command, and real UI status. List negative tests.
+4. A list of conditions where the owner must be contacted: new data loss risk, policy conflict, missing Apple entitlement, production credentials/consent, undefined distribution decision.
+5. Code/security review plan, supported test commands, and explicitly unconfirmed real-Mac/live-cloud checks; no new JobStore, Backend Worker, or mandatory PRs.
 
-Перед самостоятельным исполнением #18 провести один **read-only rehearsal** в новой сессии Codex — это проверка качества передаваемого контекста, а не просьба начать реализацию.
+**PASS:** all five points match the current repository, real APIs are listed, safety policy is maintained, and false DONE is avoided. **FAIL:** Codex proposes to rewrite the queue, disable consent, treat mock as production-E2E, create BackupSet, assign another branch as the norm, or start file operations without preparing an attempt. **BLOCKED:** cannot access the repository/Issue. In case of FAIL, correct context sources in existing documents instead of inventing a separate memory system.
 
-**Задание для rehearsal:** прочитать `AGENTS.md`, Epic #12, Issue #18, `docs/roadmap.md`, профильные политики и текущий код. Без коммитов и редактирования файлов выдать:
-1. Точный текущий HEAD и `git status -sb` (если локальное дерево доступно); при недоступности среды честно сообщить, что проверка не выполнена.
-2. Карта **существующих** `JobStore`, `jobs_ffi.rs`, `JobInventory.swift`, `verification.rs`, `local_fs.rs` API с точным различием read-only inventory и execution.
-3. Один минимальный функциональный G1 acceptance scope: no-overwrite mock create, durable attempt до effect, verified/UNKNOWN outcome, FFI command и реальный UI status. Указать negative tests.
-4. Перечень условий, при которых нужно обратиться к владельцу: новый риск потери данных, конфликт политик, отсутствующий Apple entitlement, production credentials/согласие, неопределённое решение о дистрибуции.
-5. План code/security review, поддерживаемые команды тестов и явно неподтверждённые real-Mac/live-cloud проверки; нет новых JobStore, Backend Worker и обязательных PR.
-
-**PASS:** все пять пунктов соответствуют текущему репозиторию, перечислены реальные API, сохранены safety policy и отказ от ложного DONE. **FAIL:** Codex предлагает переписать очередь, отключить consent, считать mock production-E2E, создать BackupSet, назначить другой branch как норму или начать файловые операции без подготовки attempt. **BLOCKED:** не может получить доступ к репозиторию/Issue. При FAIL исправить источники контекста в существующих документах, а не изобретать отдельную систему памяти.
-
-Только после успешного rehearsal можно запускать самостоятельную реализацию Issue. Результат rehearsal (SHA, PASS/FAIL/BLOCKED, недочёты) записывать в Issue #18. Сам rehearsal в рамках текущей документальной подготовки **ещё не выполнен**.
+Only after a successful rehearsal can independent implementation of the Issue start. Record the rehearsal result (SHA, PASS/FAIL/BLOCKED, deficiencies) in Issue #18. The rehearsal as part of current documentary preparation **is not yet performed**.

@@ -1,74 +1,74 @@
-# QADREN — окно настройки
+# QADREN — settings window
 
-## 1. Роль
+## 1. Role
 
-**Отдельное окно «Настройки»**, вызываемое из MenuBarExtra, виджетного инспектора и системных меню. Навигация **здесь** допустима; она НЕ становится Sidebar панели мониторинга. Window id `scenario-settings` сохраняется для deep links. «Настройки приложения» — один из разделов левого меню, а не отдельное окно.
+**Separate "Settings" window**, called from MenuBarExtra, widget inspector, and system menus. Navigation **is permitted here**; it DOES NOT become the monitoring panel Sidebar. Window id `scenario-settings` is kept for deep links. "Application Settings" is one section of the left menu, not a separate window.
 
-Рекомендуемый 2-колоночный layout: слева узкая постоянная навигация с разделами, справа список + inspector или редактор конкретной сущности. При малой ширине — navigation stack, без двух вложенных постоянно видимых sidebars. На macOS использовать native `NavigationSplitView`, `Form`, `Table/List`, `Toolbar` и нативные поля, стилизованные семантическими токенами; панели не превращать в светящийся HUD.
+Recommended 2-column layout: a narrow permanent navigation with sections on the left, and a list + inspector or a specific entity editor on the right. For small widths, use a navigation stack without two nested permanently visible sidebars. On macOS, use native `NavigationSplitView`, `Form`, `Table/List`, `Toolbar`, and native fields styled with semantic tokens; do not change panels into a glowing HUD.
 
-## 2. Структура
+## 2. Structure
 
-| Раздел | Содержимое | До реализации backend |
+| Section | Content | Before backend implementation |
 |---|---|---|
-| Подключения | плоский список именованных `StorageConnection`, адаптер, статус, credentials/capabilities, add/edit/remove | Local FS — единственный активный контроллер Release 1; Yandex OAuth/Keychain/Registry существуют, но контроллер вынесен за релиз (сохранить прежние токены); iCloud вне scope |
-| Сценарии | список с revision, source/destination и статусом; создать/переименовать/вкл/выкл/удалить | использовать существующую Scenario модель; не отображать невозможные операции как рабочие |
-| Автоматизация | триггеры и расписания **внутри сценария** (может быть отдельная вкладка редактора) | пока scheduler нет — read-only disabled с пояснением |
-| Политики | конфликты, удаления, scoped consents, пороги места, retention событий | не добавлять ложные возможности защиты или backup versions |
-| Узел и служба | local Worker, старт/пауза, статус независимой службы, управление запуском | признаки unavailable, если independent service нет |
-| Интерфейс | theme, оконный zoom, дефолтная плотность, восстановление панелей | совместимо с локально сохранёнными layout |
+| Connections | Flat list of named `StorageConnection`, adapter, status, credentials/capabilities, add/edit/remove | Local FS is the only active controller for Release 1; Yandex OAuth/Keychain/Registry exist, but the controller is out of release (keep previous tokens); iCloud is out of scope |
+| Scenarios | List with revision, source/destination, and status; create/rename/enable/disable/delete | Use existing Scenario model; do not show impossible operations as active |
+| Automation | Triggers and schedules **inside a scenario** (may be a separate editor tab) | While the scheduler is missing: read-only disabled with explanation |
+| Policies | Conflicts, deletions, scoped consents, space thresholds, event retention | Do not add false protection features or backup versions |
+| Node and Service | Local Worker, start/pause, independent service status, launch management | Show unavailable signs if there is no independent service |
+| Interface | Theme, window zoom, default density, panel restoration | Compatible with locally saved layouts |
 
-Это не шесть самостоятельных app windows: это структура **одной** панели настройки. Точки deep-link имеют `section`, `entityID`, `editorSubsection` с валидацией существования сущности.
+These are not six independent app windows: this is the structure of **one** settings panel. Deep-link points have `section`, `entityID`, and `editorSubsection` with validation of the entity existence.
 
-## 3. Подключения
+## 3. Connections
 
-Главная зона — плоский список, не группировать по provider как будто подключение одно. Два Yandex account могут иметь одинаковый displayName и **разные** `connection_id`. У карточки: имя, provider, enable/disable, auth state, метаданные только по явному refresh, last status, полные paths/права. Инспектор показывает capabilities, настройки и связанную очередь Job, но **не** секреты.
+The main area is a flat list; do not group by provider as if there is only one connection. Two Yandex accounts can have the same displayName and **different** `connection_id`. A card contains: name, provider, enable/disable, auth state, metadata only upon explicit refresh, last status, and full paths/permissions. The inspector shows capabilities, settings, and the linked Job queue, but **not** secrets.
 
-### Добавление (wizard)
+### Addition (wizard)
 
-1. Выбор adapter из реально доступных на данной ОС / capability (недоступные пояснить).
-2. Пользовательское имя и настройки; проверка предусловий.
-3. Авторизация через существующий OAuth/Keychain (где применимо), без показа token.
-4. Проверка метаданных / прав, результат с timestamp.
-5. Сохранение независимого connection ID; выход без фиктивного «Подключено» при ошибке.
+1. Select adapter from those available on the current OS / capability (explain unavailable ones).
+2. User name and settings; check preconditions.
+3. Authorization via existing OAuth/Keychain (where applicable) without showing the token.
+4. Check metadata / permissions; result with timestamp.
+5. Save independent connection ID; exit without a fake "Connected" message if an error occurs.
 
-При удалении/отключении: явная информация, что не удаляются файлы провайдера, но могут блокироваться новые задания; учитывать активные attempts и recoverable cleanup SQLite/Keychain согласно issue #25. Нельзя удалить registry и оставить orphan credential без управляемого recovery.
+For deletion/disabling: provide explicit information that provider files are not deleted, but new jobs may be blocked; consider active attempts and recoverable cleanup of SQLite/Keychain according to issue #25. Do not delete the registry and leave an orphan credential without managed recovery.
 
-## 4. Сценарий: мастер и инспектор
+## 4. Scenario: Master and Inspector
 
-**Список:** имя, enabled, direction, source/destination, конкретный Worker, status/last result/next run если достоверны. Никакого графового редактора топологии.
+**List:** name, enabled, direction, source/destination, specific Worker, status/last result/next run (if reliable). No graph-based topology editor.
 
-**Редактор с разделами внутри сценария:**
-1. Имя и основные параметры;
-2. Источник (connection + каталог) и назначение (connection + каталог);
-3. Тип синхронизации: односторонняя (от выбранного источника к выбранному назначению) или двусторонняя; порядок точек уже задаёт направление, поэтому отдельного «назначение → источник» в UI нет;
-4. Include/exclude по пути/расширению, без контентного сканирования на UI;
+**Editor with sections inside a scenario:**
+1. Name and basic parameters;
+2. Source (connection + directory) and destination (connection + directory);
+3. Synchronization type: one-way (from selected source to selected destination) or two-way; the order of points already defines the direction, therefore there is no separate "destination $\rightarrow$ source" in the UI;
+4. Include/exclude by path/extension, without content scanning in the UI;
 5. Conflict/overwrite/delete policies + thresholds;
-6. Trigger schedules (несколько timezone-aware) и Worker назначения;
-7. Summary, по запросу **dry-run metadata diff**, создание/сохранение revision.
+6. Trigger schedules (multiple timezone-aware) and destination Worker;
+7. Summary, **dry-run metadata diff** on request, revision creation/saving.
 
-Создание не открывает маленький sheet: редактор занимает detail-зону окна «Настройки». Вверху расположены имя, две точки обмена и тип синхронизации. После выбора точек показаны две равные панели с metadata-only деревом каждого источника; пользователь выбирает корневой каталог в каждой панели. «Этот Mac» доступен прямо в выборе точки: при сохранении сценария создаётся или переиспользуется отдельный `local_filesystem` `StorageConnection`. Выбор локальной папки запрашивается через системный picker; просмотр облака ограничен метаданными каталога и не скачивает содержимое.
+Creation does not open a small sheet: the editor occupies the detail zone of the "Settings" window. The name, two exchange points, and synchronization type are at the top. After selecting the points, two equal panels show the metadata-only tree of each source; the user selects the root directory in each panel. "This Mac" is available directly in the point selection: when saving a scenario, a separate `local_filesystem` `StorageConnection` is created or reused. Selection of a local folder is requested via a system picker; cloud viewing is limited to directory metadata and does not download content.
 
-Показывать последствия изменения: текущие Job используют старую ревизию, новые — новую. `Run now` создаёт новый Job только через Core с верными правами; настройки сами файлы не копируют.
+Show the consequences of changes: current Jobs use the old revision, new Jobs use the new revision. `Run now` creates a new Job only through Core with correct permissions; settings do not copy files themselves.
 
-## 5. Планирование
+## 5. Scheduling
 
-Редактирование каждого триггера: тип, schedule time/timezone, enabled, next valid run; DST ambiguous/missing обозначен честно; manual trigger сохраняет приоритет (Core). Множественные расписания в одном Scenario, каждый выключается отдельно. Если scheduler ещё не реализован — интерфейс может документировать параметры, но action disabled / Preview only, без фиктивного «запланировано».
+Editing each trigger: type, schedule time/timezone, enabled, next valid run; DST ambiguous/missing states are shown honestly; manual trigger maintains priority (Core). Multiple schedules exist in one Scenario, and each is disabled separately. If the scheduler is not yet implemented, the interface may document parameters, but the action is disabled / Preview only, without a fake "scheduled" status.
 
-## 6. Подтверждения/ошибки
+## 6. Confirmations/Errors
 
-Секреты не видны ни в UI, ни в error details, logs и clipboard. Ошибки авторизации и ограничения API показываются локально в контексте Connection, с кодом/предложенным безопасным действием. Никакого скрытого content read для «проверки». Удаление подключения — подтверждение по connection ID/имени с безопасным rollback и признаком pending cleanup.
+Secrets are not visible in the UI, error details, logs, or clipboard. Authorization errors and API limitations are shown locally in the context of the Connection, with a code/proposed safe action. No hidden content read for "checking". Connection deletion requires confirmation by connection ID/name with safe rollback and a pending cleanup sign.
 
-Контроллер Яндекс Диска вынесен за Release 1 (D-018): новые подключения не выдавать за текущую функциональность; старые записи/tokens сохранять. iCloud Documents/backup/sync отложены бессрочно (D-017/D-018): не показывать как работающий/подключаемый адаптер, не добавлять wizard, entitlement probes или фиктивный UI. Local FS по-прежнему запрещает скрытую материализацию File Provider/iCloud placeholders.
+The Yandex Disk controller is out of Release 1 (D-018): do not present new connections as current functionality; keep old records/tokens. iCloud Documents/backup/sync are postponed indefinitely (D-017/D-018): do not show as a working/connectable adapter, do not add a wizard, entitlement probes, or fake UI. Local FS still prohibits hidden materialization of File Provider/iCloud placeholders.
 
-## 7. Визуальный стиль окна настроек
+## 7. Visual Style of the Settings Window
 
-Использовать ту же палитру/типографику/логотип/навигационный focus, но **меньше свечения**, больше native form controls и структурированных списков. Поверхности `panel/raised`, подсветка только focused/selected row, verified warnings и destructive confirmation. Содержимое не должно менять высоту при network refresh. Full path и копирование ID доступны.
+Use the same palette/typography/logo/navigation focus, but **less glow**, more native form controls, and structured lists. Use `panel/raised` surfaces, highlighting only for focused/selected rows, verified warnings, and destructive confirmation. Content must not change height during network refresh. Full path and ID copying are available.
 
 ## 8. Acceptance
 
-- Два подключения одного провайдера можно независимо открыть, переименовать, включить/выключить; secrets не показываются.
-- Deep link из любого widget возвращает корректный раздел и entity, без смены текущей мониторинговой панели.
-- Ошибка OAuth, истекшая авторизация, недоступный adapter и отсутствие прав имеют разные состояния.
-- Параметры Scenario соответствуют реальным Core capabilities и revisions; фиктивного Run/Save/Provider copy нет.
-- После закрытия settings state мониторинга не сбрасывается, служба не меняет состояние.
-- Keyboard/VoiceOver, системные controls и min-size 760×560 работают.
+- Two connections of one provider can be independently opened, renamed, and enabled/disabled; secrets are not shown.
+- A deep link from any widget returns the correct section and entity without changing the current monitoring panel.
+- OAuth error, expired authorization, unavailable adapter, and lack of permissions have different states.
+- Scenario parameters correspond to real Core capabilities and revisions; no fake Run/Save/Provider copy.
+- After closing, the monitoring state is not reset, and the service does not change state.
+- Keyboard/VoiceOver, system controls, and min-size 760×560 work.

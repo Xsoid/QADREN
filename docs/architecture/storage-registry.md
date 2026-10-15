@@ -1,46 +1,46 @@
-# Storage Connection Registry — Issue #2 / этап 1
+# Storage Connection Registry — Issue #2 / Stage 1
 
-Статус: Registry v2, SwiftUI-интеграция, независимые Keychain OAuth по connection_id и metadata-only Яндекс Диск реализованы в `main`. Принята модель множественных подключений [D-016](../decisions/D-016-multiple-connections.md). Контентные операции и движок синхронизации пока отсутствуют.
+Status: Registry v2, SwiftUI integration, independent Keychain OAuth by connection_id and metadata-only Yandex Disk are implemented in `main`. The multiple connections model [D-016](../decisions/D-016-multiple-connections.md) is accepted. Content operations and the synchronization engine are not implemented.
 
-## Назначение
+## Purpose
 
-`StorageConnection` — локальная запись об **одном экземпляре** подключения к провайдеру. Количество экземпляров одного `adapter` или одного внешнего аккаунта не ограничивается. `id` не равен логину и не зависит от имени подключения. В текущей модели `Scenario` ссылается на независимые подключения по стабильным ID; реестр не исполняет передачи.
+`StorageConnection` is a local record of **one instance** of a connection to a provider. The number of instances of one `adapter` or one external account is not limited. The `id` is not equal to the login and does not depend on the connection name. In the current model, `Scenario` refers to independent connections by stable IDs; the registry does not perform transfers.
 
-| Поле | Содержание |
+| Field | Content |
 |---|---|
-| `id` | Непрозрачный 128-битный случайный идентификатор (hex) |
-| `adapter` | Ключ типа адаптера, например `yandex_disk` |
-| `name` | Пользовательское имя |
-| `enabled` | Разрешено ли использование подключения |
+| `id` | Opaque 128-bit random identifier (hex) |
+| `adapter` | Adapter type key, for example `yandex_disk` |
+| `name` | User name |
+| `enabled` | Boolean that indicates if the connection is allowed |
 | `status` | disconnected / connected / requires_auth / offline / error |
-| `credential_ref` | Ссылка на запись в Keychain; **не OAuth-токен** |
-| `last_checked_at` | Момент последней проверки (integer, epoch seconds по соглашению будущего слоя API) |
-| `diagnosis` | Безопасный диагностический текст без секретов |
+| `credential_ref` | Reference to a Keychain record; **not an OAuth token** |
+| `last_checked_at` | Time of the last check (integer, epoch seconds according to the future API layer convention) |
+| `diagnosis` | Safe diagnostic text without secrets |
 
-`AdapterCapabilities` вычисляются адаптером по среде исполнения/версии сервиса, а не бессрочно сохраняются в таблицу.
+The adapter calculates `AdapterCapabilities` based on the execution environment/service version; these capabilities are not stored in the table permanently.
 
 ## API
 
 `Registry::open(path)`, `in_memory()`, `add(adapter,name)`, `get(id)`, `list()`, `rename(id,name)`, `set_enabled(id,bool)`, `remove(id)`, `mark_checked(...)`, `set_credential_ref(...)`.
 
-В будущей интеграции `credential_ref` должен ссылаться на запись Keychain **этого connection_id**. Глобальный Keychain `account=default` — наследие раннего прототипа; текущий UI предусматривает отдельный ручной импорт с проверкой нового токена перед удалением legacy (D-016). Перед удалением подключения потребуется проверять ссылки Scenario/Job по мере реализации этих сущностей.
+In the future integration, `credential_ref` must refer to the Keychain record **of this connection_id**. The global Keychain `account=default` is a legacy of an early prototype; the current UI provides a separate manual import with a check of the new token before the deletion of legacy data (D-016). Before the deletion of a connection, the system must check Scenario/Job references as these entities are implemented.
 
-`remove` удаляет **только локальную запись**. Не обращается к облаку. Удаление секрета из Keychain должен выполнить платформенный слой; перед подключением реальных секретов операция удаления должна стать координированной, чтобы не оставлять credential orphan. Нельзя считать это полноценным disconnect UX.
+`remove` deletes **only the local record**. It does not access the cloud. The platform layer must delete the secret from the Keychain; before the connection of real secrets, the delete operation must be coordinated to avoid credential orphans. This operation is not a complete disconnect UX.
 
-## Миграции и целостность
+## Migrations and Integrity
 
-SQLite `PRAGMA user_version=1`. При открытии `PRAGMA quick_check`; если повреждение обнаружено, открытие завершается ошибкой, попытки автоматического восстановления/перезаписи отсутствуют. Если версия схемы больше поддерживаемой — явная ошибка, без изменения базы. Миграция 0→1 выполняется транзакционно.
+SQLite `PRAGMA user_version=1`. During opening, the system executes `PRAGMA quick_check`; if damage is detected, the opening fails with an error. There are no automatic recovery or overwrite attempts. If the schema version is greater than the supported version, the system returns an explicit error without changing the database. Migration 0→1 is performed transactionally.
 
-Будущие версии: последовательные транзакционные миграции и резервная копия БД до разрушительных изменений. Будущие схемы Scenario/Job должны учитывать ссылки на connection и мигрироваться транзакционно.
+Future versions: sequential transactional migrations and a database backup before destructive changes. Future Scenario/Job schemas must include references to the connection and must be migrated transactionally.
 
-## Безопасность
+## Safety
 
-В SQLite хранятся исключительно метаданные и **не секретные ссылки**. Не записывать в `diagnosis` тела HTTP-ответов, заголовки Authorization или URL с токенами. Путь к БД должен находиться в пользовательском Application Support с ограниченными правами (реализовать в macOS UI/платформенном слое). В тестах используется `:memory:`.
+Only metadata and **non-secret references** are stored in SQLite. Do not write HTTP response bodies, Authorization headers, or URLs with tokens into `diagnosis`. The database path must be in the user Application Support with restricted permissions (implement in macOS UI/platform layer). Tests use `:memory:`.
 
-## Не реализовано
+## Not Implemented
 
-Контентные операции Яндекс Диска, Scenario/Job, фоновый исполнитель и Local Filesystem. iCloud Documents не входит в активный Release 1 (D-017). Metadata-only операции не означают готовую синхронизацию.
+Yandex Disk content operations, Scenario/Job, background executor, and Local Filesystem. iCloud Documents are not part of the active Release 1 (D-017). Metadata-only operations do not mean that synchronization is ready.
 
-## Schema v2 — идентичность внешнего аккаунта
+## Schema v2 — External Account Identity
 
-Новое необязательное поле `provider_account_id` — идентификатор аккаунта **у провайдера** (не Client ID OAuth-приложения и не `connection_id`). Заполняется после авторизации. Оно намеренно **не уникально**: два соединения одного внешнего аккаунта независимы. Изменение поля не изменяет локальный ID, Keychain credential или связи BackupSet. Миграция v1→v2 добавляет nullable колонку в транзакции без уничтожения существующих записей. При переносе legacy Keychain `default` необходимо использовать отдельную проверяемую процедуру из D-016, а не переписывать токен автоматически при открытии базы.
+The new optional field `provider_account_id` is the account identifier **at the provider** (not the OAuth application Client ID and not the `connection_id`). The system fills this field after authorization. This field is intentionally **not unique**: two connections of one external account are independent. Changing this field does not change the local ID, Keychain credential, or BackupSet links. Migration v1→v2 adds a nullable column in a transaction without destroying existing records. When transferring the legacy Keychain `default`, the system must use the separate verified procedure from D-016 and must not rewrite the token automatically during database opening.

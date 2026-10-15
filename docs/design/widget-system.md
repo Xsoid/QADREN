@@ -1,87 +1,87 @@
-# QADREN — виджетная система и компоновка
+# QADREN — widget system and layout
 
-## 1. Продуктовый договор
+## 1. Product Contract
 
-Мониторинг — **не список разделов**, а несколько независимых локальных dashboard windows, каждое с набором стандартных интерактивных виджетов. Никакого постоянного Sidebar, палитры справа и постоянно видимого каталога. Пользователь настраивает панель, затем только наблюдает и выполняет контекстные действия. Общие фильтры доступны из компактного popover шапки. Проблемы показываются независимо от фильтров.
+Monitoring is **not a list of sections**, but several independent local dashboard windows. Each window contains a set of standard interactive widgets. There is no permanent Sidebar, no right-side palette, and no permanently visible catalog. The user configures the panel, and then only observes and performs contextual actions. General filters are available from a compact header popover. Problems are displayed independently of filters.
 
-Дублировать экземпляр одного `typeID` **в рамках одной панели запрещено**; тот же тип допустим в другой панели с другой конфигурацией. Внутри многосоставного типа `Connection` можно показывать несколько подключений или один выбранный — без добавления второго идентичного widget type на той же панели.
+Do not duplicate an instance of one `typeID` **within one panel**; the same type is permissible in another panel with a different configuration. Within a composite `Connection` type, you may show several connections or one selected connection—without adding a second identical widget type to the same panel.
 
-## 2. Модель сохраняемого представления
+## 2. Saved Representation Model
 
-Предлагаемый view-state contract (не Core domain schema):
+Proposed view-state contract (not Core domain schema):
 
-| Поле | Тип / смысл |
+| Field | Type / Meaning |
 |---|---|
-| `panelID` | стабильный UUID для отдельного окна/панели |
-| `schemaVersion` | версия layout для миграции, должна быть независима от сценариев |
-| `title` | пользовательское имя панели, например «Основная» |
-| `windowFrame` | window placement/zoom; сохраняется отдельно от Job/SQLite Core |
-| `theme` | system/dark/light (может наследовать глобальную настройку) |
+| `panelID` | stable UUID for a separate window/panel |
+| `schemaVersion` | layout version for migration; must be independent of scenarios |
+| `title` | user name for the panel, for example, "Main" |
+| `windowFrame` | window placement/zoom; saved separately from Job/SQLite Core |
+| `theme` | system/dark/light (may inherit global setting) |
 | `panelFilters` | selected connections, scenarios, worker; `all` default |
-| `widgetID`, `typeID` | id экземпляра, стандартный виджетный тип |
-| `gridRect` | целочисленные `column,row,width,height`, span в ячейках |
-| `density` | compact/regular/expanded, для **конкретного** виджета |
-| `localFilters` | inherit либо явно заданные overrides |
-| `widgetOptions` | только конкретные параметризованные настройки типа |
+| `widgetID`, `typeID` | instance ID, standard widget type |
+| `gridRect` | integer `column,row,width,height`, span in cells |
+| `density` | compact/regular/expanded, for a **specific** widget |
+| `localFilters` | inherit or explicitly defined overrides |
+| `widgetOptions` | only specific parameterized settings for the type |
 
-Persist локально и атомарно. При повреждении layout открывать безопасную дефолтную панель **без стирания пользовательской конфигурации**; migration/recovery и diagnostics. Не хранить OAuth secrets или содержимое файлов. Restore предыдущей сессии восстанавливает окна, размеры, выбранный контекст, scroll, selection по возможности; **не открывает окна само по тревоге**. При закрытии панели Worker продолжает работу согласно собственному lifecycle (после реализации фоновой службы).
+Persist locally and atomically. If the layout is corrupted, open a safe default panel **without erasing the user configuration**; provide migration/recovery and diagnostics. Do not store OAuth secrets or file contents. Session restore restores windows, sizes, selected context, scroll, and selection where possible; it **does not open windows automatically on alarm**. When the panel closes, the Worker continues to operate according to its own lifecycle (after the background service is implemented).
 
-## 3. Геометрия
+## 3. Geometry
 
-Широкое окно: базовая сетка **12 колонок** при клиентской ширине от 1180pt. Узкое: **8 колонок** для 900–1179pt. Для других размеров/zoom — пересчитать; не фиксировать пиксельную ширину виджета. Внешние отступы 12pt, gap 10pt, нет перекрытий и отрицательных координат.
+Wide window: base grid of **12 columns** for client widths from 1180pt. Narrow window: **8 columns** for 900–1179pt. For other sizes/zoom, recalculate; do not fix the pixel width of the widget. External margins are 12pt, gap is 10pt, with no overlaps and no negative coordinates.
 
-- `widthSpan` — целое число в 2..12 (или меньше доступного числа колонок на узкой сетке); высота определяется целочисленной сеткой или содержимым с согласованным min height, без обрезки команд.
-- Начальные типовые спаны **wide**: SystemHealth 3×2, ActiveJobs 5×2, Queue 2×2, Attention 2×2, Connections 4×3, ResourceMetrics 4×3, UpcomingRuns 4×2, Timeline 4×3, Scenarios 4×3; это **пример**, не принудительный порядок.
-- Для узкого экрана сначала адаптировать spans, затем переносить виджеты вниз; никогда перекрывать, делать горизонтальный скролл всей панели или обрезать обязательные действия.
-- Layout engine ищет ближайшую свободную область и делает deterministic reflow; порядок таб-навигации совпадает с визуальным reading order.
+- `widthSpan` is an integer from 2..12 (or less than the available number of columns on a narrow grid); height is determined by the integer grid or content with an agreed min height, without clipping commands.
+- Initial typical spans for **wide**: SystemHealth 3×2, ActiveJobs 5×2, Queue 2×2, Attention 2×2, Connections 4×3, ResourceMetrics 4×3, UpcomingRuns 4×2, Timeline 4×3, Scenarios 4×3; this is an **example**, not a mandatory order.
+- For a narrow screen, first adapt spans, then move widgets down; never overlap, create horizontal scroll for the whole panel, or clip mandatory actions.
+- The layout engine searches for the nearest free area and performs deterministic reflow; the tab-navigation order matches the visual reading order.
 
-## 4. Размер ≠ плотность
+## 4. Size ≠ Density
 
-**Размер** определяет выделенную площадь на полотне и число видимых элементов; **плотность** — внутренние отступы, высоту строк и объём вторичной информации. Не менять текст принудительным 0.7× скейлом, плотность не является глобальным zoom. `compact` показывает статус+основное число/2 строки; `regular` 3–5 строк/основные действия; `expanded` — подробности, дерево и контекстные действия при достаточной ширине. При отсутствии места прятать вторичные сведения по приоритету, но не опасные статусы.
+**Size** determines the allocated area on the canvas and the number of visible elements; **density** determines internal margins, row height, and the volume of secondary information. Do not change text with a forced 0.7× scale; density is not a global zoom. `compact` shows status + main number/2 lines; `regular` shows 3–5 lines/main actions; `expanded` shows details, tree, and contextual actions if the width is sufficient. If space is unavailable, hide secondary information by priority, but do not hide dangerous statuses.
 
-Пример для очереди: 2×2 — активные/ожидающие/unknown (счётчики), 4×3 — несколько Job rows, 6×4 — detailed list; смена размера не изменяет Core job ordering. Для ресурса: компактно 1 сводка, расширенно несколько отдельных метрик; не вставлять фальшивые sparklines.
+Example for the queue: 2×2 — active/waiting/unknown (counters), 4×3 — several Job rows, 6×4 — detailed list; changing size does not change Core job ordering. For resources: compact shows 1 summary, expanded shows several separate metrics; do not insert fake sparklines.
 
-## 5. Режим наблюдения и режим компоновки
+## 5. Observation Mode and Layout Mode
 
-**Наблюдение** (по умолчанию): виджеты закреплены; действия доступны внутри них; никаких drag handles; zoom/контекст фильтров, manual refresh и детали работают без переходов.
+**Observation** (default): widgets are locked; actions are available within them; no drag handles; zoom/filter context, manual refresh, and details work without transitions.
 
-**Компоновка** (явное включение в toolbar): появляется линия сетки, drag handle, resize anchor, кнопка `+ Виджет` и кнопка `Готово`. Только в этом режиме открывается drawer/popover каталога с поиском **по типам виджетов**, не поиск пользовательских файлов. Автосохранение каждого валидного изменения; Undo/Redo (Cmd-Z/Shift-Cmd-Z); опциональное восстановление layout, но не без предупреждения при потере раскладки. Удаление виджета не удаляет задания, сценарии, подключения или их историю.
+**Layout** (explicitly enabled in toolbar): a grid line, drag handle, resize anchor, `+ Widget` button, and `Done` button appear. Only in this mode does the catalog drawer/popover open with search **by widget types**, not search for user files. Auto-save every valid change; Undo/Redo (Cmd-Z/Shift-Cmd-Z); optional layout recovery, but not without warning upon layout loss. Deleting a widget does not delete jobs, scenarios, connections, or their history.
 
-Порядок: select → drag / resize → snap + safe reflow → validate bounds/type-uniqueness → persist view state. При сохранении ошибки показать сообщение и прежний layout, не объявлять успех. Каталог показывает только поддержанные виджеты; для будущих типов status «недоступен» с причиной.
+Order: select → drag / resize → snap + safe reflow → validate bounds/type-uniqueness → persist view state. If save errors occur, show a message and the previous layout; do not report success. The catalog shows only supported widgets; for future types, show status "unavailable" with a reason.
 
-## 6. Контекстные связи
+## 6. Contextual Links
 
-Глобальные фильтры (подключения, сценарии, worker/time window — только где это имеет смысл) применяются к связанным виджетам; у каждого возможен `inherit` либо `override`. При выборе объекта из одного виджета остальные, у которых включена `followSelection`, обновляются без сброса scroll/выделения. История назад/вперёд и breadcrumbs сохраняют понятный navigation context. **Системные критические сигналы и требуемые согласия видимы вне этих фильтров**, даже если виджет соответствующего типа удалён (глобальная status indication). Нет отдельного обязательного «центра подтверждений».
+Global filters (connections, scenarios, worker/time window — only where applicable) apply to linked widgets; each widget can use `inherit` or `override`. When an object is selected from one widget, other widgets with `followSelection` enabled update without resetting scroll/selection. Back/forward history and breadcrumbs preserve a clear navigation context. **System critical signals and required consents are visible outside these filters**, even if the corresponding widget type is deleted (global status indication). There is no separate mandatory "confirmation center."
 
-Refresh scope: dashboard refresh запрашивает обновление только допустимых метаданных; widget refresh — только его источник. Не запускать скрытый content read. UI показывает `lastFetched`, `lastVerified` как разные поля, где применимо.
+Refresh scope: dashboard refresh requests updates only for permitted metadata; widget refresh requests updates only for its source. Do not start hidden content reads. The UI shows `lastFetched` and `lastVerified` as separate fields where applicable.
 
-## 7. Реестр стандартных типов
+## 7. Standard Types Registry
 
-| typeID | Компактно | Развёрнуто / операции | Источник / ограничение |
+| typeID | Compact | Expanded / Operations | Source / Constraint |
 |---|---|---|---|
-| `system-health` | Controller/Worker status + lastSeen | модульная диагностика, time sync | только подтверждённые статусы |
-| `active-jobs` | current jobs + percent if known | per-job progress, pause/cancel only via Core | JobStore/FFI, не dummy runner |
-| `job-queue` | counts active/waiting/paused/unknown | ordering + action menus | durable Jobs, manual-first при Core |
-| `attention` | критические count + первый item | conflict / consent / failure context | сигнал даже при hidden widget |
-| `connections` | name/status/used if known | все подключения либо selected | per-connection, несколько одного провайдера |
-| `resource-metrics` | CPU/RAM/disk for specific Worker | измеримые метрики с timestamp | не создавать историю, пока нет telemetry |
-| `upcoming-runs` | 1–3 будущих trigger times | timezone, enable/schedule context | `Scenario` scheduling только после реализации |
-| `event-timeline` | latest events | фильтры, context, safe links | no content/secret logging |
-| `scenarios` | enabled/disabled + next run | scenario summary и переход к настройкам | изменения Core config только в настройках |
-| `worker-state` | local Worker state/paused | локальная диагностика/команды | remote Worker UI позже |
-| `file-changes` | число изменений если известно | chart ONLY if actual time-series | необязательный виджет, может быть unsupported |
-| `connection-quota` | используется/доступно если API знает | quota details per selected connection | missing quota → «нет данных» |
+| `system-health` | Controller/Worker status + lastSeen | modular diagnostics, time sync | only confirmed statuses |
+| `active-jobs` | current jobs + percent if known | per-job progress, pause/cancel only via Core | JobStore/FFI, not dummy runner |
+| `job-queue` | counts active/waiting/paused/unknown | ordering + action menus | durable Jobs, manual-first if Core |
+| `attention` | critical count + first item | conflict / consent / failure context | signal even if widget is hidden |
+| `connections` | name/status/used if known | all connections or selected | per-connection, several of one provider |
+| `resource-metrics` | CPU/RAM/disk for specific Worker | measurable metrics with timestamp | do not create history until telemetry exists |
+| `upcoming-runs` | 1–3 future trigger times | timezone, enable/schedule context | `Scenario` scheduling only after implementation |
+| `event-timeline` | latest events | filters, context, safe links | no content/secret logging |
+| `scenarios` | enabled/disabled + next run | scenario summary and transition to settings | Core config changes only in settings |
+| `worker-state` | local Worker state/paused | local diagnostics/commands | remote Worker UI later |
+| `file-changes` | number of changes if known | chart ONLY if actual time-series | optional widget, may be unsupported |
+| `connection-quota` | used/available if API knows | quota details per selected connection | missing quota → "no data" |
 
-Не включать в MVP граф топологии, глобальную скорость Worker, аналитику квот за прошлый период без данных, резервные версии файлов, backup set, постоянный поиск по файлам.
+Do not include the following in MVP: topology graph, global Worker speed, quota analytics for previous periods without data, backup file versions, backup set, permanent search through files.
 
-## 8. Дефолтная раскладка
+## 8. Default Layout
 
-Первая стартовая панель (при наличии данных): наверху краткая system-health строка и виджеты `attention`, `active-jobs`, `job-queue`; ниже `connections`, `upcoming-runs`, `event-timeline`, `scenarios`. Виджеты имеют явное состояние `empty/unavailable` если Core ещё не реализован. Первичная раскладка должна переживать изменение размера с сохранением пользовательских перестановок.
+First start panel (if data is available): at the top, a brief system-health line and `attention`, `active-jobs`, `job-queue` widgets; below them, `connections`, `upcoming-runs`, `event-timeline`, `scenarios`. Widgets have an explicit `empty/unavailable` state if Core is not yet implemented. The primary layout must survive resizing while preserving user rearrangements.
 
-## 9. Сложные и отрицательные случаи
+## 9. Complex and Negative Cases
 
-- 0 подключений / 0 jobs → meaningful empty state, кнопка перейти в «Панель настройки», не фейковый успех.
+- 0 connections / 0 jobs → meaningful empty state, button to go to "Settings Panel", not fake success.
 - 1000+ jobs → lazy rows/virtualization, stable IDs, bounded refresh; 0 memory leaks from monitoring.
-- Нет сети, auth expired, rate-limit → причина и свежесть данных, не «подключено» по старому cache.
-- Job UNKNOWN, conflict, deleting connection with attempts → заблокировать опасные команды, вывести контекст reconciliation.
-- Перезапуск окна, изменение разрешения, light/dark, zoom, VoiceOver, Reduce Motion → layout читабелен, без перекрытий и потери команд.
+- No network, auth expired, rate-limit → reason and data freshness, not "connected" via old cache.
+- Job UNKNOWN, conflict, deleting connection with attempts → block dangerous commands, display reconciliation context.
+- Window restart, resolution change, light/dark, zoom, VoiceOver, Reduce Motion → layout remains readable, without overlaps and without loss of commands.

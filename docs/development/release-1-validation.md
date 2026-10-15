@@ -1,113 +1,113 @@
-> **Текущая приёмка D-018 / 2026-10-14:** Release 1 P0 UI/foundation и P1–P2 локальная функциональность **не включают контроллер Яндекс Диска** и не требуют доступного API, OAuth/live E2E или Apple iCloud. Яндекс вынесен в post-release scope, iCloud вне активного scope. Старые таблицы ниже, обозначенные cloud-first, относятся к историческому плану и не должны блокировать локальный релиз; существенные локальные tests/consent/no-overwrite/UNKNOWN/recovery остаются обязательными. Настоящий `main` после push содержит больше кода, чем baseline этой хронологической матрицы: см. [актуальный аудит](current-state-audit.md).
+**Current Acceptance D-018 / 2026-10-14:** Release 1 P0 UI/foundation and P1–P2 local functionality **do not include the Yandex Disk controller** and do not require an available API, OAuth/live E2E, or Apple iCloud. Yandex is moved to post-release scope; iCloud is outside the active scope. Old tables below, marked cloud-first, refer to the historical plan and shall not block the local release; essential local tests/consent/no-overwrite/UNKNOWN/recovery remain mandatory. The current `main` after push contains more code than the baseline of this chronological matrix: see [current state audit](current-state-audit.md).
 
-# Release 1 — матрица проверок и доказательства
+# Release 1 — Verification Matrix and Evidence
 
-Статус: рабочий контрольный документ для [Epic #12](https://github.com/Xsoid/QADREN/issues/12), [#13](https://github.com/Xsoid/QADREN/issues/13), [#25](https://github.com/Xsoid/QADREN/issues/25).
+Status: working control document for [Epic #12](https://github.com/Xsoid/QADREN/issues/12), [#13](https://github.com/Xsoid/QADREN/issues/13), [#25](https://github.com/Xsoid/QADREN/issues/25).
 
-Отметка «реализовано» или успешная компиляция **не** заменяет проверку поведения. Тест в mock-хранилище не является проверкой настоящего Keychain/облака.
+A mark of "implemented" or successful compilation **does not** replace behavior verification. A test in a mock store is not a verification of the real Keychain/cloud.
 
-**Исторический scope Release 1 (2026-10-12, заменён D-018):** загрузка/скачивание и синхронизация между Яндекс Диском и локальными директориями. Он больше не является acceptance текущего локального релиза: Release 1 ограничен Local↔Local; контроллер Яндекс Диска — post-release. iCloud adapter/container/sync/backup, native spike и E2E не являются acceptance. Упоминания iCloud File Provider ниже — безопасность Local FS, не iCloud integration. [D-017](../decisions/D-017-defer-icloud.md), [D-018](../decisions/D-018-local-first-priorities.md).
+**Historical Scope Release 1 (2026-10-12, replaced by D-018):** upload/download and synchronization between Yandex Disk and local directories. This is no longer the acceptance for the current local release: Release 1 is limited to Local↔Local; the Yandex Disk controller is post-release. iCloud adapter/container/sync/backup, native spike, and E2E are not acceptance. Mentions of iCloud File Provider below refer to Local FS security, not iCloud integration. [D-017](../decisions/D-017-defer-icloud.md), [D-018](../decisions/D-018-local-first-priorities.md).
 
 ## Local controller mkdir slice (2026-10-14)
 
 - `qadren_jobs_run_local_directory_create` executes one explicit `local_mkdir_new` through the Rust `JobStore`: it persists a bound attempt before `mkdir`, fails on an existing target without overwrite, verifies the resulting directory metadata, and completes atomically with the receipt.
-- `LocalWorkspace` offers `Создать папку` only after the user has selected both a local root and an enabled `StorageConnection`; the real `connection_id` is recorded in the Job attempt, so normal disconnect/remove gating can see it. Rust independently reopens the Registry and rejects missing, non-Local or disabled connections before I/O. The native bridge test `bash scripts/test-macos-local-workspace.sh` creates a unique test root, verifies the listed directory, and confirms collision rejection.
+- `LocalWorkspace` offers `Create Folder` only after the user has selected both a local root and an enabled `StorageConnection`; the real `connection_id` is recorded in the Job attempt, so normal disconnect/remove gating can see it. Rust independently reopens the Registry and rejects missing, non-Local, or disabled connections before I/O. The native bridge test `bash scripts/test-macos-local-workspace.sh` creates a unique test root, verifies the listed directory, and confirms collision rejection.
 - This is deliberately **not** content copy or Local↔Local synchronization. macOS content reads remain fail-closed because opening a File Provider placeholder could materialize it. Unknown post-effect outcomes are not retried blindly.
 
 ## Native UI acceptance utilities — #26 (2026-10-15)
 
-- `./script/build_and_run.sh --verify --theme light` builds the real unsigned `dist/QADREN.app`, starts it with a process-only `light` override and confirms the QADREN process. The override is a launch argument and does not change the user's durable theme preference; `dark` and `system` are available by the same path.
+- `./script/build_and_run.sh --verify --theme light` builds the real unsigned `dist/QADREN.app`, starts it with a process-only `light` override, and confirms the QADREN process. The override is a launch argument and does not change the user's durable theme preference; `dark` and `system` are available by the same path.
 - A light-theme native dashboard inspection found that a nonempty Registry could incorrectly give the Connections widget a green ready indicator while all entries were `offline` or `disconnected`. The widget now derives its aggregate and row status from the enabled Registry entries: error and authorization states take priority; all unavailable entries are offline; mixed statuses are unknown; all disabled entries are paused.
-- Current evidence is build/process verification and the deterministic Dashboard layout runner. Repeat native screenshots of the Monitoring window after the status correction, narrow-window review and keyboard/VoiceOver checks remain **BLOCKED**, not passed, because the desktop automation could not retain that independently opened window in focus.
+- Current evidence is build/process verification and the deterministic Dashboard layout runner. Repeat native screenshots of the Monitoring window after the status correction, narrow-window review, and keyboard/VoiceOver checks remain **BLOCKED**, not passed, because the desktop automation could not retain that independently opened window in focus.
 
 ## Dispatcher workspace shell (2026-10-12)
 
-- macOS-клиент больше не собирает все технические элементы в одну прокручиваемую страницу. Корневая навигация разделена на два пространства: `Рабочая панель` для мониторинга и оперативных действий и `Настройка сценариев` для подключений, будущих правил и назначения Worker. Очередь и двухпанельный файловый менеджер открываются внутри рабочей панели, а не становятся конкурирующими корневыми разделами.
-- Полные пути локальных панелей доступны для выделения, сохраняются два независимых контекста панелей и множественный выбор. Это всё ещё metadata-only просмотр: содержимое не открывается и не предпросматривается.
-- Оболочка не заявляет о готовности отсутствующих частей Release 1: нет исполнения Scenario, синхронизации содержимого, безопасных copy/move/rename/delete Jobs, сохранения конфигурации панелей/окон, timeline, дерева Job или настраиваемых виджетов. Они остаются отдельными acceptance-пакетами.
-- Проверка первой версии этого изменения: `bash scripts/test-core.sh` (208 Rust tests) и `bash scripts/build-macos.sh` на macOS успешны; последняя команда собрала `dist/QADREN.app`. Последующая корректировка ниже заменила первоначальную sidebar-навигацию.
+- The macOS client no longer collects all technical elements on one scrollable page. Root navigation is divided into two spaces: `Dashboard` for monitoring and operational actions, and `Scenario Setup` for connections, future rules, and Worker assignment. The queue and dual-pane file manager open within the dashboard, rather than becoming competing root sections.
+- Full paths of local panels are available for selection; two independent panel contexts and multiple selection are preserved. This is still a metadata-only view: content is not opened or previewed.
+- The shell does not claim readiness of missing Release 1 parts: there is no Scenario execution, content synchronization, secure copy/move/rename/delete Jobs, saving of panel/window configurations, timeline, Job tree, or customizable widgets. These remain separate acceptance packages.
+- Verification of the first version of this change: `bash scripts/test-core.sh` (208 Rust tests) and `bash scripts/build-macos.sh` on macOS are successful; the last command built `dist/QADREN.app`. The subsequent adjustment below replaced the original sidebar navigation.
 
-### Независимые пространства и окна (2026-10-12)
+### Independent Spaces and Windows (2026-10-12)
 
-- Боковая панель удалена. Смена пространства выполняется через меню `Пространство` в toolbar macOS.
-- `Рабочая панель` — `WindowGroup`: каждая открытая панель мониторинга получает независимое состояние SwiftUI и может быть создана кнопкой `Новая панель`, а затем размещена пользователем на другом экране. QADREN не синхронизирует конфигурацию таких окон между устройствами.
-- `Настройка сценариев` — отдельное singleton-окно; оно открывается из того же меню и не смешивается с оперативной мониторинговой панелью.
-- Проверка: после `bash scripts/build-macos.sh` accessibility tree открытого приложения подтвердил отсутствие sidebar, меню `Пространство` и кнопку `Новая панель` в toolbar. Автоматического теста размещения на нескольких физических дисплеях нет.
+- The sidebar is removed. Switching spaces is performed via the `Space` menu in the macOS toolbar.
+- `Dashboard` — `WindowGroup`: each open monitoring panel receives an independent SwiftUI state and can be created by the `New Panel` button, then placed by the user on another screen. QADREN does not synchronize the configuration of such windows between devices.
+- `Scenario Setup` — a separate singleton window; it opens from the same menu and does not mix with the operational monitoring panel.
+- Verification: after `bash scripts/build-macos.sh`, the accessibility tree of the open application confirmed the absence of a sidebar, the presence of the `Space` menu, and the `New Panel` button in the toolbar. There is no automatic test for placement on multiple physical displays.
 
-### Меню строки меню (2026-10-12)
+### Menu Bar Menu (2026-10-12)
 
-- Системное меню QADREN использует тот же SwiftUI `openWindow(id:)`, что и toolbar. Оно не ищет произвольное `NSApp.windows` и поэтому не зависит от наличия устаревшего singleton-окна после перехода на `WindowGroup`.
-- В меню доступны `Открыть рабочую панель`, `Новая рабочая панель` и `Настройка сценариев`; это те же независимые сцены, что открываются из интерфейса приложения.
+- The QADREN system menu uses the same SwiftUI `openWindow(id:)` as the toolbar. It does not search for arbitrary `NSApp.windows` and therefore does not depend on the presence of a legacy singleton window after the transition to `WindowGroup`.
+- The menu provides `Open Dashboard`, `New Dashboard`, and `Scenario Setup`; these are the same independent scenes that open from the application interface.
 
-| Область | Автоматическая проверка | Реальная проверка | Состояние на 2026-10-09 |
+| Area | Automatic Verification | Real Verification | State as of 2026-10-09 |
 |---|---|---|---|
-| Rust Registry | `scripts/test-core.sh`, migration v1→v2, FFI, разные account IDs | Неповреждённая SQLite после обновления установки | Rust CI успешно на `ff585c7`; обновление реальной установки не проверялось |
-| macOS SwiftUI | Компиляция и проверка .app в Actions | Запуск UI и восстановление состояния окон | CI успешно; ручной smoke test отсутствует |
-| Keychain remove | Swift fault injection: disable / Job attempt gate / Keychain / Registry failures, retry, второй аккаунт | Принудительный отказ системного Keychain и повтор после перезапуска | Локальный runner проходит на 2026-10-12; системная проверка отсутствует |
-| Legacy OAuth | Проверка кода сохранения legacy до успешного импорта | Импорт старого токена на реальном Mac и rollback | Реальная проверка в этом цикле отсутствует |
-| Yandex metadata | Rust mock HTTP тесты | Авторизация, квота, 2 аккаунта, offline/401 | Исторически подтверждено в документации; в этом цикле не перепроверено |
-| Content / Yandex / Local FS / Worker | Частичные Local FS и Yandex content primitives существуют; полного Job execution нет | Реальные Яндекс↔локальный каталог и Local↔Local, consent, integrity и recovery | PARTIAL: полный E2E не подтверждён; iCloud отложен |
-| Ресурсы | CI фиксирует размер .app, без замера idle RAM/CPU | Activity Monitor, `ps`, network bytes, sleep/wake | Baseline не измерен |
-| Подпись и поставка | CI собирает неподписанный bundle | Gatekeeper, entitlement, notarization, clean install | Только future Release 1 |
+| Rust Registry | `scripts/test-core.sh`, migration v1→v2, FFI, different account IDs | Uncorrupted SQLite after installation update | Rust CI successful on `ff585c7`; update of real installation not verified |
+| macOS SwiftUI | Compilation and .app verification in Actions | UI launch and window state restoration | CI successful; manual smoke test missing |
+| Keychain remove | Swift fault injection: disable / Job attempt gate / Keychain / Registry failures, retry, second account | Forced failure of system Keychain and retry after restart | Local runner passes on 2026-10-12; system verification missing |
+| Legacy OAuth | Code verification for legacy save until successful import | Import of old token on real Mac and rollback | Real verification missing in this cycle |
+| Yandex metadata | Rust mock HTTP tests | Authorization, quota, 2 accounts, offline/401 | Historically confirmed in documentation; not re-verified in this cycle |
+| Content / Yandex / Local FS / Worker | Partial Local FS and Yandex content primitives exist; no full Job execution | Real Yandex↔local directory and Local↔Local, consent, integrity and recovery | PARTIAL: full E2E not confirmed; iCloud deferred |
+| Resources | CI records .app size, no idle RAM/CPU measurement | Activity Monitor, `ps`, network bytes, sleep/wake | Baseline not measured |
+| Signing and Delivery | CI builds unsigned bundle | Gatekeeper, entitlement, notarization, clean install | Future Release 1 only |
 
-## Обязательные инварианты
+## Mandatory Invariants
 
-- Содержимое облачных файлов QADREN не загружает на основной MacBook до явного согласия конкретной операции.
-- `connection_id` — идентификатор независимого подключения, `provider_account_id` может совпадать.
-- Удаление подключения **никогда не удаляет файлы провайдера**; сбой между Registry и Keychain не теряет возможность безопасно завершить локальную очистку.
-- Незавершённый, неподтверждённый эффект не превращается в `SUCCESS` автоматически.
-- Никакого runtime BackupSet и собственной истории версий файлов.
-- Существующие Apple-системные фоновые загрузки не блокируются.
+- QADREN does not upload cloud file content to the primary MacBook until explicit consent for a specific operation is given.
+- `connection_id` is the identifier of an independent connection; `provider_account_id` may match.
+- Removing a connection **never deletes provider files**; a failure between the Registry and Keychain does not lose the ability to safely complete local cleanup.
+- An unfinished, unconfirmed effect does not automatically become `SUCCESS`.
+- No runtime BackupSet and no internal file version history.
+- Existing Apple system background downloads are not blocked.
 
-## Перед завершением #13
+## Before Closing #13
 
-- [x] Пройден `main` CI на [ff585c7](https://github.com/Xsoid/QADREN/actions/runs/37857950583), в том числе новый Swift test runner.
-- [ ] Выполнить smoke test подписанного/локального UI на основном Mac без воздействия на пользовательские данные.
-- [ ] Подтвердить Keychain retry и legacy migration на реальном Mac с безопасными тестовыми подключениями.
-- [ ] Снять idle CPU/RAM, диск/сеть и записать версии macOS, Xcode и Rust.
-- [ ] Внести обнаруженные дефекты в отдельные Issues; не выдавать будущую поддержку iCloud за действующую.
+- [x] `main` CI passed on [ff585c7](https://github.com/Xsoid/QADREN/actions/runs/37857950583), including the new Swift test runner.
+- [ ] Perform smoke test of signed/local UI on primary Mac without affecting user data.
+- [ ] Confirm Keychain retry and legacy migration on real Mac with secure test connections.
+- [ ] Measure idle CPU/RAM, disk/network, and record macOS, Xcode, and Rust versions.
+- [ ] Enter discovered defects into separate Issues; do not present future iCloud support as current.
 
 ## Connection cleanup gate — #25 (2026-10-12)
 
-- Remove сначала переводит connection в `disabled`, затем выполняет Rust read-only gate по `connection_id`. Активная/UNKNOWN попытка, legacy attempt без target binding либо недоступность JobStore останавливают удаление до Keychain: disabled Registry record и credential остаются для recovery/reconciliation.
-- Локально пройдены `bash scripts/test-core.sh` (fmt, Clippy, 197 Rust unit tests) и `bash scripts/build-macos.sh`. Отдельный Swift fault-injection runner проверил normal flow, отказ на Job gate, Keychain и Registry, повтор после каждого отказа и независимость второй connection.
-- Реальный macOS Keychain lifecycle подтверждён отдельным test-only runner: запись, чтение, update duplicate item, delete и повторный delete для непредсказуемого `connection_id`; runner не обращается к Registry, provider или пользовательским credentials. Не выполнены проверка принудительного отказа системного Keychain, restart между disable и cleanup и live Scenario/adapter attempt. Поэтому #25 остаётся открытой и не является подтверждением готовности настоящего disconnect UX.
+- Remove first sets the connection to `disabled`, then executes a Rust read-only gate by `connection_id`. An active/UNKNOWN attempt, a legacy attempt without target binding, or JobStore unavailability stops removal before the Keychain: the disabled Registry record and credential remain for recovery/reconciliation.
+- `bash scripts/test-core.sh` (fmt, Clippy, 197 Rust unit tests) and `bash scripts/build-macos.sh` passed locally. A separate Swift fault-injection runner verified the normal flow, failure at the Job gate, Keychain and Registry, retry after each failure, and independence of a second connection.
+- Real macOS Keychain lifecycle is confirmed by a separate test-only runner: write, read, update duplicate item, delete, and repeated delete for an unpredictable `connection_id`; the runner does not access the Registry, provider, or user credentials. Forced system Keychain failure, restart between disable and cleanup, and live Scenario/adapter attempt were not performed. Therefore, #25 remains open and is not a confirmation of the readiness of the actual disconnect UX.
 
-`YandexConnection.disconnect()` использует тот же fail-closed протокол: disable → read-only attempt gate → Keychain delete → единый SQLite finalization (`disconnected`, credential reference cleared, connection снова доступно для явной reauthorization). При сбое до finalization запись остаётся disabled; удаление облачных файлов и обращение к провайдеру отсутствуют. Фактические результаты этого изменения фиксируются вместе с SHA в #25.
+`YandexConnection.disconnect()` uses the same fail-closed protocol: disable → read-only attempt gate → Keychain delete → single SQLite finalization (`disconnected`, credential reference cleared, connection available again for explicit reauthorization). If a failure occurs before finalization, the record remains disabled; deletion of cloud files and access to the provider are absent. The actual results of this change are recorded with the SHA in #25.
 
-Локальное `local_filesystem` подключение теперь не попадает в Keychain-only ветку: Remove использует disable → тот же read-only attempt gate → удаление только Registry record. Keychain, локальные пользовательские файлы и provider не затрагиваются. При unresolved attempt запись остаётся disabled для reconciliation/retry. Swift fault-injection runner дополнительно проверяет normal и blocked local flow.
+The local `local_filesystem` connection no longer enters the Keychain-only branch: Remove uses disable → same read-only attempt gate → deletion of Registry record only. Keychain, local user files, and provider are not affected. In case of an unresolved attempt, the record remains disabled for reconciliation/retry. The Swift fault-injection runner additionally verifies normal and blocked local flows.
 
 ## Scenario metadata-only dry-run planner — #19 (2026-10-12)
 
-- Rust `scenario_planner` строит детерминированный план только из разрешённых metadata snapshots и последнего подтверждённого `FileSyncState`; он не выполняет I/O, не создаёт Job и не меняет baseline.
-- `Create`/`Update` остаются предложениями. Удаление всегда требует отдельного policy decision; изменение destination и одновременные изменения дают conflict. Равенство имени/размера не считается равенством байтов: при отсутствии trusted checksum или provider revision результат `NeedsVerification`.
-- Локально пройден `bash scripts/test-core.sh` с 202 Rust tests. Нет adapter scan, persistence, FFI/UI, Job submission или E2E; #19 остаётся PARTIAL.
+- Rust `scenario_planner` builds a deterministic plan only from allowed metadata snapshots and the last confirmed `FileSyncState`; it does not perform I/O, does not create Jobs, and does not change the baseline.
+- `Create`/`Update` remain proposals. Deletion always requires a separate policy decision; changing the destination and simultaneous changes result in a conflict. Equality of name/size is not considered byte equality: in the absence of a trusted checksum or provider revision, the result is `NeedsVerification`.
+- `bash scripts/test-core.sh` with 202 Rust tests passed locally. There is no adapter scan, persistence, FFI/UI, Job submission, or E2E; #19 remains PARTIAL.
 
 ### Registry-backed preview composition — #19 (2026-10-13)
 
-- `Registry::plan_scenario_dry_run` загружает только immutable Scenario revision и его revision-bound подтверждённый `FileSyncState`, после чего передаёт caller-supplied metadata snapshots в pure planner. Тест подтверждает, что последующая смена direction не меняет preview старой revision и preview не записывает baseline.
-- Rust C ABI `qadren_scenarios_dry_run` принимает только caller-supplied JSON metadata snapshots и exact `scenario_id`/revision, затем возвращает deterministic plan с явными `create`, `update`, `conflict`, `needs_verification` или `delete_requires_decision`. FFI ограничивает каждый JSON payload 1 MiB и суммарно 10 000 entries, не сканирует adapters, не читает content, не создаёт Job, не меняет FileSyncState и не записывает policy decision. Некорректный/слишком большой JSON или revision 0 отклоняются до Registry planning. UI для этого FFI ещё не добавлен.
+- `Registry::plan_scenario_dry_run` loads only the immutable Scenario revision and its revision-bound confirmed `FileSyncState`, then passes caller-supplied metadata snapshots to the pure planner. The test confirms that a subsequent change in direction does not change the preview of the old revision and the preview does not write the baseline.
+- Rust C ABI `qadren_scenarios_dry_run` accepts only caller-supplied JSON metadata snapshots and exact `scenario_id`/revision, then returns a deterministic plan with explicit `create`, `update`, `conflict`, `needs_verification`, or `delete_requires_decision`. FFI limits each JSON payload to 1 MiB and a total of 10,000 entries, does not scan adapters, does not read content, does not create Jobs, does not change FileSyncState, and does not write policy decisions. Incorrect/too large JSON or revision 0 are rejected before Registry planning. UI for this FFI has not been added yet.
 
-- Граница намеренная: нет adapter scan, UI, чтения контента, Job submission, policy decision или записи FileSyncState. Если Registry или planner не может доказать корректный план, метод возвращает ошибку; выполнение не начинается. #19 остаётся PARTIAL до реального авторизованного metadata scan и отдельного execution path.
+- The boundary is intentional: no adapter scan, UI, content reading, Job submission, policy decision, or FileSyncState writing. If the Registry or planner cannot prove a correct plan, the method returns an error; execution does not start. #19 remains PARTIAL until real authorized metadata scan and a separate execution path are implemented.
 
 ## Automation coalescing baseline — #21 (2026-10-12)
 
-- Pure Rust state machine coalesces a burst of automatic triggers into one pending run and keeps exactly one follow-up while a Job is active. Disabled/locally paused Scenario ignores automatic triggers, while a manual request remains admissible.
-- SQLite v5 хранит только локальную паузу и один coalesced pending trigger. Active Job намеренно не дублируется: его durable ownership остаётся у JobStore и должен передаваться будущим scheduler при оценке trigger. Disable или local pause очищают pending automatic run; ни одна из этих операций не создаёт и не меняет Job.
-- Добавлен pure Rust evaluator weekly schedule на IANA timezone. `chrono-tz` встраивает только базу timezone в Rust binary, не добавляет сетевой сервис или runtime для пользователя. Повторяющийся DST slot получает один стабильный local key; несуществующий slot не создаёт запуск.
-- SQLite v6 хранит несколько валидированных расписаний на Scenario (IANA timezone, weekday, время). Это configuration-only слой: оценка времени, catch-up и создание Job ещё не подключены.
-- SQLite v7 atomically claims evaluated occurrence keys. Повторный DST slot и повтор после restart возвращают уже занятый key и не могут породить второй будущий Job.
-- `Registry::due_schedule_occurrences` читает enabled schedules только enabled/unpaused Scenario и детерминированно возвращает DST-safe кандидаты за заданный UTC interval. C ABI принимает явные RFC 3339 UTC bounds и также остаётся read-only; durable submission добавлен позднее отдельным Registry outbox.
-- Settings показывает для выбранного Scenario до пяти реальных кандидатов на следующие 14 дней через этот C ABI. Пустой список честно означает, что в этом окне нет подходящего enabled/unpaused расписания; экран не создаёт Job, не claim-ит occurrence и не выполняет adapter/content I/O.
-- Settings также показывает и меняет durable локальную паузу автоматизации Scenario через узкий FFI. Пауза очищает только ожидающий automatic trigger, сохраняется в Registry и исключает Scenario из candidate evaluation; существующие Job не меняются, а ручные запросы остаются отдельным путём.
-- `scripts/test-macos-scenario-schedules.sh` создаёт отдельный временный Registry и проверяет Swift/FFI bridge: enabled weekly UTC schedule возвращает ровно один ожидаемый slot, пауза сохраняется и исключает candidate, а повторный read-only запрос не меняет occurrence. Локально пройдены `bash scripts/test-core.sh` с 231 Rust tests, native runner, `bash scripts/test-macos-job-inventory.sh`, `bash scripts/test-macos-keychain.sh` и `bash scripts/build-macos.sh`. Restart-тест подтверждает сохранение pending/pause. На тот момент не было catch-up orchestration, event debounce, priority aging или Job submission; outbox bridge добавлен ниже. #21 остаётся PARTIAL.
+- A pure Rust state machine coalesces a burst of automatic triggers into one pending run and keeps exactly one follow-up while a Job is active. A disabled/locally paused Scenario ignores automatic triggers, while a manual request remains admissible.
+- SQLite v5 stores only the local pause and one coalesced pending trigger. An active Job is deliberately not duplicated: its durable ownership remains with the JobStore and must be passed to the future scheduler when evaluating a trigger. Disable or local pause clears the pending automatic run; neither of these operations creates or changes a Job.
+- A pure Rust evaluator for a weekly schedule based on IANA timezone is added. `chrono-tz` embeds only the timezone database into the Rust binary, not a network service or runtime for the user. A repeating DST slot receives one stable local key; a non-existent slot does not create a launch.
+- SQLite v6 stores several validated schedules per Scenario (IANA timezone, weekday, time). This is a configuration-only layer: time evaluation, catch-up, and Job creation are not yet connected.
+- SQLite v7 atomically claims evaluated occurrence keys. A repeated DST slot and a repeat after restart return an already occupied key and cannot produce a second future Job.
+- `Registry::due_schedule_occurrences` reads enabled schedules only for enabled/unpaused Scenarios and deterministically returns DST-safe candidates for a given UTC interval. The C ABI accepts explicit RFC 3339 UTC bounds and also remains read-only; durable submission is added later via a separate Registry outbox.
+- Settings shows up to five real candidates for the next 14 days for the selected Scenario via this C ABI. An empty list honestly means there is no suitable enabled/unpaused schedule in this window; the screen does not create Jobs, does not claim occurrences, and does not perform adapter/content I/O.
+- Settings also shows and changes the durable local pause of Scenario automation via a narrow FFI. The pause clears only the pending automatic trigger, is saved in the Registry, and excludes the Scenario from candidate evaluation; existing Jobs are not changed, and manual requests remain a separate path.
+- `scripts/test-macos-scenario-schedules.sh` creates a separate temporary Registry and verifies the Swift/FFI bridge: an enabled weekly UTC schedule returns exactly one expected slot, the pause is saved and excludes the candidate, and a repeated read-only request does not change the occurrence. `bash scripts/test-core.sh` with 231 Rust tests, native runner, `bash scripts/test-macos-job-inventory.sh`, `bash scripts/test-macos-keychain.sh`, and `bash scripts/build-macos.sh` passed locally. A restart test confirms the preservation of pending/pause. At that time, there was no catch-up orchestration, event debounce, priority aging, or Job submission; the outbox bridge is added below. #21 remains PARTIAL.
 
 ### Durable schedule outbox — #21 (2026-10-14)
 
 - Registry schema v9 atomically records a DST-safe schedule receipt and one pending Job outbox item for the immutable current Scenario revision. A slot is not consumed without a durable future submission request.
-- `schedule_dispatch::dispatch_pending_schedule_jobs` reads only this outbox and enqueues the exact Scenario-bound Job in the existing `JobStore`; it does not execute a Scenario, touch adapters, read content or start a timer.
+- `schedule_dispatch::dispatch_pending_schedule_jobs` reads only this outbox and enqueues the exact Scenario-bound Job in the existing `JobStore`; it does not execute a Scenario, touch adapters, read content, or start a timer.
 - Registry and JobStore deliberately remain separate SQLite databases. A restart after the JobStore commit but before the outbox acknowledgement observes the same Job identity/revision and marks the request dispatched without creating another Job. A mismatching existing Job fails closed.
-- This is not a scheduler service or transfer path: catch-up policy/window ownership, event debounce, queue priority/aging, FFI/UI runtime and Scenario execution remain unimplemented.
+- This is not a scheduler service or transfer path: catch-up policy/window ownership, event debounce, queue priority/aging, FFI/UI runtime, and Scenario execution remain unimplemented.
 
 ### Scheduler dispatch C ABI — #21 (2026-10-14)
 
@@ -117,521 +117,521 @@
 
 ## Scoped destructive-operation consent — #20 (2026-10-12)
 
-- Pure Rust policy gate допускает destructive operation только с explicit accepted decision для точных operation, connection, relative path и срока. Нет решения, deny, expiry или несовпадение scope означают fail-closed.
-- Локально пройдены `bash scripts/test-core.sh` с 208 Rust tests и `bash scripts/build-macos.sh`. Нет durable decisions, UI prompt, adapter pre-I/O recheck или E2E; #20 остаётся PARTIAL.
+- Pure Rust policy gate permits destructive operation only with explicit accepted decision for exact operation, connection, relative path and term. No decision, deny, expiry or scope mismatch means fail-closed.
+- `bash scripts/test-core.sh` with 208 Rust tests and `bash scripts/build-macos.sh` passed locally. No durable decisions, UI prompt, adapter pre-I/O recheck or E2E; #20 remains PARTIAL.
 
-Следующий минимальный durable слой хранит решение только для Job в `waiting_for_decision`: SQLite v8 связывает его с точными operation/connection/relative path и сроком. Accepted decision расходуется атомарно ровно один раз; denied, expired, повторное или scope-mismatched решение блокируют операцию. Запись/расходование не выполняют adapter I/O; если процесс завершится после расходования и до будущего effect, Job остаётся в ожидании, а для повтора потребуется новое явное решение. UI prompt, adapter pre-I/O recheck и реальные destructive operations по-прежнему не реализованы.
+The next minimum durable layer stores the decision only for Job in `waiting_for_decision`: SQLite v8 links it to exact operation/connection/relative path and term. Accepted decision is consumed atomically exactly one time; denied, expired, repeated or scope-mismatched decision blocks the operation. Write/consumption does not perform adapter I/O; if the process terminates after consumption and before future effect, Job remains waiting, and a repeat requires a new explicit decision. UI prompt, adapter pre-I/O recheck and real destructive operations are still not implemented.
 
 ## Local metadata workspace — #22 (2026-10-12)
 
-- Пользователь выбирает локальную папку на текущую сессию; Rust FFI показывает только metadata entries и создаёт подпапку. Content read, copy, move и delete не доступны.
+- User selects a local folder for the current session; Rust FFI shows only metadata entries and creates a subfolder. Content read, copy, move and delete are not available.
 
-Рабочий процесс: небольшие коммиты напрямую в `main`, обязательное ожидание CI и регистрация ограничений; ветки документации не создаются.
+Workflow: small commits directly to `main`, mandatory waiting for CI and registration of constraints; documentation branches are not created.
 
 ## Local Filesystem Adapter — #15 (2026-10-11)
 
-- Подтверждено пользователем на macOS для `f5f6bab`: `bash scripts/test-core.sh`, 95/95 Rust unit tests, 0 failures; форматирование и Clippy пройдены. Это не подтверждает будущие операции rename/move/delete и не является E2E iCloud.
-- В `340ab81` устранён обход проверки каталога через `list_page(..., limit=0)`: даже пустая страница требует полноценной проверки директории. Добавлен тест отсутствующего пути, обычного файла и symlink.
-- `340ab81` пока **не прошёл подтверждённые CI/macOS тесты**. Считать его требующим проверки, не закрывать #15.
-- Продолжают оставаться запрещёнными: автоматическое materialize/download на основном MacBook, небезопасные rename/move/delete и использование незавершённого адаптера для destructive Jobs.
+- User confirmed on macOS for `f5f6bab`: `bash scripts/test-core.sh`, 95/95 Rust unit tests, 0 failures; formatting and Clippy passed. This does not confirm future rename/move/delete operations and is not E2E iCloud.
+- In `340ab81` bypass of directory check via `list_page(..., limit=0)` is removed: even an empty page requires full directory verification. Added test for missing path, regular file and symlink.
+- `340ab81` has **not passed confirmed CI/macOS tests** yet. Consider it requiring verification, do not close #15.
+- The following remain prohibited: automatic materialize/download on main MacBook, unsafe rename/move/delete and use of unfinished adapter for destructive Jobs.
 
 ### Root confinement hardening (2026-10-11)
 
-- После подтверждения 95/95 unit tests на `98d79dd`, в `a657bb4` изменено открытие Unix root: теперь путь обходится по компонентам через `openat(O_DIRECTORY|O_NOFOLLOW)`, поскольку `O_NOFOLLOW` на полном пути защищает только последний компонент.
-- `dc0bdbf` добавляет негативный тест на промежуточную symlink в пути root; при отказе не должно происходить обхода за пределами заданной директории.
-- Новые коммиты требуют проверки fmt/Clippy/macOS tests. Безопасные rename/move/delete и проверка iCloud residency по-прежнему не готовы; запрет чтения контента на основном Mac сохранён.
+- After confirmation of 95/95 unit tests on `98d79dd`, Unix root opening is changed in `a657bb4`: now path is traversed by components via `openat(O_DIRECTORY|O_NOFOLLOW)`, because `O_NOFOLLOW` on full path protects only the last component.
+- `dc0bdbf` adds negative test for intermediate symlink in root path; upon failure, no traversal outside the specified directory shall occur.
+- New commits require fmt/Clippy/macOS tests verification. Safe rename/move/delete and iCloud residency check are still not ready; prohibition of content read on main Mac is preserved.
 
-### Подтверждение root confinement и новая гонка публикации (2026-10-11)
+### Root confinement confirmation and new publication race (2026-10-11)
 
-- Пользователь выполнил `scripts/test-core.sh` на `acad913`: fmt и Clippy пройдены, 96/96 unit tests и 0 doc-tests успешны.
-- `744856c` добавляет тест подмены **конечного имени** уже после `linkat`: операция должна вернуть `OutcomeUnknown`, сохранить чужой конечный файл и исходные байты по перемещённому имени. Это regression / fault injection, **не доказательство атомарности против активного злоумышленника**.
-- Новый тест ещё не подтверждён на macOS. Безопасные move/rename/delete и iCloud placeholder materialization остаются блокерами #15.
+- User executed `scripts/test-core.sh` on `acad913`: fmt and Clippy passed, 96/96 unit tests and 0 doc-tests successful.
+- `744856c` adds test for **final name** substitution after `linkat`: operation shall return `OutcomeUnknown`, preserve foreign final file and original bytes by moved name. This is regression / fault injection, **not proof of atomicity against active attacker**.
+- New test is not yet confirmed on macOS. Safe move/rename/delete and iCloud placeholder materialization remain blockers for #15.
 
-### Проверка после 97/97 и дополнительная защита staging (2026-10-11)
+### Verification after 97/97 and additional staging protection (2026-10-11)
 
-- Пользователь подтвердил на MacBook `7aa841d`: `scripts/test-core.sh` — fmt/Clippy clean, 97/97 unit tests passed, 0 doc-tests.
-- `20b19bb`: после удаления staging name и синхронизации каталога дополнительно перепроверяется inode конечного имени с ожидаемым числом ссылок 1. Несовпадение возвращает `OutcomeUnknown`, а не ложный успех.
-- `f00a0e8`: негативный тест внешнего hardlink на staging inode во время чтения. Публикация должна быть отвергнута и чужая ссылка не должна удаляться.
-- Текущие два патча ещё **не подтверждены тестами macOS**. Проверки не являются гарантией защиты против враждебного процесса с конкурентным доступом на запись в тот же каталог. До её проектирования небезопасные move/rename/delete и автоматическое чтение content на macOS остаются отключёнными.
+- User confirmed `7aa841d` on MacBook: `scripts/test-core.sh` — fmt/Clippy clean, 97/97 unit tests passed, 0 doc-tests.
+- `20b19bb`: after staging name removal and directory synchronization, inode of final name is additionally re-verified with expected link count 1. Mismatch returns `OutcomeUnknown`, not false success.
+- `f00a0e8`: negative test of external hardlink to staging inode during read. Publication shall be rejected and foreign link shall not be deleted.
+- Current two patches are **not yet confirmed by macOS tests**. Verifications are not a guarantee of protection against hostile process with concurrent write access to the same directory. Until its design, unsafe move/rename/delete and automatic content read on macOS remain disabled.
 
-### Capabilities локального адаптера (2026-10-11)
+### Local adapter capabilities (2026-10-11)
 
-- Пользователь проверил `805ce3d` на MacBook: fmt/Clippy успешны, 98/98 unit tests passed, doc-tests 0.
-- `9deeb67` добавляет `LocalFilesystem::capabilities()` на основе реально включённых функций: чтение содержимого — только Linux, создание новых файлов и каталогов — Unix, операции delete/rename по-прежнему запрещены. Для Windows поддержка только metadata, остальное fail-closed.
-- Добавлен тест непротиворечивости capabilities. Новая проверка пока не выполнена на macOS; capabilities не отменяют требования индивидуального согласия на чтение содержимого.
+- User checked `805ce3d` on MacBook: fmt/Clippy successful, 98/98 unit tests passed, doc-tests 0.
+- `9deeb67` adds `LocalFilesystem::capabilities()` based on actually enabled functions: content read — Linux only, creation of new files and directories — Unix, delete/rename operations still prohibited. For Windows, only metadata is supported, others fail-closed.
+- Added capabilities consistency test. New check is not yet performed on macOS; capabilities do not cancel requirements for individual consent for content read.
 
 ### Scoped local copy — #15 (2026-10-11)
 
-- Пользователь подтвердил `df2fff5`: `scripts/test-core.sh`, fmt/Clippy без ошибок, 99/99 Rust unit tests, 0 doc-test failures.
-- `44909b5` добавляет `copy_file_new(from, to, consent)`: Linux читает через pinned descriptor и публикует только новый файл без overwrite; отказ в consent запрещает чтение и создание. На macOS метод намеренно fail-closed даже при consent до верификации File Provider placeholder residency; не считать этот путь готовым для macOS.
-- Добавлен негативный тест отсутствия согласия, существующего destination и неизменности данных; для Linux также успешная локальная копия.
-- Новый код ещё не подтверждён macOS CI/локальным запуском; операция не подключена к Job Engine. Rename/move/delete, macOS content residency и настоящие fault-injection испытания остаются открытыми.
+- User confirmed `df2fff5`: `scripts/test-core.sh`, fmt/Clippy without errors, 99/99 Rust unit tests, 0 doc-test failures.
+- `44909b5` adds `copy_file_new(from, to, consent)`: Linux reads via pinned descriptor and publishes only new file without overwrite; lack of consent prohibits read and creation. On macOS, method intentionally fail-closed even with consent before File Provider placeholder residency verification; do not consider this path ready for macOS.
+- Added negative test for lack of consent, existing destination and data immutability; for Linux also successful local copy.
+- New code is not yet confirmed by macOS CI/local run; operation is not connected to Job Engine. Rename/move/delete, macOS content residency and real fault-injection trials remain open.
 
 ### Local copy safety regression (2026-10-11)
 
-- Пользователь подтвердил `ca747a0`: `scripts/test-core.sh`, fmt/Clippy пройдены, **100/100** Rust tests, doc-tests (0) успешны.
-- `38d5c99` добавляет негативный тест `copy_file_new`: отклонение source/destination с `..`, отсутствующего source и symlink источника (Unix), без публикации целевого файла или изменения исходного содержимого.
-- Дополнительный тест ещё не проверен на macOS. На macOS content read/copy остаются fail-closed до residency проверки; недоверенные перемещения, переименования и удаления не реализованы.
+- User confirmed `ca747a0`: `scripts/test-core.sh`, fmt/Clippy passed, **100/100** Rust tests, doc-tests (0) successful.
+- `38d5c99` adds negative test `copy_file_new`: rejection of source/destination with `..`, missing source and source symlink (Unix), without target file publication or source content change.
+- Additional test is not yet checked on macOS. On macOS content read/copy remain fail-closed until residency check; untrusted moves, renames and deletes are not implemented.
 
 ### Copy source consistency check (2026-10-11)
 
-- Пользователь подтвердил `58d4f9b`: `scripts/test-core.sh`, 101/101 unit tests, fmt и Clippy успешны.
-- `7821669`, `2358b8b`, `cf88625`: после Linux-only copy выполняется контроль размера и времени модификации исходного открытого файла. Изменение во время копирования классифицируется `OutcomeUnknown`, целевой файл может существовать и не должен автоматически перезаписываться. Добавлен Linux-only regression test изменения исходного файла.
-- Контроль метаданных **не является snapshot isolation или проверкой хеша**: переписывание с тем же размером и временем модификации может остаться незамеченным. Новые проверки на Mac и Linux ещё не подтверждены. macOS content read по-прежнему отключён.
+- User confirmed `58d4f9b`: `scripts/test-core.sh`, 101/101 unit tests, fmt and Clippy successful.
+- `7821669`, `2358b8b`, `cf88625`: after Linux-only copy, size and modification time of original open file are checked. Change during copy is classified as `OutcomeUnknown`, target file may exist and shall not be automatically overwritten. Added Linux-only regression test for source file change.
+- Metadata check **is not snapshot isolation or hash check**: rewriting with same size and modification time may remain unnoticed. New checks on Mac and Linux are not yet confirmed. macOS content read is still disabled.
 
-### Усиление проверки источника при Linux-копировании (2026-10-11)
+### Source verification hardening during Linux copy (2026-10-11)
 
-- Пользователь подтвердил `8dfdcf5` на macOS: fmt/Clippy clean, 101/101 tests, doc-tests 0.
-- `b6f265e` проверяет открытый исходный inode (`dev`, `ino`), длину, `mtime` и `ctime` с наносекундами и число переданных байтов. Добавлен Linux-only тест обнаружения неполной передачи.
-- При несоответствии после публикации возвращается `OutcomeUnknown`; автоматический повтор недопустим.
-- **Предел:** проверки метаданных не обеспечивают snapshot и не гарантируют обнаружение подмены байтов с восстановленными метаданными. Новые тесты Linux не проверены в реальном Linux-окружении; macOS не исполняет этот `cfg(target_os = "linux")` путь.
+- User confirmed `8dfdcf5` on macOS: fmt/Clippy clean, 101/101 tests, doc-tests 0.
+- `b6f265e` checks open source inode (`dev`, `ino`), length, `mtime` and `ctime` with nanoseconds and number of transferred bytes. Added Linux-only test for incomplete transfer detection.
+- On mismatch after publication, `OutcomeUnknown` is returned; automatic repeat is not permitted.
+- **Limit:** metadata checks do not provide snapshot and do not guarantee detection of byte substitution with restored metadata. New Linux tests are not verified in real Linux environment; macOS does not execute this `cfg(target_os = "linux")` path.
 
 ### Linux streaming read consistency (2026-10-11)
 
-- Пользователь подтвердил `c6f83fd` на macOS: `scripts/test-core.sh`, 101/101 Rust unit tests, fmt/Clippy без ошибок.
-- `66a067d` добавляет после Linux `read_to_writer` проверку сохранности метаданных **того же открытого исходного inode** и количества реально переданных байтов; обнаруженная мутация возвращает `OutcomeUnknown`, поскольку получатель уже мог принять данные.
-- Добавлен Linux-only тест с Writer, изменяющим исходный файл во время потокового чтения. Этот код и тест **не выполнены на Linux**; macOS не исполняет его и продолжает запрещать чтение файлового содержимого.
-- Проверка inode/mtime/ctime/длины не является консистентным снапшотом и не доказывает идентичность байтов.
+- User confirmed `c6f83fd` on macOS: `scripts/test-core.sh`, 101/101 Rust unit tests, fmt/Clippy without errors.
+- `66a067d` adds check after Linux `read_to_writer` for preservation of metadata of **the same open source inode** and number of actually transferred bytes; detected mutation returns `OutcomeUnknown`, because receiver might have already accepted data.
+- Added Linux-only test with Writer that changes source file during streaming read. This code and test **not executed on Linux**; macOS does not execute it and continues to prohibit file content read.
+- Inode/mtime/ctime/length check is not a consistent snapshot and does not prove byte identity.
 
 ### Nested local directory creation (2026-10-11)
 
-- Пользователь подтвердил `571de26`: `scripts/test-core.sh`, 101/101 macOS Rust tests, fmt и Clippy пройдены.
-- `1fc6ab4` / `346205b` добавляют `LocalFilesystem::create_directory_tree` с пошаговым созданием отсутствующих вложенных папок внутри pinned root без обхода symlink, без замены существующих объектов. Результат — количество созданных каталогов.
-- Если после создания хотя бы одного каталога следующая операция завершается ошибкой, возвращается `OutcomeUnknown`; уже созданные папки сохраняются для сверки, автоматический rollback отсутствует. Тесты проверяют успешное/повторное создание, отказ для файла в пути, traversal и частичный успех при компоненте пути длиной 300 символов.
-- Новый функциональный срез **ещё не проверен на macOS**; никакие destructive операции или macOS content read не включены.
+- User confirmed `571de26`: `scripts/test-core.sh`, 101/101 macOS Rust tests, fmt and Clippy passed.
+- `1fc6ab4` / `346205b` add `LocalFilesystem::create_directory_tree` with step-by-step creation of missing nested folders inside pinned root without symlink traversal, without replacing existing objects. Result is number of created directories.
+- If after creation of at least one directory the next operation ends with error, `OutcomeUnknown` is returned; already created folders are preserved for reconciliation, automatic rollback is absent. Tests check successful/repeated creation, failure for file in path, traversal and partial success with path component length 300 characters.
+- New functional slice **not yet verified on macOS**; no destructive operations or macOS content read are included.
 
-### Конкурентное создание каталогов (2026-10-11)
+### Concurrent directory creation (2026-10-11)
 
-- Пользователь подтвердил `fdf43a9` на Mac: `scripts/test-core.sh`, 103/103 tests, форматирование и Clippy пройдены.
-- `e8f9c27`: `create_directory_tree` при `AlreadyExists` после проверки отсутствия компонента повторно проверяет, что появился именно каталог в pinned root. Символические ссылки и обычные файлы не считаются успешным созданием.
-- Добавлен Unix-тест, подтверждающий, что ссылка внутри корня не позволяет создать вложенный каталог за его пределами.
-- Текущий коммит ещё не проверен на Mac; тест не доказывает отсутствие всех гонок между отдельными шагами. Move/rename/delete и чтение File Provider placeholders на главном Mac по-прежнему отключены.
+- User confirmed `fdf43a9` on Mac: `scripts/test-core.sh`, 103/103 tests, formatting and Clippy passed.
+- `e8f9c27`: `create_directory_tree` upon `AlreadyExists` after check for component absence re-verifies that a directory appeared in pinned root. Symbolic links and regular files are not considered successful creation.
+- Added Unix test confirming that link inside root does not allow creation of nested directory outside it.
+- Current commit is not yet verified on Mac; test does not prove absence of all races between individual steps. Move/rename/delete and read of File Provider placeholders on main Mac are still disabled.
 
 ### Partial streaming output safety (2026-10-11)
 
-- Пользователь подтвердил `6ac84ef`: `scripts/test-core.sh`, fmt/Clippy clean, 104/104 macOS tests passed, 0 doc-tests.
-- `ddc96b0` изменяет Linux `read_to_writer`: ошибка из `io::copy` теперь `OutcomeUnknown`, потому что при передаче получатель мог принять часть байтов и автоматический повтор небезопасен. Добавлен Linux-only тест Writer, который принимает один байт и отказывает на следующем вызове.
-- Новый патч ещё не проверен на macOS/Linux. Не завершены safe rename/move/delete, macOS placeholder guard и основные acceptance-тесты #15.
+- User confirmed `6ac84ef`: `scripts/test-core.sh`, fmt/Clippy clean, 104/104 macOS tests passed, 0 doc-tests.
+- `ddc96b0` changes Linux `read_to_writer`: error from `io::copy` is now `OutcomeUnknown`, because during transfer receiver might have accepted part of bytes and automatic repeat is unsafe. Added Linux-only test Writer that accepts one byte and fails on next call.
+- New patch is not yet verified on macOS/Linux. Safe rename/move/delete, macOS placeholder guard and main acceptance tests #15 are not completed.
 
 ### Local filesystem capacity inspection (2026-10-11)
 
-- Пользователь проверил `e91f0fb` на macOS: `scripts/test-core.sh`, fmt/Clippy passed, 104/104 Rust unit tests, doc-tests 0.
-- `94158a5`: добавлен read-only `LocalFilesystem::storage_space()` с `fstatvfs` закреплённого дескриптора корня на Unix. Возвращает общий и доступный объём байтов без чтения содержимого файлов. Добавлен тест, включающий проверку после удаления имени корневого каталога при живом pinned descriptor.
-- Значения не являются резервированием дискового пространства и не доказывают возможность последующей записи; ENOSPC в реальной операции всё равно обрабатывается отдельно. На неподдерживаемых платформах возвращается отказ. Новый патч пока не проверен на Mac.
+- User checked `e91f0fb` on macOS: `scripts/test-core.sh`, fmt/Clippy passed, 104/104 Rust unit tests, doc-tests 0.
+- `94158a5`: read-only `LocalFilesystem::storage_space()` added with `fstatvfs` of pinned root descriptor on Unix. Returns total and available bytes without reading file content. Added test including check after root directory name removal with live pinned descriptor.
+- Values are not disk space reservation and do not prove possibility of subsequent write; ENOSPC in real operation is still handled separately. On unsupported platforms, failure is returned. New patch is not yet verified on Mac.
 
 ### Capacity preflight with safety reserve (2026-10-11)
 
-- Пользователь подтвердил `1e12af3` на macOS: `scripts/test-core.sh`, fmt/Clippy successful, 105/105 unit tests, doc-tests 0.
-- `b9a954f` добавляет `require_free_space(incoming_bytes, reserve_bytes)` с проверкой переполнения суммы и сравнением с `storage_space()` по pinned descriptor, без чтения содержимого файлов и без создания объекта. Новый Unix тест проверяет нулевой запрос, переполнение и запрос сверх доступного объёма.
-- Это **предварительный отказ**, не резервирование и не транзакция; параллельные процессы могут занять пространство, поэтому обработка ENOSPC во время фактической записи остаётся обязательной. Метод пока не интегрирован в исполнение Jobs.
-- Новые изменения **не проверены на macOS**; операции move/rename/delete и guard iCloud placeholders не реализованы.
+- User confirmed `1e12af3` on macOS: `scripts/test-core.sh`, fmt/Clippy successful, 105/105 unit tests, 0 doc-tests.
+- `b9a954f` adds `require_free_space(incoming_bytes, reserve_bytes)` with sum overflow check and comparison with `storage_space()` via pinned descriptor, without reading file content and without creating an object. A new Unix test checks zero request, overflow, and requests exceeding available volume.
+- This is a **preliminary rejection**, not a reservation or a transaction; parallel processes may occupy space, therefore ENOSPC handling during actual writing remains mandatory. The method is not yet integrated into Jobs execution.
+- New changes are **not verified on macOS**; move/rename/delete operations and iCloud placeholder guards are not implemented.
 
 ### Reserved local file creation (2026-10-11)
 
-- Пользователь подтвердил `6ce4d3a` на macOS: `scripts/test-core.sh`, форматирование и Clippy без ошибок, 106/106 unit tests, 0 doc-tests.
-- `c867ecd` добавляет `create_with_space_reserve` — проверку требуемого размера и резерва непосредственно перед `create_from_reader`. Ошибка предварительной проверки не открывает Reader и не создаёт файл. Добавлен Unix-тест `PanicReader`, доказывающий отсутствие чтения при переполнении суммы.
-- Это НЕ гарантирует наличие места во время записи и не заменяет ENOSPC/OutcomeUnknown обработку в существующем атомарном writer. Реальный размер входного потока пока не проверяется против `expected_bytes`; новый патч ещё не проверен на Mac.
+- User confirmed `6ce4d3a` on macOS: `scripts/test-core.sh`, formatting and Clippy without errors, 106/106 unit tests, 0 doc-tests.
+- `c867ecd` adds `create_with_space_reserve` — a check of required size and reserve immediately before `create_from_reader`. A pre-check error does not open the Reader and does not create the file. A Unix test `PanicReader` is added to prove no reading occurs during sum overflow.
+- This DOES NOT guarantee space availability during writing and does not replace ENOSPC/OutcomeUnknown handling in the existing atomic writer. The actual size of the input stream is not yet checked against `expected_bytes`; the new patch is not yet verified on Mac.
 
 ### Exact declared size for reserved file creation (2026-10-11)
 
-- Пользователь проверил `2e3fa3f` на Mac: `scripts/test-core.sh` fmt/Clippy clean, **107/107** unit tests, 0 doc-tests failures.
-- `d96b1c6`, `f5b7a91`: `create_with_space_reserve` применяет streaming `ExactSizeReader` к передаваемым данным. Он блокирует публикацию, если источник раньше времени завершился либо оказался длиннее `expected_bytes`. При ошибке временная запись очищается существующим механизмом `create_from_reader`; тест покрывает короткий, длинный и точный источник.
-- Новый тест и изменения ещё **не проверены** на macOS. Метод не резервирует свободное место и не обеспечивает snapshot содержимого. Любое изменение после публикации по-прежнему требует обычной процедуры reconciliation.
+- User verified `2e3fa3f` on Mac: `scripts/test-core.sh` fmt/Clippy clean, **107/107** unit tests, 0 doc-tests failures.
+- `d96b1c6`, `f5b7a91`: `create_with_space_reserve` applies a streaming `ExactSizeReader` to the passed data. It blocks publication if the source ends prematurely or is longer than `expected_bytes`. Upon error, the temporary write is cleared by the existing `create_from_reader` mechanism; the test covers short, long, and exact sources.
+- The new test and changes are **not yet verified** on macOS. The method does not reserve free space and does not provide a content snapshot. Any change after publication still requires the standard reconciliation procedure.
 
 ### Guarded local copy with reserve (2026-10-11)
 
-- Пользователь подтвердил `7c6c5ad` на Mac: форматирование и Clippy без ошибок, **108/108** unit tests, doc-tests 0.
-- `004f9f2` добавляет `copy_file_new_with_reserve`: Linux-only чтение исходного файла через закреплённый дескриптор, проверка свободного места с резервом и точной длины до атомарной публикации, проверка метаданных открытого source после создания. Тест защищает существующий destination и подтверждает fail-closed без согласия или на macOS.
-- На macOS чтение содержимого всё ещё блокируется даже после consent. На Linux файловые мутации источника при копировании по-прежнему проверяются только по метаданным, не как snapshot. Код нового патча пока не проверен локальными тестами Linux/macOS; rename/move/delete ещё не реализованы.
+- User confirmed `7c6c5ad` on Mac: formatting and Clippy without errors, **108/108** unit tests, 0 doc-tests.
+- `004f9f2` adds `copy_file_new_with_reserve`: Linux-only reading of the source file via pinned descriptor, free space check with reserve and exact length before atomic publication, and open source metadata check after creation. The test protects the existing destination and confirms fail-closed behavior without consent or on macOS.
+- On macOS, reading content is still blocked even after consent. On Linux, source file mutations during copying are still checked only by metadata, not as a snapshot. The new patch code is not yet verified by local Linux/macOS tests; rename/move/delete are not yet implemented.
 
 ### Read-only move preflight (2026-10-11)
 
-- Пользователь подтвердил `4b385d4` на macOS: форматирование, Clippy, компиляция и **109/109 unit tests**, 0 doc-tests ошибок.
-- `d422a7c` добавляет `preview_move_new(from, to)` как read-only проверку: пути остаются внутри pinned root, source должен быть обычным файлом, destination отсутствует, parent destination существует и является каталогом. Возвращаются метаданные source, никакие данные не читаются и ни один объект не перемещается. Тест проверяет предпросмотр, конфликт, traversal и отсутствие изменений в source/destination.
-- Результат предварительной проверки не гарантирует безопасности последующего rename из-за TOCTOU; `move_file_new` остаётся заблокированным до identity-preserving реализации и adversarial tests. Код нового патча ещё не проверен на Mac.
+- User confirmed `4b385d4` on macOS: formatting, Clippy, compilation and **109/109 unit tests**, 0 doc-tests errors.
+- `d422a7c` adds `preview_move_new(from, to)` as a read-only check: paths must remain inside the pinned root, source must be a regular file, destination must not exist, and destination parent must exist and be a directory. Source metadata is returned; no data is read and no object is moved. The test verifies preview, conflict, traversal, and the absence of changes in source/destination.
+- The pre-check result does not guarantee the safety of a subsequent rename due to TOCTOU; `move_file_new` remains blocked until an identity-preserving implementation and adversarial tests are available. The new patch code is not yet verified on Mac.
 
 ### Descriptor-relative file identity (2026-10-11)
 
-- Пользователь подтвердил `15e7e0a` на macOS: форматирование, Clippy и 110/110 Rust unit tests без ошибок.
-- `28a8712`, `d9934c6`: введены `LocalFileIdentity` (device/inode/size) и `LocalFilesystem::file_identity(path)`. Unix реализация использует `fstatat(AT_SYMLINK_NOFOLLOW)` относительно pinned root, не открывает содержимое; тест проверяет сохранение идентичности после внешнего переименования и запрет traversal.
-- Полученный идентификатор пригоден для сопоставления результатов и reconciliation, **не предоставляет атомарное право на rename/unlink**. Повторное сравнение inode и pathname само по себе не устраняет TOCTOU/ABA. `move_file_new` остаётся fail-closed, destructive delete не добавлен. Новый код ещё не подтверждён на Mac.
+- User confirmed `15e7e0a` on macOS: formatting, Clippy and 110/110 Rust unit tests without errors.
+- `28a8712`, `d9934c6`: `LocalFileIdentity` (device/inode/size) and `LocalFilesystem::file_identity(path)` are introduced. The Unix implementation uses `fstatat(AT_SYMLINK_NOFOLLOW)` relative to the pinned root and does not open content; the test verifies identity preservation after external renaming and traversal prohibition.
+- The obtained identifier is suitable for matching results and reconciliation, but **does not provide an atomic right to rename/unlink**. Repeated comparison of inode and pathname does not eliminate TOCTOU/ABA. `move_file_new` remains fail-closed; destructive delete is not added. The new code is not yet confirmed on Mac.
 
 ### Move preview inode revalidation (2026-10-11)
 
-- Пользователь подтвердил `8c8d9e0` на macOS: fmt/Clippy без ошибок, **111/111** Rust tests passed, 0 doc-tests.
-- `dd04ce5` добавляет read-only `revalidate_move_new(from, to, expected)` — повторная проверка идентичности inode source и отсутствия destination, без открытия содержимого и без изменения файлов. Unix-тест заменяет source после предпросмотра и проверяет отказ с сохранением данных.
-- Повторная проверка сама по себе не устраняет TOCTOU после возврата. `move_file_new` и destructive operations остаются заблокированными. Новые изменения пока не проверены на Mac.
+- User confirmed `8c8d9e0` on macOS: fmt/Clippy without errors, **111/111** Rust tests passed, 0 doc-tests.
+- `dd04ce5` adds read-only `revalidate_move_new(from, to, expected)` — a repeated check of source inode identity and absence of destination, without opening content and without changing files. A Unix test replaces the source after preview and verifies rejection while preserving data.
+- Revalidation does not eliminate TOCTOU after return. `move_file_new` and destructive operations remain blocked. New changes are not yet verified on Mac.
 
 ### Case-collision guarded creation (2026-10-11)
 
-- Пользователь подтвердил `3085447` на Mac: fmt, Clippy и **112/112** unit tests без ошибок.
-- `112b2f9` добавляет отдельный `create_from_reader_case_guarded`: перед атомарной записью новый метод сканирует каталог назначения (через descriptor-relative Unix list) и консервативно отклоняет имена, совпадающие после Unicode lowercase. Тест проверяет `Report.TXT` против `report.txt` до чтения Reader, неизменность исходного объекта и создание свободного имени.
-- Это **дополнительная проверка, не доказательство отсутствия всех Unicode/locale/case-folding коллизий**; финальную защиту от перезаписи по-прежнему обеспечивает атомарный no-overwrite writer. При небезопасных объектах в каталоге list может вернуть отказ; 기존 `create_from_reader` не изменён. Патч не проверен на Mac; move/rename/delete остаются fail-closed.
+- User confirmed `3085447` on Mac: fmt, Clippy and **112/112** unit tests without errors.
+- `112b2f9` adds a separate `create_from_reader_case_guarded`: before atomic writing, the new method scans the destination directory (via descriptor-relative Unix list) and conservatively rejects names that match after Unicode lowercase. The test verifies `Report.TXT` against `report.txt` before reading the Reader, the invariance of the original object, and the creation of a free name.
+- This is an **additional check, not a proof of the absence of all Unicode/locale/case-folding collisions**; the atomic no-overwrite writer still provides the final protection against overwriting. With unsafe objects in the directory, the list may return a rejection; the existing `create_from_reader` is not changed. The patch is not verified on Mac; move/rename/delete remain fail-closed.
 
 ### Early destination collision on atomic create (2026-10-11)
 
-- Пользователь подтвердил на Mac коммит `7160aac`: `scripts/test-core.sh`, 113/113 tests, fmt and Clippy successful.
-- `0f14aaa` меняет реальную Unix запись `secure::create`: проверка имени назначения через `fstatat(AT_SYMLINK_NOFOLLOW)` до запуска потока данных и создания временного файла; существующее назначение отклоняется без чтения источника. Конечный `linkat` **остаётся обязательной атомарной проверкой** на конкурентные создания.
-- `5f7efde` добавляет тест `PanicReader`, подтверждающий, что при занятом назначении источник вообще не читается и файл остаётся неизменным.
-- В изменениях не разблокированы rename/move/delete и macOS content read; патч ожидает проверки на Mac.
+- User confirmed commit `7160aac` on Mac: `scripts/test-core.sh`, 113/113 tests, fmt and Clippy successful.
+- `0f14aaa` changes the actual Unix write `secure::create`: destination name check via `fstatat(AT_SYMLINK_NOFOLLOW)` occurs before starting the data stream and creating the temporary file; an existing destination is rejected without reading the source. The final `linkat` **remains the mandatory atomic check** for concurrent creations.
+- `5f7efde` adds a `PanicReader` test, confirming that if the destination is occupied, the source is not read and the file remains unchanged.
+- Rename/move/delete and macOS content read are not unlocked in the changes; the patch awaits verification on Mac.
 
 ### Bounded metadata-only recursive inventory (2026-10-11)
 
-- Пользователь подтвердил `2dd94df` на Mac: форматирование, Clippy и **114/114** тестов без ошибок.
-- `970ad18`, `3151ca4`: `LocalFilesystem::list_tree(path, max_entries)` перечисляет вложенную структуру через уже защищённые descriptor-relative `list` операции, возвращает относительные пути и метаданные, сортирует результат и отказывается возвращать неполный набор при превышении ограничения. Не открывает содержимое файла и не инициирует загрузку iCloud placeholders.
-- Новый тест проверяет вложенные каталоги, лимит записей и запрет traversal. Не заменяет атомарный snapshot: при конкурентных изменениях дерево может быть непоследовательным, требуется повторное сканирование. Патч **ещё не проверен на Mac**. Операции move/rename/delete остаются отключены.
+- User confirmed `2dd94df` on Mac: formatting, Clippy and **114/114** tests without errors.
+- `970ad18`, `3151ca4`: `LocalFilesystem::list_tree(path, max_entries)` lists the nested structure via already protected descriptor-relative `list` operations, returns relative paths and metadata, sorts the result, and refuses to return an incomplete set if the limit is exceeded. It does not open file content and does not initiate iCloud placeholder downloads.
+- A new test verifies nested directories, the entry limit, and traversal prohibition. This does not replace the atomic snapshot: under concurrent changes, the tree may be inconsistent, and re-scanning is required. The patch is **not yet verified on Mac**. Move/rename/delete operations remain disabled.
 
 ### Recursive inventory depth and unsafe subtree handling (2026-10-11)
 
-- Пользователь подтвердил успешный запуск проверок после `d0943c1` (ожидавшиеся 115 тестов); детальный вывод в этом сообщении не предоставлялся.
-- `4a2d67a` ограничивает вложенность `list_tree` 256 уровнями независимо от количества элементов, с отказом `UnsafeEntry` вместо частичного результата; добавлен тест на symlink внутри поддерева.
-- Метод по-прежнему не формирует атомарный снимок дерева при конкурентных изменениях. Новый патч ещё не проверен на Mac, rename/move/delete пока заблокированы.
+- User confirmed successful check run after `d0943c1` (115 tests expected); detailed output was not provided in this message.
+- `4a2d67a` limits `list_tree` nesting to 256 levels regardless of the number of elements, with `UnsafeEntry` rejection instead of a partial result; a test for a symlink inside a subtree is added.
+- The method still does not form an atomic tree snapshot during concurrent changes. The new patch is not yet verified on Mac; rename/move/delete are still blocked.
 
 ### Recursive inventory directory identity (2026-10-11)
 
-- Пользователь подтвердил успешную локальную проверку патча `a175e8a` (ожидалось 116 тестов, полный журнал не предоставлен).
-- `e5733fd`, `3fa958b`: Unix `list_tree` отслеживает `(device,inode)` каждого открытого каталога, отказывает при повторном посещении одного каталога, чтобы не возвращать дерево с дублированием или циклом. Дескриптор открывается без следования символическим ссылкам. `82e1f7f` проверяет сохранение inode каталога после переименования.
-- Это не атомарный снимок файловой системы; конкурентные изменения возможны. Новые изменения ещё не проверены на Mac, операции rename/move/delete по-прежнему недоступны.
+- User confirmed successful local verification of patch `a175e8a` (116 tests expected, full log not provided).
+- `e5733fd`, `3fa958b`: Unix `list_tree` tracks `(device,inode)` of each opened directory and rejects repeated visits to the same directory to avoid returning a tree with duplication or loops. The descriptor is opened without following symbolic links. `82e1f7f` verifies the preservation of the directory inode after renaming.
+- This is not an atomic filesystem snapshot; concurrent changes are possible. New changes are not yet verified on Mac; rename/move/delete operations are still unavailable.
 
 ### Unix filenames without silent replacement (2026-10-11)
 
-- Пользователь подтвердил успешный Mac-прогон после `d11123f` (предыдущий ожидаемый итог — 117 тестов).
-- `cd25b02`, `9c40748`: Unix `list` и `stat` отказываются преобразовывать невалидное UTF-8 имя через `to_string_lossy()`; возвращают `UnsafeEntry` без изменений файлов. Добавлен тест на имя с недопустимым UTF-8 байтом, проверяет отказ и сохранность содержимого.
-- Это fail-closed ограничение текущей строковой модели метаданных: для полноценной поддержки произвольных Unix byte-path потребуется отдельная модель имён, а не lossy Unicode. Изменения ещё не подтверждены macOS; move/rename/delete и безопасное чтение iCloud placeholders остаются открытыми.
+- User confirmed successful Mac run after `d11123f` (previous expected result — 117 tests).
+- `cd25b02`, `9c40748`: Unix `list` and `stat` refuse to convert invalid UTF-8 names via `to_string_lossy()`; they return `UnsafeEntry` without changing files. A test for a name with an invalid UTF-8 byte is added, verifying rejection and content preservation.
+- This is a fail-closed limitation of the current string metadata model: full support for arbitrary Unix byte-paths will require a separate name model instead of lossy Unicode. Changes are not yet confirmed on macOS; move/rename/delete and safe iCloud placeholder reading remain open.
 
 ### Mandatory collision guard in default local writer (2026-10-11)
 
-- Пользователь подтвердил успешную проверку предыдущего патча `a4429f3` на macOS (ожидалось 118 тестов; полный вывод не предоставлен).
-- `353e42d`: проверка регистронезависимого конфликта имён перенесена в основной `create_from_reader`, а `create_from_reader_case_guarded` стал совместимым делегирующим методом. Все пути создания (включая `create_with_space_reserve`) теперь используют единый guard. Отдельный тест проверяет основной API, отсутствие чтения source при конфликте и сохранность existing file.
-- Проверка имен Unicode lowercase консервативная, **не** полноценная Unicode normalization/casefold; отдельный `linkat` остаётся авторитетной защитой от перезаписи при гонке. Новый патч требует проверки fmt/Clippy/tests на Mac. Rename/move/delete и placeholder guard не реализованы.
+- User confirmed successful verification of the previous patch `a4429f3` on macOS (118 tests expected; full output not provided).
+- `353e42d`: the case-insensitive name conflict check is moved to the main `create_from_reader`, and `create_from_reader_case_guarded` becomes a compatible delegating method. All creation paths (including `create_with_space_reserve`) now use a single guard. A separate test verifies the main API, the absence of source reading during conflict, and the preservation of the existing file.
+- The Unicode lowercase name check is conservative, **not** full Unicode normalization/casefold; a separate `linkat` remains the authoritative protection against overwrite during a race. The new patch requires fmt/Clippy/tests verification on Mac. Rename/move/delete and placeholder guards are not implemented.
 
 ### Directory case-alias safety (2026-10-11)
 
-- После проверки macOS 120 unit tests пользователь поручил продолжить #15 с процентом готовности и командами проверки в каждом отчёте.
-- `9197381`, `b535fdd`: Unix `create_directory` выполняет предоперационную проверку регистронезависимой коллизии имён; отдельный test запрещает создание `assets` при существующем `Assets`, включая рекурсивный путь.
-- `f3a55c1`, `be9c931`: `create_directory_tree` теперь проверяет точное написание **уже существующего** каталога перед продолжением, чтобы на case-insensitive ФС не создать неожиданный подкаталог под именем-алиасом.
-- Эти проверки не обеспечивают атомарную защиту от всех Unicode-normalization коллизий или конкурентной смены каталогов. Rename/move/delete пока остаются fail-closed из-за TOCTOU идентичности исходного имени. Новый патч **не проверен** на macOS, проценты до подтверждения не увеличивать.
+- After verifying 120 unit tests on macOS, the user instructed to continue #15 with the completion percentage and verification commands in each report.
+- `9197381`, `b535fdd`: Unix `create_directory` performs a pre-operation check for case-insensitive name collisions; a separate test prohibits the creation of `assets` when `Assets` exists, including recursive paths.
+- `f3a55c1`, `be9c931`: `create_directory_tree` now verifies the exact spelling of an **already existing** directory before proceeding, to avoid creating an unexpected subdirectory under an alias name on case-insensitive filesystems.
+- These checks do not provide atomic protection against all Unicode-normalization collisions or concurrent directory changes. Rename/move/delete remain fail-closed due to TOCTOU of the source name identity. The new patch is **not verified** on macOS; percentages are not to be increased until confirmation.
 
 ### Concurrent mkdir alias revalidation (2026-10-11)
 
-- Пользователь подтвердил успешный тестовый запуск на macOS для `238d69a` (ожидался 121 тест, подробный журнал не приложен).
-- `5288aaa`, `7a2a368`: когда `create_directory_tree` получает `AlreadyExists` при гонке создания, теперь проверяется не только тип директории, но и **точное написание имени** в родительском каталоге. Это устраняет обход case-collision guard на case-insensitive ФС, когда конкурирующий процесс создал каталог с иным регистром.
-- При частично созданном дереве неопределённый итог классифицируется как `OutcomeUnknown`, без автоматического отката или повтора. Новый патч ещё не проверен на Mac; rename/move/delete и iCloud placeholder handling остаются блокерами закрытия #15.
+- User confirmed successful test run on macOS for `238d69a` (121 tests expected, detailed log not attached).
+- `5288aaa`, `7a2a368`: when `create_directory_tree` receives `AlreadyExists` during a creation race, it now verifies not only the directory type but also the **exact spelling of the name** in the parent directory. This eliminates the bypass of the case-collision guard on case-insensitive filesystems when a competing process has created a directory with different casing.
+- For a partially created tree, an undefined result is classified as `OutcomeUnknown`, without automatic rollback or retry. The new patch is not yet verified on Mac; rename/move/delete and iCloud placeholder handling remain blockers for closing #15.
 
 ### Recursive mkdir with unrelated symlink siblings (2026-10-11)
 
-- Пользователь подтвердил успешную проверку предыдущего состояния main (`bc53814`, ожидаемый итог 121 тест); детальный вывод не предоставлялся.
-- `fab2cbe`, `2ef5125`, `cf7cc16`: `has_exact_directory` сравнивает имена прямо в `readdir` относительно закреплённого directory fd и проверяет тип только найденного точного имени через `fstatat(AT_SYMLINK_NOFOLLOW)`. `create_directory_tree` использует эту проверку для существующих каталогов и при `AlreadyExists`, больше не требуя читать метаданные всех посторонних соседей. Это позволяет безопасно создавать вложенный каталог рядом с не относящимися к операции symlink.
-- Добавлен Unix-регрессионный тест `mkdir_tree_accepts_existing_directory_with_unrelated_symlink`. Реальная rename/move/delete функциональность и macOS placeholder read по-прежнему отключены. Патч пока не проверен на Mac.
+- User confirmed successful verification of the previous main state (`bc53814`, expected result 121 tests); detailed output was not provided.
+- `fab2cbe`, `2ef5125`, `cf7cc16`: `has_exact_directory` compares names directly in `readdir` relative to the pinned directory fd and verifies the type only for the found exact name via `fstatat(AT_SYMLINK_NOFOLLOW)`. `create_directory_tree` uses this check for existing directories and during `AlreadyExists`, no longer requiring metadata reads for all unrelated neighbors. This allows safe creation of a nested directory next to symlinks unrelated to the operation.
+- A Unix regression test `mkdir_tree_accepts_existing_directory_with_unrelated_symlink` is added. Actual rename/move/delete functionality and macOS placeholder read are still disabled. The patch is not yet verified on Mac.
 
 ### Non-destructive hard-link move staging (2026-10-11)
 
-- Пользователь подтвердил успешный macOS запуск после `2993a28` (ожидалось 122 unit tests).
-- `2bce13c`, `34a48c0`: Unix `stage_move_link_new(from,to)` публикует новое имя посредством `linkat` без перезаписи, не читает содержимое и не удаляет исходное имя. Перед операцией проверяет, что source — regular file, и конфликт destination; после публикации сверяет `dev/inode` и выполняет `sync_all` каталога назначения. Любая ошибка после публикации возвращает `OutcomeUnknown`. Добавлен тест сохранения source, защиты существующего destination и идентичности inode.
-- **Это не rename/move/delete.** Concurrent source pathname replacement не может быть полностью исключён одной проверкой перед `linkat`; в случае расхождения требуется reconciliation. Запрещены автоматический unlink исходника и blind retry. Операция не интегрирована с Jobs и не заявлена в capabilities. Новый код ещё не проверен macOS; число ожидаемых тестов — 123.
+- User confirmed successful macOS run after `2993a28` (122 unit tests expected).
+- `2bce13c`, `34a48c0`: Unix `stage_move_link_new(from,to)` publishes a new name via `linkat` without overwriting, does not read content, and does not delete the source name. Before the operation, it verifies that the source is a regular file and checks for destination conflict; after publication, it compares `dev/inode` and performs `sync_all` on the destination directory. Any error after publication returns `OutcomeUnknown`. A test is added for source preservation, existing destination protection, and inode identity.
+
+- **This is not rename/move/delete.** Concurrent source pathname replacement cannot be fully excluded by a single check before `linkat`; reconciliation is required if a discrepancy occurs. Automatic unlink of the source and blind retry are prohibited. The operation is not integrated with Jobs and is not declared in capabilities. New code is not yet verified on macOS; the number of expected tests is 123.
 
 ### Hard-link staging source identity reconciliation (2026-10-11)
 
-- Пользователь подтвердил успешную macOS проверку предыдущего патча `31d1a4f`, ожидавшиеся 123 теста (подробный лог не приложен).
-- `8f05d9c`: сразу после `linkat` повторно проверяется имя исходного файла через `fstatat(AT_SYMLINK_NOFOLLOW)` и сопоставление inode/device/type. Любое расхождение или ошибка **после публикации** возвращает `OutcomeUnknown`, запрещая слепой повтор; новый destination не удаляется автоматически.
-- `4e883d5`: тест отказа hard-link staging для symlink-источника без создания назначения.
-- Остаётся TOCTOU между самой командой `linkat` и проверками; операция не является атомарным безопасным rename, не выполняет unlink, не интегрирована в Job execution. Патч не проверен на Mac, ожидаемый итог 124 теста; прогресс #15 сохраняется на ~52%.
+- The user confirmed successful macOS verification of the previous patch `31d1a4f`, with 123 expected tests (detailed log is not attached).
+- `8f05d9c`: immediately after `linkat`, the source file name is re-verified using `fstatat(AT_SYMLINK_NOFOLLOW)` and a comparison of inode/device/type. Any discrepancy or error **after publication** returns `OutcomeUnknown`, prohibiting blind retry; the new destination is not automatically deleted.
+- `4e883d5`: test for hard-link staging failure for a symlink source without destination creation.
+- TOCTOU remains between the `linkat` command and the checks; the operation is not an atomic safe rename, does not perform unlink, and is not integrated into Job execution. The patch is not verified on Mac, with 124 expected tests; progress #15 remains at ~52%.
 
 ### Staging hard-link conflicts (2026-10-11)
 
-- Пользователь подтвердил успешный тестовый запуск предыдущего патча `f113d5b` (ожидаемые 124 теста).
-- `82e4200`: регрессионный тест регистронезависимого конфликта имени destination для hard-link staging.
-- `7370f63`: отказывается создавать дополнительную ссылку на source с `st_nlink != 1`, поскольку уже разделяемый inode требует явного разрешения конфликта. `b330263`: негативный тест такого источника.
-- Изменения не устраняют гонку TOCTOU для source, поэтому метод остаётся вспомогательной неразрушающей операцией, без интеграции в Jobs. Новый патч ещё не проверен на Mac; ожидаются 126 тестов. Оценка готовности #15 ~52%.
+- The user confirmed a successful test run of the previous patch `f113d5b` (124 expected tests).
+- `82e4200`: regression test for case-insensitive destination name conflict for hard-link staging.
+- `7370f63`: refuses to create an additional link to a source with `st_nlink != 1`, because an already shared inode requires explicit conflict resolution. `b330263`: negative test for such a source.
+- Changes do not eliminate the TOCTOU race for the source; therefore, the method remains an auxiliary non-destructive operation, without integration into Jobs. The new patch is not yet verified on Mac; 126 tests are expected. Readiness estimate #15 ~52%.
 
 ### Hard-link publication race fault injection (2026-10-11)
 
-- Пользователь подтвердил успешный macOS-прогон предыдущего патча `1f10dfa` (ожидались 126 тестов).
-- `971e4c6` добавляет тестовый callback строго после `linkat` в `link_file_new`, до проверки source. Production использует no-op.
-- `b6c186e` добавляет adversarial-тест: после публикации исходное имя переименовывается и замещается другим файлом. Результат обязан быть `OutcomeUnknown`, при этом оригинальные bytes сохранены и в renamed source, и в staged hard link; подменённый файл не удаляется.
-- Это не устраняет TOCTOU между preflight и `linkat`, не реализует delete/rename/move и не разрешает автоматические повторы. Новый патч пока не проверен на Mac, ожидается 127 тестов; готовность ~52%.
+- The user confirmed a successful macOS run of the previous patch `1f10dfa` (126 expected tests).
+- `971e4c6` adds a test callback strictly after `linkat` in `link_file_new`, before the source check. Production uses no-op.
+- `b6c186e` adds an adversarial test: after publication, the source name is renamed and replaced by another file. The result must be `OutcomeUnknown`, while original bytes are preserved in both the renamed source and the staged hard link; the replaced file is not deleted.
+- This does not eliminate TOCTOU between preflight and `linkat`, does not implement delete/rename/move, and does not allow automatic retries. The new patch is not yet verified on Mac, 127 tests are expected; readiness ~52%.
 
 ### Read-only hard-link staging reconciliation (2026-10-11)
 
-- Пользователь подтвердил успешный прогон macOS после `12037c8` (ожидаемые 127 тестов).
-- `6039528`, `b035b43`: `reconcile_staged_link(from,to,expected)` сопоставляет identity обоих имён с зафиксированным `(device,inode,size)` и возвращает `bool`, не читая байты и не выполняя мутаций. Тест подтверждает совпадение после публикации и отрицательный результат после подмены source, а также сохранность исходного inode.
-- Это **наблюдение**, а не завершение move/delete и не разрешение на blind retry после `OutcomeUnknown`; идентификаторы и размер не гарантируют целостность содержимого при конкурентной модификации. Новый патч ещё не проверен на Mac. Оценка #15 ~52%.
+- The user confirmed a successful macOS run after `12037c8` (127 expected tests).
+- `6039528`, `b035b43`: `reconcile_staged_link(from,to,expected)` matches the identity of both names with a fixed `(device,inode,size)` and returns `bool` without reading bytes or performing mutations. The test confirms a match after publication and a negative result after source replacement, as well as the preservation of the original inode.
+- This is an **observation**, not a completion of move/delete and not a permission for blind retry after `OutcomeUnknown`; identifiers and size do not guarantee content integrity during concurrent modification. The new patch is not yet verified on Mac. Estimate #15 ~52%.
 
 ### Missing hard-link paths during reconciliation (2026-10-11)
 
-- Пользователь подтвердил успешную проверку `5b89d08` на Mac (128 тестов).
-- `5864520`: `reconcile_staged_link` возвращает `Ok(false)`, когда исходное или опубликованное имя отсутствует (`NotFound`), без восстановления, повторной публикации или чтения содержимого. Ошибки другого типа по-прежнему возвращаются вызывающему коду.
-- Unix-тест проверяет отсутствующий destination, затем отсутствующий source после внешнего rename, и сохранение содержимого исходного inode. Это не разрешение на автоматический повтор: любой ранее полученный `OutcomeUnknown` продолжает требовать ручного/управляемого разбора состояния.
-- Новый патч ещё не проверен на Mac; ожидается 129 тестов; готовность #15 остаётся ≈52%.
+- The user confirmed successful verification of `5b89d08` on Mac (128 tests).
+- `5864520`: `reconcile_staged_link` returns `Ok(false)` when the source or published name is missing (`NotFound`), without recovery, republication, or content reading. Other error types are still returned to the calling code.
+- The Unix test verifies a missing destination, then a missing source after an external rename, and the preservation of the original inode content. This is not a permission for automatic retry: any previously received `OutcomeUnknown` continues to require manual/managed state resolution.
+- The new patch is not yet verified on Mac; 129 tests are expected; readiness #15 remains ≈52%.
 
 ### macOS metadata-only dataless identification (2026-10-11)
 
-- Пользователь подтвердил успешную macOS проверку предыдущего состояния `d53c679` (129 тестов).
-- `f3ad883`: macOS `fstatat(AT_SYMLINK_NOFOLLOW)` относительно закреплённого descriptor проверяет Apple `SF_DATALESS = 0x40000000` (XNU `bsd/sys/stat.h`). Не открывает контент и не инициирует материализацию.
-- `eb8256e`: `content_residency(path)` возвращает `DatalessPlaceholder`, `NotDatalessFlagged` (не означает гарантированную доступность содержимого!) либо `Unknown` на Linux. macOS read-to-writer остаётся запрещённым даже после per-operation consent; статус не выдаёт разрешения на чтение. Добавлены macOS и Linux тесты.
-- Известное ограничение: `SF_DATALESS` не заменяет полную оценку File Provider/iCloud `ubiquitousItemDownloadingStatus` и устойчивую per-operation no-hydration политику; отсутствующий флаг не доказывает, что file read безопасен. Новое состояние main пока не проверено на Mac, ожидаются 130 тестов на macOS (Linux: 130).
+- The user confirmed successful macOS verification of the previous state `d53c679` (129 tests).
+- `f3ad883`: macOS `fstatat(AT_SYMLINK_NOFOLLOW)` relative to a pinned descriptor checks Apple `SF_DATALESS = 0x40000000` (XNU `bsd/sys/stat.h`). It does not open content and does not initiate materialization.
+- `eb8256e`: `content_residency(path)` returns `DatalessPlaceholder`, `NotDatalessFlagged` (does not mean guaranteed content availability!), or `Unknown` on Linux. macOS read-to-writer remains prohibited even after per-operation consent; the status does not grant read permission. macOS and Linux tests are added.
+- Known limitation: `SF_DATALESS` does not replace a full evaluation of File Provider/iCloud `ubiquitousItemDownloadingStatus` and a robust per-operation no-hydration policy; a missing flag does not prove that a file read is safe. The new main state is not yet verified on Mac, 130 tests are expected on macOS (Linux: 130).
 
 ### Batch metadata inspection (2026-10-11)
 
-- Пользователь подтвердил успешную локальную проверку предыдущего состояния (`d9dda36`, 130 тестов); GitHub-hosted Actions заблокированы биллингом, используем локальный `scripts/test-core.sh`.
-- `8a736f2`, `ecf2a61`: добавлены `inspect_content()` и `inspect_content_batch()` — составной metadata-only preflight с проверкой inode/size до и после запроса residency. Сбор данных из нескольких файлов атомарности/консистентного snapshot не гарантирует. Если любой элемент отсутствует, является symlink или выходит за пределы root — полный вызов возвращает ошибку без частичного успешного результата.
-- Три новых Unix-теста: batch для двух regular files, отказ на symlink и traversal, отказ на missing entry без создания данных. Ожидаемый локальный тестовый итог на macOS: 133 теста, ещё не проверено.
-- Отсутствие `SF_DATALESS` не разрешает hydration или чтение содержимого. macOS content reads остаются запрещены. Расширенные File Provider statuses и безопасные rename/move/delete ещё не реализованы. Оценка #15: ~58%.
+- The user confirmed successful local verification of the previous state (`d9dda36`, 130 tests); GitHub-hosted Actions are blocked by billing, so local `scripts/test-core.sh` is used.
+- `8a736f2`, `ecf2a61`: `inspect_content()` and `inspect_content_batch()` are added — a composite metadata-only preflight that checks inode/size before and after the residency request. Data collection from multiple files does not guarantee atomicity/consistent snapshot. If any element is missing, is a symlink, or is outside the root, the full call returns an error without a partial successful result.
+- Three new Unix tests: batch for two regular files, failure on symlink and traversal, failure on missing entry without data creation. Expected local test result on macOS: 133 tests, not yet verified.
+- The absence of `SF_DATALESS` does not permit hydration or content reading. macOS content reads remain prohibited. Extended File Provider statuses and safe rename/move/delete are not yet implemented. Estimate #15: ~58%.
 
 ### Metadata batch revalidation after preflight (2026-10-11)
 
-- Пользователь подтвердил успешный локальный прогон предыдущего пакета (`10faf08`; 133 теста).
-- `db03c69`: добавлены `revalidate_content_inspection(path, expected)` и `revalidate_content_batch(paths, expected)` для повторной metadata-only проверки устаревших результатов preflight перед следующим шагом. Сверяются inode/device/size и residency. Отсутствующий файл возвращает `Ok(false)`, symlink/небезопасные пути возвращают ошибку; несоответствие длины массивов — `InvalidPath`. Пакет не объявляется консистентным снимком, операции проверки не дают права чтения и не устраняют TOCTOU.
-- 3 Unix-теста: успешное повторное наблюдение, замена inode и удаление, stale batch и неверная длина, подмена symlink и сохранность данных. Новый код требует локального запуска macOS; ожидаются 136 тестов.
-- Готовность #15 около 60%; полноценные безопасные move/rename/delete и File Provider statuses ещё не реализованы.
+- The user confirmed a successful local run of the previous package (`10faf08`; 133 tests).
+- `db03c69`: `revalidate_content_inspection(path, expected)` and `revalidate_content_batch(paths, expected)` are added for re-performing metadata-only checks of stale preflight results before the next step. Inode/device/size and residency are compared. A missing file returns `Ok(false)`, symlinks/unsafe paths return an error; array length mismatch returns `InvalidPath`. The package is not declared as a consistent snapshot; verification operations do not grant read rights and do not eliminate TOCTOU.
+- 3 Unix tests: successful re-observation, inode replacement and deletion, stale batch and incorrect length, symlink substitution and data preservation. New code requires a local macOS run; 136 tests are expected.
+- Readiness #15 is about 60%; full safe move/rename/delete and File Provider statuses are not yet implemented.
 
 ### Same-size local modification detection (2026-10-11)
 
-- Пользователь подтвердил успешный локальный прогон предыдущего пакета (`4b1a9be`, 136 тестов).
-- `d31845d`, `ca49575`, `70c7a69`: `file_change_stamp()` получает Unix `mtime`/`ctime` с наносекундной частью через `fstatat(AT_SYMLINK_NOFOLLOW)` в закреплённом root; `LocalContentInspection` включает четыре поля временной подписи. `inspect_content` проверяет подпись до/после residency и inode до/после, `revalidate_content_*` теперь выявляет изменения одинакового размера, не читая контент. Добавлены Unix-тесты same-length rewrite одного файла и в batch.
-- Ограничение: время изменения не криптографическая контрольная сумма и не защита от намеренной подмены атрибутов / микрогонок. Вывод инспекции не является доказательством неизменности и не разрешает чтение cloud-content на Mac.
-- Новый пакет ещё не проверен компилятором Mac; ожидается 138 unit-тестов. Готовность #15 приблизительно 60%.
+- The user confirmed a successful local run of the previous package (`4b1a9be`, 136 tests).
+- `d31845d`, `ca49575`, `70c7a69`: `file_change_stamp()` obtains Unix `mtime`/`ctime` with the nanosecond part via `fstatat(AT_SYMLINK_NOFOLLOW)` in a pinned root; `LocalContentInspection` includes four time-stamp fields. `inspect_content` checks the stamp before/after residency and inode before/after; `revalidate_content_*` now detects changes of the same size without reading content. Unix tests for same-length rewrite of one file and in batch are added.
+- Limitation: the modification time is not a cryptographic checksum and is not protection against intentional attribute substitution/micro-races. The inspection output is not proof of immutability and does not permit reading cloud content on Mac.
+- The new package is not yet verified by the Mac compiler; 138 unit tests are expected. Readiness #15 is approximately 60%.
 
 ### Duplicate-source protection for metadata batches (2026-10-11)
 
-- Пользователь подтвердил успешную локальную проверку предыдущего пакета (`bd58430`, 138 тестов).
-- `4dc0d73`: `inspect_content_batch` отказывает при повторе пути (включая ASCII case aliases) или повторном `(device,inode)` под другим именем. Это предотвращает двойную обработку hardlinked файлов на этапе планирования; не читает содержимое и не изменяет файлы. Правила регистронезависимости для Unicode отличаются между файловыми системами; окончательная проверка дубликатов по inode касается существующих файлов.
-- Два новых Unix-теста: exact/case duplicate и hard-link alias. Ожидаются 140 тестов при следующей проверке на Mac. Не подтверждено компилятором; rename/move/delete и File Provider остаются незавершёнными.
+- The user confirmed successful local verification of the previous package (`bd58430`, 138 tests).
+- `4dc0d73`: `inspect_content_batch` fails if a path is repeated (including ASCII case aliases) or if `(device,inode)` is repeated under a different name. This prevents double processing of hardlinked files during the planning stage; it does not read content and does not modify files. Case-insensitivity rules for Unicode differ between file systems; final duplicate verification by inode concerns existing files.
+- Two new Unix tests: exact/case duplicate and hard-link alias. 140 tests are expected during the next Mac verification. Not confirmed by compiler; rename/move/delete and File Provider remain incomplete.
 
 ### Pinned root overlap preflight (2026-10-11)
 
-- Пользователь подтвердил локальные 140 тестов для предыдущего пакета `10cd138`.
-- `01d4ea0`, `96a22a5`, `0242ca7`: `LocalFilesystem::overlaps_root(&other)` проверяет совпадение / вложенность файловых корней на Unix по `(st_dev, st_ino)` при обходе parent `..` через `openat` от закреплённых directory fd. Путь или содержимое файлов не читаются. Тесты: одинаковый корень и parent/child, независимые соседние корни, перемещение (rename) родительского каталога после открытия fd. Не выполняется автоматическое блокирование cross-root jobs; вызывающий код должен запрещать сценарии с пересекающимися корнями.
-- Ограничения: при активных конкурентных mount/rename изменениях обход каталогов остаётся observational, а не транзакционным; предельная глубина 1024 вызывает fail-closed UnsafeEntry. На non-Unix метод недоступен.
-- Патч требует проверки на Mac: ожидаемые 143 теста. Готовность #15 приблизительно 62%; полноценные rename/move/delete и гарантированная no-hydration работа остаются открытыми.
+- The user confirmed local 140 tests for the previous package `10cd138`.
+- `01d4ea0`, `96a22a5`, `0242ca7`: `LocalFilesystem::overlaps_root(&other)` checks for matching or nested file roots on Unix by `(st_dev, st_ino)` while traversing parent `..` via `openat` from pinned directory fds. Path or file content is not read. Tests: same root and parent/child, independent neighboring roots, moving (renaming) a parent directory after opening the fd. Automatic blocking of cross-root jobs is not performed; the calling code must prohibit scenarios with overlapping roots.
+- Limitations: with active concurrent mount/rename changes, directory traversal remains observational, not transactional; a maximum depth of 1024 causes a fail-closed `UnsafeEntry`. The method is unavailable on non-Unix.
+- The patch requires verification on Mac: 143 tests are expected. Readiness #15 is approximately 62%; full rename/move/delete and guaranteed no-hydration work remain open.
 
 ### Non-destructive staging: failure and unsafe-object matrix (2026-10-11)
 
-- Пользователь подтвердил локальный прогон `f6fb0f8`: 143 теста.
-- `2dfcb58`, `f98ae93`, `f36afa1`: добавлены четыре Unix-регрессионных теста для `stage_move_link_new` и `reconcile_staged_link`: сбой после успешного linkat классифицируется как `OutcomeUnknown` и не удаляет ни source, ни destination; повтор с занятым destination отклоняется; directory-source и symlink-destination не изменяются; замена inode destination обнаруживается без удаления файлов.
-- Новая матрица проверяет **сохранность данных**, но не даёт гарантии атомарного rename/delete при конкурентной подмене. Не включать реальное удаление источника и автоматические повторы по итогам этих тестов.
-- Новый пакет не проходил локальный fmt/clippy/tests; ожидаемый итог 147 тестов. Готовность #15 ≈62%: существенные блокеры rename/move/delete и File Provider hydration ещё открыты.
+- The user confirmed a local run of `f6fb0f8`: 143 tests.
+- `2dfcb58`, `f98ae93`, `f36afa1`: four Unix regression tests are added for `stage_move_link_new` and `reconcile_staged_link`: failure after successful linkat is classified as `OutcomeUnknown` and does not delete either source or destination; retry with a busy destination is rejected; directory-source and symlink-destination are not changed; destination inode replacement is detected without file deletion.
+- The new matrix verifies **data preservation**, but does not guarantee atomic rename/delete during concurrent replacement. Do not include actual source deletion and automatic retries based on these tests.
+- The new package has not passed local fmt/clippy/tests; 147 tests are expected. Readiness #15 ≈62%: significant blockers for rename/move/delete and File Provider hydration are still open.
 
 ### Safe move preflight case collisions and directory guards (2026-10-11)
 
-- Пользователь подтвердил успешный локальный прогон предыдущего патча (`f9e49f7`, 147 тестов).
-- `400625a`, `33d5139`: metadata-only `preview_move_new` при отсутствующем destination проверяет через закреплённый descriptor родителя, нет ли case-insensitive alias назначения, и возвращает `AlreadyExists` вместо ложного разрешения. `revalidate_move_new` наследует защиту. Добавлены 3 Unix-теста: case alias destination/revalidate, успешная preview в существующий каталог без записи, отказ на symlink parent или отсутствующий parent.
-- Это не разрешает реальный move/rename/delete, не устраняет TOCTOU после preflight и не инициирует cloud content read. Новый патч ожидает локальной macOS проверки: 150 тестов. Готовность #15 ~62%; крупные блокеры сохраняются.
+- The user confirmed a successful local run of the previous patch (`f9e49f7`, 147 tests).
+- `400625a`, `33d5139`: metadata-only `preview_move_new` checks, when the destination is missing, via a pinned parent descriptor if a case-insensitive alias of the destination exists, and returns `AlreadyExists` instead of a false permission. `revalidate_move_new` inherits this protection. 3 Unix tests are added: case alias destination/revalidate, successful preview into an existing directory without writing, failure on symlink parent or missing parent.
+- This does not permit actual move/rename/delete, does not eliminate TOCTOU after preflight, and does not initiate cloud content read. The new patch awaits local macOS verification: 150 tests. Readiness #15 ~62%; major blockers remain.
 
 ### POSIX permissions metadata (2026-10-11)
 
-- Пользователь подтвердил успешную локальную проверку предыдущего пакета `9677f8c` (150 тестов).
-- `6e8e8d2`, `760b2b2`: добавлена `LocalFilesystem::mode_bits(path)`, основанная на descriptor-relative `fstatat(AT_SYMLINK_NOFOLLOW)`. Возвращает POSIX bits `0o7777` для regular files/directories, отказывает на symlink и недопустимых путях. Не открывает содержимое и не инициирует iCloud hydration.
-- Эти биты информативны и не доказывают эффективный доступ: ACL, процессный UID/GID, sandbox, TCC и файловые политики проверяются непосредственно при выполнении операции. Добавлены два Unix-теста: режимы 0640/0750, отказ на symlink и traversal.
-- Текущий патч ещё не проверен на Mac; ожидаются 152 теста. Готовность #15 ≈62%, безопасные rename/move/delete и полный placeholder guard остаются незавершёнными.
+- The user confirmed successful local verification of the previous package `9677f8c` (150 tests).
+- `6e8e8d2`, `760b2b2`: `LocalFilesystem::mode_bits(path)` is added, based on descriptor-relative `fstatat(AT_SYMLINK_NOFOLLOW)`. It returns POSIX bits `0o7777` for regular files/directories and fails on symlinks and invalid paths. It does not open content and does not initiate iCloud hydration.
+- These bits are informative and do not prove effective access: ACL, process UID/GID, sandbox, TCC, and file policies are checked directly during operation execution. Two Unix tests are added: modes 0640/0750, failure on symlink and traversal.
+- The current patch is not yet verified on Mac; 152 tests are expected. Readiness #15 ≈62%, safe rename/move/delete and full placeholder guard remain incomplete.
 
 ### Full-stage acceptance pass: macOS no-hydration contract (2026-10-11)
 
-- По согласованию с пользователем далее проверяем #15 как единый этап, а не отправляем на Mac каждое небольшое изменение. Последний подтверждённый локальный прогон относится к предыдущему состоянию `7f3527f` (152 теста по ожидаемому счётчику; пользователь ещё не прислал вывод текущего прогона).
-- `d063bb7` добавляет два macOS contract tests: оба entry point для локального копирования (`copy_file_new`, `copy_file_new_with_reserve`) возвращают `UnsafeEntry` и не создают destination как при Denied, так и при GrantedForThisOperation; metadata-only `inspect_content` не разрешает `read_to_writer`, а capabilities не обещают read_content. Это не проверка на реальном iCloud placeholder и не реализация безопасной materialization.
-- До финальной приёмки #15 обязательно выполнить единый fmt/clippy/tests на macOS и отдельную ручную проверку placeholder в разрешённом тестовом контейнере, без QADREN-инициированного скачивания. Функции rename/move/delete пока небезопасны для публичного включения и должны либо получить доказуемо безопасный механизм, либо остаться явным блокером закрытия issue.
+- As agreed with the user, #15 is henceforth verified as a single stage rather than sending every small change to Mac. The last confirmed local run refers to the previous state `7f3527f` (152 tests according to the expected counter; the user has not yet sent the output of the current run).
+- `d063bb7` adds two macOS contract tests: both entry points for local copying (`copy_file_new`, `copy_file_new_with_reserve`) return `UnsafeEntry` and do not create a destination both for Denied and GrantedForThisOperation; metadata-only `inspect_content` does not permit `read_to_writer`, and capabilities do not promise `read_content`. This is not a test on a real iCloud placeholder and not an implementation of safe materialization.
+- Before final acceptance of #15, it is mandatory to perform a single fmt/clippy/tests run on macOS and a separate manual placeholder check in a permitted test container, without QADREN-initiated downloading. Rename/move/delete functions are currently unsafe for public inclusion and must either receive a provably safe mechanism or remain an explicit blocker for closing the issue.
 
 ### Atomic no-overwrite rename candidate (2026-10-11)
 
-- `30b42da`, `520f299`, `aa8bb35`: добавлен `rename_file_new` для regular file на Unix с атомарным системным no-overwrite primitive: Linux `renameat2(RENAME_NOREPLACE)`, macOS `renameatx_np(RENAME_EXCL)`. Промежуточные parent directories закрепляются descriptor-relative, source должен иметь `st_nlink == 1`, destination предварительно проходит `preview_move_new` и case collision guard, после перемещения проверяется inode; directory fds синхронизируются. При неоднозначном исходе возвращается `OutcomeUnknown`, автоматический retry запрещён.
-- Контрактные Unix-тесты: успешный перенос в другой каталог, existing destination без перезаписи, symlink в назначении без изменения source/target. Не проверено в локальном Mac build. Вызов **пока экспериментальный**: race со сменой source inode между preflight и rename не устранён полностью, поэтому нельзя выдавать его за подтверждённо безопасный при враждебных конкурентных модификациях или подключать к автоматическим Jobs. Также не реализованы безопасные delete/replace и не проведена проверка реальных File Provider placeholders.
-- Следующий шаг: локальная сборка полного пакета и review API/негативных race-тестов, но по договорённости не запрашиваем Mac прогон после каждого коммита; окончательное закрытие #15 требует всех контрактов и тестов.
+- `30b42da`, `520f299`, `aa8bb35`: `rename_file_new` is added for regular files on Unix with an atomic system no-overwrite primitive: Linux `renameat2(RENAME_NOREPLACE)`, macOS `renameatx_np(RENAME_EXCL)`. Intermediate parent directories are pinned descriptor-relative, the source must have `st_nlink == 1`, the destination is pre-verified via `preview_move_new` and the case collision guard, and the inode is checked after movement; directory fds are synchronized. In case of an ambiguous outcome, `OutcomeUnknown` is returned; automatic retry is prohibited.
+- Contract Unix tests: successful transfer to another directory, existing destination without overwrite, symlink in destination without changing source/target. Not verified in local Mac build. The call is **currently experimental**: the race with source inode change between preflight and rename is not fully eliminated; therefore, it cannot be presented as confirmed safe under hostile concurrent modifications or connected to automatic Jobs. Safe delete/replace are also not implemented, and verification of real File Provider placeholders has not been performed.
+- Next step: local build of the full package and review of API/negative race tests, but by agreement, Mac runs are not requested after every commit; final closure of #15 requires all contracts and tests.
 
 - `968e4a3`, `f9482b7`: source name recreated after `renameat*` is classified `OutcomeUnknown`, plus adversarial tests for hardlinked source, Unicode-independent case collision and intermediate symlink outside root. Added six total Unix rename tests. The rename API is available for isolated test use, but remains **not advertised in adapter capabilities** due unresolved concurrent source-swap race; this is not acceptance of deletion or general-purpose automatic move.
 
-- `effb541`: `reconcile_renamed_file(from,to,expected)` делает только metadata-only проверку результата ранее неоднозначного rename: ожидаемый destination inode совпадает, source name отсутствует; ничего не восстанавливает и не удаляет. Тест покрывает before/after rename и destination swap. Это observational, не транзакционная гарантия.
+- `effb541`: `reconcile_renamed_file(from,to,expected)` performs only a metadata-only check of the result of a previous ambiguous rename: the expected destination inode matches and the source name is absent; it does not restore or delete anything. The test covers before/after rename and destination swap. This is an observational, not a transactional, guarantee.
 
 ### Interrupted rename handling (2026-10-11)
 
-- `43e37c6`, `0385e93`, `c4492b6`: rename syscall failures with `Interrupted` now return `OutcomeUnknown` (not retryable `Io`); `AlreadyExists` stays a known collision; other error classes continue as `Io`. Three deterministic unit tests cover these classifications without performing destructive filesystem operations.
-- Safety review: `renameat2(RENAME_NOREPLACE)` / `renameatx_np(RENAME_EXCL)` atomically protects **destination no-overwrite**, but it does **not** atomically bind the source inode observed before syscall. A hostile concurrent source pathname replacement can cause rename of a different inode. Postflight reconciliation detects many such outcomes only **after** mutation. Therefore keep this API out of automatic Jobs/capabilities until a stronger trust/concurrency model or source-binding design is agreed and tested. macOS placeholder policy remains fail closed for content reads.
-- Full-stage local validation still outstanding, by agreement do not ask for per-commit testing. No change to percentage of issue #15.
+- `43e37c6`, `0385e93`, `c4492b6`: rename syscall failures with `Interrupted` now return `OutcomeUnknown` (not retryable `Io`); `AlreadyExists` remains a known collision; other error classes continue as `Io`. Three deterministic unit tests cover these classifications without performing destructive filesystem operations.
+- Safety review: `renameat2(RENAME_NOREPLACE)` / `renameatx_np(RENAME_EXCL)` atomically protects **destination no-overwrite**, but it does **not** atomically bind the source inode observed before the syscall. A hostile concurrent source pathname replacement can cause a rename of a different inode. Postflight reconciliation detects many such outcomes only **after** mutation. Therefore, keep this API out of automatic Jobs/capabilities until a stronger trust/concurrency model or source-binding design is agreed and tested. The macOS placeholder policy remains fail-closed for content reads.
+- Full-stage local validation is still outstanding; by agreement, do not request per-commit testing. No change to the percentage of issue #15.
 
-- `6208400`: non-Unix local adapter no longer declares `Windows` as supported nor marks insecure path-based metadata listing as verified; `list_metadata` and prerequisites now require Unix. Existing non-Unix fallback is not a production-safe file adapter and should be replaced by OS-specific secure implementation before enabling Windows.
-- `2dbedec`: rename compares second `fstatat` source `(dev,ino,size)` with initial identity and requires `nlink==1`. This narrows the pre-rename race window but does not close it; unresolved source-binding limitation still forbids automatic destructive jobs.
-- Next gate: verify platform-specific `libc` symbols and fmt/clippy/tests on Mac as part of the agreed consolidated review, then decide safe source-binding and deletion policy before declaring #15 accepted.
+- `6208400`: non-Unix local adapter no longer declares `Windows` as supported nor marks insecure path-based metadata listing as verified; `list_metadata` and prerequisites now require Unix. The existing non-Unix fallback is not a production-safe file adapter and must be replaced by an OS-specific secure implementation before enabling Windows.
+- `2dbedec`: rename compares the second `fstatat` source `(dev,ino,size)` with the initial identity and requires `nlink==1`. This narrows the pre-rename race window but does not close it; the unresolved source-binding limitation still forbids automatic destructive jobs.
+- Next gate: verify platform-specific `libc` symbols and fmt/clippy/tests on Mac as part of the agreed consolidated review, then decide the safe source-binding and deletion policy before declaring #15 accepted.
 
-### Подтверждённый локальный пакет и следующий инкремент (2026-10-11)
+### Confirmed local package and next increment (2026-10-11)
 
-- Пользователь подтвердил успешный `scripts/test-core.sh` после форматирования `91f3a2a`. Это подтверждает fmt/clippy/tests для данного состояния, но не закрывает вопросы сохранности при конкурентных файловых мутациях.
-- `12415b1`: metadata-only `preview_move_identity(from,to)` возвращает наблюдаемую идентичность исходного regular file после проверки назначения, не меняя файлов. Тест проверяет отсутствие изменений на диске. Это вспомогательный контракт для будущего reconciliation, не реализация безопасного удаления или move; проверку нового патча включить в следующую объединённую приёмку, не запрашивая отдельный запуск.
+- The user confirmed a successful `scripts/test-core.sh` after formatting `91f3a2a`. This confirms fmt/clippy/tests for this state, but does not resolve safety issues during concurrent file mutations.
+- `12415b1`: metadata-only `preview_move_identity(from,to)` returns the observed identity of the source regular file after checking the destination, without changing files. The test verifies no changes on disk. This is a helper contract for future reconciliation, not an implementation of safe deletion or move; include the check of the new patch in the next consolidated acceptance without requesting a separate run.
 
 ### Regression baseline after macOS validation (2026-10-11)
 
-- Пользователь подтвердил успешный Mac test-core.sh на `3772973` (включая предыдущие изменения); точное число тестов в сообщении не приведено.
-- `993b81a`: два Unix negative tests — rename со source symlink должен отказать без модификации target, а preview с исходным inode, заменённым до revalidate, должен отказать как UnsafeEntry. Эти тесты ещё не запускались на Mac.
-- До полного DoD #15 сохраняется критический пробел: возможность подмены source pathname **после** проверки и **до** самого системного rename, а также отсутствие безопасного delete, iCloud File Provider proof и финальной общей приёмки. Пока нет достаточных оснований отмечать пункт файловых перемещений завершённым.
+- The user confirmed a successful Mac test-core.sh on `3772973` (including previous changes); the exact number of tests is not provided in the message.
+- `993b81a`: two Unix negative tests — rename with a source symlink must fail without modifying the target, and a preview with a source inode replaced before revalidation must fail as `UnsafeEntry`. These tests have not yet been run on Mac.
+- Until the full DoD #15 is met, a critical gap remains: the possibility of source pathname substitution **after** check and **before** the system rename, as well as the lack of safe delete, iCloud File Provider proof, and final general acceptance. There are currently insufficient grounds to mark the file movement item as complete.
 
 ### Checked rename preview binding (2026-10-11)
 
-- После подтверждённого пользователем Mac-прогона `3772973` продолжается единый этап разработки. Новые тесты `993b81a` и `d41282c` ещё не проверены.
-- `d41282c`: `rename_file_new_checked(from,to,expected)` повторно проверяет source identity и destination preflight перед no-replace rename; негативный тест со сменой inode до вызова не перемещает подменённый файл; позитивный тест проверяет одноразовый перенос. Это сужает окно устаревшего плана, но **не исключает гонку после последней проверки**. Нельзя использовать для враждебных конкурентных директорий или рекламировать как завершённый `move/delete`.
-- Итоговый критерий безопасности: операции, которые потенциально удаляют исходный путь, включаются в автоматические Jobs только после доказанной гарантии source binding либо документированной и проверенной модели эксклюзивного владения каталогом. Пока нельзя отметать no-hydration обязательства на Mac.
+- Following the user-confirmed Mac run of `3772973`, a single development stage continues. New tests `993b81a` and `d41282c` are not yet verified.
+- `d41282c`: `rename_file_new_checked(from,to,expected)` re-verifies source identity and destination preflight before a no-replace rename; a negative test with an inode change before the call does not move the substituted file; a positive test verifies a one-time transfer. This narrows the stale plan window but **does not exclude a race after the final check**. It must not be used for hostile concurrent directories or advertised as a completed `move/delete`.
+- Final safety criterion: operations that potentially delete the source path are included in automatic Jobs only after a proven source binding guarantee or a documented and verified exclusive directory ownership model. No-hydration obligations on Mac cannot be dismissed yet.
 
 ### Capability gate for destructive operations (2026-10-11)
 
-- `133dc04`: добавлен contract test, подтверждающий, что `LocalFilesystem::capabilities()` не рекламирует Rename/Delete и `CapabilityDeclaration::allows` возвращает `UnsupportedOperation` для обоих на Unix. Это защита слоя планирования от преждевременного использования experimental rename, а не устранение source pathname race.
-- Последняя подтверждённая пользователем macOS проверка была до `993b81a`; объединённые изменения после неё ещё не прошли fmt/clippy/test на Mac. В рамках согласованного процесса не требуем отдельного тестового прогона сейчас.
-- Блокер закрытия этапа: обеспечить безопасные удаления/перемещения при допускаемых конкурентных мутациях или согласовать ограниченную модель контролируемой директории, плюс File Provider/macOS hydration policy и полная приёмка.
+- `133dc04`: added a contract test confirming that `LocalFilesystem::capabilities()` does not advertise Rename/Delete and `CapabilityDeclaration::allows` returns `UnsupportedOperation` for both on Unix. This protects the planning layer from premature use of experimental rename, rather than eliminating the source pathname race.
+- The last user-confirmed macOS check was before `993b81a`; combined changes after it have not yet passed fmt/clippy/test on Mac. As part of the agreed process, do not request a separate test run now.
+- Stage closing blocker: ensure safe deletions/moves during allowed concurrent mutations or agree on a limited controlled directory model, plus File Provider/macOS hydration policy and full acceptance.
 
 ### macOS dataless mutation guard (2026-10-11)
 
-- `da3474b`, `90a6ff3`: на macOS операции `rename_file_noreplace` и `link_file_new_with_post_link_check` отклоняют `SF_DATALESS` source до изменения namespace. Добавлен unit-тест флага. Результат компиляции и тестирования ещё не подтверждён.
-- Отсутствие флага `SF_DATALESS` не доказывает, что File Provider item полностью локальный; metadata guard не выдаёт право на чтение. Все content reads на macOS остаются запрещены. Rename не публикуется в capabilities из-за source pathname race. Полный DoD #15 ещё открыт.
+- `da3474b`, `90a6ff3`: on macOS, `rename_file_noreplace` and `link_file_new_with_post_link_check` operations reject `SF_DATALESS` sources before namespace changes. A unit test for the flag is added. Compilation and testing results are not yet confirmed.
+- The absence of the `SF_DATALESS` flag does not prove that a File Provider item is fully local; the metadata guard does not grant read rights. All content reads on macOS remain prohibited. Rename is not published in capabilities due to the source pathname race. Full DoD #15 remains open.
 
-### Конкурентные изменения: fail-closed delete (2026-10-11)
+### Concurrent changes: fail-closed delete (2026-10-11)
 
-- Принятое в #15 решение: QADREN должен быть безопасным даже при конкурирующих изменениях файлов сторонними приложениями.
-- `c293901`: добавлен явный `delete_file(path)`, который проверяет границы пути и отклоняет удаление как `UnsafeEntry`. Два негативных теста проверяют сохранность исходника и отказ при traversal. Метод намеренно ничего не удаляет: `fstatat` + `unlinkat` не дают атомарного условия «удалить только inode, который проверен».
-- Не считать это реализацией delete в DoD. `move_file_new` также остаётся fail-closed; `rename_file_new*` нельзя использовать в автоматических заданиях. Следующий шаг: безопасная модель без удаления исходника и проверка всей цепочки в macOS, затем отдельная архитектурная реализация source-bound destructive operations или задокументированная недоступность.
-- Эти два новых теста не проверены в локальном Mac прогоне; не запрашивать отдельную проверку до общей приёмки.
+- Decision accepted in #15: QADREN must be safe even with concurrent file changes by third-party applications.
+- `c293901`: added an explicit `delete_file(path)` that checks path boundaries and rejects deletion as `UnsafeEntry`. Two negative tests verify source preservation and failure during traversal. The method intentionally deletes nothing: `fstatat` + `unlinkat` do not provide an atomic condition to "delete only the inode that was verified."
+- Do not consider this as the delete implementation in the DoD. `move_file_new` also remains fail-closed; `rename_file_new*` must not be used in automatic jobs. Next step: a safe model without source deletion and verification of the entire chain in macOS, then a separate architectural implementation of source-bound destructive operations or documented unavailability.
+- These two new tests are not verified in a local Mac run; do not request separate verification before general acceptance.
 
 ### Non-destructive staged copy under concurrent writers (2026-10-11)
 
-- `df89eda`, `b2f50d4`, `cbb51ca`: добавлен `prepare_move_copy_new(from,to,expected,consent)`, который на Linux сверяет прежнюю metadata-only инспекцию источника, проверяет свободное назначение, копирует байты через no-overwrite writer, повторно сверяет исходник и **никогда не удаляет source**. Если исходник изменился после публикации, возвращает `OutcomeUnknown`, так как копия могла уже появиться.
-- Тесты проверяют успешную публикацию с сохранением исходника, отказ от второго копирования в занятое назначение, отказ при устаревшей инспекции и отсутствии согласия, запрет чтения/копирования на macOS даже с согласием. Это только Linux preparation, **не полноценный move**; не добавлять rename/delete в capabilities.
-- Для source pathname, изменённого сторонним writer в ходе копирования, проверки являются best-effort; обязательный postflight `OutcomeUnknown` не означает доказанную консистентность. Новые изменения ждут общей macOS проверки.
+- `df89eda`, `b2f50d4`, `cbb51ca`: added `prepare_move_copy_new(from,to,expected,consent)`, which on Linux matches the previous metadata-only source inspection, checks for a free destination, copies bytes via a no-overwrite writer, re-verifies the source, and **never deletes the source**. If the source changed after publication, it returns `OutcomeUnknown`, as a copy might have already appeared.
+- Tests verify successful publication with source preservation, refusal of a second copy into an occupied destination, refusal upon stale inspection and lack of consent, and prohibition of reading/copying on macOS even with consent. This is only Linux preparation, **not a full move**; do not add rename/delete to capabilities.
+- For a source pathname changed by a third-party writer during copying, checks are best-effort; a mandatory postflight `OutcomeUnknown` does not mean proven consistency. New changes await general macOS verification.
 
 ### Linux move-copy: checked opened source inode (2026-10-11)
 
-- Пользователь подтвердил успешный локальный fmt/clippy/tests после `5c62e0d`.
-- `3b55848`: `prepare_move_copy_new` больше не открывает source повторно внутри `copy_file_new` после отдельного pathname preflight. Теперь источник сначала открывается через pinned root/no-follow, непосредственно открытый fd сверяется по `(dev,ino,size,mtime,ctime)` с `LocalContentInspection` **до** создания destination; затем тот же открытый дескриптор передаётся в no-overwrite writer. После копирования проверяются метаданные того же fd и исходное имя. При непроверяемом результате после публикации возвращается `OutcomeUnknown`; исходник никогда не удаляется.
-- Это устраняет окно замены между инспекцией и **открытием фактического input** для незаметного копирования не того inode, но не гарантирует snapshot байтов при конкурентных записях в открытый inode. Mac content reads по-прежнему fail-closed. Патч не проверен локальным компилятором; выполнить в общей приёмке.
+- The user confirmed a successful local fmt/clippy/tests after `5c62e0d`.
+- `3b55848`: `prepare_move_copy_new` no longer re-opens the source inside `copy_file_new` after a separate pathname preflight. Now, the source is first opened via pinned root/no-follow, the directly opened fd is verified by `(dev,ino,size,mtime,ctime)` against `LocalContentInspection` **before** destination creation; then the same open descriptor is passed to the no-overwrite writer. After copying, the metadata of the same fd and the source name are checked. If the result is unverifiable after publication, `OutcomeUnknown` is returned; the source is never deleted.
+- This eliminates the replacement window between inspection and **opening the actual input** to prevent unnoticed copying of the wrong inode, but it does not guarantee a byte snapshot during concurrent writes to the open inode. Mac content reads remain fail-closed. The patch is not verified by a local compiler; execute during general acceptance.
 
 ### Exact-length move-copy publication (2026-10-11)
 
-- Пользователь подтвердил успешный Mac-прогон после `a7ad156`.
-- `a937c72`: в Linux `prepare_move_copy_new` входной descriptor ограничен `ExactSizeReader` на зафиксированную `before.len()` длину. При сокращении или росте потока временная запись должна отказать **до** публикации назначения; после публикации остаётся отдельная сверка того же открытого fd и pathname. Исходник не удаляется. Пакет требует следующей объединённой локальной проверки.
-- Это не гарантия неизменного снимка байтов при конкурентной перезаписи такой же длины и не завершение move/delete. Безопасность Mac cloud content остаётся fail-closed.
+- The user confirmed a successful Mac run after `a7ad156`.
+- `a937c72`: in Linux `prepare_move_copy_new`, the input descriptor is limited by `ExactSizeReader` to the fixed `before.len()` length. If the stream shrinks or grows, the temporary write must fail **before** destination publication; after publication, a separate verification of the same open fd and pathname remains. The source is not deleted. The package requires the next consolidated local check.
+- This is not a guarantee of an unchanged byte snapshot during concurrent overwrite of the same length, nor is it the completion of move/delete. Mac cloud content safety remains fail-closed.
 
 ### Linux source verification before copy publication (2026-10-11)
 
-- Пользователь подтвердил Mac-прогон после пакета `b30071b`.
-- `24d38d0`, `b0e7ecc`: `VerifiedCopyReader` на Linux проверяет открытый descriptor в точке EOF, прежде чем no-overwrite writer публикует готовый temporary file. Если inode поменял размер/mtime/ctime во время чтения, `create_from_reader` возвращает ошибку и не публикует destination. Добавлен тест same-size изменения источника перед EOF. После публикации остаётся отдельная проверка источника и его pathname с `OutcomeUnknown` при расхождении.
-- Проверка timestamp не доказывает атомарный snapshot байтов при конкурентной записи; исходник никогда не удаляется. На macOS content reads запрещены. Новый код ожидает компиляции и локального теста, не считать #15 закрытым.
+- The user confirmed a Mac run after package `b30071b`.
+- `24d38d0`, `b0e7ecc`: `VerifiedCopyReader` on Linux checks the open descriptor at the EOF point before the no-overwrite writer publishes the ready temporary file. If the inode changed size/mtime/ctime during reading, `create_from_reader` returns an error and does not publish the destination. A test for same-size source change before EOF is added. After publication, a separate check of the source and its pathname remains, with `OutcomeUnknown` upon discrepancy.
+- Timestamp verification does not prove an atomic byte snapshot during concurrent writing; the source is never deleted. On macOS, content reads are prohibited. New code awaits compilation and local testing; do not consider #15 closed.
 
 ### Hardlink source guard for move-copy preparation (2026-10-11)
 
-- Пользователь подтвердил успешный локальный прогон предыдущего пакета `2bc6485`.
-- `55c4955`: Linux move-copy preparation теперь отказывает при `nlink != 1` у уже открытого source inode перед публикацией destination. Дополнительный тест подтверждает, что для hard-linked source новый файл не создаётся, а alias и оригинал сохраняются. Это согласовано с более строгими требованиями безопасного перемещения, но не распространяется на обычное самостоятельное копирование.
-- Изменение ещё не прошло macOS fmt/clippy/tests; новую проверку запрашивать вместе с общим пакетом, не после этого коммита. Полное delete/move остаётся закрытым для автоматических Jobs.
+- The user confirmed a successful local run of the previous package `2bc6485`.
+- `55c4955`: Linux move-copy preparation now fails if `nlink != 1` for the already opened source inode before destination publication. An additional test confirms that for a hard-linked source, no new file is created, and both the alias and the original are preserved. This is consistent with stricter safe movement requirements but does not apply to ordinary independent copying.
+- The change has not yet passed macOS fmt/clippy/tests; request a new check together with the general package, not after this commit. Full delete/move remains closed for automatic Jobs.
 
 ### Move-copy publication regression (2026-10-11)
 
-- Пользователь подтвердил предыдущий Mac-прогон до текущего набора изменений.
-- `e1beef4` добавляет Linux end-to-end тест: уже открытый source изменён после исходного `metadata`, а `VerifiedCopyReader` должен сорвать атомарную публикацию destination. Если source изменён, оригинал не удаляется.
-- Коррекция `6f233ac` убирает ненужный явный `drop` reader-а и полагается на стандартную NLL-проверку областей заимствования Rust. Нужна компиляция и тестирование на Mac на объединённом этапе; нет основания объявлять #15 завершённым.
+- The user confirmed the previous Mac run before the current set of changes.
+- `e1beef4` adds a Linux end-to-end test: an already open source is changed after the initial `metadata`, and `VerifiedCopyReader` must abort the atomic publication of the destination. If the source is changed, the original is not deleted.
+- Correction `6f233ac` removes an unnecessary explicit `drop` of the reader and relies on standard Rust NLL borrow checking. Compilation and testing on Mac are required during the consolidated stage; there is no basis to declare #15 complete.
 
 ### Reconciliation boundary: copy versus byte equality (2026-10-11)
 
 - `c71bab1`: metadata-only `reconcile_move_copy` inspects a preserved source against the original inspection and checks that a destination of the expected length exists. It does **not** claim integrity, equality of content, recovery, completed move, or authorization to remove either file.
-- Unix negative contract test deliberately uses same-sized but different bytes: metadata reconciliation may return true, illustrating why caller MUST NOT mistake its result for verified copy integrity. A missing destination returns false. This interface is observational only.
-- To mark prepared copy as verified, execution needs a trustworthy content digest/producer-verified source and destination, alongside stable source identity and no forbidden macOS hydration. No automatic destructive step is enabled. Consolidated Mac tests remain pending for new code.
+- Unix negative contract test deliberately uses same-sized but different bytes: metadata reconciliation may return true, illustrating why the caller MUST NOT mistake its result for verified copy integrity. A missing destination returns false. This interface is observational only.
+- To mark a prepared copy as verified, execution needs a trustworthy content digest/producer-verified source and destination, alongside stable source identity and no forbidden macOS hydration. No automatic destructive step is enabled. Consolidated Mac tests remain pending for new code.
 
 ### End-to-end prepared copy byte verification (2026-10-11)
 
-- `c71bab1`, `bcbaa41`: metadata-only copy reconciliation проверяет наличие двух имён и размер, **не** целостность; отрицательный контракт демонстрирует одинаковую длину при разных байтах.
-- `67c4a9c`, `a4ab00a`: отдельный Linux API `verify_move_copy_bytes` по явному разрешению открывает исходник и назначение через pinned root + no-follow, сравнивает содержимое потоково блоками 64 KiB и перепроверяет оба открытых inode по metadata до/после. При изменении обнаруженных metadata или исходного pathname возвращает ошибку, а не мнимый успех. Linux-тест различает equal-size corruption от точного совпадения, macOS-тест требует fail-closed даже с consent.
-- При враждебной записи в открытый файл сравнение + timestamps не обеспечивает транзакционный байтовый snapshot; автоматический delete/move остаётся недоступен. Эти новые изменения не проверены Mac toolchain. Прогресс оценивать по готовым функциям, не количеству тестов.
+- `c71bab1`, `bcbaa41`: metadata-only copy reconciliation checks for the presence of two names and the size, **not** integrity; a negative contract demonstrates identical length with different bytes.
+- `67c4a9c`, `a4ab00a`: a separate Linux API `verify_move_copy_bytes` opens the source and destination via pinned root + no-follow upon explicit permission, compares content streaming in 64 KiB blocks, and re-verifies both open inodes by metadata before/after. If detected metadata or the source pathname changes, it returns an error rather than a false success. The Linux test distinguishes equal-size corruption from an exact match; the macOS test requires fail-closed even with consent.
+- With hostile writing to an open file, comparison + timestamps do not provide a transactional byte snapshot; automatic delete/move remains unavailable. These new changes are not verified by the Mac toolchain. Evaluate progress by completed functions, not by the number of tests.
 
 ### Release 1 Stage 04 start: Yandex streaming upload (2026-10-11)
 
-- По просьбе ускорить проект начата независимая работа #16 без фиктивного закрытия #15. Это параллельное начало, а не снятие блокирующих гарантий безопасности.
-- `a7e874d`, `8738354`, `020c72b`, `e69891f`: реализован минимальный путь upload: GET подписанного ресурса `/resources/upload?overwrite=false`, проверка HTTPS/PUT/отсутствия URL credentials, потоковый HTTP PUT фиксированной заявленной длины без открытия файлов на Mac, отдельный `UploadOutcome::Accepted/Pending`; запрещены HTTP redirects в производственном клиенте. Ошибка PUT считается возможным неизвестным состоянием удалённого файла и требует внешнего reconciliation; метод не выполняет автоматических retries.
-- Upload reader теперь проверяет точное соответствие фактической длины durable `expected_size`: short source и trailing bytes обнаруживаются до передачи последнего chunk (для нулевого expected size — до PUT). Несовпадение не объявляется успешной копией: результат остаётся `UploadOutcomeUnknown` и требует reconciliation. Это не вычисляет MD5 source и не заменяет remote metadata verification.
+- At the request to accelerate the project, independent work #16 has started without a dummy closing of #15. This is a parallel start, not a removal of blocking safety guarantees.
+- `a7e874d`, `8738354`, `020c72b`, `e69891f`: a minimal upload path is implemented: GET for a signed resource `/resources/upload?overwrite=false`, verification of HTTPS/PUT/absence of URL credentials, streaming HTTP PUT of a fixed declared length without opening files on Mac, and a separate `UploadOutcome::Accepted/Pending`; HTTP redirects are prohibited in the production client. A PUT error is considered a possible unknown state of the remote file and requires external reconciliation; the method does not perform automatic retries.
+
+- Upload reader now checks that actual durable length matches `expected_size` exactly: short source and trailing bytes are detected before the last chunk is transferred (for zero expected size, before PUT). A mismatch is not declared as a successful copy: the result remains `UploadOutcomeUnknown` and requires reconciliation. This does not compute MD5 source and does not replace remote metadata verification.
 
 ### Yandex upload metadata reconciliation contract — #16 (2026-10-13)
 
-- `reconcile_uploaded_resource` делает только `GET /resources` по точному ожидаемому path и сопоставляет path, size и 32-hex provider MD5. Некорректный ожидаемый MD5 останавливает проверку как `InsufficientEvidence` ещё до сети; неполный или иной ответ провайдера не становится успехом.
-- Metadata-only browser получает следующие страницы только по явному действию пользователя: Rust/FFI передаёт `offset` при фиксированном limit 50, SwiftUI показывает «Показать ещё» только когда provider сообщил ещё элементы. Проверка loopback HTTP фиксирует GET `/resources` с path/limit/offset и без content transfer. Отсутствие или противоречивые pagination fields не открывают бесконечную загрузку.
-- Наблюдение existing durable `copy` attempt переиспользует этот contract после проверки зарегистрированного `connection_id`, Keychain credential reference и provider account UID. Оно остаётся read-only: не повторяет PUT, не читает/скачивает контент, не изменяет Job/evidence/baseline и не подключено к FFI/UI. Mock HTTP test доказывает read-only GET и match metadata; это не live Yandex E2E и не подтверждение реальной передачи. #16 остаётся PARTIAL.
-- Для уже `UNKNOWN` copy attempt добавлен отдельный recovery boundary: после той же account-bound read-only проверки только точное совпадение path/size/MD5 атомарно завершает attempt и Job. Mismatch, неполная metadata, account/credential error и provider failure оставляют Job `UNKNOWN`; PUT, download, retry, Registry/FileSyncState mutation отсутствуют. Этот путь пока не подключён к UI/FFI и не является live Yandex E2E.
-- Сквозные mock tests фиксируют порядок account UID → resource metadata и доказывают, что даже точное совпадение не меняет `running` Job и не resolves attempt; несовпадающий account UID останавливает путь до lookup ресурса. Токен остаётся только в closure test Keychain resolver и не записывается в Registry/JobStore.
-- Тест с mock API подтверждает отказ от передачи на HTTP URL до чтения входа. НЕТ end-to-end проверки реальным аккаунтом, проверки полного размера/MD5 после загрузки, честного `OutcomeUnknown` в типе ошибки, интеграции со сценариями/очередью, безопасного контроля отмены и retries/backoff; пока не включать автоматические Jobs или рекламировать production-ready. Новый код ещё не прошёл локальный fmt/clippy/tests.
-
+- `reconcile_uploaded_resource` only performs `GET /resources` for the exact expected path and matches path, size, and 32-hex provider MD5. An incorrect expected MD5 stops the check as `InsufficientEvidence` before network access; an incomplete or different provider response is not a success.
+- Metadata-only browser retrieves subsequent pages only by explicit user action: Rust/FFI passes `offset` with a fixed limit of 50, SwiftUI shows "Show more" only when the provider reports more elements. Loopback HTTP verification records GET `/resources` with path/limit/offset and without content transfer. Missing or contradictory pagination fields do not trigger infinite loading.
+- Observation of an existing durable `copy` attempt reuses this contract after verifying the registered `connection_id`, Keychain credential reference, and provider account UID. It remains read-only: it does not repeat PUT, does not read/download content, does not change Job/evidence/baseline, and is not connected to FFI/UI. Mock HTTP test proves read-only GET and metadata match; this is not live Yandex E2E and not confirmation of real transfer. #16 remains PARTIAL.
+- For an already `UNKNOWN` copy attempt, a separate recovery boundary is added: after the same account-bound read-only verification, only an exact path/size/MD5 match atomically completes the attempt and Job. Mismatch, incomplete metadata, account/credential error, and provider failure leave the Job as `UNKNOWN`; PUT, download, retry, and Registry/FileSyncState mutation are absent. This path is not yet connected to UI/FFI and is not live Yandex E2E.
+- End-to-end mock tests record the order account UID $\rightarrow$ resource metadata and prove that even an exact match does not change a `running` Job and does not resolve an attempt; a mismatching account UID stops the path before resource lookup. The token remains only in the closure test Keychain resolver and is not written to Registry/JobStore.
+- Mock API test confirms the refusal to transfer to an HTTP URL before reading the entry. There is NO end-to-end verification with a real account, no verification of full size/MD5 after upload, no honest `OutcomeUnknown` in the error type, no integration with scenarios/queue, and no safe control of cancellation and retries/backoff; do not enable automatic Jobs or advertise as production-ready. New code has not yet passed local fmt/clippy/tests.
 
 ## Gate-focused acceptance matrix — 2026-10-11
 
-Исторические записи выше относятся к указанным там SHA и не подтверждают нынешний HEAD. Каждому утверждению о прохождении тестов обязателен фактический SHA и среда.
+Historical records above refer to the SHAs listed there and do not confirm the current HEAD. Every claim of passing tests must include the actual SHA and environment.
 
-| Gate | Готово тогда и только тогда, когда | Подтверждение на этапе подготовки |
+| Gate | Ready if and only if | Confirmation at preparation stage |
 |---|---|---|
-| G0 | Документированы владельцы Job, scope consent, adapter errors/capabilities, FFI и UNKNOWN reconciliation | Документировано, реализации ещё требуют проверки |
-| G1 | Manual create-new проходит SwiftUI → Rust JobStore → mock adapter → verified SQLite receipt → UI; no-overwrite, restart/duplicate/fault tests | PARTIAL: mock vertical slice, durable queue/cancel before effect, Rust/mock/ABI tests and macOS smoke/restart passed; real adapter, pause/resume, fair scheduling and limits remain |
-| G2 | Та же вертикаль работает на реально подтверждённой паре адаптеров; live provider evidence и consent | НЕ выполнено |
-| G3 | One-way и two-way Scenario diff опираются на последнее подтверждённое состояние; конфликт блокируется | НЕ выполнено |
-| G4 | Mass delete/overwrite, concurrent mutation, Keychain disconnect и uncertain retry fail-closed | Частично, полная приёмка НЕ выполнена |
-| G5 | Единый Rust engine обслуживает Job в независимой службе; закрытие UI не прекращает выполнение | НЕ выполнено |
-| G6 | Матрица платформы, entitlement, выбранная distribution, signed install, ресурсы и fault tests зафиксированы | НЕ выполнено |
+| G0 | Job owners, scope consent, adapter errors/capabilities, FFI, and UNKNOWN reconciliation are documented | Documented, implementations still require verification |
+| G1 | Manual create-new passes SwiftUI $\rightarrow$ Rust JobStore $\rightarrow$ mock adapter $\rightarrow$ verified SQLite receipt $\rightarrow$ UI; no-overwrite, restart/duplicate/fault tests | PARTIAL: mock vertical slice, durable queue/cancel before effect, Rust/mock/ABI tests and macOS smoke/restart passed; real adapter, pause/resume, fair scheduling and limits remain |
+| G2 | The same vertical works on a actually verified adapter pair; live provider evidence and consent | NOT performed |
+| G3 | One-way and two-way Scenario diff rely on the last confirmed state; conflict is blocked | NOT performed |
+| G4 | Mass delete/overwrite, concurrent mutation, Keychain disconnect, and uncertain retry fail-closed | Partially, full acceptance NOT performed |
+| G5 | A single Rust engine services Jobs in an independent service; closing UI does not stop execution | NOT performed |
+| G6 | Platform matrix, entitlement, selected distribution, signed install, resources, and fault tests are fixed | NOT performed |
 
-Для каждого инкремента приложить тестовый case ID, SHA, environment, executed command, PASS/FAIL/BLOCKED/SKIPPED, источник evidence (real/mock/static) и оставшийся риск. Закрытие #15 по количеству unit tests запрещено. Рекомендуемый первый E2E: no-overwrite create-new-file, stable attempt ID и verification перед terminal success. Исходный контент нельзя автоматически скачивать на главный MacBook. Перед выпуском с неполными destructive capabilities запросить отдельное продуктовое согласование.
-
+For each increment, attach a test case ID, SHA, environment, executed command, PASS/FAIL/BLOCKED/SKIPPED, evidence source (real/mock/static), and remaining risk. Closing #15 based on the number of unit tests is prohibited. Recommended first E2E: no-overwrite create-new-file, stable attempt ID, and verification before terminal success. Original content must not be automatically downloaded to the main MacBook. Before release with incomplete destructive capabilities, request separate product approval.
 
 ### G1 in-process job inventory — 2026-10-11
 
-Срез исходного кода: `a39c392` (`JobStore::list_jobs`), `519810a`/`c581b9b` (read-only C ABI `qadren_jobs_list`), `58cd095` (Swift `JobInventory`), `33fc1f8` (read-only queue panel in `MainView`). Статусы считываются непосредственно из durable SQLite; никакой Job не запускается при открытии UI. Для первого runner сохраняется отдельная архитектурная граница, без придуманной worker службы.
+Source code slice: `a39c392` (`JobStore::list_jobs`), `519810a`/`c581b9b` (read-only C ABI `qadren_jobs_list`), `58cd095` (Swift `JobInventory`), `33fc1f8` (read-only queue panel in `MainView`). Statuses are read directly from durable SQLite; no Job starts when the UI opens. A separate architectural boundary is maintained for the first runner, without an invented worker service.
 
-**Проверки:** статический анализ путей по исходному коду. Rust fmt/Clippy/tests, Swift compiler, native macOS smoke и реальное восстановление после restart на этих коммитах здесь НЕ выполнялись. Код не считается проверенным, пока нет подтверждённого запуска. Этот промежуточный этап **не** удовлетворяет G1: отсутствуют manual Job executor, no-overwrite adapter effect, production verifier, согласованная фиксация результата и end-to-end test.
+**Verifications:** static path analysis of source code. Rust fmt/Clippy/tests, Swift compiler, native macOS smoke, and real recovery after restart on these commits were NOT performed here. Code is not considered verified until a confirmed run occurs. This intermediate stage **does not** satisfy G1: manual Job executor, no-overwrite adapter effect, production verifier, agreed result fixation, and end-to-end test are absent.
 
-**Перед следующим функциональным коммитом:** запустить `bash scripts/test-core.sh` и `bash scripts/build-macos.sh` на Mac. При неуспехе сначала исправить компиляцию, не расширять функциональность. Следующее изменение должно быть связано с безопасным исполнением, не наращивать read-only интерфейс без необходимости.
+**Before next functional commit:** run `bash scripts/test-core.sh` and `bash scripts/build-macos.sh` on Mac. If unsuccessful, fix compilation first, do not expand functionality. The next change must relate to safe execution, not increase the read-only interface unnecessarily.
 
 ### G1 mock create execution package — 2026-10-11
 
-`118cdf2` добавил единственный in-process vertical slice: SwiftUI через узкий C ABI создаёт новый **app-owned** mock artifact; `job_execution.rs` сохраняет `JobStore` Job и bound attempt с размером/MD5 до записи, выполняет `create_new` без overwrite, затем mock verifier заново читает только этот тестовый объект и сохраняет metadata-verified receipt в SQLite. Swift не пишет SQLite и не выполняет файловую бизнес-логику.
+`118cdf2` added a single in-process vertical slice: SwiftUI via a narrow C ABI creates a new **app-owned** mock artifact; `job_execution.rs` saves a `JobStore` Job and bound attempt with size/MD5 before writing, performs `create_new` without overwrite, then a mock verifier reads only this test object again and saves a metadata-verified receipt in SQLite. Swift does not write to SQLite and does not perform file business logic.
 
-Проверено на macOS: `bash scripts/test-core.sh` — Rust fmt, Clippy и 188 unit tests passed; в том числе consent-denial без эффекта, occupied destination без overwrite, invalid path, partial write, duplicate request, simulated crash after external effect → restart `UNKNOWN` with no replay, а также successful C-ABI execution. `bash scripts/build-macos.sh` собрал unsigned `dist/QADREN.app` и проверил `Info.plist`.
+Verified on macOS: `bash scripts/test-core.sh` — Rust fmt, Clippy, and 188 unit tests passed; including consent-denial without effect, occupied destination without overwrite, invalid path, partial write, duplicate request, simulated crash after external effect $\rightarrow$ restart `UNKNOWN` with no replay, and successful C-ABI execution. `bash scripts/build-macos.sh` built an unsigned `dist/QADREN.app` and verified `Info.plist`.
 
-`118c1f9` расширяет mock slice ровно одной безопасной операцией управления: `Queue mock file` сохраняет только local SQLite Job; `Run` является отдельным operation-scoped согласием на создание test artifact; `Cancel` разрешён только если нет active/unknown bound attempt. Введён terminal state `cancelled` и migration v6→v7, которая сохраняет Jobs/events/attempts/evidence. Active или UNKNOWN attempt отменить нельзя — возможный эффект по-прежнему требует reconciliation, не получает ложный статус `cancelled`.
+`118c1f9` extends the mock slice with exactly one safe management operation: `Queue mock file` saves only a local SQLite Job; `Run` is a separate operation-scoped consent to create a test artifact; `Cancel` is allowed only if there is no active/unknown bound attempt. Terminal state `cancelled` and migration v6$\rightarrow$v7 are introduced, which preserve Jobs/events/attempts/evidence. An active or UNKNOWN attempt cannot be cancelled — a possible effect still requires reconciliation and does not receive a false `cancelled` status.
 
-Следующий пакет добавляет durable `Pause`/`Resume` для Job **до** внешнего эффекта: `Pause` переводит queued Job в `paused`, `Resume` возвращает его в `queued`, а отдельный `Run` вновь требует operation-scoped consent. Пауза при active/unknown bound attempt сознательно отклоняется: checkpoint для потоковой передачи ещё не реализован, поэтому система не выдаёт остановку возможного эффекта за проверенный факт. Состояние доступно через узкие Rust C ABI команды и отображается SwiftUI без прямой записи в SQLite.
+The next package adds durable `Pause`/`Resume` for a Job **before** external effect: `Pause` moves a queued Job to `paused`, `Resume` returns it to `queued`, and a separate `Run` again requires operation-scoped consent. Pause during an active/unknown bound attempt is intentionally rejected: checkpoint for streaming is not yet implemented, so the system does not report the stop of a possible effect as a verified fact. State is available via narrow Rust C ABI commands and displayed in SwiftUI without direct writing to SQLite.
 
-Проверено на macOS для этого пакета: `bash scripts/test-core.sh` — PASS (fmt, Clippy, 192 Rust unit tests); `bash scripts/build-macos.sh` — PASS (unsigned `dist/QADREN.app`, `Info.plist`); UI smoke — PASS: queued mock Job появился в UI, был отменён до effect, после закрытия и повторного запуска UI сохранил `cancelled`. Это **mock evidence**, не G2 и не реальная передача Yandex/iCloud/Local FS: не читается пользовательское или облачное содержимое, не добавлены destructive operations, Background Worker, Scenario, pause/resume, fair scheduling, limits или реальный provider reconciliation. G1 и #18 остаются PARTIAL до этих отдельных границ и final review на SHA.
+Verified on macOS for this package: `bash scripts/test-core.sh` — PASS (fmt, Clippy, 192 Rust unit tests); `bash scripts/build-macos.sh` — PASS (unsigned `dist/QADREN.app`, `Info.plist`); UI smoke — PASS: queued mock Job appeared in UI, was cancelled before effect, after closing and restarting UI preserved `cancelled`. This is **mock evidence**, not G2 and not real Yandex/iCloud/Local FS transfer: no user or cloud content is read, no destructive operations, Background Worker, Scenario, pause/resume, fair scheduling, limits, or real provider reconciliation are added. G1 and #18 remain PARTIAL until these separate boundaries and final review on SHA.
 
-Добавлена отдельная read-only reconciliation для уже durable `UNKNOWN` G1 mock attempt: Rust сверяет ровно сохранённые `operation_kind`, `connection_id`, target, size и MD5 с app-owned test artifact, лишь после точного совпадения разрешает тот же attempt и переводит Job в `completed`. Несовпадение, отсутствие root/object или неоднозначная binding остаются `UNKNOWN`; повторная запись, удаление или автоматический rollback отсутствуют. Этот узкий mock recovery не является reconciliation для Yandex, Local FS или iCloud и не снимает оставшиеся G1/#18 ограничения.
+A separate read-only reconciliation for already durable `UNKNOWN` G1 mock attempts is added: Rust compares exactly the saved `operation_kind`, `connection_id`, target, size, and MD5 with the app-owned test artifact; only after an exact match does it resolve that same attempt and move the Job to `completed`. Mismatch, absence of root/object, or ambiguous binding remain `UNKNOWN`; repeated writing, deletion, or automatic rollback are absent. This narrow mock recovery is not reconciliation for Yandex, Local FS, or iCloud and does not remove remaining G1/#18 restrictions.
 
-Проверено на macOS для этого изменения: `bash scripts/test-core.sh` — PASS (fmt, Clippy, 212 Rust unit tests, включая crash-after-effect → exact reconciliation и partial artifact → сохранение `UNKNOWN`); `bash scripts/build-macos.sh` — PASS (unsigned `dist/QADREN.app`, `Info.plist`).
+Verified on macOS for this change: `bash scripts/test-core.sh` — PASS (fmt, Clippy, 212 Rust unit tests, including crash-after-effect $\rightarrow$ exact reconciliation and partial artifact $\rightarrow$ preservation of `UNKNOWN`); `bash scripts/build-macos.sh` — PASS (unsigned `dist/QADREN.app`, `Info.plist`).
 
-`JobInventoryTests.swift` дополняет этот mock-slice native Swift→Rust проверкой на временном app-owned root: пустой inventory, Queue → Pause → Resume → Run → durable `completed`, затем отдельный Queue → Cancel без artifact. Команда `bash scripts/test-macos-job-inventory.sh` собирает release Rust static library и этот runner; она не запускает QADREN.app, не использует Application Support пользователя и не читает пользовательское/облачное содержимое. Это ABI/bridge evidence, а не visual UI smoke или реальная передача данных.
+`JobInventoryTests.swift` complements this mock-slice with a native Swift$\rightarrow$Rust check on a temporary app-owned root: empty inventory, Queue $\rightarrow$ Pause $\rightarrow$ Resume $\rightarrow$ Run $\rightarrow$ durable `completed`, then a separate Queue $\rightarrow$ Cancel without artifact. The command `bash scripts/test-macos-job-inventory.sh` builds the release Rust static library and this runner; it does not launch QADREN.app, does not use the user's Application Support, and does not read user/cloud content. This is ABI/bridge evidence, not visual UI smoke or real data transfer.
 
-Следующий G1 safety-пакет различает известный отказ до эффекта и неоднозначный результат: если app-owned `create_new` атомарно сообщает, что target уже занят, Rust в одной SQLite-транзакции переводит bound active attempt в `failed_before_effect`, а Job — в `failed`. Receipt и успешная verification при этом не фабрикуются; существующие bytes остаются нетронутыми. Partial write, обычная I/O-ошибка, crash после возможного эффекта и неудачная verification по-прежнему становятся `UNKNOWN` после reopen и требуют только read-only reconciliation. Миграция schema v9 сохраняет legacy active/unknown/resolved attempts; только active/unknown продолжают блокировать completion, cancel, pause, decisions и удаление credentials.
+The next G1 safety package distinguishes between a known failure before effect and an ambiguous result: if app-owned `create_new` atomically reports that the target is already occupied, Rust moves the bound active attempt to `failed_before_effect` and the Job to `failed` in a single SQLite transaction. Receipts and successful verification are not fabricated; existing bytes remain untouched. Partial write, ordinary I/O error, crash after possible effect, and failed verification still become `UNKNOWN` after reopen and require only read-only reconciliation. Schema migration v9 preserves legacy active/unknown/resolved attempts; only active/unknown continue to block completion, cancel, pause, decisions, and credential deletion.
 
-Успешное завершение verified attempt теперь также является единой SQLite-транзакцией: `resolved` attempt, evidence level, `completed` Job и оба event записываются вместе. Поэтому crash не может оставить resolved attempt под `running`/`UNKNOWN` Job, который уже нельзя безопасно повторить или reconciliate. Этот общий Rust boundary используют как normal mock completion, так и его read-only recovery; он не добавляет реальный provider transfer или меняет политику согласия.
+Successful completion of a verified attempt is now also a single SQLite transaction: `resolved` attempt, evidence level, `completed` Job, and both events are written together. Therefore, a crash cannot leave a resolved attempt under a `running`/`UNKNOWN` Job that can no longer be safely repeated or reconciled. Both normal mock completion and its read-only recovery use this common Rust boundary; it does not add real provider transfer or change the consent policy.
 
-### Настройки: подключения и Scenario configuration — 2026-10-12
+### Settings: connections and Scenario configuration — 2026-10-12
 
-«Настройки» остаются отдельным окном и используют реальные секции: независимые `StorageConnection`, сохранённые Scenario и «Настройки приложения». SwiftUI вызывает существующий Rust Registry FFI для list/create/enable/update Scenario; форма сохраняет имя, два connection ID, каталоги, направление и ревизию 1. Изменение конфигурации транзакционно увеличивает revision и сохраняет отдельный immutable snapshot обеих ревизий, не меняя включённость Scenario; закреплённый Job в будущем сможет взять именно свою конфигурацию, а не текущую строку. Включение/выключение также меняет durable Registry. «Настройки приложения» содержат локальную тему в том же левом меню и не смешивают её с настройками синхронизации. В соответствии с D-017 iCloud отсутствует из активных пунктов интерфейса.
+"Settings" remains a separate window and uses real sections: independent `StorageConnection`, saved Scenarios, and "App Settings". SwiftUI calls the existing Rust Registry FFI for list/create/enable/update Scenario; the form saves the name, two connection IDs, directories, direction, and revision 1. Changing the configuration transactionally increases the revision and saves a separate immutable snapshot of both revisions without changing the Scenario enablement; a pinned Job in the future will be able to take its specific configuration rather than the current string. Enabling/disabling also changes the durable Registry. "App Settings" contains a local theme in the same left menu and does not mix it with synchronization settings. In accordance with D-017, iCloud is absent from active interface items.
 
-Создание Scenario — редактор в detail-зоне, не sheet. В его верхней части находятся имя, две точки обмена и направление; ниже — два metadata-only браузера каталогов. «Этот Mac» доступен как реальное `local_filesystem` подключение: при первом сохранении создаётся независимый Registry record, затем он переиспользуется. Яндекс Диск загружает только первую страницу метаданных выбранного каталога (не байты файлов); запуск сценария и передача файлов по-прежнему отсутствуют.
+Scenario creation is an editor in the detail zone, not a sheet. Its upper part contains the name, two exchange points, and direction; below are two metadata-only directory browsers. "This Mac" is available as a real `local_filesystem` connection: an independent Registry record is created during the first save, then reused. Yandex Disk loads only the first page of metadata for the selected directory (not file bytes); scenario launch and file transfer are still absent.
 
-Граница: это configuration-only UI. Есть создание, включение и revision-safe изменение Scenario; нет удаления Scenario, scheduler, dry-run запуска, Job submission или передачи файлов. Экран явно сообщает об этих ограничениях и не имитирует Run/копирование. Удаление connection по-прежнему использует существующий recoverable Keychain/attempt gate.
+Boundary: this is configuration-only UI. There is creation, enablement, and revision-safe change of Scenarios; there is no Scenario deletion, scheduler, dry-run launch, Job submission, or file transfer. The screen explicitly reports these limitations and does not simulate Run/copying. Connection deletion still uses the existing recoverable Keychain/attempt gate.
 
-Проверено на macOS для этого изменения: `bash scripts/test-core.sh` — PASS (fmt, Clippy, 220 Rust unit tests, включая C ABI create/list/enable/update Scenario и миграцию v3 с сохранением snapshot); `bash scripts/build-macos.sh` — PASS (unsigned `dist/QADREN.app`, `Info.plist`). Native visual/VoiceOver smoke для этой версии не подтверждён: session UI automation стала недоступна после перезапуска приложения.
+Verified on macOS for this change: `bash scripts/test-core.sh` — PASS (fmt, Clippy, 220 Rust unit tests, including C ABI create/list/enable/update Scenario and v3 migration with snapshot preservation); `bash scripts/build-macos.sh` — PASS (unsigned `dist/QADREN.app`, `Info.plist`). Native visual/VoiceOver smoke for this version is not confirmed: session UI automation became unavailable after application restart.
 
-### Файловый менеджер: read-only metadata slice — #22 (2026-10-13)
+### File Manager: read-only metadata slice — #22 (2026-10-13)
 
-«Файловый менеджер» открыт отдельным macOS-окном из меню `Пространство` и Menu Bar, поэтому не возвращает постоянный Sidebar на мониторинговую панель. В окне две независимые локальные панели с выбором корня, breadcrumb-навигацией и выделением строк; они читают только имена, типы и размеры через существующий Local Filesystem FFI.
+"File Manager" is opened as a separate macOS window from the `Space` menu and Menu Bar, therefore it does not return a permanent Sidebar to the monitoring panel. In the window, there are two independent local panels with root selection, breadcrumb navigation, and row selection; they read only names, types, and sizes via the existing Local Filesystem FFI.
 
-Граница: это browsing-only срез. Предпросмотр и загрузка содержимого, создание каталогов, копирование, перемещение, переименование и удаление отключены: прямой Swift вызов `qadren_local_mkdir` удалён. Никакой Job, Scenario, consent или файловый эффект не создаётся открытием/обновлением окна. Операции изменения будут добавляться только вместе с безопасным Job Engine и его durable attempt/reconciliation контрактом.
+Boundary: this is a browsing-only slice. Content preview and download, directory creation, copying, moving, renaming, and deletion are disabled: the direct Swift call `qadren_local_mkdir` is removed. No Job, Scenario, consent, or file effect is created by opening/updating the window. Modification operations will be added only together with a safe Job Engine and its durable attempt/reconciliation contract.
 
-Для этого среза выполнены `bash scripts/test-core.sh` и `bash scripts/build-macos.sh`; native visual/VoiceOver smoke отдельно не выполнялся.
+`bash scripts/test-core.sh` and `bash scripts/build-macos.sh` were performed for this slice; native visual/VoiceOver smoke was not performed separately.
 
 ### Monitoring layout: per-window local composition — #23 (2026-10-14)
 
-- Monitoring сохраняет локальный порядок и видимость четырёх существующих виджетов (`Система`, `Задания`, `Очередь`, `Подключения`) отдельно для каждого SwiftUI scene через `@SceneStorage` panel ID и `UserDefaults`. В режиме «Компоновка» можно переставить или скрыть виджет; временный каталог возвращает только скрытые стандартные виджеты, а сброс восстанавливает baseline. Постоянного Sidebar, произвольных HTML-виджетов и второго data/Job слоя нет.
-- В режиме «Компоновка» доступны native toolbar actions Undo/Redo (`Cmd-Z` / `Shift-Cmd-Z`) для последней серии локальных изменений. История ограничена 50 состояниями, не переживает перезапуск окна и не затрагивает данные Core; каждый undo/redo сохраняет текущий presentation layout так же, как исходное изменение.
-- Для каждого виджета отдельно сохраняется плотность `Компактно` / `Обычно` / `Подробно`; это меняет только вторичную информацию и объём реально доступных строк, не масштабирует весь интерфейс и не создаёт показатели. Отсутствующее поле в layout, сохранённом предыдущей версией, безопасно читается как `Обычно`.
-- В том же режиме отдельно для каждой панели доступен размер адаптивной сетки `Компактная` / `Обычная` / `Просторная`: он меняет только порог deterministic reflow (`230` / `270` / `360` pt), не масштабирует chrome или содержимое виджетов. Это presentation-only поле участвует в Undo/Redo; layout старого формата-массива по-прежнему открывается с обычной сеткой.
-- Сохранены только presentation fields. Layout не меняет Job, Scenario, StorageConnection, Worker или файлы. Повреждённый сохранённый JSON открывается с безопасным default layout, при этом исходная запись не удаляется автоматически.
-- `bash scripts/test-macos-dashboard-layout.sh` проверяет persistence порядка/visibility, независимость двух panel ID и fail-safe recovery повреждённого layout. Native app был открыт для inspection monitoring surface; последующее UI automation connection прервалось, поэтому visual/VoiceOver acceptance для нового layout остаётся BLOCKED и не заявляется как PASS.
+- Monitoring preserves the local order and visibility of four existing widgets (`System`, `Jobs`, `Queue`, `Connections`) separately for each SwiftUI scene via `@SceneStorage` panel ID and `UserDefaults`. In "Layout" mode, a widget can be rearranged or hidden; a temporary catalog returns only hidden standard widgets, and a reset restores the baseline. There is no permanent Sidebar, arbitrary HTML widgets, or second data/Job layer.
+- In "Layout" mode, native toolbar actions Undo/Redo (`Cmd-Z` / `Shift-Cmd-Z`) are available for the last series of local changes. History is limited to 50 states, does not survive window restart, and does not affect Core data; each undo/redo saves the current presentation layout just as the original change did.
+- For each widget, density is saved separately as `Compact` / `Normal` / `Detailed`; this changes only secondary information and the volume of actually available rows, does not scale the entire interface, and does not create metrics. A missing field in a layout saved by a previous version is safely read as `Normal`.
+- In the same mode, an adaptive grid size is available separately for each panel as `Compact` / `Normal` / `Spacious`: it changes only the deterministic reflow threshold (`230` / `270` / `360` pt), does not scale chrome or widget content. This presentation-only field participates in Undo/Redo; layout in the old array format still opens with a normal grid.
+- Only presentation fields are saved. Layout does not change Job, Scenario, StorageConnection, Worker, or files. Corrupted saved JSON opens with a safe default layout, while the original record is not automatically deleted.
+- `bash scripts/test-macos-dashboard-layout.sh` verifies persistence of order/visibility, independence of two panel IDs, and fail-safe recovery of corrupted layout. The native app was opened for inspection of the monitoring surface; subsequent UI automation connection was interrupted, so visual/VoiceOver acceptance for the new layout remains BLOCKED and is not declared as PASS.
 
-### Расписания Scenario: durable configuration UI — #21 (2026-10-13)
+### Scenario Schedules: durable configuration UI — #21 (2026-10-13)
 
-Для существующего Scenario в отдельной панели настроек можно создать несколько weekly расписаний, просмотреть их IANA timezone, временно выключить каждое отдельно или удалить. Конфигурация хранится в существующем Rust Registry; SwiftUI обращается к ней только через новые узкие C ABI list/create/enable/remove. Операция удаления расписания в одной SQLite-транзакции сначала удаляет его receipts уже оценённых слотов, затем саму конфигурацию, и не затрагивает Scenario, Job или файлы. Выключение сохраняет receipts, поэтому повторное включение не должно воспроизвести старый слот.
+For an existing Scenario, several weekly schedules can be created in a separate settings panel, their IANA timezone can be viewed, each can be temporarily disabled individually, or deleted. Configuration is stored in the existing Rust Registry; SwiftUI accesses it only via new narrow C ABI list/create/enable/remove. The schedule deletion operation deletes its receipts for already evaluated slots first, then the configuration itself, in a single SQLite transaction, and does not affect Scenario, Job, or files. Disabling preserves receipts, so re-enabling should not reproduce an old slot.
 
-Граница: интерфейс прямо сообщает, что scheduler ещё не создаёт Job. Нет `next run`, фонового таймера, content I/O, Scenario execution, consent или передачи файлов. Native visual/VoiceOver smoke для этого SHA не выполнен; статические Core/FFI и macOS build проверки перечислены в evidence Issue #21.
+Boundary: the interface explicitly states that the scheduler does not yet create Jobs. There is no `next run`, background timer, content I/O, Scenario execution, consent, or file transfer. Native visual/VoiceOver smoke for this SHA is not performed; static Core/FFI and macOS build checks are listed in evidence Issue #21.
 
-### Подтверждённый FileSyncState — #19 (2026-10-13)
+### Confirmed FileSyncState — #19 (2026-10-13)
 
-Registry schema v8 хранит FileSyncState отдельно от строки Scenario: ключ включает Scenario ID, immutable revision и относительный путь; в записи остаются только metadata identity/size/MD5 каждой стороны, без контента и секретов. Запись допускается только при `MetadataVerified` либо более сильном evidence; `Requested`, provider acknowledgement и `UNKNOWN` fail-closed и baseline не продвигают. Новая revision начинает без унаследованного baseline, поэтому её dry-run не может молча использовать состояние другой конфигурации.
+Registry schema v8 stores FileSyncState separately from the Scenario string: the key includes Scenario ID, immutable revision, and relative path; the record retains only metadata identity/size/MD5 for each side, without content or secrets. Writing is allowed only with `MetadataVerified` or stronger evidence; `Requested`, provider acknowledgement, and `UNKNOWN` fail-closed and do not advance the baseline. A new revision starts without an inherited baseline, so its dry-run cannot silently use the state of another configuration.
 
-Этот пакет не делает adapter scan, не вызывает planner через FFI/UI, не создаёт Job и не подтверждает реальную синхронизацию. Он создаёт только durable contract, который будущий executor обязан вызывать после независимой проверки результата.
+This package does not perform an adapter scan, does not call the planner via FFI/UI, does not create Jobs, and does not confirm real synchronization. It creates only a durable contract that a future executor must call after an independent result verification.

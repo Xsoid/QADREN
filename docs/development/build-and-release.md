@@ -1,46 +1,45 @@
-> **D-018 / 2026-10-14:** локальный релиз P0–P2 строится и тестируется без контроллера Яндекс Диска, живого API, новых OAuth и iCloud entitlements. Yandex feature-work/live E2E вынесены за Release 1, iCloud — бессрочно. Ниже старый G1/G2 cloud sequence исторический: локальный Job→Local FS и safety проверяются раньше. Подпись/распространение относятся к **локальному** релизу и не требуют облачного сервиса. [D-018](../decisions/D-018-local-first-priorities.md).
+**D-018 / 2026-10-14:** the local release P0–P2 is built and tested without the Yandex Disk controller, live API, new OAuth, and iCloud entitlements. Yandex feature-work/live E2E is moved after Release 1; iCloud is moved indefinitely. The old G1/G2 cloud sequence is historical below: local Job→Local FS and safety are checked first. Signing and distribution relate to the **local** release and do not require a cloud service. [D-018](../decisions/D-018-local-first-priorities.md).
 
-# Сборка и выпуск
+# Build and Release
 
-Статус: developer build scripts реализованы, выпускной конвейер и модель распространения ещё не утверждены.
+Status: developer build scripts are implemented; the release pipeline and distribution model are not approved.
 
-## Архитектура поставки
+## Delivery Architecture
 
-- На macOS итог — `QADREN.app`, самодостаточный нативный пакет.
-- Rust-компоненты компилируются в машинный код и **поставляются внутри приложения** (библиотека или исполняемый компонент — решить по прототипу).
-- SwiftUI и Apple APIs используют штатные framework macOS.
-- Никакой отдельной установки Rust/Swift/Cargo/Xcode/Node/Python/Docker на компьютер конечного пользователя.
-- Для работы облаков потребуются учётные записи, сеть, системные разрешения и подходящая версия ОС.
+- On macOS, the result is `QADREN.app`, which is a self-contained native package.
+- Rust components are compiled into machine code and **delivered inside the application** (as a library or an executable component — decide based on the prototype).
+- SwiftUI and Apple APIs use standard macOS frameworks.
+- The end-user computer does not require a separate installation of Rust/Swift/Cargo/Xcode/Node/Python/Docker.
+- Cloud operation requires accounts, network, system permissions, and a compatible OS version.
 
-## Разработка
+## Development
 
-Локальная сборка: `bash scripts/test-core.sh` для Rust fmt/Clippy/tests; `bash scripts/build-macos.sh` для unsigned macOS developer bundle `dist/QADREN.app`. Для обычного developer launch использовать `./script/build_and_run.sh`: он останавливает прежний процесс, собирает этот bundle и запускает его как macOS app; `--verify` дополнительно подтверждает процесс. Для непостоянной native-приёмки тем можно добавить `--theme dark`, `--theme light` или `--theme system`: override передаётся лишь запущенному процессу и не меняет настройку пользователя. Команды не заменяют реальный E2E. Локальная сборка требует Rust toolchain и Xcode на Mac разработчика. Сборку Rust и Swift держать воспроизводимой: зафиксировать toolchain в манифестах после выбора версий, использовать lockfile и минимальный build script. Не загружать бинарники зависимостей из непроверенных источников в release pipeline.
+Local build: `bash scripts/test-core.sh` for Rust fmt/Clippy/tests; `bash scripts/build-macos.sh` for the unsigned macOS developer bundle `dist/QADREN.app`. For a standard developer launch, use `./script/build_and_run.sh`: it stops the previous process, builds this bundle, and starts it as a macOS app; `--verify` additionally confirms the process. For temporary native theme acceptance, you can add `--theme dark`, `--theme light`, or `--theme system`: the override is passed only to the started process and does not change the user setting. These commands do not replace real E2E. Local build requires the Rust toolchain and Xcode on the developer Mac. Keep the Rust and Swift build reproducible: fix the toolchain in the manifests after selecting versions, use a lockfile, and use a minimum build script. Do not upload dependency binaries from unverified sources into the release pipeline.
 
-## Релизный конвейер (проектируется)
+## Release Pipeline (in design)
 
-1. Проверить tests, lint, контроль лицензий и зависимостей.
-2. Собрать оптимизированную release-конфигурацию, минимизировать символы отладки только в пользовательском артефакте.
-3. Сформировать .app с корректными подписыванием и sandbox/entitlements, только если они нужны выбранной модели распространения и реальным функциям Яндекс Диска/Local FS; iCloud entitlements не требуются.
-4. Проверить корректную загрузку Rust-компонента на чистой поддерживаемой macOS.
-5. Подписать Developer ID и выполнить notarization (для распространения вне Mac App Store); проверить Gatekeeper.
-6. Проверить установку, запуск, обновление и удаление без сторонних runtime.
+1. Check tests, lint, license control, and dependencies.
+2. Build an optimized release configuration; minimize debug symbols only in the user artifact.
+3. Form the .app with correct signing and sandbox/entitlements only if they are required for the selected distribution model and real Yandex Disk/Local FS functions; iCloud entitlements are not required.
+4. Check the correct loading of the Rust component on a clean supported macOS.
+5. Sign with Developer ID and perform notarization (for distribution outside the Mac App Store); check Gatekeeper.
+6. Check installation, launch, update, and removal without third-party runtimes.
 
-Выбор распространения через App Store или напрямую **ещё не принят**. App Sandbox, entitlements и background execution зависят от этого выбора и должны быть проверены отдельно.
+The choice of distribution via the App Store or directly **is not yet decided**. App Sandbox, entitlements, and background execution depend on this choice and must be checked separately.
 
-## Другие ОС
+## Other OS
 
-В будущем общее Rust-ядро компилируется под Windows/Linux. Платформенный UI и секреты — отдельные модули. iCloud Documents adapter отложен (D-017) и не входит в release criteria для других ОС. Цель — нативный пакет без стороннего runtime, но системные библиотеки и требования к версии ОС допустимы.
+In the future, the common Rust core is compiled for Windows/Linux. Platform UI and secrets are separate modules. The iCloud Documents adapter is postponed (D-017) and is not part of the release criteria for other OS. The goal is a native package without a third-party runtime, but system libraries and OS version requirements are acceptable.
 
+## End-to-End Integration Runbook (2026-10-11)
 
-## Сквозной integration runbook (2026-10-11)
+1. Save the `main` SHA, versions of macOS/Xcode/Swift/rustc, and the test fixture; do not use user files.
+2. `bash scripts/test-core.sh`: fmt, Clippy, Rust tests. On Mac, also run `bash scripts/build-macos.sh` and check `dist/QADREN.app`; this is an unsigned developer bundle, not a release.
+3. For G1, prepare a test source stream and a *missing* destination path. Submit an idempotent manual Job through the same Rust JobStore, independent of the frontend. No Scenario for a one-time operation.
+4. Before I/O, check connection/capability/consent and durable attempt. Perform a no-overwrite write and metadata verification; save the receipt in SQLite and display it in SwiftUI. Distinguish the adapter ACK from cloud integrity evidence.
+5. Fault matrix: missing consent (zero content I/O), existing destination (no change), short/long stream, adapter 401/429/5xx, timeout after possible write, restart after external effect before DB commit, duplicate attempt, cancel/pause, connection disconnection. UNKNOWN is not retry and not success without read-only reconciliation.
+6. Compare the file tree, object metadata, and SQLite strings before and after; ensure there are no secrets and no downloads on the main MacBook without operation-specific consent.
+7. For G2, replace the mock with real supported adapters; isolate real checks of macOS Keychain, Yandex account, and Local FS permissions from mock tests; do not check iCloud entitlement. Record the results in `release-1-validation.md` with SHA, commands, and failed scenarios.
+8. Perform a code/security review and then mark the corresponding acceptance cell and Issue. If a step is not reproducible, specify BLOCKED, not Done.
 
-1. Сохранить SHA `main`, версии macOS/Xcode/Swift/rustc и test fixture; не использовать пользовательские файлы.
-2. `bash scripts/test-core.sh`: fmt, Clippy, Rust tests. На Mac также `bash scripts/build-macos.sh`, проверить `dist/QADREN.app`; это unsigned developer bundle, не релиз.
-3. Для G1 подготовить тестовый исходный поток и *отсутствующий* целевой путь. Submit idempotent manual Job через тот же Rust JobStore, независимо от frontend. Никакого Scenario для разовой операции.
-4. Перед I/O проверить connection/capability/consent и durable attempt. Провести no-overwrite write, metadata verification, сохранить receipt в SQLite, отобразить его в SwiftUI. Отличать adapter ACK от cloud integrity evidence.
-5. Fault matrix: отсутствует consent (нулевой content I/O), existing destination (не меняется), short/long stream, adapter 401/429/5xx, timeout после возможной записи, restart после external effect до DB commit, duplicate attempt, cancel/pause, отключение connection. UNKNOWN не retry и не success без read-only reconciliation.
-6. Сверить дерево файлов, object metadata и строки SQLite до/после; убедиться в отсутствии секретов и скачиваний на основной MacBook без операции-specific consent.
-7. Для G2 заменить mock реальными поддерживаемыми адаптерами; выделить реальные проверки macOS Keychain, Яндекс-аккаунта и разрешений Local FS отдельно от mock tests; не проверять iCloud entitlement. Результаты записать в `release-1-validation.md` с SHA, командами и непройденными сценариями.
-8. Провести code/security review и только затем отметить соответствующую клетку acceptance и Issue. Если шаг не воспроизводится, указать BLOCKED, не Done.
-
-**Рабочее решение по архитектуре:** первый runner работает in-process SwiftUI → Rust через узкий FFI. В release gate остаётся независимое выполнение после закрытия UI: после G1/G2 тот же Rust engine переносится в background service без новых JobStore или конкурирующих владельцев. Выбор Mac App Store/прямой signed distribution открыт до macOS signing/sandbox/service feasibility проверки, независимо от iCloud. GitHub Actions необязательны.
+**Architectural Working Solution:** the first runner works in-process SwiftUI → Rust through a narrow FFI. The release gate retains independent execution after the UI closes: after G1/G2, the same Rust engine is moved to a background service without new JobStores or competing owners. The choice of Mac App Store/direct signed distribution remains open until the macOS signing/sandbox/service feasibility check, independent of iCloud. GitHub Actions are optional.

@@ -1,41 +1,41 @@
 # QADREN — UI/UX Design System
 
-Статус: **обязательная исходная спецификация для реализации SwiftUI**, редакция 2026-10-12. Направление визуального оформления согласовано как «киберпанк-инструментальная панель»; точные значения токенов — первоначальный проверяемый baseline, не утверждение о проведённой визуальной приёмке. Реализация остаётся PARTIAL до тестов и утверждённых снимков.
+Status: **mandatory source specification for SwiftUI implementation**, revision 2026-10-12. The visual design direction is agreed as "cyberpunk instrument panel"; the exact token values are the initial verifiable baseline, not a statement of completed visual acceptance. The implementation remains PARTIAL until tests and approved screenshots are available.
 
-![Оригинальный логотип QADREN](../../assets/qadren-logo.png)
+![Original QADREN logo](../../assets/qadren-logo.png)
 
-## Точка входа и приоритет
+## Entry Point and Priority
 
-1. [Визуальный язык и бренд](visual-language.md) + [машиночитаемые токены](tokens.json).
-2. [Атомарные и составные компоненты](components.md).
-3. [Сетка, реестр и жизненный цикл виджетов](widget-system.md).
-4. [Панель мониторинга](monitoring.md) и [панель настройки](settings.md).
-5. [Контракт реализации и приёмки](implementation.md).
-6. [Статический визуальный прототип](prototype.html) — **демонстрация**, не поведение приложения и не альтернативная спецификация.
+1. [Visual Language and Brand](visual-language.md) + [machine-readable tokens](tokens.json).
+2. [Atomic and composite components](components.md).
+3. [Grid, registry and widget life cycle](widget-system.md).
+4. [Monitoring panel](monitoring.md) and [settings panel](settings.md).
+5. [Implementation and acceptance contract](implementation.md).
+6. [Static visual prototype](prototype.html) — **demonstration**, not application behavior and not an alternative specification.
 
-В случае расхождения: безопасность из `docs/policies/` и предметные решения `docs/architecture/`/ADR выше внешнего вида. Внутри дизайн-системы поведенческие контракты Markdown имеют приоритет над примером HTML. Реальный текущий `main` проверяется перед кодом; отсутствие функции показывается как недоступность/заглушка, а не «готово».
+In case of discrepancy: safety from `docs/policies/` and domain solutions from `docs/architecture/`/ADR are higher priority than appearance. Within the design system, Markdown behavioral contracts have priority over the HTML example. The actual current `main` is verified before the code; the absence of a function is shown as unavailable/stub, not as "ready".
 
-## Нельзя менять при реализации
+## Do Not Change During Implementation
 
-- Мониторинг — **полотно интерактивных виджетов без постоянного Sidebar или навигации по разделам**; временный каталог виджетов только в режиме компоновки.
-- Два типа рабочих окон уже заданы: мониторинг (несколько независимых окон) и панель настройки. Меню macOS — точка входа и быстрые действия; закрытие UI не равносильно остановке фоновой службы после её реализации.
-- Тёмная киберпанк-тема — основной художественный baseline: тёмная глубина, электрический циан/синий, контролируемое свечение; светлая и системная темы также предусмотрены.
-- **Использовать только** `assets/qadren-logo.png` как знак QADREN; не создавать «похожий» знак, не заменять SF Symbols логотипом стороннего продукта.
-- Запрещены выдуманные графики/числа, подмена UNKNOWN ошибкой/успехом, локальная загрузка содержимого на основной MacBook без разрешения, декорация недоступной функции активной кнопкой.
-- Сначала существующий `MainView.swift`, `QADRENApp.swift`, `StorageConnections.swift`, `JobInventory.swift`, `LocalWorkspace.swift`, не второй UI-слой и не второй Rust Job Engine.
+- Monitoring — **a canvas of interactive widgets without a permanent Sidebar or section navigation**; a temporary widget catalog is only available in layout mode.
+- Two types of work windows are already defined: monitoring (several independent windows) and the settings panel. The macOS menu is the entry point and for quick actions; closing the UI is not equal to stopping the background service after its implementation.
+- Dark cyberpunk theme — the primary artistic baseline: dark depth, electric cyan/blue, controlled glow; light and system themes are also provided.
+- **Use only** `assets/qadren-logo.png` as the QADREN mark; do not create a "similar" mark, do not replace SF Symbols with a third-party product logo.
+- Fictitious graphs/numbers, replacing UNKNOWN with error/success, local content upload to the main MacBook without permission, and decorating an unavailable function with an active button are prohibited.
+- First the existing `MainView.swift`, `QADRENApp.swift`, `StorageConnections.swift`, `JobInventory.swift`, `LocalWorkspace.swift`, not a second UI layer and not a second Rust Job Engine.
 
-## Разделение решений
+## Separation of Decisions
 
-| Тип | Источник истины |
+| Type | Source of Truth |
 |---|---|
-| Функции синхронизации, локальные загрузки, подтверждения | `docs/architecture/backup-model.md`, `docs/policies/` |
-| Состав и взаимодействие UI | файлы `docs/design/*.md` |
-| Отступы, палитра, размеры, типографика | `docs/design/tokens.json` + пояснения в `visual-language.md` |
-| Существующие API и runtime readiness | `main` исходный код, тесты и issue #18/#22/#23 |
-| HTML-демонстрация | только стилистический и композиционный референс |
+| Synchronization functions, local uploads, confirmations | `docs/architecture/backup-model.md`, `docs/policies/` |
+| UI composition and interaction | `docs/design/*.md` files |
+| Spacing, palette, sizes, typography | `docs/design/tokens.json` + explanations in `visual-language.md` |
+| Existing API and runtime readiness | `main` source code, tests and issue #18/#22/#23 |
+| HTML demonstration | only stylistic and compositional reference |
 
-Не менять принятые документы «по вкусу Codex»; конфликт описать и согласовать. Документация не является разрешением преждевременно активировать опасные команды.
+Do not change accepted documents "according to Codex taste"; describe and agree on any conflict. Documentation is not a permission to activate dangerous commands prematurely.
 
-## Рекомендуемый путь для Codex
+## Recommended Path for Codex
 
-Прочитать документы в приведённом порядке, инвентаризировать текущие компоненты, создать общий theme/token слой и виджетный chrome, затем перевести текущую панель на виджетную поверхность без изменения доменной логики. После визуального baseline интегрировать реальные read-only данные, потом разрешённые команды через FFI в порядке релизных gates. Каждый инкремент проверять по [implementation.md](implementation.md). Работать в `main`, без новых веток и без отдельного дизайн-репозитория.
+Read the documents in the given order, inventory the current components, create a general theme/token layer and widget chrome, then move the current panel to the widget surface without changing the domain logic. After the visual baseline, integrate real read-only data, then permitted commands via FFI in the order of release gates. Verify each increment according to [implementation.md](implementation.md). Work in `main`, without new branches and without a separate design repository.

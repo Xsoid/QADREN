@@ -1,51 +1,51 @@
-# Технологический стек QADREN
+# QADREN Technology Stack
 
-Статус: **принято** 2026-10-08. Это выбор технологий, а не утверждение, что реализация уже готова. Актуальная продуктовая спецификация — `docs/architecture/backup-model.md`.
+Status: **accepted** 2026-10-08. This is a selection of technologies. It is not a statement that the implementation is complete. The current product specification is `docs/architecture/backup-model.md`.
 
-## Обязательные решения
+## Mandatory Solutions
 
-- **Rust** — общее кроссплатформенное ядро, логика Scenario/Job/FileSyncState, планирование, задания, Worker и общие облачные адаптеры.
-- **Swift + SwiftUI** — нативный компактный интерфейс для первой платформы **macOS**.
-- **C ABI / FFI** — узкая, версионируемая граница между Rust и Swift, без передачи произвольных внутренних Rust-структур.
-- **SQLite** — встроенное локальное хранилище реестра, метаданных и журнала задач; схема и конкретная Rust-библиотека выбираются при реализации.
-- **macOS Keychain** — секреты и OAuth-токены; в будущем платформенные хранилища секретов для других ОС.
-- **Официальный REST API Яндекс Диска** — существующий частично реализованный сетевой адаптер; контроллер вынесен за Release 1 в post-release P3 и не требуется для local-first P0–P2 (D-018).
-- **Cargo и Xcode** — инструменты сборки разработчика, не требования к системе пользователя.
+- **Rust** — general cross-platform core, Scenario/Job/FileSyncState logic, scheduling, tasks, Worker, and general cloud adapters.
+- **Swift + SwiftUI** — native compact interface for the first platform **macOS**.
+- **C ABI / FFI** — narrow, versioned boundary between Rust and Swift. Do not pass arbitrary internal Rust structures.
+- **SQLite** — embedded local storage for registry, metadata, and task log; the schema and the specific Rust library are selected during implementation.
+- **macOS Keychain** — secrets and OAuth tokens; platform secret stores for other OS in the future.
+- **Official Yandex Disk REST API** — existing partially implemented network adapter; the controller is moved beyond Release 1 to post-release P3 and is not required for local-first P0–P2 (D-018).
+- **Cargo and Xcode** — developer build tools. These are not user system requirements.
 
-## Отложенное
+## Deferred
 
-Swift/Foundation + Apple iCloud Documents — только возможный будущий адаптер; не часть обязательного стека Release 1, текущих задач, сборки или релизной приёмки ([D-017](../decisions/D-017-defer-icloud.md)).
+Swift/Foundation + Apple iCloud Documents — only a possible future adapter; not part of the mandatory Release 1 stack, current tasks, build, or release acceptance ([D-017](../decisions/D-017-defer-icloud.md)).
 
-## Предварительные библиотеки, не обязательные зависимости
+## Preliminary Libraries, Non-mandatory Dependencies
 
-- Tokio — асинхронные фоновые операции.
-- reqwest — HTTP-клиент; выбирать конфигурацию TLS/зависимости по реальной необходимости.
-- serde — сериализация конфигураций и сообщений на границах модулей.
-- rusqlite — кандидат для SQLite.
-- sha2 — кандидат для SHA-256.
+- Tokio — asynchronous background operations.
+- reqwest — HTTP client; select TLS configuration/dependencies based on real need.
+- serde — serialization of configurations and messages at module boundaries.
+- rusqlite — candidate for SQLite.
+- sha2 — candidate for SHA-256.
 
-Подключать их только в момент появления конкретного use case. Не вводить две библиотеки, решающие одну задачу. Закреплять версии в lockfile.
+Include these libraries only when a specific use case occurs. Do not introduce two libraries that solve one task. Fix versions in the lockfile.
 
-## Результат для пользователя
+## User Result
 
-Готовое приложение — **самодостаточный скомпилированный пакет .app**, не требующий отдельно устанавливать Rust, Swift, Xcode, Python, Node.js, Docker, СУБД или внешний runtime. Можно полагаться на системные библиотеки и службы поддерживаемой версии macOS. На других платформах — соответствующий нативный пакет с проверенными системными требованиями.
+The finished application is a **self-sufficient compiled .app package**. The user does not need to install Rust, Swift, Xcode, Python, Node.js, Docker, DBMS, or an external runtime. The application uses system libraries and services of the supported macOS version. On other platforms, use a corresponding native package with verified system requirements.
 
-SwiftUI доступен только на поддерживаемых Apple ОС: при переносе ядра на Windows/Linux реализация UI может отличаться, но семантика заданий, политики и адаптерный контракт не должны меняться.
+SwiftUI is available only on supported Apple OS: when the core is ported to Windows/Linux, the UI implementation may differ, but the task semantics, policies, and adapter contract must not change.
 
-## Сознательно не используем
+## Not Used (By Design)
 
-Electron, Chromium-бандл, Node.js/Python runtime в продакшене, JVM, Docker, микросервисы, обязательный локальный HTTP-сервер, отдельную БД-сервер, тяжёлый plugin host. Не добавлять сторонний framework ради нескольких экранов.
+Electron, Chromium bundle, Node.js/Python runtime in production, JVM, Docker, microservices, mandatory local HTTP server, separate DB server, heavy plugin host. Do not add a third-party framework for a few screens.
 
-## Минимальные ресурсы — измеряемые ориентиры, не гарантии
+## Minimum Resources — Measurable Targets, Not Guarantees
 
-- Установленный macOS-пакет: желательная цель до **20 МБ**.
-- RAM в покое: желательная цель до **40 МБ**.
-- CPU без задач: близко к нулю, без активного polling.
-- Отсутствие постоянного локального зеркала на основном MacBook.
-- Отсутствие несанкционированной загрузки содержимого QADREN на основной MacBook.
+- Installed macOS package: desired target up to **20 MB**.
+- RAM at rest: desired target up to **40 MB**.
+- CPU without tasks: close to zero, without active polling.
+- No permanent local mirror on the main MacBook.
+- No unauthorized download of QADREN content to the main MacBook.
 
-Размер измерять на **релизной, подписанной** сборке; RAM, энергию, дисковую активность и network bytes проверять тестами, а не обещать заранее.
+Measure size on the **release, signed** build; verify RAM, energy, disk activity, and network bytes with tests. Do not promise these values in advance.
 
-## Что ещё не выбрано
+## Not Yet Selected
 
-Версии macOS/Rust/Swift/Xcode, deployment target, архитектуры CPU, путь упаковки/подписи/notarization, схема обновлений, окончательная структура crates, точная конфигурация SQLite и API адаптера. Фиксировать после прототипа и проверки поддержки Apple.
+macOS/Rust/Swift/Xcode versions, deployment target, CPU architectures, packaging/signing/notarization path, update scheme, final crates structure, exact SQLite configuration, and API adapter. Fix these after the prototype and verification of Apple support.

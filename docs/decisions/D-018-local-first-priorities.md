@@ -1,19 +1,19 @@
-# D-018 — Приоритет локального фундамента и интерфейсов
+# D-018 — Priority of local foundation and interfaces
 
-**Дата:** 2026-10-14. **Статус:** принято. **Переопределяет:** очередь Release 1 в D-017, roadmap и исторических issues. Политики безопасности, D-016 и технические ограничения сохраняются.
+**Date:** 2026-10-14. **Status:** accepted. **Overrides:** Release 1 queue in D-017, roadmap, and historical issues. Safety policies, D-016, and technical constraints remain.
 
-## Очередность разработки
+## Development Sequence
 
-- **P0 — фундамент и UX/UI.** Сначала устранить выявленные ошибки сборки и расхождения `main` с локальными работами; привести Rust Core, SQLite, узкий FFI и SwiftUI к устойчивому baseline. Развивать нативную дизайн-систему, компоненты, виджетное полотно мониторинга без постоянного sidebar, окно настроек и MenuBarExtra, состояния пустой очереди/ошибки/UNKNOWN. Использовать `assets/qadren-logo.png` и `docs/design/`. Не создавать второй Job Engine и фиктивные показатели.
-- **P1 — локальное функциональное ядро.** Реализовать и проверить UI → Rust JobStore → Local Filesystem → verification → SQLite → UI. Затем локальные сценарии, восстановление после сбоев, политика согласий и двухпанельный файловый менеджер. Начинать с metadata/dry-run и no-overwrite; опасные операции только через safety-gates.
-- **P2 — автономный локальный продукт.** Планировщик, независимый Worker/service, сохранение сессий, проверяемые Local↔Local операции, дистрибутив. Отсутствие облачного API не блокирует локальную версию.
-- **P3 / POST-RELEASE — контроллер Яндекс Диска.** По прямому решению владельца он **вынесен за Release 1**. Владелец сообщил об аварийном состоянии Яндекса и частичной недоступности Диска/API. **До нового отдельного решения не выполнять новые задачи, OAuth/API/transfer или live E2E с Яндекс Диском.** Имеющийся исходный код OAuth/metadata/upload, подключения, тесты и данные сохранять; разрешены независимые offline/mock regression-проверки без сетевых запросов. #16 не является этапом или gate Release 1.
-- **PARKED — iCloud без даты.** По информации владельца для желаемого пути требуется недоступная платная учётная запись Apple Developer. Коннектор, entitlement, UI и исследования интеграции не разрабатываются. #17 остаётся закрытой. Не отменяется защита Local FS от скрытой материализации File Provider.
+- **P0 — foundation and UX/UI.** First, remove identified build errors and discrepancies between `main` and local work; bring Rust Core, SQLite, narrow FFI, and SwiftUI to a stable baseline. Develop the native design system, components, monitoring widget canvas without a constant sidebar, settings window and MenuBarExtra, and empty queue/error/UNKNOWN states. Use `assets/qadren-logo.png` and `docs/design/`. Do not create a second Job Engine or fictitious indicators.
+- **P1 — local functional core.** Implement and verify UI → Rust JobStore → Local Filesystem → verification → SQLite → UI. Then implement local scenarios, crash recovery, consent policy, and a two-pane file manager. Start with metadata/dry-run and no-overwrite; perform dangerous operations only through safety-gates.
+- **P2 — autonomous local product.** Scheduler, independent Worker/service, session saving, verifiable Local↔Local operations, and distribution package. The absence of a cloud API does not block the local version.
+- **P3 / POST-RELEASE — Yandex Disk controller.** By direct decision of the owner, this is **removed from Release 1**. The owner reported an emergency state of Yandex and partial unavailability of Disk/API. **Do not perform new tasks, OAuth/API/transfer, or live E2E with Yandex Disk until a new separate decision is made.** Preserve existing OAuth/metadata/upload source code, connections, tests, and data; independent offline/mock regression checks without network requests are permitted. #16 is not a stage or gate of Release 1.
+- **PARKED — iCloud without date.** According to the owner, the desired path requires an unavailable paid Apple Developer account. The connector, entitlement, UI, and integration research are not developed. #17 remains closed. The protection of Local FS against hidden File Provider materialization is not canceled.
 
-## Управление
+## Management
 
-Работать только в `main`; без новых веток и обязательных PR. Сверять фактический код и SHA перед каждой задачей; локальные непушенные коммиты из комментариев issues не считать частью origin/main. `VERIFIED` ставить лишь после проверок на конкретном SHA; отличать `PARTIAL`, `BLOCKED`, `PARKED`. UI можно разрабатывать на имеющихся read-only API и отдельно изолированных preview fixtures без ожидания облака. Запрет несанкционированного скачивания на основной MacBook, durable attempts, no-overwrite, UNKNOWN/reconciliation, scoped consent и отсутствие собственного версионирования неизменны.
+Work only in `main`; no new branches and no mandatory PRs. Verify actual code and SHA before each task; do not count local unpushed commits from issue comments as part of origin/main. Set `VERIFIED` only after checks on a specific SHA; distinguish `PARTIAL`, `BLOCKED`, `PARKED`. Develop UI using existing read-only APIs and separately isolated preview fixtures without waiting for the cloud. The prohibition of unauthorized downloading to the main MacBook, durable attempts, no-overwrite, UNKNOWN/reconciliation, scoped consent, and the absence of proprietary versioning remain unchanged.
 
-Release 1 состоит только из P0–P2: нативный UI и проверяемый контроллер **Local Filesystem** (JobStore, Policy, recovery, Local↔Local), затем автономная локальная служба и дистрибутив. Облачная интеграция — отдельный post-release scope, не критерий локального релиза.
+Release 1 consists only of P0–P2: native UI and a verifiable **Local Filesystem** controller (JobStore, Policy, recovery, Local↔Local), then an autonomous local service and distribution package. Cloud integration is a separate post-release scope and is not a criterion for the local release.
 
-См. [roadmap](../roadmap.md) и [аудит](../development/current-state-audit.md).
+See [roadmap](../roadmap.md) and [audit](../development/current-state-audit.md).

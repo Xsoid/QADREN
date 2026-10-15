@@ -1,25 +1,25 @@
-# D-017 — iCloud отложен за пределы активного Release 1
+# D-017 — iCloud postponed beyond active Release 1
 
-**Дата:** 2026-10-12. **Статус:** принято. **Область:** продуктовый scope, Codex issues, архитектура, UI, release gate.
+**Date:** 2026-10-12. **Status:** accepted. **Scope:** product scope, Codex issues, architecture, UI, release gate.
 
-## Решение
+## Decision
 
-В первом релизе QADREN **не разрабатываются резервирование, синхронизация, передача файлов с iCloud, iCloud Documents adapter, собственный контейнер, entitlement/provisioning, native feasibility spike, iCloud connection UI и iCloud integration/E2E**. iCloud остаётся потенциальной будущей интеграцией, не текущей задачей и не зависимостью. Существующая #17 закрывается как not planned. Codex не создаёт новых реализационных задач iCloud без явного решения владельца.
+In the first QADREN release, **do not develop backup, synchronization, file transfer with iCloud, iCloud Documents adapter, own container, entitlement/provisioning, native feasibility spike, iCloud connection UI and iCloud integration/E2E**. iCloud remains a potential future integration, not a current task and not a dependency. Existing #17 is closed as not planned. Codex does not create new iCloud implementation tasks without an explicit decision by the owner.
 
-**Исторический порядок от 12 октября, ПЕРЕСМОТРЕН D-018 от 14 октября:** ниже указанное требование Яндекс↔Local больше не является gate локального релиза; приоритет сейчас фундамент/UI → Local↔Local → автономная локальная версия, и лишь затем Яндекс. [D-018](D-018-local-first-priorities.md).
+**Historical order from October 12, REVISED by D-018 from October 14:** the Yandex↔Local requirement stated below is no longer a gate for the local release; the priority is now foundation/UI → Local↔Local → autonomous local version, and only then Yandex. [D-018](D-018-local-first-priorities.md).
 
-Активные endpoints в историческом scope: **Яндекс Диск и Local Filesystem**. Бывший приоритет — Local→Yandex upload, Yandex→Local download (с индивидуальным согласием при загрузке на основной MacBook), Local↔Local; прочие пары, включая Yandex↔Yandex, только после верификации capabilities. Далее one-way и two-way синхронизация и безопасные конфликты. Не считать простую копию гарантированной резервной версией: собственного BackupSet и версионирования содержимого нет.
+Active endpoints in the historical scope: **Yandex Disk and Local Filesystem**. Former priority — Local→Yandex upload, Yandex→Local download (with individual consent when downloading to the main MacBook), Local↔Local; other pairs, including Yandex↔Yandex, only after capabilities verification. Then one-way and two-way synchronization and safe conflicts. Do not consider a simple copy as a guaranteed backup version: there is no own BackupSet and no content versioning.
 
-## Основание и условия возврата
+## Basis and return conditions
 
-Владелец решил отложить iCloud из-за ограничений доступного ему бесплатного способа интеграции. Это принятое **продуктовое решение**, а не независимая проверка всех API, цен Apple и Apple Developer entitlements. Вернуться к iCloud только после нового явного решения, проверки технически и экономически доступной модели и доказательств семантики облачной выгрузки; до этого не делать даже spike.
+The owner decided to postpone iCloud because of limitations of the free integration method available to the owner. This is an accepted **product decision**, and not an independent verification of all APIs, Apple prices, and Apple Developer entitlements. Return to iCloud only after a new explicit decision, verification of a technically and economically available model, and evidence of cloud upload semantics; do not perform even a spike before this.
 
-## Не отменяет
+## Does not cancel
 
-- Системный iCloud/macOS работает независимо; QADREN не вмешивается.
-- Guards в Local Filesystem против неявной материализации File Provider/iCloud placeholders и скачивания содержимого на основной MacBook **сохраняются** как требования безопасности. Это не означает реализацию iCloud.
-- Действуют durable attempts, UNKNOWN/recovery, no-overwrite/conflict/delete policies, индивидуальные consent, независимые подключения и метаданные sync state.
+- System iCloud/macOS works independently; QADREN does not interfere.
+- Guards in Local Filesystem against implicit materialization of File Provider/iCloud placeholders and downloading of content to the main MacBook **remain** as safety requirements. This does not mean the implementation of iCloud.
+- Durable attempts, UNKNOWN/recovery, no-overwrite/conflict/delete policies, individual consent, independent connections, and metadata sync state remain active.
 
-## Пересмотр решений
+## Revision of decisions
 
-Заменяет iCloud-часть D-003 и D-012; остальные решения об архитектуре и локальных файловых системах остаются. Ссылки: `README.md`, `AGENTS.md`, `docs/roadmap.md`, `docs/architecture/*`, `docs/development/*`, `docs/design/settings.md`, Epic #12.
+Replaces the iCloud part of D-003 and D-012; other decisions about architecture and local file systems remain. Links: `README.md`, `AGENTS.md`, `docs/roadmap.md`, `docs/architecture/*`, `docs/development/*`, `docs/design/settings.md`, Epic #12.

@@ -1,63 +1,63 @@
-# Модель синхронизации: Scenario, Job, FileSyncState
+# Synchronization Model: Scenario, Job, FileSyncState
 
-Статус: согласованное продуктовое направление, 2026-10-09. Не означает, что функциональность уже реализована.
+Status: agreed product direction, 2026-10-09. This does not mean that the functionality is already implemented.
 
-## Цель и границы
+## Purpose and Scope
 
-QADREN управляет передачей и одно-/двусторонней синхронизацией файлов между независимыми StorageConnection, локальными каталогами и облачными ресурсами. **Первый релиз — полноценная локальная версия**, в которой один экземпляр приложения исполняет роли Controller и Worker. Удалённые Worker и межузловой транспорт — следующий этап, до отдельного утверждения протокола. Собственные резервные архивы, версионирование содержимого, восстановление исторических копий, BackupSet и зависимости между сценариями — вне MVP.
+QADREN manages the transfer and one-way/two-way synchronization of files between independent StorageConnection, local directories, and cloud resources. **The first release is a full local version**, in which one application instance performs the roles of Controller and Worker. Remote Workers and inter-node transport are the next stage, pending separate approval of the protocol. Own backup archives, content versioning, recovery of historical copies, BackupSet, and dependencies between scenarios are out of scope for the MVP.
 
-## Модель
+## Model
 
-- **StorageConnection** — независимый экземпляр адаптера с собственным ID/полномочиями; может быть источником и назначением.
-- **Scenario** — именованная конфигурация двух endpoints/каталогов, направления синхронизации, фильтров, политики удаления и конфликтов, триггеров, назначенного Worker. Имеет ревизии.
-- **Job** — единица исполнения с фиксированной ревизией Scenario либо разовая файловая операция из файлового менеджера; не каждое Job требует Scenario.
-- **Controller** — владеет конфигурацией, назначениями, очередями и общим мониторингом. **Worker** — единственный исполнитель делегированного задания; может работать автономно и управлять локальным исполнением, но не редактировать назначенный сценарий.
-- **FileSyncState** — служебные метаданные и последнее подтверждённое согласованное состояние сторон для выявления изменений, конфликтов и идемпотентности; **не архив содержимого**. Оно привязано к конкретной revision Scenario и записывается только после независимого подтверждения результата, не после scan, запроса или provider acknowledgement.
-- **ExecutionEvent/Report** — события, подтверждения провайдера и результаты проверок; UNKNOWN не равен FAILED.
+- **StorageConnection** — an independent adapter instance with its own ID/permissions; it can be a source and a destination.
+- **Scenario** — a named configuration of two endpoints/directories, synchronization direction, filters, deletion and conflict policies, triggers, and an assigned Worker. It has revisions.
+- **Job** — an execution unit with a fixed Scenario revision or a one-time file operation from the file manager; not every Job requires a Scenario.
+- **Controller** — owns the configuration, assignments, queues, and general monitoring. **Worker** — the sole executor of a delegated task; it can operate autonomously and manage local execution, but it cannot edit the assigned scenario.
+- **FileSyncState** — service metadata and the last confirmed agreed state of the parties to identify changes, conflicts, and idempotency; **it is not a content archive**. It is linked to a specific Scenario revision and is recorded only after independent confirmation of the result, not after a scan, request, or provider acknowledgement.
+- **ExecutionEvent/Report** — events, provider confirmations, and check results; UNKNOWN is not equal to FAILED.
 
-## Правила исполнения
+## Execution Rules
 
-- Односторонняя или двусторонняя синхронизация; фильтры по путям/папкам/расширениям; конфликтная и delete-политика задаются сценарием; неизвестная идентичность файлов не считается равенством.
-- Несколько независимых расписаний у сценария, отдельные переключатели, IANA timezone (по умолчанию Controller), один запуск за период DST; отсутствующее локальное время — ближайший допустимый момент, повторяющееся — один запуск.
-- Триггеры изменений интеллектуально объединяются; изменения во время выполнения — одно следующее задание; пропуски за время недоступности Worker объединяются в один catch-up. Вычисление schedule occurrence само по себе read-only. Для schedule slots Registry атомарно фиксирует receipt и durable outbox item; dispatcher идемпотентно создаёт ровно тот же pinned Job в отдельном JobStore и после этого подтверждает outbox. Это предотвращает потерю запуска при crash между SQLite stores, но не заменяет catch-up policy или scheduler service.
-- Ручные Jobs получают начальный повышенный приоритет; длительное ожидание повышает эффективный приоритет автоматических; ручная перестановка очереди разрешена. Повторный запуск занятого сценария ставится в очередь.
-- Выключенный Scenario запрещает автоматические триггеры, но допускает ручной запуск. При выключении пользователь выбирает: завершить активные Jobs или безопасно приостановить. При удалении — безопасная остановка и подтверждение от Worker.
-- Изменения Scenario применяются лишь к будущим Jobs. Переназначение Worker — только после подтверждения прекращения прежнего исполнения. Принудительное удаление Worker оставляет неопределённые сценарии заблокированными.
-- Worker сохраняет локальную паузу через перезагрузки до ручного возобновления. Controller может хранить команды офлайн Worker, но «отправлено» не равно «применено».
-- После сбоя безопасные операции возобновляются автоматически; неоднозначные требуют решения пользователя.
+- One-way or two-way synchronization; filters by paths/folders/extensions; conflict and delete policies are defined by the scenario; unknown file identity is not considered equality.
+- A scenario has several independent schedules, separate switches, IANA timezone (Controller by default), and one launch per DST period; if local time is missing, use the nearest allowable moment; if repeating, use one launch.
+- Change triggers are merged intelligently; changes during execution result in one subsequent task; misses during Worker unavailability are merged into one catch-up. Schedule occurrence calculation is read-only. For schedule slots, the Registry atomically records the receipt and a durable outbox item; the dispatcher idempotently creates exactly the same pinned Job in a separate JobStore and then confirms the outbox. This prevents launch loss during a crash between SQLite stores, but it does not replace the catch-up policy or scheduler service.
+- Manual Jobs receive an initial high priority; long waiting increases the effective priority of automatic jobs; manual queue reordering is allowed. A repeated launch of a busy scenario is placed in the queue.
+- A disabled Scenario prohibits automatic triggers but allows manual launch. When disabling, the user chooses to: terminate active Jobs or pause safely. When deleting: safe stop and confirmation from the Worker.
+- Scenario changes apply only to future Jobs. Worker reassignment occurs only after confirmation that the previous execution has stopped. Forced removal of a Worker leaves undefined scenarios locked.
+- The Worker saves a local pause across reboots until manual resumption. The Controller can store commands for an offline Worker, but "sent" is not equal to "applied".
+- After a failure, safe operations resume automatically; ambiguous operations require user decision.
 
-## Адаптеры
+## Adapters
 
-**Актуализация D-018 (2026-10-14):** Release 1: P0 — фундамент/UI, P1 — проверяемый контроллер Local Filesystem и безопасная Local↔Local синхронизация, P2 — локальная служба и дистрибутив. Контроллер Яндекс Диска вынесен в post-release P3, iCloud бессрочно. **Историческая формулировка далее не является текущим scope:** скачивание, загрузка и синхронизация Яндекс Диска и локальных директорий. Первый путь Release 1 — только Local↔Local; облачные комбинации требуют нового решения и реальных capability/E2E тестов. Копирование не даёт гарантий хранения исторических версий.
+**Update D-018 (2026-10-14):** Release 1: P0 — foundation/UI, P1 — verifiable Local Filesystem controller and safe Local↔Local synchronization, P2 — local service and distribution package. The Yandex Disk controller is moved to post-release P3, iCloud is indefinite. **The historical wording below is no longer the current scope:** downloading, uploading, and synchronization of Yandex Disk and local directories. The first path for Release 1 is only Local↔Local; cloud combinations require a new solution and real capability/E2E tests. Copying does not guarantee the storage of historical versions.
 
-- **Yandex Disk** через официальный API; metadata/OAuth работают, content primitives частичны, полноценный upload/download и синхронизация ещё не доказаны E2E.
-- **iCloud Documents** — отложенный вариант за пределами Release 1. Не реализовывать backup/sync, контейнер, адаптер и Apple entitlements без отдельного решения ([D-017](../decisions/D-017-defer-icloud.md)).
-- **Local Filesystem** — **отдельный адаптер**, не часть iCloud Documents; комбинировать в Scenario можно без смешения полномочий.
-- Адаптер декларирует ОС, права и возможности; планировщик не подменяет отсутствующие capabilities.
+- **Yandex Disk** via official API; metadata/OAuth work, content primitives are partial, full upload/download and synchronization are not yet proven E2E.
+- **iCloud Documents** — a deferred option outside of Release 1. Do not implement backup/sync, container, adapter, and Apple entitlements without a separate decision ([D-017](../decisions/D-017-defer-icloud.md)).
+- **Local Filesystem** — **a separate adapter**, not part of iCloud Documents; it can be combined in a Scenario without mixing permissions.
+- The adapter declares the OS, rights, and capabilities; the scheduler does not substitute missing capabilities.
 
-## Безопасность и история
+## Security and History
 
-- QADREN **не инициирует скачивание содержимого файлов на основной MacBook без предварительного явного согласия для конкретной операции**, включая проверки и восстановление. Метаданные разрешены. Системный iCloud/иные приложения не ограничиваются.
-- Удаления/перезаписи/массовые операции проверяются на опасность; неоднозначности блокируются до решения; использовать корзину провайдера где доступна, собственной системы версий/корзины нет.
-- Данные результата различают Worker report, подтверждение провайдера и реально проверенную целостность; не заявлять гарантию восстановления без резервной версии.
-- История Jobs/Events имеет настраиваемый срок очистки, но не удаляются незавершённые состояния, ожидающие подтверждения, неотправленные события и служебная история, необходимая для корректной синхронизации.
+- QADREN **does not initiate the downloading of file content to the main MacBook without prior explicit consent for a specific operation**, including checks and recovery. Metadata is allowed. System iCloud/other applications are not restricted.
+- Deletions/overwrites/mass operations are checked for danger; ambiguities are blocked until resolved; use the provider's trash where available; there is no internal versioning system/trash.
+- Result data distinguishes between Worker report, provider confirmation, and actually verified integrity; do not claim a recovery guarantee without a backup version.
+- Job/Event history has a configurable cleanup period, but unfinished states awaiting confirmation, unsent events, and service history necessary for correct synchronization are not deleted.
 
 ## UX/UI
 
-- Диспетчерский интерфейс с произвольным количеством локальных панелей и отдельными окнами, полным восстановлением размещения и истории контекста.
-- Виджеты стандартные, добавляются из единого списка с поиском, без клонирования; сетка без перекрытий; отдельный режим компоновки с автосохранением и undo.
-- Сводные/индивидуальные виджеты ресурсов; очередь; timeline запусков с оперативными действиями; задания, дерево файлов, прогресс; ошибки/конфликты; общий индикатор здоровья. Скорость и ETA только по Job, причём ETA лишь когда достоверен.
-- Общие фильтры панели с overrides виджетов; выбор объекта обновляет связанные виджеты; назад/вперёд и breadcrumbs; полные пути без сокращения.
-- Три плотности **для каждого виджета**, масштаб **для каждого окна**, светлая/тёмная/автоматическая темы. Глобальные критические сообщения не скрываются контекстными фильтрами и не открывают окна насильно.
-- Двухпанельный файловый менеджер (мультивыбор, copy/move/rename/delete/mkdir/drag-drop) без контентного предпросмотра и без поиска файлов. Операции используют общие Jobs, не создают постоянных Scenario.
-- Дерево Job поддерживает произвольное множественное выделение файлов/каталогов из разных ветвей и массовые действия. Стабильно сохраняет выделение/скролл при обновлениях; папка показывает байты **и** число файлов.
-- Предварительный просмотр синхронизации — по запросу, сводка+дерево, автоматически актуализируется, но не обязателен перед каждым запуском. Он строится только из разрешённых metadata snapshots, immutable revision Scenario и подтверждённого FileSyncState; не сканирует адаптеры сам, не читает контент, не создаёт Job и не меняет baseline.
-- Запросы подтверждений остаются в контексте виджетов/операций, глобальный индикатор считает их; отдельного центра нет.
-- Расширенный системный индикатор: активные Jobs, прогресс, операции и пауза. Фоновая служба запускается автоматически, окна вручную; выход UI не останавливает службу; явная остановка службы — с предупреждением.
-- Worker имеет независимый локальный UI только своих доступных заданий; конфигурации панелей между узлами не передаются.
+- Dispatcher interface with an arbitrary number of local panels and separate windows, with full restoration of placement and context history.
+- Standard widgets are added from a single list with search, without cloning; grid without overlaps; separate layout mode with auto-save and undo.
+- Summary/individual resource widgets; queue; launch timeline with operational actions; tasks, file tree, progress; errors/conflicts; general health indicator. Speed and ETA are available only for the Job, and ETA is shown only when reliable.
+- General panel filters with widget overrides; object selection updates linked widgets; back/forward and breadcrumbs; full paths without abbreviation.
+- Three densities **for each widget**, scale **for each window**, light/dark/automatic themes. Global critical messages are not hidden by contextual filters and do not force windows to open.
+- Two-pane file manager (multi-select, copy/move/rename/delete/mkdir/drag-drop) without content preview and without file search. Operations use general Jobs and do not create permanent Scenarios.
+- The Job tree supports arbitrary multiple selection of files/directories from different branches and mass actions. It stably preserves selection/scroll during updates; a folder shows bytes **and** the number of files.
+- Synchronization preview — on request, summary+tree, automatically updates, but is not mandatory before every launch. It is built only from allowed metadata snapshots, immutable Scenario revisions, and confirmed FileSyncState; it does not scan adapters itself, does not read content, does not create a Job, and does not change the baseline.
+- Confirmation requests remain in the context of widgets/operations; a global indicator counts them; there is no separate center.
+- Extended system indicator: active Jobs, progress, operations, and pause. The background service starts automatically; windows start manually; exiting the UI does not stop the service; explicit stop of the service occurs with a warning.
+- The Worker has an independent local UI only for its own available tasks; panel configurations are not transferred between nodes.
 
-## Что не делать сейчас
+## What not to do now
 
-Не реализовывать iCloud sync/backup/adapter/native spike без отдельного решения D-017. Не вводить BackupSet в runtime, обязательную защитную копию каждого файла, графовую зависимость сценариев, версионирование содержимого, аналитику квот во времени, прогнозы места, глобальные скорости Worker, графическую топологию, поисковый индекс, произвольные кастомные виджеты, автоматический выбор Worker, синхронизацию UI между устройствами.
+Do not implement iCloud sync/backup/adapter/native spike without separate decision D-017. Do not introduce BackupSet into runtime, mandatory backup of every file, graph dependency of scenarios, content versioning, quota analytics over time, space forecasts, global Worker speeds, graphical topology, search index, arbitrary custom widgets, automatic Worker selection, or UI synchronization between devices.
 
-См. [дорожную карту](../roadmap.md) и историю предыдущей модели в Git.
+See [roadmap](../roadmap.md) and the history of the previous model in Git.

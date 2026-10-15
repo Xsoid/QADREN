@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -24,64 +24,64 @@ body.light{color-scheme:light;--bg:#f1f7fa;--panel:#fff;--raised:#e9f2f7;--strok
 <div class="app" id="app">
   <header class="titlebar">
     <span class="lights" aria-hidden="true"><i></i><i></i><i></i></span>
-    <img class="logo" src="../../assets/qadren-logo.png" alt="Логотип QADREN">
-    <span class="brand">QADREN</span><span class="split"></span><span class="muted" id="modeLabel">Основная панель</span>
-    <span class="spacer"></span><button class="btn ghost" id="theme" type="button">☼ Тема</button>
-    <button class="btn" id="settingsBtn" type="button">⚙ Настройки</button>
-    <button class="btn" id="layoutBtn" type="button">▦ Компоновка</button>
-    <button class="btn primary edit-only" id="addBtn" type="button">＋ Виджет</button>
+    <img class="logo" src="../../assets/qadren-logo.png" alt="QADREN Logo">
+    <span class="brand">QADREN</span><span class="split"></span><span class="muted" id="modeLabel">Main Panel</span>
+    <span class="spacer"></span><button class="btn ghost" id="theme" type="button">☼ Theme</button>
+    <button class="btn" id="settingsBtn" type="button">⚙ Settings</button>
+    <button class="btn" id="layoutBtn" type="button">▦ Layout</button>
+    <button class="btn primary edit-only" id="addBtn" type="button">＋ Widget</button>
   </header>
-  <div class="note">ДЕМО-МАКЕТ · ВСЕ ЧИСЛА ВЫМЫШЛЕНЫ · кнопки файловых операций намеренно отсутствуют · оригинальный знак из assets/qadren-logo.png</div>
+  <div class="note">DEMO LAYOUT · ALL NUMBERS ARE FICTITIOUS · file operation buttons are intentionally absent · original logo from assets/qadren-logo.png</div>
   <div id="monitor">
     <div class="banner">
-      <span class="status"><i class="dot ok"></i><strong>Система работает</strong></span>
-      <span class="small muted">последние известные данные</span><span class="spacer"></span>
-      <span class="kpi"><b>2</b><span class="small">Активны</span></span>
-      <span class="kpi"><b>3</b><span class="small">Ожидают</span></span>
-      <span class="kpi"><b style="color:var(--warn)">1</b><span class="small">Требует внимания</span></span>
-      <button class="btn" id="filters" type="button">⚑ Фильтры</button>
+      <span class="status"><i class="dot ok"></i><strong>System Operational</strong></span>
+      <span class="small muted">latest known data</span><span class="spacer"></span>
+      <span class="kpi"><b>2</b><span class="small">Active</span></span>
+      <span class="kpi"><b>3</b><span class="small">Pending</span></span>
+      <span class="kpi"><b style="color:var(--warn)">1</b><span class="small">Attention Required</span></span>
+      <button class="btn" id="filters" type="button">⚑ Filters</button>
     </div>
     <div class="canvas"><div class="grid" id="grid">
-      <article class="widget span3"><div class="widget-head">◇ Система <span class="wd-actions"><button class="square" title="Подробности">⋯</button></span></div><div class="widget-body">
-        <div class="row"><span><i class="dot ok"></i> Локальный Worker</span><span class="tag ok">Готов</span></div><div class="metric" style="color:var(--ok);margin:8px 0">ONLINE</div><div class="small muted">Controller: этот Mac · обновлено 12:42</div>
+      <article class="widget span3"><div class="widget-head">◇ System <span class="wd-actions"><button class="square" title="Details">⋯</button></span></div><div class="widget-body">
+        <div class="row"><span><i class="dot ok"></i> Local Worker</span><span class="tag ok">Ready</span></div><div class="metric" style="color:var(--ok);margin:8px 0">ONLINE</div><div class="small muted">Controller: this Mac · updated 12:42</div>
         <div class="bars" style="height:38px;margin-top:9px"><i style="height:24%"></i><i style="height:38%"></i><i style="height:29%"></i><i style="height:52%"></i><i style="height:31%"></i><i style="height:60%"></i><i style="height:43%"></i><i style="height:45%"></i></div>
       </div></article>
-      <article class="widget span5"><div class="widget-head">↔ Активные операции <span class="count">2</span><span class="wd-actions"><button class="square" title="Развернуть">⤢</button><button class="square">⋯</button></span></div>
-        <div class="widget-body"><div class="line"><div class="row"><b class="elide">Документы → Яндекс Диск</b><span class="mono">68%</span></div><div class="progress"><i style="width:68%"></i></div><div class="row small muted"><span>1 284 / 1 890 файлов · 12,6 ГБ</span><span>12:42</span></div></div>
-        <div class="line"><div class="row"><b class="elide">Фото → локальный каталог</b><span class="mono">24%</span></div><div class="progress"><i style="width:24%"></i></div><div class="small muted">320 / 1 284 файлов · 3,1 ГБ</div></div></div>
+      <article class="widget span5"><div class="widget-head">↔ Active Operations <span class="count">2</span><span class="wd-actions"><button class="square" title="Expand">⤢</button><button class="square">⋯</button></span></div>
+        <div class="widget-body"><div class="line"><div class="row"><b class="elide">Documents → Yandex Disk</b><span class="mono">68%</span></div><div class="progress"><i style="width:68%"></i></div><div class="row small muted"><span>1,284 / 1,890 files · 12.6 GB</span><span>12:42</span></div></div>
+        <div class="line"><div class="row"><b class="elide">Photos → local directory</b><span class="mono">24%</span></div><div class="progress"><i style="width:24%"></i></div><div class="small muted">320 / 1,284 files · 3.1 GB</div></div></div>
       </article>
-      <article class="widget span2"><div class="widget-head">☷ Очередь <span class="count">5</span></div><div class="widget-body"><div class="row"><span>В работе</span><b class="metric">2</b></div><div class="row"><span>Ожидают</span><b>3</b></div><div class="row"><span>UNKNOWN</span><b style="color:var(--unknown)">0</b></div></div></article>
-      <article class="widget urgent span2"><div class="widget-head" style="color:var(--danger)">⚠ Проблемы <span class="count">1</span></div><div class="widget-body"><b>Конфликт изменений</b><p class="small muted">Документы/Проект/Отчёт.docx</p><div class="tag warn" style="display:inline-block">Требует решения</div><p class="small">Результат пока не подтверждён.</p><span class="action">Подробнее →</span></div></article>
-      <article class="widget span4"><div class="widget-head">▣ Подключения <span class="count">3</span></div><div class="widget-body">
-        <div class="line"><div class="row"><b>Яндекс Диск</b><span class="small muted">420 / 1000 ГБ</span></div><div class="progress"><i style="width:42%"></i></div></div>
-        <div class="line"><div class="row"><b>iCloud Documents</b><span class="tag">демо</span></div><div class="small muted">Функциональность контейнера требует проверки</div></div>
-        <div class="line"><div class="row"><b>Локальное хранилище</b><span class="tag ok">Готово</span></div></div>
+      <article class="widget span2"><div class="widget-head">☷ Queue <span class="count">5</span></div><div class="widget-body"><div class="row"><span>In Progress</span><b class="metric">2</b></div><div class="row"><span>Pending</span><b>3</b></div><div class="row"><span>UNKNOWN</span><b style="color:var(--unknown)">0</b></div></div></article>
+      <article class="widget urgent span2"><div class="widget-head" style="color:var(--danger)">⚠ Issues <span class="count">1</span></div><div class="widget-body"><b>Change Conflict</b><p class="small muted">Documents/Project/Report.docx</p><div class="tag warn" style="display:inline-block">Resolution Required</div><p class="small">Result not yet confirmed.</p><span class="action">More details →</span></div></article>
+      <article class="widget span4"><div class="widget-head">▣ Connections <span class="count">3</span></div><div class="widget-body">
+        <div class="line"><div class="row"><b>Yandex Disk</b><span class="small muted">420 / 1000 GB</span></div><div class="progress"><i style="width:42%"></i></div></div>
+        <div class="line"><div class="row"><b>iCloud Documents</b><span class="tag">demo</span></div><div class="small muted">Container functionality requires verification</div></div></div>
+        <div class="line"><div class="row"><b>Local Storage</b><span class="tag ok">Ready</span></div></div>
       </div></article>
-      <article class="widget span4"><div class="widget-head">◈ Ресурсы Worker</div><div class="widget-body"><div class="columns2"><div class="mini"><span class="small muted">CPU</span><div class="metric">18%</div><div class="progress"><i style="width:18%"></i></div></div><div class="mini"><span class="small muted">RAM</span><div class="metric">42%</div><div class="progress"><i style="width:42%"></i></div></div><div class="mini"><span class="small muted">Диск</span><div class="metric">36%</div></div><div class="mini"><span class="small muted">Сеть</span><div class="metric">—</div></div></div></div></article>
-      <article class="widget span4"><div class="widget-head">◷ Ближайшие запуски</div><div class="widget-body"><div class="line row"><span>Документы</span><span class="mono small">14:30</span></div><div class="line row"><span>Фотографии</span><span class="mono small">16:00</span></div><div class="line row"><span>Архив</span><span class="mono small">23:00</span></div><div class="small muted" style="margin-top:9px">Расписание показано только в демо</div></div></article>
-      <article class="widget span4"><div class="widget-head">☷ События <span class="count">12</span></div><div class="widget-body"><div class="line"><span class="dot ok"></span> <span class="mono muted">12:42</span> · Сценарий завершён</div><div class="line"><span class="dot danger"></span> <span class="mono muted">12:38</span> · Конфликт файлов</div><div class="line"><span class="dot"></span> <span class="mono muted">12:35</span> · Старт синхронизации</div><div class="line"><span class="dot unknown"></span> <span class="mono muted">12:21</span> · Нужна сверка</div></div></article>
-      <article class="widget span4"><div class="widget-head">▧ Сценарии <span class="count">4</span></div><div class="widget-body"><div class="line row"><span>Документы</span><span class="tag ok">Активен</span></div><div class="line row"><span>Фотографии</span><span class="tag ok">Активен</span></div><div class="line row"><span>Заметки</span><span class="tag">Приостановлен</span></div><div class="line row"><span>Архив</span><span class="tag warn">Ожидает</span></div></div></article>
-      <article class="widget span4"><div class="widget-head">⌁ Файловая активность <span class="count">демо</span></div><div class="widget-body"><div class="bars" id="bars"></div><p class="small muted">График показывать только при наличии реальной статистики.</p></div></article>
+      <article class="widget span4"><div class="widget-head">◈ Worker Resources</div><div class="widget-body"><div class="columns2"><div class="mini"><span class="small muted">CPU</span><div class="metric">18%</div><div class="progress"><i style="width:18%"></i></div></div><div class="mini"><span class="small muted">RAM</span><div class="metric">42%</div><div class="progress"><i style="width:42%"></i></div></div><div class="mini"><span class="small muted">Disk</span><div class="metric">36%</div></div><div class="mini"><span class="small muted">Net</span><div class="metric">—</div></div></div></div></article>
+      <article class="widget span4"><div class="widget-head">◷ Upcoming Runs</div><div class="widget-body"><div class="line row"><span>Documents</span><span class="mono small">14:30</span></div><div class="line row"><span>Photos</span><span class="mono small">16:00</span></div><div class="line row"><span>Archive</span><span class="mono small">23:00</span></div><div class="small muted" style="margin-top:9px">Schedule shown in demo only</div></div></article>
+      <article class="widget span4"><div class="widget-head">☷ Events <span class="count">12</span></div><div class="widget-body"><div class="line"><span class="dot ok"></span> <span class="mono muted">12:42</span> · Script completed</div><div class="line"><span class="dot danger"></span> <span class="mono muted">12:38</span> · File conflict</div><div class="line"><span class="dot"></span> <span class="mono muted">12:35</span> · Synchronization start</div><div class="line"><span class="dot unknown"></span> <span class="mono muted">12:21</span> · Verification required</div></div></article>
+      <article class="widget span4"><div class="widget-head">▧ Scenarios <span class="count">4</span></div><div class="widget-body"><div class="line row"><span>Documents</span><span class="tag ok">Active</span></div><div class="line row"><span>Photos</span><span class="tag ok">Active</span></div><div class="line row"><span>Notes</span><span class="tag">Suspended</span></div><div class="line row"><span>Archive</span><span class="tag warn">Pending</span></div></div></article>
+      <article class="widget span4"><div class="widget-head">⌁ File Activity <span class="count">demo</span></div><div class="widget-body"><div class="bars" id="bars"></div><p class="small muted">Chart shows only when real statistics are available.</p></div></article>
     </div></div>
-    <div class="catalog edit-only" id="catalog" hidden><h2>Каталог стандартных виджетов · демонстрация</h2><div class="catalog-row"><span class="chip">Операции</span><span class="chip">Очередь</span><span class="chip">Проблемы</span><span class="chip">Подключения</span><span class="chip">Worker</span><span class="chip">События</span></div><p class="small muted">Реальное добавление, drag/resize, Undo и сохранение — задачи SwiftUI по документации.</p></div>
-    <div class="footer"><span>Controller · Этот Mac</span><span>Worker · демонстрационное состояние</span><span class="spacer"></span><span>Нет подключения к Core · исходный HTML-прототип</span></div>
+    <div class="catalog edit-only" id="catalog" hidden><h2>Standard Widget Catalog · demonstration</h2><div class="catalog-row"><span class="chip">Operations</span><span class="chip">Queue</span><span class="chip">Issues</span><span class="chip">Connections</span><span class="chip">Worker</span><span class="chip">Events</span></div><p class="small muted">Real adding, drag/resize, Undo and save are SwiftUI tasks per documentation.</p></div>
+    <div class="footer"><span>Controller · This Mac</span><span>Worker · demo state</span><span class="spacer"></span><span>No connection to Core · original HTML prototype</span></div>
   </div>
   <section class="settings" id="settings">
-    <nav><div class="selected">Подключения</div><div>Сценарии</div><div>Автоматизация</div><div>Политики</div><div>Узел и служба</div><div>Интерфейс</div></nav>
-    <main><h2>Панель настройки</h2><p class="muted">Нативная форма macOS с той же дизайн-системой; навигация допускается только здесь.</p>
-      <div class="section"><b>Подключения</b><div class="field"><span class="muted">Название</span><span class="value">Яндекс Диск — Основной</span></div><div class="field"><span class="muted">Тип</span><span class="value">Yandex Disk</span></div><div class="field"><span class="muted">Статус</span><span class="value"><i class="dot ok"></i> Подключён (демо)</span></div><div class="field"><span class="muted">Connection ID</span><span class="value mono">connection-id-preview</span></div><button class="btn disabled" disabled>Управление требует Core</button></div>
-      <div class="section"><b>Сценарии и расписания</b><p class="muted">Два независимых подключения, направление передачи, правила конфликтов, include/exclude, ревизия сценария. Демонстрация не изменяет данные.</p></div>
+    <nav><div class="selected">Connections</div><div>Scenarios</div><div>Automation</div><div>Policies</div><div>Node and Service</div><div>Interface</div></nav>
+    <main><h2>Settings Panel</h2><p class="muted">Native macOS form with same design system; navigation permitted only here.</p>
+      <div class="section"><b>Connections</b><div class="field"><span class="muted">Name</span><span class="value">Yandex Disk — Main</span></div><div class="field"><span class="muted">Type</span><span class="value">Yandex Disk</span></div><div class="field"><span class="muted">Status</span><span class="value"><i class="dot ok"></i> Connected (demo)</span></div><div class="field"><span class="muted">Connection ID</span><span class="value mono">connection-id-preview</span></div><button class="btn disabled" disabled>Management requires Core</button></div>
+      <div class="section"><b>Scenarios and Schedules</b><p class="muted">Two independent connections, transfer direction, conflict rules, include/exclude, scenario revision. Demonstration does not change data.</p></div>
     </main>
   </section>
 </div>
 <script>
 const app=document.querySelector('#app'),mon=document.querySelector('#monitor'),settings=document.querySelector('#settings');
 let edit=false,showSettings=false;
-document.querySelector('#settingsBtn').addEventListener('click',()=>{showSettings=!showSettings;settings.style.display=showSettings?'grid':'none';mon.style.display=showSettings?'none':'';document.querySelector('#modeLabel').textContent=showSettings?'Панель настройки':'Основная панель';document.querySelector('#settingsBtn').textContent=showSettings?'← Мониторинг':'⚙ Настройки';document.querySelector('#layoutBtn').style.display=showSettings?'none':''});
-document.querySelector('#layoutBtn').addEventListener('click',()=>{edit=!edit;app.classList.toggle('edit',edit);document.querySelector('#layoutBtn').textContent=edit?'✓ Готово':'▦ Компоновка';if(!edit)document.querySelector('#catalog').hidden=true});
+document.querySelector('#settingsBtn').addEventListener('click',()=>{showSettings=!showSettings;settings.style.display=showSettings?'grid':'none';mon.style.display=showSettings?'none':'';document.querySelector('#modeLabel').textContent=showSettings?'Settings Panel':'Main Panel';document.querySelector('#settingsBtn').textContent=showSettings?'← Monitoring':'⚙ Settings';document.querySelector('#layoutBtn').style.display=showSettings?'none':''});
+document.querySelector('#layoutBtn').addEventListener('click',()=>{edit=!edit;app.classList.toggle('edit',edit);document.querySelector('#layoutBtn').textContent=edit?'✓ Done':'▦ Layout';if(!edit)document.querySelector('#catalog').hidden=true});
 document.querySelector('#addBtn').addEventListener('click',()=>{document.querySelector('#catalog').hidden=!document.querySelector('#catalog').hidden});
 document.querySelector('#theme').addEventListener('click',()=>document.body.classList.toggle('light'));
-document.querySelector('#filters').addEventListener('click',()=>alert('Глобальные фильтры — спецификация monitoring.md. Это визуальный прототип, данных и фильтров нет.'));
+document.querySelector('#filters').addEventListener('click',()=>alert('Global filters — specification monitoring.md. This is a visual prototype, no data or filters are present.'));
 const bars=document.querySelector('#bars');const values=[8,15,20,10,31,22,35,24,28,17,21,30,39,27,36,22,29,41,25,33,19,20,29,37,16,12,18,25,32,24,20,11];bars.innerHTML=values.map(x=>'<i style="height:'+x*2+'%"></i>').join('');
 </script>
 </body></html>

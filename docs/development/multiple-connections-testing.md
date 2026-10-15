@@ -1,37 +1,37 @@
-# Несколько независимых подключений — первый работающий UI (#7)
+# Multiple independent connections — first working UI (#7)
 
-Ветвь реализует D-016 для Яндекс Диска с использованием общего Rust SQLite registry. Каждый экземпляр `StorageConnection` имеет независимые ID, название, провайдерский account ID и Keychain секрет. Никакого уникального ограничения по provider account ID не вводится.
+The branch implements D-016 for Yandex Disk using a common Rust SQLite registry. Each `StorageConnection` instance has an independent ID, name, provider account ID, and Keychain secret. No unique constraint for the provider account ID is implemented.
 
-## Локальное хранение
-- SQLite: `~/Library/Application Support/QADREN/connections.sqlite3` (metadata only), защищённая директория; файл создан/помечен с правами 0600 на macOS.
-- Keychain: сервис `dev.qadren.yandex.oauth`, `account=connection_id`, токены никогда не пишутся в SQLite. OAuth Client ID встраивается через локальную конфигурацию, Client Secret не используется.
-- Для каждого экземпляра собственные `YandexConnection`, OAuth state, PKCE verifier, session, status, account identity и metadata.
+## Local storage
+- SQLite: `~/Library/Application Support/QADREN/connections.sqlite3` (metadata only), protected directory; the file is created/marked with 0600 permissions on macOS.
+- Keychain: service `dev.qadren.yandex.oauth`, `account=connection_id`, tokens are never written to SQLite. The OAuth Client ID is embedded via local configuration; the Client Secret is not used.
+- Each instance has its own `YandexConnection`, OAuth state, PKCE verifier, session, status, account identity, and metadata.
 
-## Миграция прежнего аккаунта
-На первом запуске новая версия обнаруживает старый Keychain `account=default` и показывает **Import existing connection**. Не нужно заново проходить OAuth. При импорте токен копируется на новый независимый ID, проверяется чтение копии и запись credential-ref; исходный ключ `default` удаляется **только после успеха**. Если процесс прервался, существующая новая запись с тем же токеном повторно используется.
+## Migration of previous account
+On the first start, the new version detects the old Keychain `account=default` and shows **Import existing connection**. The user does not need to perform OAuth again. During import, the token is copied to a new independent ID; the system verifies the copy read and the credential-ref write; the original `default` key is deleted **only after success**. If the process is interrupted, the existing new record with the same token is reused.
 
-Миграция не меняет содержимое Яндекс Диска. Если старый ключ не читается, прежнее подключение не удаляется. В случае неудачного копирования новый незавершённый реестр можно восстановить или удалить вручную.
+Migration does not change the Yandex Disk content. If the old key cannot be read, the previous connection is not deleted. In case of failed copying, the new incomplete registry can be restored or deleted manually.
 
-## Ограничения до полной приёмки
-- Проверены Rust тесты модели и миграции v1→v2; macOS UI, Keychain copy-once и несколько реальных аккаунтов **требуют ручного теста**.
-- UI использует единственный зарегистрированный OAuth Client ID для всех соединений этого провайдера.
-- В UI пока только Yandex Disk; другие адаптеры подключаются по тому же реестру по мере реализации.
-- BackupSet, удалённые узлы и связи не реализованы, поэтому предупреждение об используемых правилами подключениях требуется перед внедрением BackupSet.
-- Яндекс может требовать явно выйти или сменить аккаунт в браузере при авторизации второго подключения; подтверждается ручным тестом.
-- Никакого скачивания содержимого файлов, записи или удаления в облаке.
+## Limitations before final acceptance
+- Rust tests for the model and v1→v2 migration are verified; macOS UI, Keychain copy-once, and multiple real accounts **require manual testing**.
+- The UI uses a single registered OAuth Client ID for all connections of this provider.
+- The UI currently supports only Yandex Disk; other adapters are added to the same registry as they are implemented.
+- BackupSet, deleted nodes, and links are not implemented; therefore, a warning about connections used by rules is required before BackupSet implementation.
+- Yandex may require the user to explicitly log out or change the account in the browser when authorizing a second connection; this is to be confirmed by manual testing.
+- No downloading of file contents, writing, or deleting in the cloud is performed.
 
-## Приёмка
-1. Обновить приложение, увидеть баннер legacy и импортировать токен: тот же пользователь и квота без повторного OAuth.
-2. Добавить два отдельных подключения, авторизовать разные аккаунты и повторно один из них.
-3. Проверить независимые статусы и работу Refresh для каждого.
-4. Удалить/отключить только одно подключение: остальные остаются активными.
-5. Перезапустить приложение: подключённые экземпляры снова доступны.
-6. Проверить обработку ошибочного/отменённого OAuth, offline, сохранность токенов в Keychain, отсутствие утечки в логи.
+## Acceptance
+1. Update the application, see the legacy banner, and import the token: verify the same user and quota without repeated OAuth.
+2. Add two separate connections, authorize different accounts, and repeat one of them.
+3. Verify independent statuses and the Refresh operation for each connection.
+4. Delete/disconnect only one connection: verify that others remain active.
+5. Restart the application: verify that connected instances are available again.
+6. Verify the handling of erroneous/cancelled OAuth, offline state, token preservation in Keychain, and absence of leaks in logs.
 
-## Финальный security / error review
+## Final security / error review
 
-- Никакие токены и коды OAuth не пишутся в SQLite, логи, URL запросов Disk REST API или git. Keychain привязан к `connection_id`.
-- Legacy import выполняется после ручного подтверждения пользователя; прежний `default` удаляется только после копирования, чтения и сохранения ссылки. Обрыв процесса до этой точки оставляет исходный токен. Импорт не захватывает случайную пустую запись только по имени.
-- При Remove сначала connection переводится в disabled. Затем Rust JobStore read-only проверяет незавершённые попытки для этого `connection_id`; при недоступном JobStore, активной/UNKNOWN попытке или legacy попытке без target binding очистка fail-closed: запись и Keychain credential остаются для reconciliation/retry. Только после чистой проверки удаляются credential и локальная Registry-запись. Это не удаляет облачные данные и не влияет на соседние подключения.
-- Rust HTTP тестирует ответы 200, 401, 403, 429, 503 и timeout через loopback без настоящих облаков и без запроса содержимого файлов. 401/403 и 429 классифицируются отдельно; автоматическое повторение запросов намеренно выключено, доступен ручной Refresh. Retry/backoff требует отдельной политики до внедрения фоновых задач, чтобы не нарушать лимиты API.
-- Оставшиеся ограничения: нет распределённого управления аккаунтами/узлами, недоступен iCloud Documents, нет BackupSet, не проверялись автоматический refresh истекшего OAuth-токена и работа токена после его отзыва в самом Яндексе. Эти функции не входят в действующий read-only прототип.
+- No tokens or OAuth codes are written to SQLite, logs, Disk REST API request URLs, or git. The Keychain is linked to `connection_id`.
+- Legacy import is performed after manual user confirmation; the previous `default` is deleted only after copying, reading, and saving the reference. Interruption of the process before this point leaves the original token. Import does not capture a random empty record based only on the name.
+- During Remove, the connection is first set to disabled. Then the Rust JobStore (read-only) checks for incomplete attempts for this `connection_id`; if the JobStore is unavailable, if there is an active/UNKNOWN attempt, or a legacy attempt without target binding, the cleanup is fail-closed: the record and Keychain credential remain for reconciliation/retry. The credential and local Registry record are deleted only after a clean check. This does not delete cloud data and does not affect adjacent connections.
+- Rust HTTP tests responses 200, 401, 403, 429, 503, and timeout via loopback without real clouds and without requesting file contents. 401/403 and 429 are classified separately; automatic request repetition is intentionally disabled; manual Refresh is available. Retry/backoff requires a separate policy before implementing background tasks to avoid violating API limits.
+- Remaining limitations: no distributed management of accounts/nodes, iCloud Documents is unavailable, no BackupSet, automatic refresh of an expired OAuth token and token operation after revocation in Yandex were not verified. These functions are not part of the current read-only prototype.

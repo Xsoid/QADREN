@@ -1,22 +1,22 @@
-# Безопасность данных и проверка результатов
+# Data Security and Result Verification
 
-Статус: продуктовая политика v0.2, реализация отдельных механизмов требует тестов.
+Status: product policy v0.2, implementation of separate mechanisms requires tests.
 
-## Границы гарантий
+## Guarantee Boundaries
 
-QADREN выполняет синхронизацию, **не хранит собственные предыдущие версии содержимого** в MVP и не гарантирует возможность восстановления перезаписанных или окончательно удалённых файлов. BackupSet, retention и восстановление исторических версий отложены: [проект будущих возможностей](../architecture/backup-model.md).
+QADREN performs synchronization. It **does not store its own previous versions of content** in MVP. It does not guarantee the recovery of overwritten or permanently deleted files. BackupSet, retention, and recovery of historical versions are deferred: [project of future capabilities](../architecture/backup-model.md).
 
-## Требования безопасности
+## Security Requirements
 
-- Применять сценарные политики конфликтов и удаления; обнаруживать массовые удаления, неоднозначные перезаписи и опасные расхождения. Не допускать молчаливых разрушительных действий.
-- При сомнении остановить затронутую операцию и запросить разрешение в её контексте. Допускается массовое разрешение однотипных конфликтов и создание постоянных сценарных правил.
-- Использовать корзину провайдера, где доступна; не утверждать, что она обеспечивает резервную историю, и не создавать собственную корзину.
-- Метаданные имени/размера/времени **не являются доказательством равенства байтов**. Использовать доступные удалённые идентификаторы, ETag/ревизии/серверные хеши; недоступность достоверной проверки явно обозначать.
-- Хранить последнее подтверждённое согласованное состояние синхронизируемых файлов. Это служебная история для обнаружения изменений и идемпотентности, **не архив старого содержимого**.
-- Исполнитель различает собственный отчёт, подтверждение записи провайдером и фактически проверенную целостность. UNKNOWN не заменять FAILED или SUCCESS.
-- После сбоя проверять факт предыдущего выполнения до повтора потенциально разрушительной операции.
-- Не удалять при очистке пользовательской истории сведения, нужные для незавершённых заданий, контроля синхронизации и подтверждения действий.
+- Apply scenario-based conflict and deletion policies; detect mass deletions, ambiguous overwrites, and dangerous discrepancies. Do not allow silent destructive actions.
+- If there is a doubt, stop the affected operation and request permission in its context. Mass resolution of similar conflicts and creation of permanent scenario rules are permitted.
+- Use the provider trash where it is available; do not claim that it provides a backup history, and do not create a separate trash.
+- Name/size/time metadata **is not proof of byte equality**. Use available remote identifiers, ETag/revisions/server hashes; explicitly indicate when reliable verification is unavailable.
+- Store the last confirmed agreed state of synchronized files. This is a service history for change detection and idempotency, **not an archive of old content**.
+- The executor distinguishes between its own report, write confirmation by the provider, and actually verified integrity. Do not replace UNKNOWN with FAILED or SUCCESS.
+- After a failure, verify the fact of previous execution before repeating a potentially destructive operation.
+- When cleaning user history, do not delete information required for incomplete tasks, synchronization control, and action confirmation.
 
-## Ограничения основного MacBook
+## Main MacBook Limitations
 
-Следовать [политике локальных загрузок](local-downloads.md): QADREN не скачивает содержимое на основной MacBook без явного согласия конкретной операции. Никакая диагностика или хеширование не является исключением. Не вмешиваться в нативную работу iCloud/macOS и других приложений.
+Follow the [local downloads policy](local-downloads.md): QADREN does not download content to the main MacBook without the explicit consent of a specific operation. No diagnostics or hashing is an exception. Do not interfere with the native operation of iCloud/macOS and other applications.
