@@ -15,8 +15,8 @@ enum JobPresentationStatus: Equatable {
         if inventoryFailed { return .failed }
         guard !states.isEmpty else { return .waiting }
         if states.contains("failed") { return .failed }
-        if states.contains("waiting_for_decision") { return .needsAction }
         if states.contains("unknown") { return .unknown }
+        if states.contains("waiting_for_decision") { return .needsAction }
         if states.contains("running") { return .active }
         if states.contains("paused") { return .paused }
         if states.contains("queued") { return .waiting }

@@ -105,7 +105,7 @@ struct DashboardLayoutTests {
         check(JobPresentationStatus.aggregate(["paused", "queued"], inventoryFailed: false) == .paused, "paused Job outranks queue")
         check(JobPresentationStatus.aggregate(["running", "paused"], inventoryFailed: false) == .active, "running Job outranks paused queue")
         check(JobPresentationStatus.aggregate(["unknown", "running"], inventoryFailed: false) == .unknown, "unknown Job outranks activity")
-        check(JobPresentationStatus.aggregate(["waiting_for_decision", "unknown"], inventoryFailed: false) == .needsAction, "decision requirement outranks unknown status")
+        check(JobPresentationStatus.aggregate(["waiting_for_decision", "unknown"], inventoryFailed: false) == .unknown, "unknown Job is never hidden by a decision requirement")
         check(JobPresentationStatus.aggregate(["failed", "waiting_for_decision"], inventoryFailed: false) == .failed, "failed Job outranks decision requirement")
         check(JobPresentationStatus.aggregate(["completed"], inventoryFailed: true) == .failed, "JobStore read failure outranks historical completion")
 
