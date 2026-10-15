@@ -241,7 +241,7 @@ impl JobStore {
 
     fn initialize(db: Connection, owner_lock: Option<Connection>) -> Result<Self> {
         let version: i32 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 9 {
+        if version > 10 {
             return Err(JobStoreError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -444,6 +444,17 @@ impl JobStore {
                  PRAGMA user_version = 9;
                  COMMIT;
                  PRAGMA foreign_keys = ON;",
+            )?;
+        }
+        if version <= 9 {
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE attempt_root_identities (
+                   attempt_id TEXT PRIMARY KEY NOT NULL REFERENCES job_attempts(attempt_id),
+                   root_identity TEXT NOT NULL
+                 );
+                 PRAGMA user_version = 10;
+                 COMMIT;",
             )?;
         }
         db.pragma_update(None, "foreign_keys", "ON")?;
@@ -871,6 +882,57 @@ impl JobStore {
         expected_size: u64,
         expected_md5: &str,
     ) -> Result<()> {
+        self.prepare_bound_attempt_inner(
+            job_id,
+            attempt_id,
+            operation_kind,
+            target_connection_id,
+            target_path,
+            expected_size,
+            expected_md5,
+            None,
+        )
+    }
+
+    /// Atomically prepare an operation whose effect is scoped to an already
+    /// opened Local Filesystem root. The immutable identity is intentionally
+    /// attempt-owned: one StorageConnection can serve many independent roots.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_bound_attempt_with_root_identity(
+        &mut self,
+        job_id: &str,
+        attempt_id: &str,
+        operation_kind: &str,
+        target_connection_id: &str,
+        target_path: &str,
+        expected_size: u64,
+        expected_md5: &str,
+        root_identity: &str,
+    ) -> Result<()> {
+        self.prepare_bound_attempt_inner(
+            job_id,
+            attempt_id,
+            operation_kind,
+            target_connection_id,
+            target_path,
+            expected_size,
+            expected_md5,
+            Some(root_identity),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_bound_attempt_inner(
+        &mut self,
+        job_id: &str,
+        attempt_id: &str,
+        operation_kind: &str,
+        target_connection_id: &str,
+        target_path: &str,
+        expected_size: u64,
+        expected_md5: &str,
+        root_identity: Option<&str>,
+    ) -> Result<()> {
         self.check_storage_identity()?;
         if job_id.is_empty()
             || attempt_id.is_empty()
@@ -880,6 +942,7 @@ impl JobStore {
             || expected_size > i64::MAX as u64
             || expected_md5.len() != 32
             || !expected_md5.bytes().all(|b| b.is_ascii_hexdigit())
+            || root_identity.is_some_and(|value| value.is_empty() || value.len() > 256)
         {
             return Err(JobStoreError::InvalidId);
         }
@@ -912,6 +975,12 @@ impl JobStore {
                 target_path
             ],
         )?;
+        if let Some(root_identity) = root_identity {
+            tx.execute(
+                "INSERT INTO attempt_root_identities(attempt_id,root_identity) VALUES (?1,?2)",
+                params![attempt_id, root_identity],
+            )?;
+        }
         tx.execute(
             "INSERT INTO attempt_expectations(attempt_id,expected_size,expected_md5)
              VALUES (?1,?2,?3)",
@@ -927,6 +996,22 @@ impl JobStore {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Return an immutable root binding for exactly one attempt. Legacy
+    /// attempts deliberately return `None` and cannot be auto-reconciled.
+    pub fn attempt_root_identity(&self, job_id: &str, attempt_id: &str) -> Result<Option<String>> {
+        self.db
+            .query_row(
+                "SELECT r.root_identity
+                 FROM attempt_root_identities r INNER JOIN job_attempts a
+                   ON a.attempt_id=r.attempt_id
+                 WHERE a.job_id=?1 AND a.attempt_id=?2",
+                params![job_id, attempt_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(JobStoreError::from)
     }
 
     // Historical split helpers exist only for migration/regression tests.
@@ -2196,7 +2281,7 @@ mod tests {
             .db
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
     }
 
     #[test]

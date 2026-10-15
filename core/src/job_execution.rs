@@ -30,6 +30,15 @@ pub enum LocalDirectoryCreateStatus {
     Existing(JobState),
 }
 
+/// Result of a read-only reconciliation for an UNKNOWN Local Filesystem
+/// directory creation. It never retries or repairs the filesystem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalDirectoryReconciliationStatus {
+    Completed,
+    StillUnknown,
+    Existing(JobState),
+}
+
 /// Result of a read-only check of an UNKNOWN mock operation.  This never
 /// retries a write: only an exact match with the durable expectation can
 /// resolve the existing attempt.
@@ -71,6 +80,13 @@ fn enabled_local_connection(registry_path: &Path, connection_id: &str) -> bool {
         registry.get(connection_id),
         Ok(Some(connection)) if connection.adapter == "local_filesystem" && connection.enabled
     )
+}
+
+fn local_root_identity_key(local: &LocalFilesystem) -> Result<String, LocalDirectoryCreateError> {
+    let identity = local
+        .root_identity()
+        .map_err(LocalDirectoryCreateError::Local)?;
+    Ok(format!("unix:{}:{}", identity.device, identity.inode))
 }
 
 impl From<JobStoreError> for MockCreateError {
@@ -343,6 +359,7 @@ pub fn run_local_directory_create(
     if !local.capabilities().operations.create_directory {
         return Err(LocalDirectoryCreateError::CapabilityUnavailable);
     }
+    let root_identity = local_root_identity_key(&local)?;
     let target_path = relative_path
         .to_str()
         .filter(|path| !path.is_empty())
@@ -362,7 +379,7 @@ pub fn run_local_directory_create(
     // A directory has no content checksum, but JobStore requires a fixed
     // expectation shape. The empty-content MD5 is an immutable sentinel;
     // verification below proves directory type, not file-content integrity.
-    store.prepare_bound_attempt(
+    store.prepare_bound_attempt_with_root_identity(
         job_id,
         &attempt_id,
         "local_mkdir_new",
@@ -370,6 +387,7 @@ pub fn run_local_directory_create(
         target_path,
         0,
         "d41d8cd98f00b204e9800998ecf8427e",
+        &root_identity,
     )?;
     // Disconnect may have raced with Job preparation. No I/O has begun, so
     // record the proven pre-effect refusal instead of touching the root.
@@ -402,6 +420,72 @@ pub fn run_local_directory_create(
     );
     store.complete_attempt(job_id, &attempt_id, &receipt)?;
     Ok(LocalDirectoryCreateStatus::Completed)
+}
+
+/// Reconcile an UNKNOWN Local Filesystem directory creation without writing,
+/// deleting, or retrying. A different root, disabled connection, missing
+/// binding, or mismatched target remains UNKNOWN.
+pub fn reconcile_local_directory_create(
+    database_path: &Path,
+    registry_path: &Path,
+    local_root: &Path,
+    connection_id: &str,
+    job_id: &str,
+) -> Result<LocalDirectoryReconciliationStatus, LocalDirectoryCreateError> {
+    if !valid_job_id(job_id) || connection_id.is_empty() {
+        return Err(LocalDirectoryCreateError::InvalidRequest);
+    }
+    if !enabled_local_connection(registry_path, connection_id) {
+        return Ok(LocalDirectoryReconciliationStatus::StillUnknown);
+    }
+    let local = LocalFilesystem::open(local_root).map_err(LocalDirectoryCreateError::Local)?;
+    let root_identity = local_root_identity_key(&local)?;
+    let mut store = JobStore::open(database_path)?;
+    let Some(job) = store.get(job_id)? else {
+        return Err(LocalDirectoryCreateError::Store(JobStoreError::NotFound));
+    };
+    if job.state != JobState::Unknown {
+        return Ok(LocalDirectoryReconciliationStatus::Existing(job.state));
+    }
+    let attempts = store.unresolved_attempts()?;
+    let matching: Vec<_> = attempts
+        .iter()
+        .filter(|attempt| {
+            attempt.job_id == job_id
+                && attempt.status == "unknown"
+                && attempt.operation_kind.as_deref() == Some("local_mkdir_new")
+                && attempt.target_connection_id.as_deref() == Some(connection_id)
+        })
+        .collect();
+    if matching.len() != 1 {
+        return Ok(LocalDirectoryReconciliationStatus::StillUnknown);
+    }
+    let attempt = matching[0];
+    let Some(expected) = store.expected_metadata(job_id, &attempt.attempt_id)? else {
+        return Ok(LocalDirectoryReconciliationStatus::StillUnknown);
+    };
+    if expected.operation_kind != "local_mkdir_new"
+        || expected.target_connection_id != connection_id
+        || expected.attempt_id != attempt.attempt_id
+        || store
+            .attempt_root_identity(job_id, &attempt.attempt_id)?
+            .as_deref()
+            != Some(root_identity.as_str())
+    {
+        return Ok(LocalDirectoryReconciliationStatus::StillUnknown);
+    }
+    let target = Path::new(&expected.target_path);
+    if !matches!(local.stat(target), Ok(entry) if entry.is_directory) {
+        return Ok(LocalDirectoryReconciliationStatus::StillUnknown);
+    }
+    let receipt = VerifiedReceipt::metadata_verified(
+        &attempt.attempt_id,
+        "local_mkdir_new",
+        connection_id,
+        &expected.target_path,
+    );
+    store.complete_attempt(job_id, &attempt.attempt_id, &receipt)?;
+    Ok(LocalDirectoryReconciliationStatus::Completed)
 }
 
 fn run_mock_create_inner(
@@ -743,6 +827,107 @@ mod tests {
             Some(JobState::Completed)
         );
         assert!(store.unresolved_attempts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn local_directory_reconciliation_requires_the_durable_root_identity() {
+        let (database, registry, root, connection) = local_fixture("reconcile-root");
+        fs::create_dir(&root).unwrap();
+        let local = LocalFilesystem::open(&root).unwrap();
+        let root_identity = local_root_identity_key(&local).unwrap();
+        let mut store = JobStore::open(&database).unwrap();
+        store.enqueue("local-mkdir-unknown", None).unwrap();
+        store
+            .advance(
+                "local-mkdir-unknown",
+                JobState::Queued,
+                JobState::Running,
+                Confirmation::Confirmed(EvidenceLevel::Requested),
+            )
+            .unwrap();
+        store
+            .prepare_bound_attempt_with_root_identity(
+                "local-mkdir-unknown",
+                "local-mkdir-unknown-attempt-1",
+                "local_mkdir_new",
+                &connection,
+                "created",
+                0,
+                "d41d8cd98f00b204e9800998ecf8427e",
+                &root_identity,
+            )
+            .unwrap();
+        drop(store);
+        fs::create_dir(root.join("created")).unwrap();
+
+        assert_eq!(
+            reconcile_local_directory_create(
+                &database,
+                &registry,
+                &root,
+                &connection,
+                "local-mkdir-unknown",
+            )
+            .unwrap(),
+            LocalDirectoryReconciliationStatus::Completed
+        );
+        let store = JobStore::open(&database).unwrap();
+        assert_eq!(
+            store.state("local-mkdir-unknown").unwrap(),
+            Some(JobState::Completed)
+        );
+    }
+
+    #[test]
+    fn local_directory_reconciliation_refuses_a_different_root() {
+        let (database, registry, root, connection) = local_fixture("reconcile-wrong-root");
+        let other_root = root.parent().unwrap().join("other-root");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&other_root).unwrap();
+        let local = LocalFilesystem::open(&root).unwrap();
+        let root_identity = local_root_identity_key(&local).unwrap();
+        let mut store = JobStore::open(&database).unwrap();
+        store.enqueue("local-mkdir-wrong-root", None).unwrap();
+        store
+            .advance(
+                "local-mkdir-wrong-root",
+                JobState::Queued,
+                JobState::Running,
+                Confirmation::Confirmed(EvidenceLevel::Requested),
+            )
+            .unwrap();
+        store
+            .prepare_bound_attempt_with_root_identity(
+                "local-mkdir-wrong-root",
+                "local-mkdir-wrong-root-attempt-1",
+                "local_mkdir_new",
+                &connection,
+                "created",
+                0,
+                "d41d8cd98f00b204e9800998ecf8427e",
+                &root_identity,
+            )
+            .unwrap();
+        drop(store);
+        fs::create_dir(root.join("created")).unwrap();
+        fs::create_dir(other_root.join("created")).unwrap();
+
+        assert_eq!(
+            reconcile_local_directory_create(
+                &database,
+                &registry,
+                &other_root,
+                &connection,
+                "local-mkdir-wrong-root",
+            )
+            .unwrap(),
+            LocalDirectoryReconciliationStatus::StillUnknown
+        );
+        let store = JobStore::open(&database).unwrap();
+        assert_eq!(
+            store.state("local-mkdir-wrong-root").unwrap(),
+            Some(JobState::Unknown)
+        );
     }
 
     #[test]

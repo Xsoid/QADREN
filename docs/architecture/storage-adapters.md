@@ -41,6 +41,8 @@ Native File Provider/iCloud placeholder checks when the **local** adapter operat
 
 A standalone, actively developed adapter for local file systems and directories. **Not part of iCloud Documents** and not a method for hidden access to all of iCloud Drive. Before reading a file in an iCloud-managed directory, it is necessary to determine if the operation initiates forbidden materialization of content on the main MacBook.
 
+For `local_mkdir_new`, JobStore saves the opened root device/inode identity with the bound attempt before `mkdir`. Read-only reconciliation completes an UNKNOWN attempt only when the enabled Local connection, operation, relative path, directory type, and root identity all match. A missing legacy binding or a different root remains UNKNOWN. Reconciliation does not create, remove, or retry a directory.
+
 ## New adapters
 
 Integrations of new clouds and servers are added independently of the core; the macOS dependency of iCloud is not transferred to all of QADREN.

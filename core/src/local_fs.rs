@@ -64,6 +64,15 @@ pub struct LocalFileIdentity {
     pub size: u64,
 }
 
+/// Identity of the pinned Local Filesystem root. It is metadata only and is
+/// durable evidence that a later reconciliation opened the same directory.
+/// It does not grant access to the root or authorize a filesystem mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalRootIdentity {
+    pub device: u64,
+    pub inode: u64,
+}
+
 /// Metadata-only indication of local content residency.
 /// NotDatalessFlagged is NOT authorization to read or a hydration guarantee.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -298,6 +307,28 @@ impl LocalFilesystem {
             }
             let canonical = fs::canonicalize(root)?;
             Ok(Self { root: canonical })
+        }
+    }
+
+    /// Return the identity of this already pinned root without reading user
+    /// content. A controller persists it before an effect and must require an
+    /// exact match before read-only reconciliation can resolve that effect.
+    pub fn root_identity(&self) -> Result<LocalRootIdentity> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = self.root_fd.metadata()?;
+            if !metadata.is_dir() {
+                return Err(LocalError::NotDirectory);
+            }
+            Ok(LocalRootIdentity {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Err(LocalError::UnsafeEntry)
         }
     }
 
