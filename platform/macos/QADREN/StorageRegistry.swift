@@ -146,7 +146,7 @@ enum StorageRegistryBridge {
     static func databasePath() throws -> String { try path }
 
     private static func unwrap<T: Decodable>(
-        _ pointer: UnsafeMutablePointer<CChar>?, as: T.Type
+        _ pointer: UnsafeMutablePointer<CChar>?, as: T.Type, databasePath: String? = nil
     ) throws -> T {
         guard let pointer else { throw StorageError.operation("Registry unavailable") }
         defer { registryFree(pointer) }
@@ -155,7 +155,7 @@ enum StorageRegistryBridge {
         guard response.ok, let result = response.data else {
             throw StorageError.operation(response.error ?? "Registry request failed")
         }
-        let database = try path
+        let database = try databasePath ?? path
         try? FileManager.default.setAttributes(
             [.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: database
         )
@@ -368,12 +368,18 @@ enum StorageRegistryBridge {
 
     /// Final local record deletion for the recoverable removal workflow. Rust
     /// rechecks that the record is disabled and has no unresolved Jobs.
-    static func removeAfterJobGate(id: String, jobsDatabasePath: String) throws {
-        let database = try path
+    static func removeAfterJobGate(
+        id: String, jobsDatabasePath: String, databasePath: String? = nil
+    ) throws {
+        let database = try databasePath ?? path
         let _: Bool = try database.withCString { db in
             try jobsDatabasePath.withCString { jobDatabase in
                 try id.withCString { value in
-                    try unwrap(registryRemoveAfterJobGate(db, jobDatabase, value), as: Bool.self)
+                    try unwrap(
+                        registryRemoveAfterJobGate(db, jobDatabase, value),
+                        as: Bool.self,
+                        databasePath: database
+                    )
                 }
             }
         }
