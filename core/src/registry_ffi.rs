@@ -504,13 +504,13 @@ pub extern "C" fn qadren_registry_add(
 
 #[no_mangle]
 pub extern "C" fn qadren_registry_remove(path: *const c_char, id: *const c_char) -> *mut c_char {
-    let Some(id) = input(id) else {
+    let (Some(_path), Some(_id)) = (input(path), input(id)) else {
         return output(json!({"ok":false,"error":"invalid_input"}));
     };
-    with_registry(path, |db| {
-        db.remove(&id)?;
-        Ok(json!(true))
-    })
+    // Keep this legacy ABI symbol for callers that can decode its explicit
+    // failure. A direct Registry deletion bypasses ConnectionRemoval's
+    // disable and unresolved-Job gates, so it must not mutate local state.
+    output(json!({"ok":false,"error":"registry_remove_requires_connection_workflow"}))
 }
 
 #[no_mangle]
@@ -650,14 +650,28 @@ mod tests {
             unsafe { qadren_registry_free_string(result) };
         }
         let result = qadren_registry_remove(path.as_ptr(), a.as_ptr());
+        let rejection: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(result) }.to_str().unwrap()).unwrap();
         unsafe { qadren_registry_free_string(result) };
+        assert_eq!(
+            rejection,
+            json!({"ok":false,"error":"registry_remove_requires_connection_workflow"})
+        );
         let result = qadren_registry_list(path.as_ptr());
         let entries: Value =
             serde_json::from_str(unsafe { CStr::from_ptr(result) }.to_str().unwrap()).unwrap();
         unsafe { qadren_registry_free_string(result) };
-        assert_eq!(entries["data"].as_array().unwrap().len(), 1);
-        assert_eq!(entries["data"][0]["id"], ids[1]);
-        assert_eq!(entries["data"][0]["provider_account_id"], "shared-account");
+        let entries = entries["data"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        let listed_ids = entries
+            .iter()
+            .map(|entry| entry["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(listed_ids.contains(&ids[0].as_str()));
+        assert!(listed_ids.contains(&ids[1].as_str()));
+        assert!(entries
+            .iter()
+            .all(|entry| entry["provider_account_id"] == "shared-account"));
         std::fs::remove_file(file).unwrap();
     }
 
