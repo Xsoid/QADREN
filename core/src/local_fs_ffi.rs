@@ -46,15 +46,12 @@ pub unsafe extern "C" fn qadren_local_mkdir(
     root: *const c_char,
     relative: *const c_char,
 ) -> *mut c_char {
-    let (Some(root), Some(relative)) = (input(root), input(relative)) else {
+    if input(root).is_none() || input(relative).is_none() {
         return response(json!({"ok":false,"error":"invalid_request"}));
-    };
-    match LocalFilesystem::open(Path::new(root))
-        .and_then(|fs| fs.create_directory(Path::new(relative)))
-    {
-        Ok(()) => response(json!({"ok":true,"data":true})),
-        Err(_) => response(json!({"ok":false,"error":"local_mkdir_unavailable"})),
     }
+    // Keep the legacy symbol fail-closed for ABI compatibility. A direct
+    // filesystem mutation would bypass the sole durable JobStore path.
+    response(json!({"ok":false,"error":"local_mkdir_requires_job"}))
 }
 
 #[no_mangle]
@@ -91,6 +88,29 @@ mod tests {
             .to_str()
             .unwrap()
             .contains("\"ok\":true"));
+        unsafe { qadren_local_free_string(result) };
+        std::fs::remove_dir(&root_path).unwrap();
+    }
+
+    #[test]
+    fn legacy_mkdir_ffi_cannot_bypass_the_job_store() {
+        let root_path = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join(format!(
+                "qadren-local-ffi-mkdir-{}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        std::fs::create_dir(&root_path).unwrap();
+        let root = CString::new(root_path.to_str().unwrap()).unwrap();
+        let relative = CString::new("must-not-exist").unwrap();
+        let result = unsafe { qadren_local_mkdir(root.as_ptr(), relative.as_ptr()) };
+        let message = unsafe { CStr::from_ptr(result) }.to_str().unwrap();
+        assert!(message.contains("\"error\":\"local_mkdir_requires_job\""));
+        assert!(!root_path.join("must-not-exist").exists());
         unsafe { qadren_local_free_string(result) };
         std::fs::remove_dir(&root_path).unwrap();
     }
