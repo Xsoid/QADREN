@@ -197,7 +197,11 @@ struct MainView: View {
                     if widget.density == .compact {
                         QDMetric(value: "\(visibleJobs.count)", label: "в инвентаре", provenance: "локальный JobStore")
                     } else {
-                        HStack(alignment: .top, spacing: 18) {
+                        LazyVGrid(
+                            columns: [GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 12)],
+                            alignment: .leading,
+                            spacing: 8
+                        ) {
                             QDMetric(value: "\(jobQueueSummary.active)", label: "выполняется", provenance: "локальный JobStore")
                             QDMetric(value: "\(jobQueueSummary.waiting)", label: "в очереди", provenance: "локальный JobStore")
                             QDMetric(value: "\(jobQueueSummary.unknown)", label: "неизвестно", provenance: "требует сверки")
