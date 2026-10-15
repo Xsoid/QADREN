@@ -513,6 +513,49 @@ pub extern "C" fn qadren_registry_remove(path: *const c_char, id: *const c_char)
     output(json!({"ok":false,"error":"registry_remove_requires_connection_workflow"}))
 }
 
+/// Remove one disabled connection only after a fresh JobStore safety gate.
+/// This changes local Registry state only. The macOS removal workflow owns any
+/// credential cleanup that must happen before this final local deletion.
+///
+/// # Safety
+/// Arguments must point to valid NUL-terminated UTF-8 strings for this call.
+#[no_mangle]
+pub unsafe extern "C" fn qadren_registry_remove_after_job_gate(
+    registry_path: *const c_char,
+    jobs_path: *const c_char,
+    id: *const c_char,
+) -> *mut c_char {
+    let (Some(registry_path), Some(jobs_path), Some(id)) =
+        (input(registry_path), input(jobs_path), input(id))
+    else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    let registry = match Registry::open(Path::new(&registry_path)) {
+        Ok(registry) => registry,
+        Err(_) => return output(json!({"ok":false,"error":"registry_unavailable"})),
+    };
+    let connection = match registry.get(&id) {
+        Ok(Some(connection)) => connection,
+        Ok(None) => return output(json!({"ok":false,"error":"connection_not_found"})),
+        Err(_) => return output(json!({"ok":false,"error":"registry_unavailable"})),
+    };
+    if connection.enabled {
+        return output(json!({"ok":false,"error":"connection_not_disabled"}));
+    }
+    let jobs = match JobStore::open(Path::new(&jobs_path)) {
+        Ok(jobs) => jobs,
+        Err(_) => return output(json!({"ok":false,"error":"job_store_unavailable"})),
+    };
+    match jobs.connection_has_unresolved_attempts(&id) {
+        Ok(true) => output(json!({"ok":false,"error":"connection_has_unresolved_jobs"})),
+        Ok(false) => match registry.remove(&id) {
+            Ok(()) => output(json!({"ok":true,"data":true})),
+            Err(_) => output(json!({"ok":false,"error":"registry_unavailable"})),
+        },
+        Err(_) => output(json!({"ok":false,"error":"job_store_unavailable"})),
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn qadren_registry_rename(
     path: *const c_char,
@@ -657,22 +700,50 @@ mod tests {
             rejection,
             json!({"ok":false,"error":"registry_remove_requires_connection_workflow"})
         );
+        let jobs_path = file.with_file_name("jobs.sqlite3");
+        JobStore::open(&jobs_path).unwrap();
+        let jobs = CString::new(jobs_path.to_str().unwrap()).unwrap();
+        let enabled_response = unsafe {
+            qadren_registry_remove_after_job_gate(path.as_ptr(), jobs.as_ptr(), a.as_ptr())
+        };
+        let enabled: Value = serde_json::from_str(
+            unsafe { CStr::from_ptr(enabled_response) }
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap();
+        unsafe { qadren_registry_free_string(enabled_response) };
+        assert_eq!(
+            enabled,
+            json!({"ok":false,"error":"connection_not_disabled"})
+        );
+        let registry = Registry::open(&file).unwrap();
+        registry.set_enabled(&ids[0], false).unwrap();
+        drop(registry);
+        let removed_pointer = unsafe {
+            qadren_registry_remove_after_job_gate(path.as_ptr(), jobs.as_ptr(), a.as_ptr())
+        };
+        let removed: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(removed_pointer) }.to_str().unwrap())
+                .unwrap();
+        unsafe { qadren_registry_free_string(removed_pointer) };
+        assert_eq!(removed, json!({"ok":true,"data":true}));
         let result = qadren_registry_list(path.as_ptr());
         let entries: Value =
             serde_json::from_str(unsafe { CStr::from_ptr(result) }.to_str().unwrap()).unwrap();
         unsafe { qadren_registry_free_string(result) };
         let entries = entries["data"].as_array().unwrap();
-        assert_eq!(entries.len(), 2);
+        assert_eq!(entries.len(), 1);
         let listed_ids = entries
             .iter()
             .map(|entry| entry["id"].as_str().unwrap())
             .collect::<Vec<_>>();
-        assert!(listed_ids.contains(&ids[0].as_str()));
         assert!(listed_ids.contains(&ids[1].as_str()));
         assert!(entries
             .iter()
             .all(|entry| entry["provider_account_id"] == "shared-account"));
         std::fs::remove_file(file).unwrap();
+        std::fs::remove_file(jobs_path).unwrap();
     }
 
     #[test]

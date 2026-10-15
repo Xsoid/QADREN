@@ -61,8 +61,11 @@ private func registryRename(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<C
 private func registrySetEnabled(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ enabled: UInt8) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_finalize_disconnect")
 private func registryFinalizeDisconnect(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
-@_silgen_name("qadren_registry_remove")
-private func registryRemove(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_registry_remove_after_job_gate")
+private func registryRemoveAfterJobGate(
+    _ registryPath: UnsafePointer<CChar>?, _ jobsPath: UnsafePointer<CChar>?,
+    _ id: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_set_credential")
 private func registrySetCredential(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ ref: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_set_status")
@@ -363,10 +366,16 @@ enum StorageRegistryBridge {
         return result.id
     }
 
-    static func remove(id: String) throws {
+    /// Final local record deletion for the recoverable removal workflow. Rust
+    /// rechecks that the record is disabled and has no unresolved Jobs.
+    static func removeAfterJobGate(id: String, jobsDatabasePath: String) throws {
         let database = try path
         let _: Bool = try database.withCString { db in
-            try id.withCString { value in try unwrap(registryRemove(db, value), as: Bool.self) }
+            try jobsDatabasePath.withCString { jobDatabase in
+                try id.withCString { value in
+                    try unwrap(registryRemoveAfterJobGate(db, jobDatabase, value), as: Bool.self)
+                }
+            }
         }
     }
 

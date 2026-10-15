@@ -68,7 +68,11 @@ final class StorageConnections: ObservableObject {
             let ensureNoUnresolvedAttempts = {
                 try JobInventory.requireNoUnresolvedAttempts(connectionID: id)
             }
-            let deleteRecord = { try StorageRegistryBridge.remove(id: id) }
+            let deleteRecord = {
+                try StorageRegistryBridge.removeAfterJobGate(
+                    id: id, jobsDatabasePath: JobInventory.paths().database
+                )
+            }
             switch entry.adapter {
             case "yandex_disk":
                 try ConnectionRemoval.run(
