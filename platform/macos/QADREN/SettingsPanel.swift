@@ -173,6 +173,7 @@ struct SettingsPanelView: View {
     @State private var isEditingScenario = false
     @State private var editedScenario: ScenarioEntry?
     @State private var schedulesScenario: ScenarioEntry?
+    @State private var previewScenario: ScenarioEntry?
 
     var body: some View {
         NavigationSplitView {
@@ -196,6 +197,11 @@ struct SettingsPanelView: View {
                             scenario: schedulesScenario,
                             done: { self.schedulesScenario = nil }
                         )
+                    } else if let previewScenario {
+                        ScenarioDryRunView(
+                            scenario: previewScenario,
+                            done: { self.previewScenario = nil }
+                        )
                     } else if isEditingScenario {
                         ScenarioEditorView(
                             connections: scenarioEndpoints,
@@ -209,7 +215,8 @@ struct SettingsPanelView: View {
                             connections: connections.entries,
                             createScenario: beginScenarioCreation,
                             editScenario: beginScenarioEditing,
-                            editSchedules: { schedulesScenario = $0 }
+                            editSchedules: { schedulesScenario = $0 },
+                            previewScenario: { previewScenario = $0 }
                         )
                     }
                 case .application:
@@ -455,6 +462,7 @@ private struct ScenariosSettingsView: View {
     let createScenario: () -> Void
     let editScenario: (ScenarioEntry) -> Void
     let editSchedules: (ScenarioEntry) -> Void
+    let previewScenario: (ScenarioEntry) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -506,6 +514,11 @@ private struct ScenariosSettingsView: View {
                                 .help(isLocalScenario(scenario)
                                       ? "Настроить расписания локального сценария"
                                       : "Сценарий с Яндекс Диском отложен до P3")
+                            Button("Проверить план") { previewScenario(scenario) }
+                                .disabled(!isLocalScenario(scenario))
+                                .help(isLocalScenario(scenario)
+                                      ? "Явно прочитать только метаданные двух локальных каталогов и показать план без передачи файлов"
+                                      : "Сценарий с Яндекс Диском отложен до P3")
                         }
                         EndpointLine(
                             title: "Источник",
@@ -551,7 +564,7 @@ private struct ScenariosSettingsView: View {
             return "Сценарий использует Яндекс Диск и отложен до P3. Его запуск, изменение и расписания недоступны; запись сохранена локально."
         }
         return scenario.enabled
-            ? "Автоматизация и запуск ещё недоступны: Core пока не создаёт Job из Scenario."
+            ? "Можно проверить план только по метаданным. Запуск и передача файлов пока недоступны."
             : "Автоматические триггеры для этого сценария выключены."
     }
 
@@ -564,6 +577,111 @@ private struct ScenariosSettingsView: View {
         case "left_to_right", "right_to_left": "Односторонняя"
         case "bidirectional": "Двусторонняя"
         default: direction
+        }
+    }
+}
+
+private struct ScenarioDryRunView: View {
+    let scenario: ScenarioEntry
+    let done: () -> Void
+    @State private var plan: [ScenarioPlanItem] = []
+    @State private var isLoading = false
+    @State private var error: String?
+    @State private var hasRequestedPreview = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .firstTextBaseline) {
+                Button("Назад", systemImage: "chevron.left", action: done)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("План сценария").font(.largeTitle.bold())
+                    Text("Ревизия \(scenario.revision) · \(scenario.name)")
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Проверить план", systemImage: "arrow.triangle.2.circlepath") { loadPlan() }
+                    .disabled(isLoading)
+            }
+            Text("Кнопка читает только имена и размеры файлов из выбранных локальных каталогов. Она не открывает содержимое, не вычисляет хэши, не создаёт Job и не передаёт файлы.")
+                .font(.callout).foregroundStyle(.secondary)
+            if let error {
+                SettingsNotice(text: error, symbol: "exclamationmark.triangle")
+            }
+            if isLoading {
+                ProgressView("Чтение метаданных и построение плана…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if !hasRequestedPreview {
+                SettingsEmptyState(
+                    title: "План ещё не проверен",
+                    detail: "Проверка выполняется только по вашему явному действию и не меняет файлы или очередь.",
+                    symbol: "doc.text.magnifyingglass"
+                ) {
+                    Button("Проверить план", action: loadPlan)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if plan.isEmpty {
+                SettingsEmptyState(
+                    title: "Изменения не найдены",
+                    detail: "По доступным метаданным план не содержит действий. Это не является проверкой равенства содержимого файлов.",
+                    symbol: "checkmark.circle"
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(plan) { item in
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text(item.relative_path).font(.body.monospaced())
+                            Spacer()
+                            Text(actionTitle(item.action)).font(.caption.weight(.semibold))
+                        }
+                        Text("Источник: \(sideTitle(item.left)) · Назначение: \(sideTitle(item.right))")
+                            .font(.caption).foregroundStyle(.secondary)
+                        if let reason = item.action.reason {
+                            Text(reason).font(.caption).foregroundStyle(.orange)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+                .listStyle(.inset)
+            }
+        }
+        .padding(24)
+    }
+
+    private func loadPlan() {
+        isLoading = true
+        error = nil
+        defer { isLoading = false; hasRequestedPreview = true }
+        do {
+            let left = try StorageRegistryBridge.localScenarioSnapshot(root: scenario.left_root)
+            let right = try StorageRegistryBridge.localScenarioSnapshot(root: scenario.right_root)
+            plan = try StorageRegistryBridge.dryRunScenario(
+                id: scenario.id, revision: scenario.revision, left: left, right: right
+            )
+        } catch {
+            plan = []
+            self.error = "Не удалось прочитать метаданные или построить план: " + error.localizedDescription
+        }
+    }
+
+    private func sideTitle(_ value: String) -> String {
+        switch value {
+        case "unchanged": "без изменений"
+        case "added": "добавлен"
+        case "removed": "отсутствует"
+        case "changed": "изменён"
+        default: "требует проверки"
+        }
+    }
+
+    private func actionTitle(_ action: ScenarioPlanAction) -> String {
+        switch action.kind {
+        case "create": return action.from_left == true ? "создать справа" : "создать слева"
+        case "update": return action.from_left == true ? "обновить справа" : "обновить слева"
+        case "delete_requires_decision": return "нужно отдельное решение"
+        case "conflict": return "конфликт"
+        case "needs_verification": return "нужна проверка"
+        default: return "без действия"
         }
     }
 }

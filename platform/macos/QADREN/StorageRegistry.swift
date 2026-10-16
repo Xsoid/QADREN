@@ -16,6 +16,13 @@ private func scenarioCreate(
 private func scenarioSetEnabled(
     _ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ enabled: UInt8
 ) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_scenarios_dry_run")
+private func scenarioDryRun(
+    _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?, _ revision: UInt64,
+    _ leftSnapshot: UnsafePointer<CChar>?, _ rightSnapshot: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_local_metadata_snapshot")
+private func localMetadataSnapshot(_ root: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_scenario_schedules_list")
 private func scenarioSchedulesList(
     _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?
@@ -115,6 +122,25 @@ struct ScenarioAutomationEntry: Decodable, Equatable {
     let locally_paused: Bool
     let pending_automatic_run: Bool
 }
+struct ScenarioSnapshotItem: Codable {
+    let relative_path: String
+    let object_revision: String?
+    let size: UInt64
+    let checksum_md5: String?
+}
+struct ScenarioPlanAction: Decodable {
+    let kind: String
+    let from_left: Bool?
+    let on_left: Bool?
+    let reason: String?
+}
+struct ScenarioPlanItem: Decodable, Identifiable {
+    let relative_path: String
+    let left: String
+    let right: String
+    let action: ScenarioPlanAction
+    var id: String { relative_path }
+}
 private struct NewConnection: Decodable {
     let id: String
 }
@@ -207,6 +233,39 @@ enum StorageRegistryBridge {
         let _: Bool = try database.withCString { db in
             try id.withCString { value in
                 try unwrap(scenarioSetEnabled(db, value, enabled ? 1 : 0), as: Bool.self)
+            }
+        }
+    }
+
+    /// Read only file metadata below a user-selected Local Filesystem root.
+    /// This does not open content, calculate a checksum, submit a Job, or
+    /// change a Scenario baseline.
+    static func localScenarioSnapshot(root: String) throws -> [ScenarioSnapshotItem] {
+        try root.withCString { root in
+            try unwrap(localMetadataSnapshot(root), as: [ScenarioSnapshotItem].self)
+        }
+    }
+
+    /// Produce a read-only plan for the exact stored Scenario revision from
+    /// supplied metadata snapshots. No adapter scan or transfer occurs here.
+    static func dryRunScenario(
+        id: String, revision: UInt64, left: [ScenarioSnapshotItem], right: [ScenarioSnapshotItem],
+        databasePath: String? = nil
+    ) throws -> [ScenarioPlanItem] {
+        let database = try databasePath ?? path
+        let encoder = JSONEncoder()
+        let leftJSON = String(decoding: try encoder.encode(left), as: UTF8.self)
+        let rightJSON = String(decoding: try encoder.encode(right), as: UTF8.self)
+        return try database.withCString { database in
+            try id.withCString { id in
+                try leftJSON.withCString { left in
+                    try rightJSON.withCString { right in
+                        try unwrap(
+                            scenarioDryRun(database, id, revision, left, right),
+                            as: [ScenarioPlanItem].self
+                        )
+                    }
+                }
             }
         }
     }
