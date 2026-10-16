@@ -241,7 +241,7 @@ impl JobStore {
 
     fn initialize(db: Connection, owner_lock: Option<Connection>) -> Result<Self> {
         let version: i32 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 10 {
+        if version > 11 {
             return Err(JobStoreError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -390,7 +390,7 @@ impl JobStore {
                  CREATE TABLE operation_decisions (
                    decision_id TEXT PRIMARY KEY NOT NULL,
                    job_id TEXT NOT NULL REFERENCES jobs(id),
-                   operation_kind TEXT NOT NULL CHECK(operation_kind IN ('overwrite','delete','rename')),
+                   operation_kind TEXT NOT NULL CHECK(operation_kind IN ('read_content','overwrite','delete','rename')),
                    connection_id TEXT NOT NULL,
                    relative_path TEXT NOT NULL,
                    expires_at INTEGER NOT NULL CHECK(expires_at >= 0),
@@ -455,6 +455,33 @@ impl JobStore {
                  );
                  PRAGMA user_version = 10;
                  COMMIT;",
+            )?;
+        }
+        if version <= 10 {
+            // Expand the durable one-time decision vocabulary without changing
+            // existing decisions. A content read can materialize a File Provider
+            // item on macOS, so it needs the same exact-scope persistence.
+            db.execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                 BEGIN IMMEDIATE;
+                 CREATE TABLE operation_decisions_new (
+                   decision_id TEXT PRIMARY KEY NOT NULL,
+                   job_id TEXT NOT NULL REFERENCES jobs(id),
+                   operation_kind TEXT NOT NULL CHECK(operation_kind IN ('read_content','overwrite','delete','rename')),
+                   connection_id TEXT NOT NULL,
+                   relative_path TEXT NOT NULL,
+                   expires_at INTEGER NOT NULL CHECK(expires_at >= 0),
+                   decision TEXT NOT NULL CHECK(decision IN ('accepted','denied')),
+                   consumed INTEGER NOT NULL DEFAULT 0 CHECK(consumed IN (0,1))
+                 );
+                 INSERT INTO operation_decisions_new
+                   SELECT decision_id,job_id,operation_kind,connection_id,relative_path,expires_at,decision,consumed FROM operation_decisions;
+                 DROP TABLE operation_decisions;
+                 ALTER TABLE operation_decisions_new RENAME TO operation_decisions;
+                 CREATE INDEX operation_decisions_for_job ON operation_decisions(job_id, consumed);
+                 PRAGMA user_version = 11;
+                 COMMIT;
+                 PRAGMA foreign_keys = ON;",
             )?;
         }
         db.pragma_update(None, "foreign_keys", "ON")?;
@@ -2281,7 +2308,7 @@ mod tests {
             .db
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
     }
 
     #[test]

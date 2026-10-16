@@ -2,8 +2,9 @@
 //! It never contacts a provider or reads user/cloud content.
 use crate::confirmation::{Confirmation, EvidenceLevel};
 use crate::jobs::{JobStore, JobStoreError};
-use crate::local_fs::{LocalError, LocalFilesystem};
+use crate::local_fs::{ContentReadConsent, LocalError, LocalFilesystem};
 use crate::model::JobState;
+use crate::policy::{Decision, OperationScope, ProtectedOperation};
 use crate::registry::Registry;
 use crate::verification::{OperationVerifier, VerifiedReceipt};
 use std::fs::{self, OpenOptions};
@@ -80,6 +81,25 @@ pub enum LocalDirectoryCreateError {
     Store(JobStoreError),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalFileCopyStatus {
+    Completed,
+    Existing(JobState),
+}
+
+#[derive(Debug)]
+pub enum LocalFileCopyError {
+    InvalidRequest,
+    ConsentRequired,
+    TargetExists,
+    CapabilityUnavailable,
+    ConnectionUnavailable,
+    VerificationFailed,
+    OutcomeUnknown(LocalError),
+    Local(LocalError),
+    Store(JobStoreError),
+}
+
 fn enabled_local_connection(registry_path: &Path, connection_id: &str) -> bool {
     let Ok(registry) = Registry::open(registry_path) else {
         return false;
@@ -113,6 +133,10 @@ impl From<JobStoreError> for LocalDirectoryCreateError {
     fn from(value: JobStoreError) -> Self {
         Self::Store(value)
     }
+}
+
+impl From<JobStoreError> for LocalFileCopyError {
+    fn from(value: JobStoreError) -> Self { Self::Store(value) }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -452,6 +476,110 @@ pub fn run_local_directory_create(
     );
     store.complete_attempt(job_id, &attempt_id, &receipt)?;
     Ok(LocalDirectoryCreateStatus::Completed)
+}
+
+/// Execute one manually confirmed Local-to-Local copy. The confirmation is
+/// written and consumed for this exact source connection and relative path
+/// before the source file is opened. This permits macOS File Provider
+/// materialization only after the user has approved that exact operation.
+pub fn run_local_file_copy(
+    database_path: &Path,
+    registry_path: &Path,
+    source_root: &Path,
+    source_connection_id: &str,
+    source_relative: &Path,
+    destination_root: &Path,
+    destination_connection_id: &str,
+    destination_relative: &Path,
+    job_id: &str,
+    consent: bool,
+) -> Result<LocalFileCopyStatus, LocalFileCopyError> {
+    if !valid_job_id(job_id)
+        || source_connection_id.is_empty()
+        || destination_connection_id.is_empty()
+        || source_relative.as_os_str().is_empty()
+        || destination_relative.as_os_str().is_empty()
+    {
+        return Err(LocalFileCopyError::InvalidRequest);
+    }
+    if !consent { return Err(LocalFileCopyError::ConsentRequired); }
+    if !enabled_local_connection(registry_path, source_connection_id)
+        || !enabled_local_connection(registry_path, destination_connection_id)
+    { return Err(LocalFileCopyError::ConnectionUnavailable); }
+    let source = LocalFilesystem::open(source_root).map_err(LocalFileCopyError::Local)?;
+    let destination = LocalFilesystem::open(destination_root).map_err(LocalFileCopyError::Local)?;
+    if !source.capabilities().operations.read_content || !destination.capabilities().operations.write_content {
+        return Err(LocalFileCopyError::CapabilityUnavailable);
+    }
+    if source.overlaps_root(&destination).map_err(LocalFileCopyError::Local)? {
+        return Err(LocalFileCopyError::InvalidRequest);
+    }
+    let source_entry = source.stat(source_relative).map_err(LocalFileCopyError::Local)?;
+    if source_entry.is_directory { return Err(LocalFileCopyError::InvalidRequest); }
+    match destination.stat(destination_relative) {
+        Ok(_) => return Err(LocalFileCopyError::TargetExists),
+        Err(LocalError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(LocalFileCopyError::Local(error)),
+    }
+    let source_path = source_relative.to_str().ok_or(LocalFileCopyError::InvalidRequest)?;
+    let target_path = destination_relative.to_str().ok_or(LocalFileCopyError::InvalidRequest)?;
+    let root_identity = local_root_identity_key(&destination).map_err(|error| match error {
+        LocalDirectoryCreateError::Local(error) => LocalFileCopyError::Local(error),
+        LocalDirectoryCreateError::Store(error) => LocalFileCopyError::Store(error),
+        _ => LocalFileCopyError::InvalidRequest,
+    })?;
+    let mut store = JobStore::open(database_path)?;
+    if let Some(existing) = store.get(job_id)? { return Ok(LocalFileCopyStatus::Existing(existing.state)); }
+    store.enqueue(job_id, None)?;
+    store.advance(
+        job_id,
+        JobState::Queued,
+        JobState::Running,
+        Confirmation::Unknown,
+    )?;
+    store.advance(
+        job_id,
+        JobState::Running,
+        JobState::WaitingForDecision,
+        Confirmation::Unknown,
+    )?;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| LocalFileCopyError::InvalidRequest)?.as_secs();
+    let scope = OperationScope {
+        operation: ProtectedOperation::ReadContent,
+        connection_id: source_connection_id.to_owned(),
+        relative_path: source_path.to_owned(),
+        expires_at: now.saturating_add(60),
+    };
+    let decision_id = format!("{job_id}-source-read");
+    store.record_operation_decision(&decision_id, job_id, &scope, Decision::Accepted)?;
+    store.consume_operation_decision(&decision_id, job_id, &scope, now)?;
+    store.advance(job_id, JobState::WaitingForDecision, JobState::Running, Confirmation::Confirmed(EvidenceLevel::Requested))?;
+    let attempt_id = format!("{job_id}-attempt-1");
+    store.prepare_bound_attempt_with_root_identity(
+        job_id, &attempt_id, "local_copy_new", destination_connection_id, target_path,
+        source_entry.size, "00000000000000000000000000000000", &root_identity,
+    )?;
+    if !enabled_local_connection(registry_path, source_connection_id)
+        || !enabled_local_connection(registry_path, destination_connection_id)
+    {
+        store.fail_attempt_before_effect(job_id, &attempt_id)?;
+        return Err(LocalFileCopyError::ConnectionUnavailable);
+    }
+    match source.copy_file_to_new(source_relative, &destination, destination_relative, ContentReadConsent::GrantedForThisOperation) {
+        Ok(bytes) if bytes == source_entry.size => {}
+        Ok(_) => return Err(LocalFileCopyError::VerificationFailed),
+        Err(LocalError::AlreadyExists) => { store.fail_attempt_before_effect(job_id, &attempt_id)?; return Err(LocalFileCopyError::TargetExists); }
+        Err(error @ LocalError::OutcomeUnknown(_)) => return Err(LocalFileCopyError::OutcomeUnknown(error)),
+        Err(error) => return Err(LocalFileCopyError::Local(error)),
+    }
+    match destination.stat(destination_relative) {
+        Ok(entry) if !entry.is_directory && entry.size == source_entry.size => {}
+        _ => return Err(LocalFileCopyError::VerificationFailed),
+    }
+    let receipt = VerifiedReceipt::metadata_verified(&attempt_id, "local_copy_new", destination_connection_id, target_path);
+    store.complete_attempt(job_id, &attempt_id, &receipt)?;
+    Ok(LocalFileCopyStatus::Completed)
 }
 
 /// Reconcile an UNKNOWN Local Filesystem directory creation without writing,
@@ -900,6 +1028,44 @@ mod tests {
             Some(JobState::Completed)
         );
         assert!(store.unresolved_attempts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn local_file_copy_persists_consent_and_never_overwrites() {
+        let (database, registry_path, source_root, source_connection) = local_fixture("copy");
+        let destination_root = source_root.parent().unwrap().join("destination-root");
+        fs::create_dir(&source_root).unwrap();
+        fs::create_dir(&destination_root).unwrap();
+        fs::write(source_root.join("source.txt"), b"copy me").unwrap();
+        let registry = Registry::open(&registry_path).unwrap();
+        let destination_connection = registry.add("local_filesystem", "Destination Local").unwrap();
+
+        assert!(matches!(
+            run_local_file_copy(
+                &database, &registry_path, &source_root, &source_connection, Path::new("source.txt"),
+                &destination_root, &destination_connection, Path::new("source.txt"), "local-copy-denied", false,
+            ),
+            Err(LocalFileCopyError::ConsentRequired)
+        ));
+        assert!(!database.exists());
+        assert_eq!(
+            run_local_file_copy(
+                &database, &registry_path, &source_root, &source_connection, Path::new("source.txt"),
+                &destination_root, &destination_connection, Path::new("source.txt"), "local-copy-1", true,
+            ).unwrap(),
+            LocalFileCopyStatus::Completed
+        );
+        assert_eq!(fs::read(destination_root.join("source.txt")).unwrap(), b"copy me");
+        assert_eq!(fs::read(source_root.join("source.txt")).unwrap(), b"copy me");
+        assert_eq!(JobStore::open(&database).unwrap().state("local-copy-1").unwrap(), Some(JobState::Completed));
+        assert!(matches!(
+            run_local_file_copy(
+                &database, &registry_path, &source_root, &source_connection, Path::new("source.txt"),
+                &destination_root, &destination_connection, Path::new("source.txt"), "local-copy-2", true,
+            ),
+            Err(LocalFileCopyError::TargetExists)
+        ));
+        assert_eq!(fs::read(destination_root.join("source.txt")).unwrap(), b"copy me");
     }
 
     #[test]

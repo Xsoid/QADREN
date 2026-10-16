@@ -8,6 +8,10 @@ QADREN **does not start the download of cloud file content to the local storage 
 
 Before the request, specify the files/set, source, reason, purpose, expected volume, and operation authority if possible. No answer is not agreement. Permission has a limited scope; it does not become a global permanent permission.
 
+## Local File Copy Consent
+
+For one Local Filesystem file copy, the File Manager can ask the user to allow macOS to materialize the selected source item. The dialog names the materialization risk and states that QADREN copies one selected file without overwrite. The Rust JobStore records and consumes one accepted `read_content` decision for the exact source `connection_id` and relative path before it opens the file. A new copy needs a new confirmation. A preview, a metadata read, or a previous confirmation is not consent.
+
 ## Allowed Automatic Actions
 
 Retrieval of metadata, lists, sizes, dates, identifiers, and available server hashes **without downloading content**. If the API requires a content download to get information, the basic prohibition applies.
@@ -17,7 +21,7 @@ Retrieval of metadata, lists, sizes, dates, identifiers, and available server ha
 - Do not try to block or change the normal operation of iCloud Drive in macOS.
 - Do not prevent other applications from accessing files.
 - Do not consider system synchronization already performed by macOS as a violation.
-- QADREN reading of a file that is already local, and operations that can cause its materialization, require separate verification and careful separation in the implementation to not start a prohibited download.
+- QADREN reading of a file that is already local, and operations that can cause its materialization, require the separate consent described above.
 - On **another Mac designated as a Worker**, different explicitly established policies may apply: it can download data automatically for its tasks.
 
 ## Delegation

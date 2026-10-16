@@ -4,6 +4,7 @@
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtectedOperation {
+    ReadContent,
     Overwrite,
     Delete,
     Rename,
@@ -12,6 +13,7 @@ pub enum ProtectedOperation {
 impl ProtectedOperation {
     pub(crate) fn label(self) -> &'static str {
         match self {
+            Self::ReadContent => "read_content",
             Self::Overwrite => "overwrite",
             Self::Delete => "delete",
             Self::Rename => "rename",
@@ -20,6 +22,7 @@ impl ProtectedOperation {
 
     pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
+            "read_content" => Some(Self::ReadContent),
             "overwrite" => Some(Self::Overwrite),
             "delete" => Some(Self::Delete),
             "rename" => Some(Self::Rename),

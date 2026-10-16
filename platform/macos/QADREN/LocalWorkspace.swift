@@ -22,6 +22,13 @@ private func localCopyPreview(
     _ sourceRoot: UnsafePointer<CChar>?, _ sourceRelative: UnsafePointer<CChar>?,
     _ destinationRoot: UnsafePointer<CChar>?, _ destinationRelative: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_jobs_run_local_file_copy")
+private func runLocalFileCopyJob(
+    _ database: UnsafePointer<CChar>?, _ registry: UnsafePointer<CChar>?,
+    _ sourceRoot: UnsafePointer<CChar>?, _ sourceConnection: UnsafePointer<CChar>?, _ sourceRelative: UnsafePointer<CChar>?,
+    _ destinationRoot: UnsafePointer<CChar>?, _ destinationConnection: UnsafePointer<CChar>?, _ destinationRelative: UnsafePointer<CChar>?,
+    _ jobID: UnsafePointer<CChar>?, _ consent: Bool
+) -> UnsafeMutablePointer<CChar>?
 
 struct LocalWorkspaceEntry: Decodable, Identifiable { let name: String; let is_directory: Bool; let size: UInt64; var id: String { name } }
 private struct LocalEnvelope<T: Decodable>: Decodable { let ok: Bool; let data: T?; let error: String? }
@@ -335,6 +342,67 @@ struct LocalCopyPreviewRequest: Equatable {
             destinationRoot: destinationRoot,
             destinationRelativePath: destination.relativePath
         )
+    }
+
+    /// Executes only after the confirmation dialog has explained that macOS can
+    /// materialize the selected File Provider item. Rust persists and consumes
+    /// the one-time decision before opening the source file.
+    @discardableResult func copyFile(
+        request: LocalCopyPreviewRequest, to destination: LocalWorkspace
+    ) throws -> String {
+        try copyFile(
+            request: request,
+            to: destination,
+            databasePath: try JobInventory.paths().database,
+            registryPath: try StorageRegistryBridge.databasePath()
+        )
+    }
+
+    /// Test seam for the native bridge. Production obtains the app-owned paths
+    /// above, while tests can use isolated stores.
+    @discardableResult func copyFile(
+        request: LocalCopyPreviewRequest, to destination: LocalWorkspace,
+        databasePath: String, registryPath: String
+    ) throws -> String {
+        guard request.isCurrent(source: self, destination: destination) else {
+            throw StorageError.operation("План копирования устарел. Проверьте его ещё раз.")
+        }
+        let jobID = "local-copy-" + UUID().uuidString.lowercased()
+        let pointer = databasePath.withCString { database in
+            registryPath.withCString { registry in
+                request.sourceRoot.withCString { sourceRoot in
+                    request.sourceConnectionID.withCString { sourceConnection in
+                        request.sourceRelativePath.withCString { sourceRelative in
+                            request.destinationRoot.withCString { destinationRoot in
+                                request.destinationConnectionID.withCString { destinationConnection in
+                                    request.destinationRelativePath.withCString { destinationRelative in
+                                        jobID.withCString { identifier in
+                                            runLocalFileCopyJob(database, registry, sourceRoot, sourceConnection, sourceRelative, destinationRoot, destinationConnection, destinationRelative, identifier, true)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        guard let pointer else { throw StorageError.operation("Local copy Job unavailable") }
+        defer { localFree(pointer) }
+        let result = try JSONDecoder().decode(LocalJobEnvelope.self, from: Data(String(cString: pointer).utf8))
+        guard result.ok else {
+            if result.error == "outcome_unknown" {
+                throw StorageError.operation("Результат копирования не подтверждён. Проверьте файлы до повторной попытки.")
+            }
+            if result.error == "target_exists" {
+                throw StorageError.operation("Файл с таким именем уже есть в папке назначения.")
+            }
+            throw StorageError.operation(result.error ?? "Local copy Job failed")
+        }
+        error = nil
+        refresh()
+        destination.refresh()
+        return jobID
     }
 
     func findDirectoryReconciliations(connectionID: String, databasePath: String, registryPath: String) throws {

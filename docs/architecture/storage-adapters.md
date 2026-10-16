@@ -39,9 +39,11 @@ Native File Provider/iCloud placeholder checks when the **local** adapter operat
 
 ## Local Filesystem
 
-A standalone, actively developed adapter for local file systems and directories. **Not part of iCloud Documents** and not a method for hidden access to all of iCloud Drive. Before reading a file in an iCloud-managed directory, it is necessary to determine if the operation initiates forbidden materialization of content on the main MacBook.
+A standalone, actively developed adapter for local file systems and directories. **Not part of iCloud Documents** and not a method for hidden access to all of iCloud Drive. A Local-to-Local file copy can open a File Provider source only after the user confirms that macOS can materialize that exact source item. The Rust JobStore records and consumes a one-time `read_content` decision for its source `connection_id` and relative path before the open. The destination is no-overwrite. Uncertain post-effect state is `UNKNOWN`; it is never retried blindly.
 
 For `local_mkdir_new`, JobStore saves the opened root device/inode identity with the bound attempt before `mkdir`. Read-only reconciliation completes an UNKNOWN attempt only when the enabled Local connection, operation, relative path, directory type, and root identity all match. A missing legacy binding or a different root remains UNKNOWN. The File Manager can list UNKNOWN mkdir Jobs bound to the selected root and connection, including after restart. It shows an explicit check action for each matching Job. Inventory and the check action do not create, remove, retry, or read a directory.
+
+For `local_copy_new`, JobStore saves the destination root identity and a durable attempt before the copy. Completion requires a regular destination file with the expected byte count. This is metadata verification, not a content hash proof.
 
 ## New adapters
 

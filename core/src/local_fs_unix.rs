@@ -575,29 +575,19 @@ pub fn stat(root: &File, target: &Path) -> Result<LocalEntry> {
 }
 
 /// Open a regular file relative to the pinned directory for streaming.
-/// macOS deliberately fails closed: opening an iCloud placeholder might trigger
-/// materialization; a trusted resident-file check must precede implementation.
+/// The caller must already have durable, exact-scope consent. On macOS this
+/// open can materialize a File Provider item.
 pub fn open_content(root: &File, target: &Path) -> Result<File> {
-    #[cfg(target_os = "macos")]
-    {
-        let _ = (root, target);
-        Err(LocalError::UnsafeEntry)
-    }
+    let (directory, leaf) = parent(root, target)?;
     #[cfg(target_os = "linux")]
-    {
-        let (directory, leaf) = parent(root, target)?;
-        let input = opened(unsafe {
-            openat(
-                directory.as_raw_fd(),
-                leaf.as_ptr(),
-                RDONLY | NOFOLLOW | NONBLOCK | CLOEXEC,
-            )
-        })?;
-        if !input.metadata()?.is_file() {
-            return Err(LocalError::UnsafeEntry);
-        }
-        Ok(input)
+    let flags = RDONLY | NOFOLLOW | NONBLOCK | CLOEXEC;
+    #[cfg(target_os = "macos")]
+    let flags = RDONLY | NOFOLLOW | CLOEXEC;
+    let input = opened(unsafe { openat(directory.as_raw_fd(), leaf.as_ptr(), flags) })?;
+    if !input.metadata()?.is_file() {
+        return Err(LocalError::UnsafeEntry);
     }
+    Ok(input)
 }
 
 /// Creates one directory without following symlinks or replacing existing entries.

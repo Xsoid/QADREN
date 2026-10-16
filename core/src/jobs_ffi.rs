@@ -226,6 +226,51 @@ pub unsafe extern "C" fn qadren_jobs_run_local_directory_create(
     }
 }
 
+/// Execute one explicitly confirmed Local-to-Local file copy. The caller must
+/// pass `consent=true` only after a user approved possible File Provider
+/// materialization for this exact source file.
+///
+/// # Safety
+/// Arguments must be valid, NUL-terminated strings for the duration of call.
+#[no_mangle]
+pub unsafe extern "C" fn qadren_jobs_run_local_file_copy(
+    database_path: *const c_char,
+    registry_path: *const c_char,
+    source_root: *const c_char,
+    source_connection_id: *const c_char,
+    source_relative: *const c_char,
+    destination_root: *const c_char,
+    destination_connection_id: *const c_char,
+    destination_relative: *const c_char,
+    job_id: *const c_char,
+    consent: bool,
+) -> *mut c_char {
+    let (Some(database_path), Some(registry_path), Some(source_root), Some(source_connection_id),
+        Some(source_relative), Some(destination_root), Some(destination_connection_id),
+        Some(destination_relative), Some(job_id)) = (
+        input(database_path), input(registry_path), input(source_root), input(source_connection_id),
+        input(source_relative), input(destination_root), input(destination_connection_id),
+        input(destination_relative), input(job_id),
+    ) else { return response(json!({"ok":false,"error":"invalid_request"})); };
+    match crate::job_execution::run_local_file_copy(
+        Path::new(database_path), Path::new(registry_path), Path::new(source_root), source_connection_id,
+        Path::new(source_relative), Path::new(destination_root), destination_connection_id,
+        Path::new(destination_relative), job_id, consent,
+    ) {
+        Ok(crate::job_execution::LocalFileCopyStatus::Completed) => response(json!({"ok":true,"data":{"status":"completed"}})),
+        Ok(crate::job_execution::LocalFileCopyStatus::Existing(state)) => response(json!({"ok":true,"data":{"status":format!("{:?}", state).to_ascii_lowercase(),"existing":true}})),
+        Err(crate::job_execution::LocalFileCopyError::ConsentRequired) => response(json!({"ok":false,"error":"consent_required"})),
+        Err(crate::job_execution::LocalFileCopyError::TargetExists) => response(json!({"ok":false,"error":"target_exists"})),
+        Err(crate::job_execution::LocalFileCopyError::ConnectionUnavailable) => response(json!({"ok":false,"error":"local_connection_unavailable"})),
+        Err(crate::job_execution::LocalFileCopyError::CapabilityUnavailable) => response(json!({"ok":false,"error":"local_capability_unavailable"})),
+        Err(crate::job_execution::LocalFileCopyError::VerificationFailed) => response(json!({"ok":false,"error":"verification_failed"})),
+        Err(crate::job_execution::LocalFileCopyError::OutcomeUnknown(_)) => response(json!({"ok":false,"error":"outcome_unknown"})),
+        Err(crate::job_execution::LocalFileCopyError::InvalidRequest) => response(json!({"ok":false,"error":"invalid_request"})),
+        Err(crate::job_execution::LocalFileCopyError::Local(_)) => response(json!({"ok":false,"error":"local_operation_failed"})),
+        Err(crate::job_execution::LocalFileCopyError::Store(_)) => response(json!({"ok":false,"error":"job_store_unavailable"})),
+    }
+}
+
 /// Read-only reconciliation for one UNKNOWN Local Filesystem directory-create
 /// Job. This never starts another mkdir; Rust requires the exact durable root
 /// identity, connection, operation and directory metadata before completion.
