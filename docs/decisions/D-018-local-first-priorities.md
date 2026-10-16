@@ -8,7 +8,11 @@
 - **P1 — local functional core.** Implement and verify UI → Rust JobStore → Local Filesystem → verification → SQLite → UI. Then implement local scenarios, crash recovery, consent policy, and a two-pane file manager. Start with metadata/dry-run and no-overwrite; perform dangerous operations only through safety-gates.
 - **P2 — autonomous local product.** Scheduler, independent Worker/service, session saving, verifiable Local↔Local operations, and distribution package. The absence of a cloud API does not block the local version.
 - **P3 / POST-RELEASE — Yandex Disk controller.** By direct decision of the owner, this is **removed from Release 1**. The owner reported an emergency state of Yandex and partial unavailability of Disk/API. **Do not perform new tasks, OAuth/API/transfer, or live E2E with Yandex Disk until a new separate decision is made.** Preserve existing OAuth/metadata/upload source code, connections, tests, and data; independent offline/mock regression checks without network requests are permitted. #16 is not a stage or gate of Release 1.
-- **PARKED — iCloud without date.** According to the owner, the desired path requires an unavailable paid Apple Developer account. The connector, entitlement, UI, and integration research are not developed. #17 remains closed. The protection of Local FS against hidden File Provider materialization is not canceled.
+- **P3 / POST-RELEASE, PARKED — iCloud without date.** According to the owner, the desired path requires an unavailable paid Apple Developer account. The connector, entitlement, UI, and integration research are not developed. #17 remains closed. The protection of Local FS against hidden File Provider materialization is not canceled.
+
+## Status clarification — 2026-10-16
+
+P0 interface baseline [#26](https://github.com/Xsoid/QADREN/issues/26) has been closed as completed; do not treat P0 as an active development stage. Both [Yandex #16](https://github.com/Xsoid/QADREN/issues/16) and [iCloud #17](https://github.com/Xsoid/QADREN/issues/17) are closed as **not planned for Release 1**, solely to keep post-release work out of the active queue. They are future candidates without an automatic deadline or implementation commitment. Reopen the existing relevant Issue only after a separate owner decision. For local execution use the active [Epic #12](https://github.com/Xsoid/QADREN/issues/12) gates: safe native read → real no-overwrite copy → Scenario sync → autonomous Worker → release evidence.
 
 ## Management
 
