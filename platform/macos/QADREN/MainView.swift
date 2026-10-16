@@ -588,10 +588,28 @@ private struct FileManagerPane: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text(title).font(.headline)
+                Picker("Подключение", selection: $selectedConnectionID) {
+                    Text("Выберите подключение").tag("")
+                    ForEach(localConnections) { connection in
+                        Text(connection.name).tag(connection.id)
+                    }
+                }
+                .frame(maxWidth: 220)
+                .onChange(of: selectedConnectionID) { connectionID in
+                    workspace.bind(connectionID: connectionID)
+                }
                 Spacer()
-                Button("Выбрать папку") { workspace.chooseRoot() }
+                Button("Выбрать папку") { workspace.chooseRoot(for: selectedConnectionID) }
+                    .disabled(!selectedConnectionIsAvailable)
                 Button("Обновить", systemImage: "arrow.clockwise") { workspace.refresh() }.disabled(workspace.root == nil)
-            }.padding(.horizontal, 18).padding(.top, 16)
+            }
+            .padding(.horizontal, 18).padding(.top, 16)
+            .onAppear {
+                if selectedConnectionID.isEmpty, let connection = localConnections.first {
+                    selectedConnectionID = connection.id
+                    workspace.bind(connectionID: connection.id)
+                }
+            }
             if let root = workspace.root {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(root).font(.caption).textSelection(.enabled)
@@ -602,13 +620,6 @@ private struct FileManagerPane: View {
                         if !workspace.selectedNames.isEmpty { Text("Выбрано: \(workspace.selectedNames.count)").font(.caption).foregroundStyle(.secondary) }
                     }
                     HStack(spacing: 8) {
-                        Picker("Подключение", selection: $selectedConnectionID) {
-                            Text("Выберите подключение").tag("")
-                            ForEach(localConnections) { connection in
-                                Text(connection.name).tag(connection.id)
-                            }
-                        }
-                        .frame(maxWidth: 220)
                         TextField("Имя новой папки", text: $newDirectoryName)
                         Button("Создать папку") {
                             workspace.createDirectory(

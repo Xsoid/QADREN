@@ -25,6 +25,10 @@ private struct LocalJobEnvelope: Decodable { let ok: Bool; let data: LocalJobRes
 private struct LocalReconciliationCandidate: Decodable { let job_id: String }
 
 @MainActor final class LocalWorkspace: ObservableObject {
+    /// A root is valid only for the independently selected Local connection in
+    /// this panel. Switching connections clears all path-derived state before
+    /// any Job can use it.
+    @Published private(set) var boundConnectionID: String?
     @Published private(set) var root: String?
     @Published private(set) var relativePath = ""
     @Published private(set) var entries: [LocalWorkspaceEntry] = []
@@ -37,15 +41,33 @@ private struct LocalReconciliationCandidate: Decodable { let job_id: String }
     /// UNKNOWN. It is an explicit user action, never an automatic retry.
     @Published private(set) var reconciliationJobIDs: [String] = []
 
-    func chooseRoot() {
+    func chooseRoot(for connectionID: String) {
+        guard !connectionID.isEmpty else {
+            error = "Выберите активное локальное подключение"
+            return
+        }
         let panel = NSOpenPanel(); panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        selectRoot(url.path)
+        selectRoot(url.path, connectionID: connectionID)
     }
-    func selectRoot(_ path: String) {
+    /// Bind this panel to a connection before browsing its root. A different
+    /// connection never inherits a path, selection, or UNKNOWN Job inventory.
+    func bind(connectionID: String) {
+        guard boundConnectionID != connectionID else { return }
+        boundConnectionID = connectionID
+        root = nil
+        relativePath = ""
+        entries = []
+        selectedNames.removeAll()
+        reconciliationJobIDs = []
+        error = nil
+    }
+    func selectRoot(_ path: String, connectionID: String? = nil) {
+        if let connectionID { bind(connectionID: connectionID) }
         root = path
         relativePath = ""
         selectedNames.removeAll()
+        reconciliationJobIDs = []
         refresh()
     }
     var selectedDirectory: String? {
@@ -104,6 +126,10 @@ private struct LocalReconciliationCandidate: Decodable { let job_id: String }
         guard let root else { return nil }
         guard !connectionID.isEmpty else {
             error = "Выберите активное локальное подключение"
+            return nil
+        }
+        guard boundConnectionID == nil || boundConnectionID == connectionID else {
+            error = "Выберите папку для текущего локального подключения"
             return nil
         }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -170,6 +196,10 @@ private struct LocalReconciliationCandidate: Decodable { let job_id: String }
             error = "Выберите исходное локальное подключение"
             return
         }
+        guard boundConnectionID == nil || boundConnectionID == connectionID else {
+            error = "Выберите папку для текущего локального подключения"
+            return
+        }
         let pointer = databasePath.withCString { database in
             registryPath.withCString { registry in
                 root.withCString { root in
@@ -215,6 +245,10 @@ private struct LocalReconciliationCandidate: Decodable { let job_id: String }
         guard let root else { return }
         guard !connectionID.isEmpty else {
             error = "Выберите локальное подключение"
+            return
+        }
+        guard boundConnectionID == nil || boundConnectionID == connectionID else {
+            error = "Выберите папку для текущего локального подключения"
             return
         }
         let pointer = databasePath.withCString { database in

@@ -10,12 +10,15 @@ struct LocalWorkspaceTests {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
 
         let workspace = LocalWorkspace()
-        workspace.selectRoot(root.path)
         let database = root.appendingPathComponent("jobs.sqlite3").path
         let registry = root.appendingPathComponent("connections.sqlite3").path
         let connection = try StorageRegistryBridge.addLocalComputer(
             name: "Test Local", databasePath: registry
         )
+        let otherConnection = try StorageRegistryBridge.addLocalComputer(
+            name: "Other Local", databasePath: registry
+        )
+        workspace.selectRoot(root.path, connectionID: connection)
         let createdJobID = try workspace.createDirectory(
             named: "created", connectionID: connection, databasePath: database, registryPath: registry
         )
@@ -84,6 +87,32 @@ struct LocalWorkspaceTests {
                 NSLocalizedDescriptionKey: "completed local Job appeared in reconciliation inventory"
             ])
         }
+
+        workspace.setSelected("created", isSelected: true)
+        workspace.bind(connectionID: otherConnection)
+        guard workspace.boundConnectionID == otherConnection,
+              workspace.root == nil,
+              workspace.relativePath.isEmpty,
+              workspace.entries.isEmpty,
+              workspace.selectedNames.isEmpty,
+              workspace.reconciliationJobIDs.isEmpty else {
+            throw NSError(domain: "QADRENTests", code: 11, userInfo: [
+                NSLocalizedDescriptionKey: "connection switch retained the previous root state"
+            ])
+        }
+        workspace.selectRoot(root.path, connectionID: otherConnection)
+        let blocked = try workspace.createDirectory(
+            named: "blocked", connectionID: connection, databasePath: database, registryPath: registry
+        )
+        guard blocked == nil,
+              !FileManager.default.fileExists(atPath: root.appendingPathComponent("blocked").path),
+              workspace.error != nil else {
+            throw NSError(domain: "QADRENTests", code: 12, userInfo: [
+                NSLocalizedDescriptionKey: "mismatched connection used a root bound to another connection"
+            ])
+        }
+
+        workspace.selectRoot(root.path, connectionID: connection)
 
         do {
             try workspace.createDirectory(
