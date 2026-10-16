@@ -68,6 +68,32 @@ enum QDTheme {
         )
     }
 
+    /// This is used for non-semantic widget borders when macOS asks for
+    /// increased contrast. Semantic status borders keep their own color.
+    static func widgetStroke(
+        for scheme: ColorScheme, increasedContrast: Bool
+    ) -> Color {
+        Color(hex: widgetStrokeHex(for: scheme, increasedContrast: increasedContrast))
+    }
+
+    static func widgetStrokeContrastRatio(
+        for scheme: ColorScheme, increasedContrast: Bool
+    ) -> Double {
+        contrastRatio(
+            foreground: widgetStrokeHex(for: scheme, increasedContrast: increasedContrast),
+            background: scheme == .dark ? 0x0B1B2A : 0xFFFFFF
+        )
+    }
+
+    private static func widgetStrokeHex(
+        for scheme: ColorScheme, increasedContrast: Bool
+    ) -> UInt32 {
+        guard increasedContrast else {
+            return scheme == .dark ? 0x1B4058 : 0x9DB9C9
+        }
+        return scheme == .dark ? 0xECF7FF : 0x112C3C
+    }
+
     private static func semanticHex(_ semantic: QDSemanticColor, for scheme: ColorScheme) -> UInt32 {
         if scheme == .dark {
             return switch semantic {
@@ -109,6 +135,34 @@ enum QDTheme {
             channel <= 0.04045 ? channel / 12.92 : pow((channel + 0.055) / 1.055, 2.4)
         }
         return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+    }
+}
+
+enum QDAccessibilityPresentation {
+    static func widgetBorderWidth(increasedContrast: Bool) -> CGFloat {
+        increasedContrast ? 2 : 1
+    }
+
+    static func permitsImplicitAnimation(reduceMotion: Bool) -> Bool {
+        !reduceMotion
+    }
+}
+
+private struct QDReduceMotion: ViewModifier {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func body(content: Content) -> some View {
+        content.transaction { transaction in
+            if !QDAccessibilityPresentation.permitsImplicitAnimation(reduceMotion: reduceMotion) {
+                transaction.animation = nil
+            }
+        }
+    }
+}
+
+extension View {
+    func qadrenAccessibilityPresentation() -> some View {
+        modifier(QDReduceMotion())
     }
 }
 
@@ -190,6 +244,7 @@ struct QDWidgetFrame<Content: View, Actions: View>: View {
     @ViewBuilder let actions: Actions
     @ViewBuilder let content: Content
     @Environment(\.colorScheme) private var colorScheme
+    @State private var increasedContrast = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
 
     init(
         title: String,
@@ -231,9 +286,21 @@ struct QDWidgetFrame<Content: View, Actions: View>: View {
                 .stroke(
                     status == .needsAction
                         ? QDTheme.semanticColor(.needsAction, for: colorScheme)
-                        : QDTheme.color(.stroke, for: colorScheme),
-                    lineWidth: 1
+                        : QDTheme.widgetStroke(
+                            for: colorScheme,
+                            increasedContrast: increasedContrast
+                        ),
+                    lineWidth: QDAccessibilityPresentation.widgetBorderWidth(
+                        increasedContrast: increasedContrast
+                    )
                 )
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification
+            )
+        ) { _ in
+            increasedContrast = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
         }
     }
 }

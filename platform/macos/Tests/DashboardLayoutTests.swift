@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 
 private func check(_ condition: @autoclosure () -> Bool, _ message: String) {
     guard condition() else { fatalError("FAIL: " + message) }
@@ -119,6 +120,28 @@ struct DashboardLayoutTests {
             check(QDTheme.semanticContrastRatio(semantic, for: .light) >= 4.5, "light semantic status text meets 4.5:1 contrast")
             check(QDTheme.semanticContrastRatio(semantic, for: .dark) >= 4.5, "dark semantic status text meets 4.5:1 contrast")
         }
+        for scheme in [ColorScheme.light, .dark] {
+            check(
+                QDTheme.widgetStrokeContrastRatio(for: scheme, increasedContrast: true) >= 4.5,
+                "increased-contrast widget border remains distinct from its panel"
+            )
+        }
+        check(
+            QDAccessibilityPresentation.widgetBorderWidth(increasedContrast: false) == 1,
+            "standard contrast uses a one point widget border"
+        )
+        check(
+            QDAccessibilityPresentation.widgetBorderWidth(increasedContrast: true) == 2,
+            "increased contrast uses a two point widget border"
+        )
+        check(
+            QDAccessibilityPresentation.permitsImplicitAnimation(reduceMotion: false),
+            "standard motion permits implicit animation"
+        )
+        check(
+            !QDAccessibilityPresentation.permitsImplicitAnimation(reduceMotion: true),
+            "reduce motion disables implicit animation"
+        )
 
         print("Dashboard layout native tests passed")
     }

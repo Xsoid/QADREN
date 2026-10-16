@@ -25,6 +25,7 @@ struct MainView: View {
             case .files: filesWorkspace
             }
         }
+        .qadrenAccessibilityPresentation()
         .tint(QDTheme.color(.focus, for: colorScheme))
         .navigationTitle(workspace.title)
         .background(TitlebarLogoAccessory().frame(width: 0, height: 0))

@@ -12,6 +12,7 @@ The UI shall not invent data pipelines, second queues, runtime history, or regis
 
 - If a JobStore/Registry read error occurs, monitoring shall show a priority available warning and the error state of the corresponding widget; the error shall not be presented as a quiet empty/success state.
 - If the saved layout is corrupted, `DashboardLayoutStore` shall show a safe default panel, shall not erase original bytes, and shall report this to monitoring; the notification shall disappear only after the user intentionally saves a new layout.
+- The root view shall remove implicit animations when macOS enables Reduce Motion. Widget borders shall use a two point high-contrast treatment when macOS enables Increase Contrast.
 - The user can hide all widgets: the canvas shall then show an available empty state with exact instructions to restore widgets via layout mode.
 - In Release 1, Settings shall offer to create only a Local FS connection. An existing Yandex connection can be renamed, disabled, or locally deleted while preserving the rule "cloud objects are not touched," but the UI shall not offer OAuth or API calls without a new post-release solution.
 
