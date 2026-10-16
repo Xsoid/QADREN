@@ -11,7 +11,7 @@
 ## Safety invariants
 
 - Keep Rust as the cross-platform core and SwiftUI as the macOS UI.
-- Release 1 uses Local Filesystem. Yandex Disk is post-release. iCloud is not planned.
+- Release 1 uses Local Filesystem only. Yandex Disk and iCloud are post-release and parked. Their existing Issues remain closed until a separate owner decision. Keep File Provider safety guards.
 - Use one Rust JobStore. A `Scenario` defines synchronization rules. A `Job` is one execution or one manual file operation.
 - Keep each `StorageConnection` independent. Bind OAuth and Keychain state to `connection_id`.
 - Do not save secrets in SQLite, Git, logs, or HTTP URLs.
