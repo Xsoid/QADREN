@@ -94,6 +94,8 @@ pub enum LocalFileCopyError {
     TargetExists,
     CapabilityUnavailable,
     ConnectionUnavailable,
+    ScenarioUnavailable,
+    ScenarioScopeMismatch,
     VerificationFailed,
     OutcomeUnknown(LocalError),
     Local(LocalError),
@@ -494,6 +496,71 @@ pub fn run_local_file_copy(
     job_id: &str,
     consent: bool,
 ) -> Result<LocalFileCopyStatus, LocalFileCopyError> {
+    run_local_file_copy_inner(
+        database_path, registry_path, source_root, source_connection_id, source_relative,
+        destination_root, destination_connection_id, destination_relative, job_id, consent, None,
+    )
+}
+
+/// Execute one explicitly confirmed Local-to-Local create proposed by an exact
+/// Scenario revision. The immutable Scenario identity is stored with the Job.
+/// This does not enable automatic content reads: every source still needs its
+/// own confirmation.
+#[allow(clippy::too_many_arguments)]
+pub fn run_local_scenario_file_copy(
+    database_path: &Path,
+    registry_path: &Path,
+    scenario_id: &str,
+    scenario_revision: u64,
+    source_root: &Path,
+    source_connection_id: &str,
+    source_relative: &Path,
+    destination_root: &Path,
+    destination_connection_id: &str,
+    destination_relative: &Path,
+    job_id: &str,
+    consent: bool,
+) -> Result<LocalFileCopyStatus, LocalFileCopyError> {
+    let registry = Registry::open(registry_path).map_err(|_| LocalFileCopyError::ScenarioUnavailable)?;
+    let scenario = registry
+        .get_scenario_revision(scenario_id, scenario_revision)
+        .map_err(|_| LocalFileCopyError::ScenarioUnavailable)?
+        .ok_or(LocalFileCopyError::ScenarioUnavailable)?;
+    let source_root = source_root.to_str().ok_or(LocalFileCopyError::InvalidRequest)?;
+    let destination_root = destination_root.to_str().ok_or(LocalFileCopyError::InvalidRequest)?;
+    let is_left_to_right = scenario.left_connection_id == source_connection_id
+        && scenario.left_root == source_root
+        && scenario.right_connection_id == destination_connection_id
+        && scenario.right_root == destination_root;
+    let is_right_to_left = scenario.direction == "bidirectional"
+        && scenario.right_connection_id == source_connection_id
+        && scenario.right_root == source_root
+        && scenario.left_connection_id == destination_connection_id
+        && scenario.left_root == destination_root;
+    if !is_left_to_right && !is_right_to_left {
+        return Err(LocalFileCopyError::ScenarioScopeMismatch);
+    }
+    run_local_file_copy_inner(
+        database_path, registry_path, Path::new(source_root), source_connection_id, source_relative,
+        Path::new(destination_root), destination_connection_id, destination_relative, job_id, consent,
+        Some((scenario_id, scenario_revision)),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_local_file_copy_inner(
+    database_path: &Path,
+    registry_path: &Path,
+    source_root: &Path,
+    source_connection_id: &str,
+    source_relative: &Path,
+    destination_root: &Path,
+    destination_connection_id: &str,
+    destination_relative: &Path,
+    job_id: &str,
+    consent: bool,
+    scenario: Option<(&str, u64)>,
+) -> Result<LocalFileCopyStatus, LocalFileCopyError> {
     if !valid_job_id(job_id)
         || source_connection_id.is_empty()
         || destination_connection_id.is_empty()
@@ -530,7 +597,7 @@ pub fn run_local_file_copy(
     })?;
     let mut store = JobStore::open(database_path)?;
     if let Some(existing) = store.get(job_id)? { return Ok(LocalFileCopyStatus::Existing(existing.state)); }
-    store.enqueue(job_id, None)?;
+    store.enqueue(job_id, scenario)?;
     store.advance(
         job_id,
         JobState::Queued,
@@ -1066,6 +1133,38 @@ mod tests {
             Err(LocalFileCopyError::TargetExists)
         ));
         assert_eq!(fs::read(destination_root.join("source.txt")).unwrap(), b"copy me");
+    }
+
+    #[test]
+    fn scenario_copy_binds_the_exact_revision_and_endpoint_scope() {
+        let (database, registry_path, source_root, source_connection) = local_fixture("scenario-copy");
+        let destination_root = source_root.parent().unwrap().join("scenario-destination-root");
+        fs::create_dir(&source_root).unwrap();
+        fs::create_dir(&destination_root).unwrap();
+        fs::write(source_root.join("source.txt"), b"copy me").unwrap();
+        let registry = Registry::open(&registry_path).unwrap();
+        let destination_connection = registry.add("local_filesystem", "Scenario Destination").unwrap();
+        let scenario = registry.create_scenario(
+            "Scenario copy", &source_connection, source_root.to_str().unwrap(),
+            &destination_connection, destination_root.to_str().unwrap(), "left_to_right",
+        ).unwrap();
+        assert_eq!(
+            run_local_scenario_file_copy(
+                &database, &registry_path, &scenario, 1, &source_root, &source_connection, Path::new("source.txt"),
+                &destination_root, &destination_connection, Path::new("source.txt"), "scenario-copy-1", true,
+            ).unwrap(),
+            LocalFileCopyStatus::Completed
+        );
+        let stored = JobStore::open(&database).unwrap().get("scenario-copy-1").unwrap().unwrap();
+        assert_eq!(stored.scenario_id.as_deref(), Some(scenario.as_str()));
+        assert_eq!(stored.scenario_revision, Some(1));
+        assert!(matches!(
+            run_local_scenario_file_copy(
+                &database, &registry_path, &scenario, 1, &destination_root, &source_connection, Path::new("source.txt"),
+                &source_root, &destination_connection, Path::new("other.txt"), "scenario-copy-bad", true,
+            ),
+            Err(LocalFileCopyError::ScenarioScopeMismatch)
+        ));
     }
 
     #[test]

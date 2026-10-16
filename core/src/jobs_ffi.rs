@@ -262,6 +262,47 @@ pub unsafe extern "C" fn qadren_jobs_run_local_file_copy(
         Err(crate::job_execution::LocalFileCopyError::ConsentRequired) => response(json!({"ok":false,"error":"consent_required"})),
         Err(crate::job_execution::LocalFileCopyError::TargetExists) => response(json!({"ok":false,"error":"target_exists"})),
         Err(crate::job_execution::LocalFileCopyError::ConnectionUnavailable) => response(json!({"ok":false,"error":"local_connection_unavailable"})),
+        Err(crate::job_execution::LocalFileCopyError::ScenarioUnavailable) => response(json!({"ok":false,"error":"scenario_unavailable"})),
+        Err(crate::job_execution::LocalFileCopyError::ScenarioScopeMismatch) => response(json!({"ok":false,"error":"scenario_scope_mismatch"})),
+        Err(crate::job_execution::LocalFileCopyError::CapabilityUnavailable) => response(json!({"ok":false,"error":"local_capability_unavailable"})),
+        Err(crate::job_execution::LocalFileCopyError::VerificationFailed) => response(json!({"ok":false,"error":"verification_failed"})),
+        Err(crate::job_execution::LocalFileCopyError::OutcomeUnknown(_)) => response(json!({"ok":false,"error":"outcome_unknown"})),
+        Err(crate::job_execution::LocalFileCopyError::InvalidRequest) => response(json!({"ok":false,"error":"invalid_request"})),
+        Err(crate::job_execution::LocalFileCopyError::Local(_)) => response(json!({"ok":false,"error":"local_operation_failed"})),
+        Err(crate::job_execution::LocalFileCopyError::Store(_)) => response(json!({"ok":false,"error":"job_store_unavailable"})),
+    }
+}
+
+/// Execute one explicitly confirmed copy bound to an immutable Scenario revision.
+/// The Rust executor rejects roots and connections that are not the direction
+/// stored in that revision.
+#[no_mangle]
+pub unsafe extern "C" fn qadren_jobs_run_local_scenario_file_copy(
+    database_path: *const c_char, registry_path: *const c_char,
+    scenario_id: *const c_char, scenario_revision: u64,
+    source_root: *const c_char, source_connection_id: *const c_char, source_relative: *const c_char,
+    destination_root: *const c_char, destination_connection_id: *const c_char, destination_relative: *const c_char,
+    job_id: *const c_char, consent: bool,
+) -> *mut c_char {
+    let (Some(database_path), Some(registry_path), Some(scenario_id), Some(source_root),
+        Some(source_connection_id), Some(source_relative), Some(destination_root),
+        Some(destination_connection_id), Some(destination_relative), Some(job_id)) = (
+        input(database_path), input(registry_path), input(scenario_id), input(source_root),
+        input(source_connection_id), input(source_relative), input(destination_root),
+        input(destination_connection_id), input(destination_relative), input(job_id),
+    ) else { return response(json!({"ok":false,"error":"invalid_request"})); };
+    match crate::job_execution::run_local_scenario_file_copy(
+        Path::new(database_path), Path::new(registry_path), scenario_id, scenario_revision,
+        Path::new(source_root), source_connection_id, Path::new(source_relative),
+        Path::new(destination_root), destination_connection_id, Path::new(destination_relative), job_id, consent,
+    ) {
+        Ok(crate::job_execution::LocalFileCopyStatus::Completed) => response(json!({"ok":true,"data":{"status":"completed"}})),
+        Ok(crate::job_execution::LocalFileCopyStatus::Existing(state)) => response(json!({"ok":true,"data":{"status":format!("{:?}", state).to_ascii_lowercase(),"existing":true}})),
+        Err(crate::job_execution::LocalFileCopyError::ConsentRequired) => response(json!({"ok":false,"error":"consent_required"})),
+        Err(crate::job_execution::LocalFileCopyError::TargetExists) => response(json!({"ok":false,"error":"target_exists"})),
+        Err(crate::job_execution::LocalFileCopyError::ConnectionUnavailable) => response(json!({"ok":false,"error":"local_connection_unavailable"})),
+        Err(crate::job_execution::LocalFileCopyError::ScenarioUnavailable) => response(json!({"ok":false,"error":"scenario_unavailable"})),
+        Err(crate::job_execution::LocalFileCopyError::ScenarioScopeMismatch) => response(json!({"ok":false,"error":"scenario_scope_mismatch"})),
         Err(crate::job_execution::LocalFileCopyError::CapabilityUnavailable) => response(json!({"ok":false,"error":"local_capability_unavailable"})),
         Err(crate::job_execution::LocalFileCopyError::VerificationFailed) => response(json!({"ok":false,"error":"verification_failed"})),
         Err(crate::job_execution::LocalFileCopyError::OutcomeUnknown(_)) => response(json!({"ok":false,"error":"outcome_unknown"})),

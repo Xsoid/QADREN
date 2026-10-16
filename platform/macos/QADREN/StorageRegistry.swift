@@ -25,6 +25,13 @@ private func scenarioDryRun(
 private func localScenarioMetadataSnapshot(
     _ registry: UnsafePointer<CChar>?, _ connectionID: UnsafePointer<CChar>?, _ root: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_jobs_run_local_scenario_file_copy")
+private func runLocalScenarioCopyJob(
+    _ jobs: UnsafePointer<CChar>?, _ registry: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?, _ revision: UInt64,
+    _ sourceRoot: UnsafePointer<CChar>?, _ sourceConnection: UnsafePointer<CChar>?, _ sourceRelative: UnsafePointer<CChar>?,
+    _ destinationRoot: UnsafePointer<CChar>?, _ destinationConnection: UnsafePointer<CChar>?, _ destinationRelative: UnsafePointer<CChar>?,
+    _ jobID: UnsafePointer<CChar>?, _ consent: Bool
+) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_scenario_schedules_list")
 private func scenarioSchedulesList(
     _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?
@@ -145,6 +152,9 @@ struct ScenarioPlanItem: Decodable, Identifiable {
 }
 private struct NewConnection: Decodable {
     let id: String
+}
+private struct ScenarioJobStatus: Decodable {
+    let status: String
 }
 private struct RegistryEnvelope<T: Decodable>: Decodable {
     let ok: Bool
@@ -280,6 +290,31 @@ enum StorageRegistryBridge {
                 }
             }
         }
+    }
+
+    /// Submit one `create` proposal after its separate materialization consent.
+    /// The Core validates the exact immutable Scenario revision and endpoint
+    /// direction before it creates the durable copy Job.
+    static func executeScenarioCreate(
+        scenario: ScenarioEntry, item: ScenarioPlanItem
+    ) throws {
+        guard item.action.kind == "create", let fromLeft = item.action.from_left else {
+            throw StorageError.operation("План не разрешает создание этого файла")
+        }
+        let registry = try path
+        let jobs = try JobInventory.paths().database
+        let sourceRoot = fromLeft ? scenario.left_root : scenario.right_root
+        let sourceConnection = fromLeft ? scenario.left_connection_id : scenario.right_connection_id
+        let destinationRoot = fromLeft ? scenario.right_root : scenario.left_root
+        let destinationConnection = fromLeft ? scenario.right_connection_id : scenario.left_connection_id
+        let jobID = "scenario-copy-" + UUID().uuidString.lowercased()
+        let pointer = jobs.withCString { jobs in registry.withCString { registry in scenario.id.withCString { scenarioID in
+            sourceRoot.withCString { sourceRoot in sourceConnection.withCString { sourceConnection in item.relative_path.withCString { sourceRelative in
+                destinationRoot.withCString { destinationRoot in destinationConnection.withCString { destinationConnection in item.relative_path.withCString { destinationRelative in jobID.withCString { jobID in
+                    runLocalScenarioCopyJob(jobs, registry, scenarioID, scenario.revision, sourceRoot, sourceConnection, sourceRelative, destinationRoot, destinationConnection, destinationRelative, jobID, true)
+                }}}}}}}}
+        }}
+        let _: ScenarioJobStatus = try unwrap(pointer, as: ScenarioJobStatus.self)
     }
 
     static func listScenarioSchedules(scenarioID: String) throws -> [ScenarioScheduleEntry] {
