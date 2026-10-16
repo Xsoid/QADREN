@@ -1,5 +1,6 @@
 //! Narrow metadata-only Local Filesystem ABI for the macOS file-manager shell.
 use crate::local_fs::LocalFilesystem;
+use crate::registry::Registry;
 use serde_json::json;
 use std::ffi::{c_char, CStr, CString};
 use std::path::Path;
@@ -17,6 +18,27 @@ fn input_allow_empty<'a>(pointer: *const c_char) -> Option<&'a str> {
 }
 fn response(value: serde_json::Value) -> *mut c_char {
     CString::new(value.to_string()).unwrap().into_raw()
+}
+
+fn metadata_snapshot(root: &str) -> crate::local_fs::Result<serde_json::Value> {
+    const MAX_ENTRIES: usize = 10_000;
+    LocalFilesystem::open(Path::new(root)).and_then(|fs| {
+        fs.list_tree(Path::new(""), MAX_ENTRIES).map(|entries| {
+            json!(entries
+                .into_iter()
+                .filter_map(|(relative_path, entry)| {
+                    (!entry.is_directory).then(|| {
+                        json!({
+                            "relative_path": relative_path.to_string_lossy(),
+                            "object_revision": null,
+                            "size": entry.size,
+                            "checksum_md5": null
+                        })
+                    })
+                })
+                .collect::<Vec<_>>())
+        })
+    })
 }
 
 #[no_mangle]
@@ -48,28 +70,46 @@ pub unsafe extern "C" fn qadren_local_list(
 /// Pointer must reference a valid NUL-terminated UTF-8 string during this call.
 #[no_mangle]
 pub unsafe extern "C" fn qadren_local_metadata_snapshot(root: *const c_char) -> *mut c_char {
-    const MAX_ENTRIES: usize = 10_000;
     let Some(root) = input(root) else {
         return response(json!({"ok":false,"error":"invalid_request"}));
     };
-    let result = LocalFilesystem::open(Path::new(root)).and_then(|fs| {
-        fs.list_tree(Path::new(""), MAX_ENTRIES).map(|entries| {
-            entries
-                .into_iter()
-                .filter_map(|(relative_path, entry)| {
-                    (!entry.is_directory).then(|| {
-                        json!({
-                            "relative_path": relative_path.to_string_lossy(),
-                            "object_revision": null,
-                            "size": entry.size,
-                            "checksum_md5": null
-                        })
-                    })
-                })
-                .collect::<Vec<_>>()
-        })
-    });
-    match result {
+    match metadata_snapshot(root) {
+        Ok(entries) => response(json!({"ok":true,"data":entries})),
+        Err(_) => response(json!({"ok":false,"error":"local_metadata_unavailable"})),
+    }
+}
+
+/// Return a metadata-only snapshot for one enabled Local StorageConnection.
+/// The Registry check happens before opening the root, so a disabled, missing,
+/// or non-Local Scenario endpoint cannot cause a filesystem scan. The caller
+/// still owns the exact Scenario revision and no content is opened or hashed.
+///
+/// # Safety
+/// Pointers must reference valid NUL-terminated UTF-8 strings during this call.
+#[no_mangle]
+pub unsafe extern "C" fn qadren_local_scenario_metadata_snapshot(
+    registry_path: *const c_char,
+    connection_id: *const c_char,
+    root: *const c_char,
+) -> *mut c_char {
+    let (Some(registry_path), Some(connection_id), Some(root)) =
+        (input(registry_path), input(connection_id), input(root))
+    else {
+        return response(json!({"ok":false,"error":"invalid_request"}));
+    };
+    let connection = match Registry::open(Path::new(registry_path))
+        .and_then(|registry| registry.get(connection_id))
+    {
+        Ok(Some(connection)) => connection,
+        Ok(None) => {
+            return response(json!({"ok":false,"error":"local_scenario_connection_unavailable"}))
+        }
+        Err(_) => return response(json!({"ok":false,"error":"registry_unavailable"})),
+    };
+    if connection.adapter != "local_filesystem" || !connection.enabled {
+        return response(json!({"ok":false,"error":"local_scenario_connection_unavailable"}));
+    }
+    match metadata_snapshot(root) {
         Ok(entries) => response(json!({"ok":true,"data":entries})),
         Err(_) => response(json!({"ok":false,"error":"local_metadata_unavailable"})),
     }

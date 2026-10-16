@@ -21,8 +21,10 @@ private func scenarioDryRun(
     _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?, _ revision: UInt64,
     _ leftSnapshot: UnsafePointer<CChar>?, _ rightSnapshot: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
-@_silgen_name("qadren_local_metadata_snapshot")
-private func localMetadataSnapshot(_ root: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_local_scenario_metadata_snapshot")
+private func localScenarioMetadataSnapshot(
+    _ registry: UnsafePointer<CChar>?, _ connectionID: UnsafePointer<CChar>?, _ root: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_scenario_schedules_list")
 private func scenarioSchedulesList(
     _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?
@@ -237,12 +239,22 @@ enum StorageRegistryBridge {
         }
     }
 
-    /// Read only file metadata below a user-selected Local Filesystem root.
-    /// This does not open content, calculate a checksum, submit a Job, or
-    /// change a Scenario baseline.
-    static func localScenarioSnapshot(root: String) throws -> [ScenarioSnapshotItem] {
-        try root.withCString { root in
-            try unwrap(localMetadataSnapshot(root), as: [ScenarioSnapshotItem].self)
+    /// Read only metadata below one enabled Local Scenario endpoint. This does
+    /// not open content, calculate a checksum, submit a Job, or change a
+    /// Scenario baseline.
+    static func localScenarioSnapshot(
+        root: String, connectionID: String, databasePath: String? = nil
+    ) throws -> [ScenarioSnapshotItem] {
+        let database = try databasePath ?? path
+        return try database.withCString { database in
+            try connectionID.withCString { connectionID in
+                try root.withCString { root in
+                    try unwrap(
+                        localScenarioMetadataSnapshot(database, connectionID, root),
+                        as: [ScenarioSnapshotItem].self
+                    )
+                }
+            }
         }
     }
 

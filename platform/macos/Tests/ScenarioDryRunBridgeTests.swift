@@ -14,6 +14,10 @@ private func scenarioCreateForTest(
 ) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_free_string")
 private func freeRegistryStringForTest(_ ptr: UnsafeMutablePointer<CChar>?)
+@_silgen_name("qadren_registry_set_enabled")
+private func registrySetEnabledForTest(
+    _ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ enabled: UInt8
+) -> UnsafeMutablePointer<CChar>?
 
 private struct Response<T: Decodable>: Decodable {
     let ok: Bool
@@ -79,6 +83,16 @@ private func createScenario(
     }
 }
 
+private func setConnectionEnabled(database: String, id: String, enabled: Bool) throws {
+    try database.withCString { database in
+        try id.withCString { id in
+            let _: Bool = try decode(
+                registrySetEnabledForTest(database, id, enabled ? 1 : 0), as: Bool.self
+            )
+        }
+    }
+}
+
 @main
 struct ScenarioDryRunBridgeTests {
     static func main() throws {
@@ -99,8 +113,12 @@ struct ScenarioDryRunBridgeTests {
             rightID: rightID, rightRoot: rightRoot.path
         )
 
-        let leftSnapshot = try StorageRegistryBridge.localScenarioSnapshot(root: leftRoot.path)
-        let rightSnapshot = try StorageRegistryBridge.localScenarioSnapshot(root: rightRoot.path)
+        let leftSnapshot = try StorageRegistryBridge.localScenarioSnapshot(
+            root: leftRoot.path, connectionID: leftID, databasePath: database
+        )
+        let rightSnapshot = try StorageRegistryBridge.localScenarioSnapshot(
+            root: rightRoot.path, connectionID: rightID, databasePath: database
+        )
         check(leftSnapshot.count == 1, "metadata scan returns the source file")
         check(leftSnapshot[0].relative_path == "report.txt", "snapshot keeps a relative path")
         check(leftSnapshot[0].checksum_md5 == nil, "snapshot does not hash file content")
@@ -113,6 +131,15 @@ struct ScenarioDryRunBridgeTests {
         check(plan[0].action.from_left == true, "proposal preserves source direction")
         check(!FileManager.default.fileExists(atPath: rightRoot.appendingPathComponent("report.txt").path),
               "dry run does not transfer content")
+        try setConnectionEnabled(database: database, id: leftID, enabled: false)
+        do {
+            _ = try StorageRegistryBridge.localScenarioSnapshot(
+                root: leftRoot.path, connectionID: leftID, databasePath: database
+            )
+            fatalError("disabled Local connection scanned a Scenario root")
+        } catch {
+            // The Registry gate runs before the Local Filesystem scan.
+        }
         print("Scenario dry-run native Swift/FFI bridge tests passed")
     }
 }

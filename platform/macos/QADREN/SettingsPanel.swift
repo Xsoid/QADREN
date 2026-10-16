@@ -653,8 +653,12 @@ private struct ScenarioDryRunView: View {
         error = nil
         defer { isLoading = false; hasRequestedPreview = true }
         do {
-            let left = try StorageRegistryBridge.localScenarioSnapshot(root: scenario.left_root)
-            let right = try StorageRegistryBridge.localScenarioSnapshot(root: scenario.right_root)
+            let left = try StorageRegistryBridge.localScenarioSnapshot(
+                root: scenario.left_root, connectionID: scenario.left_connection_id
+            )
+            let right = try StorageRegistryBridge.localScenarioSnapshot(
+                root: scenario.right_root, connectionID: scenario.right_connection_id
+            )
             plan = try StorageRegistryBridge.dryRunScenario(
                 id: scenario.id, revision: scenario.revision, left: left, right: right
             )
