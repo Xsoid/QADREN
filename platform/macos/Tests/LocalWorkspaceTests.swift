@@ -37,6 +37,30 @@ struct LocalWorkspaceTests {
             ])
         }
 
+        guard let createdEntry = workspace.entries.first(where: { $0.name == "created" }) else {
+            throw NSError(domain: "QADRENTests", code: 7, userInfo: [
+                NSLocalizedDescriptionKey: "created directory is absent from the workspace selection source"
+            ])
+        }
+        workspace.setSelected("created", isSelected: true)
+        guard workspace.selectedNames == Set(["created"]) else {
+            throw NSError(domain: "QADRENTests", code: 8, userInfo: [
+                NSLocalizedDescriptionKey: "visible directory selection was not stored"
+            ])
+        }
+        workspace.open(createdEntry)
+        guard workspace.relativePath == "created", workspace.selectedNames.isEmpty else {
+            throw NSError(domain: "QADRENTests", code: 9, userInfo: [
+                NSLocalizedDescriptionKey: "directory navigation retained selection from its previous path"
+            ])
+        }
+        workspace.up()
+        guard workspace.relativePath.isEmpty, workspace.selectedNames.isEmpty else {
+            throw NSError(domain: "QADRENTests", code: 10, userInfo: [
+                NSLocalizedDescriptionKey: "up navigation retained selection from its previous path"
+            ])
+        }
+
         // The completed Job is not retried. This only exercises the same
         // narrow Swift-to-Rust reconciliation ABI used for UNKNOWN Jobs.
         try workspace.reconcileDirectoryCreate(

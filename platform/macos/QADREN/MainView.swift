@@ -581,7 +581,6 @@ private struct FileManagerPane: View {
     let title: String
     @ObservedObject var workspace: LocalWorkspace
     let localConnections: [StorageEntry]
-    @State private var selected = Set<String>()
     @State private var newDirectoryName = ""
     @State private var selectedConnectionID = ""
     var body: some View {
@@ -599,7 +598,7 @@ private struct FileManagerPane: View {
                         Button("Вверх", systemImage: "chevron.up") { workspace.up() }.disabled(workspace.relativePath.isEmpty)
                         Text(workspace.relativePath.isEmpty ? "/" : "/" + workspace.relativePath).font(.caption.monospaced()).textSelection(.enabled)
                         Spacer()
-                        if !selected.isEmpty { Text("Выбрано: \(selected.count)").font(.caption).foregroundStyle(.secondary) }
+                        if !workspace.selectedNames.isEmpty { Text("Выбрано: \(workspace.selectedNames.count)").font(.caption).foregroundStyle(.secondary) }
                     }
                     HStack(spacing: 8) {
                         Picker("Подключение", selection: $selectedConnectionID) {
@@ -646,7 +645,10 @@ private struct FileManagerPane: View {
                 }.padding(.horizontal, 18)
                 List(workspace.entries) { entry in
                     HStack {
-                        Toggle("", isOn: Binding(get: { selected.contains(entry.name) }, set: { enabled in if enabled { selected.insert(entry.name) } else { selected.remove(entry.name) } })).labelsHidden()
+                        Toggle("", isOn: Binding(
+                            get: { workspace.selectedNames.contains(entry.name) },
+                            set: { workspace.setSelected(entry.name, isSelected: $0) }
+                        )).labelsHidden()
                         Button { workspace.open(entry) } label: {
                             HStack {
                                 Image(systemName: entry.is_directory ? "folder.fill" : "doc").foregroundStyle(entry.is_directory ? Color.accentColor : Color.secondary)

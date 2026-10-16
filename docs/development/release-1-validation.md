@@ -612,7 +612,7 @@ Verified on macOS for this change: `bash scripts/test-core.sh` — PASS (fmt, Cl
 
 ### File Manager: read-only metadata slice — #22 (2026-10-13)
 
-"File Manager" is opened as a separate macOS window from the `Space` menu and Menu Bar, therefore it does not return a permanent Sidebar to the monitoring panel. In the window, there are two independent local panels with root selection, breadcrumb navigation, and row selection; they read only names, types, and sizes via the existing Local Filesystem FFI.
+"File Manager" is opened as a separate macOS window from the `Space` menu and Menu Bar, therefore it does not return a permanent Sidebar to the monitoring panel. In the window, there are two independent local panels with root selection, breadcrumb navigation, and row selection; they read only names, types, and sizes via the existing Local Filesystem FFI. A row selection belongs only to the visible directory. The client clears it when the user changes the root or navigates down or up.
 
 Boundary: this is a browsing-only slice. Content preview and download, directory creation, copying, moving, renaming, and deletion are disabled: the direct Swift call `qadren_local_mkdir` is removed. No Job, Scenario, consent, or file effect is created by opening/updating the window. Modification operations will be added only together with a safe Job Engine and its durable attempt/reconciliation contract.
 

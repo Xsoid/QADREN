@@ -28,6 +28,10 @@ private struct LocalReconciliationCandidate: Decodable { let job_id: String }
     @Published private(set) var root: String?
     @Published private(set) var relativePath = ""
     @Published private(set) var entries: [LocalWorkspaceEntry] = []
+    /// Selection belongs to the directory that is visible now. Navigation
+    /// clears it so a name selected in one directory cannot appear selected
+    /// in another directory with the same name.
+    @Published private(set) var selectedNames: Set<String> = []
     @Published private(set) var error: String?
     /// This exists only after Rust reports a potentially effected mkdir as
     /// UNKNOWN. It is an explicit user action, never an automatic retry.
@@ -38,14 +42,46 @@ private struct LocalReconciliationCandidate: Decodable { let job_id: String }
         guard panel.runModal() == .OK, let url = panel.url else { return }
         selectRoot(url.path)
     }
-    func selectRoot(_ path: String) { root = path; relativePath = ""; refresh() }
+    func selectRoot(_ path: String) {
+        root = path
+        relativePath = ""
+        selectedNames.removeAll()
+        refresh()
+    }
     var selectedDirectory: String? {
         guard let root else { return nil }
         return relativePath.isEmpty ? root : root + "/" + relativePath
     }
-    func refresh() { guard let root else { return }; do { entries = try call(localList, root: root, relative: relativePath); error = nil } catch { self.error = error.localizedDescription } }
-    func open(_ entry: LocalWorkspaceEntry) { guard entry.is_directory else { return }; relativePath = relativePath.isEmpty ? entry.name : relativePath + "/" + entry.name; refresh() }
-    func up() { guard !relativePath.isEmpty else { return }; relativePath = relativePath.split(separator: "/").dropLast().joined(separator: "/"); refresh() }
+    func refresh() {
+        guard let root else { return }
+        do {
+            entries = try call(localList, root: root, relative: relativePath)
+            selectedNames.formIntersection(Set(entries.map(\.name)))
+            error = nil
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+    func open(_ entry: LocalWorkspaceEntry) {
+        guard entry.is_directory else { return }
+        relativePath = relativePath.isEmpty ? entry.name : relativePath + "/" + entry.name
+        selectedNames.removeAll()
+        refresh()
+    }
+    func up() {
+        guard !relativePath.isEmpty else { return }
+        relativePath = relativePath.split(separator: "/").dropLast().joined(separator: "/")
+        selectedNames.removeAll()
+        refresh()
+    }
+    func setSelected(_ name: String, isSelected: Bool) {
+        guard entries.contains(where: { $0.name == name }) else { return }
+        if isSelected {
+            selectedNames.insert(name)
+        } else {
+            selectedNames.remove(name)
+        }
+    }
     /// The button that calls this is the explicit, operation-scoped user action.
     /// Rust owns the Job attempt, no-overwrite mkdir and final verification.
     @discardableResult func createDirectory(named name: String, connectionID: String) -> String? {
