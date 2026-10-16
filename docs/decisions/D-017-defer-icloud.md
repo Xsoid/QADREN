@@ -1,10 +1,10 @@
 # D-017 — iCloud postponed beyond active Release 1
 
-**Date:** 2026-10-12. **Status:** accepted. **Scope:** product scope, Codex issues, architecture, UI, release gate.
+**Date:** 2026-10-12. **Status:** accepted. **Scope:** product scope, architecture, UI, and release gate.
 
 ## Decision
 
-In the first QADREN release, **do not develop backup, synchronization, file transfer with iCloud, iCloud Documents adapter, own container, entitlement/provisioning, native feasibility spike, iCloud connection UI and iCloud integration/E2E**. iCloud remains a potential future integration, not a current task and not a dependency. Existing #17 is closed as not planned. Codex does not create new iCloud implementation tasks without an explicit decision by the owner.
+In the first QADREN release, **do not develop backup, synchronization, file transfer with iCloud, iCloud Documents adapter, own container, entitlement/provisioning, native feasibility spike, iCloud connection UI, or iCloud integration/E2E**. iCloud remains a potential future integration, not a current task and not a dependency. Do not start iCloud implementation without an explicit owner decision.
 
 **Historical order from October 12, REVISED by D-018 from October 14:** the Yandex↔Local requirement stated below is no longer a gate for the local release; the priority is now foundation/UI → Local↔Local → autonomous local version, and only then Yandex. [D-018](D-018-local-first-priorities.md).
 
@@ -22,4 +22,4 @@ The owner decided to postpone iCloud because of limitations of the free integrat
 
 ## Revision of decisions
 
-Replaces the iCloud part of D-003 and D-012; other decisions about architecture and local file systems remain. Links: `README.md`, `AGENTS.md`, `docs/roadmap.md`, `docs/architecture/*`, `docs/development/*`, `docs/design/settings.md`, Epic #12.
+Replaces the iCloud part of D-003 and D-012. Other decisions about architecture and local file systems remain. Linked documents: `README.md`, `AGENTS.md`, `docs/roadmap.md`, `docs/architecture/*`, `docs/development/*`, and `docs/design/settings.md`.

@@ -1,14 +1,14 @@
 # QADREN — UI Integration Plan for Codex and Acceptance
 
-> **Update after push 2026-10-14 / D-018:** existing `DesignSystem.swift`, `DashboardLayout.swift`, `DashboardLayoutTests.swift`, `MainView.swift`, `SettingsPanel.swift`, `QADRENApp.swift` already implement the basic widget canvas, preservation of order/visibility/density/gridScale, Undo/Redo, multi-window support, and settings. The UI-A–F sequence below is a **verification and completion checklist**, not an instruction to recreate these classes. Priority #26 P0, #23 service P2. Yandex Disk controller is moved beyond Release 1; iCloud is out of scope. [Current State Audit](../development/current-state-audit.md).
+> **Current baseline / D-018:** `DesignSystem.swift`, `DashboardLayout.swift`, `DashboardLayoutTests.swift`, `MainView.swift`, `SettingsPanel.swift`, and `QADRENApp.swift` already implement the widget canvas, preservation of order, visibility, density, grid scale, Undo/Redo, multi-window support, and settings. The UI-A–F sequence below is a **verification and completion checklist**, not an instruction to recreate these classes. The independent service is later autonomy work. Yandex Disk is post-release; iCloud is out of scope. [Current State Audit](../development/current-state-audit.md).
 
 ## 0. Boundaries and Actual Baseline
 
 This documentation is a **visual-behavioral contract**, not an order to create non-existent Core APIs. Historical baseline before the October 14 push (do not apply without verification): `QADRENApp.swift` has WindowGroup monitoring, `scenario-settings` window, and MenuBarExtra. `MainView.swift` contains dashboard status tiles, jobs list, two local metadata panels, and connections/OAuth setup; `StorageConnections.swift`, `YandexConnection.swift`, `LocalWorkspace.swift`, and `JobInventory.swift` exist. The first full Rust Job execution/independent worker service is still passing roadmap gates. **Check HEAD before implementation**; this list may become obsolete.
 
-The UI shall not invent data pipelines, second queues, runtime history, or registries. The active controller for Release 1 is Local FS; Yandex UI/feature-work is moved beyond the release; preserve existing records/tokens. iCloud connection/sync/backup UI are excluded from active implementation (D-017). VoiceOver support is out of scope; keyboard access and accurate SwiftUI accessibility metadata remain required. All changes occur in `main`; do not create feature/docs branches; do not propose automatic Work transition. Completion of documentation does not close Issue #23.
+The UI shall not invent data pipelines, second queues, runtime history, or registries. The active controller for Release 1 is Local FS. Yandex UI and feature work are post-release; preserve existing records and tokens. iCloud connection, synchronization, and backup UI are excluded from active implementation (D-017). VoiceOver support is out of scope. Keyboard access and accurate SwiftUI accessibility metadata remain required. All changes occur in `main`. Do not create feature or documentation branches. Completion of documentation does not prove service readiness.
 
-### Updated P0-Verification #26
+### Baseline Verification
 
 - If a JobStore/Registry read error occurs, monitoring shall show a priority available warning and the error state of the corresponding widget; the error shall not be presented as a quiet empty/success state.
 - If the saved layout is corrupted, `DashboardLayoutStore` shall show a safe default panel, shall not erase original bytes, and shall report this to monitoring; the notification shall disappear only after the user intentionally saves a new layout.
@@ -41,7 +41,7 @@ Suggested SwiftUI type names (`QDTheme`, `QDWidgetFrame`, `QDLayoutStore`) are p
 
 **UI-E — Settings and inspectors.** Settings panel with sections (connection/scenario/schedules/policies/node/UI), deep links from widgets, native forms, and recoverable connection removal. File manager shall be an expanded/separate panel from monitoring, without permanent navigation. Do not implement unfinished operations "for aesthetics."
 
-**UI-F — Life cycle.** Connect the independent service according to #23, not prior to G5 completion; MenuBarExtra shall show real state; closing windows shall not stop the Worker; implement safe service stop. Verify restart, sleep, crash recovery, and absence of auto-open windows.
+**UI-F — Life cycle.** Connect the independent service only after the local execution path is verified. `MenuBarExtra` shall show real state. Closing windows shall not stop the Worker. Implement safe service stop. Verify restart, sleep, crash recovery, and absence of auto-open windows.
 
 Each stage is one cohesive verifiable patch. There is no need to stop independent Core work on G1–G4: UI-B/C can be implemented with Preview fixtures and real read-only FFI.
 
@@ -59,7 +59,7 @@ Do not create empty directories or a separate file for every icon; the actual st
 - Do not download content to the primary MacBook via QADREN without separate explicit scoped consent. Browse/list/stat/metadata shall not include content.
 - The UI shall not confirm verified success without corresponding Rust evidence. UNKNOWN shall not have unconditional retry. Success of a Yandex API request is not unconditional proof of full delivery and integrity.
 - Distinguish storages/jobs with the same display name by actual connection_id/Job ID.
-- Do not delete user files via remove connection; perform local credentials cleanup with recoverability per #25.
+- Do not delete user files via remove connection. Perform local credential cleanup with recoverability.
 - No secrets, auth URLs, access tokens, or file content in diagnostics, screenshots/previews, or analytics.
 - No preview/demo indicator shall enter runtime. Use a separate flag/fixture mode for UI tests only. The `ui-test-fixtures` Core feature is for native UNKNOWN acceptance only and is absent from the normal macOS build.
 
@@ -92,7 +92,7 @@ Do not create empty directories or a separate file for every icon; the actual st
 
 ## 6. Readiness and Reporting
 
-For each Issue, record `HEAD/base SHA`, list of components, actual APIs, screenshots/preview snapshots, `PASS/FAIL/BLOCKED/SKIPPED`, commit SHA, known residual risks, and owner decisions. Perform code review + security review. AI-Docs-Hub is only an additional project-scoped index/review; it is not the source of UI architecture.
+For each UI validation record `HEAD/base SHA`, list components, actual APIs, screenshots or preview snapshots, `PASS/FAIL/BLOCKED/SKIPPED`, commit SHA, known residual risks, and owner decisions. Perform code and security review. AI-Docs-Hub is only an additional project-scoped index and review. It is not the source of UI architecture.
 
 **DONE Criterion for the design system in code:** not simply a similar screenshot. The theme is applied via one token layer, every widget uses a common frame/states, layout/filters/session are preserved, real data is not substituted, dangerous actions without Core authorization are unavailable, and accessibility and native build are actually passed.
 

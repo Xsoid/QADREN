@@ -1,4 +1,4 @@
-# Multiple independent connections — first working UI (#7)
+# Multiple Independent Connections — First Working UI
 
 The branch implements D-016 for Yandex Disk using a common Rust SQLite registry. Each `StorageConnection` instance has an independent ID, name, provider account ID, and Keychain secret. No unique constraint for the provider account ID is implemented.
 

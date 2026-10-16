@@ -1,6 +1,6 @@
 # Yandex Disk: metadata and limited upload contract
 
-Status: metadata/OAuth integration and limited streaming upload contract exist, but full transfer and live E2E are not accepted. Issue #16 (partial).
+Status: metadata/OAuth integration and a limited streaming-upload contract exist, but full transfer and live end-to-end behavior are not accepted. This adapter is post-release work.
 
 ## Basis
 Official documents:
@@ -32,7 +32,7 @@ Official documents:
 
 ## UI under verification: quota and Disk root
 
-PR #4 adds C ABI functions for **read-only** Rust requests:
+The C ABI exposes functions for **read-only** Rust requests:
 - `qadren_yandex_disk_info`: `GET /v1/disk/` — volume.
 - `qadren_yandex_list_root`: `GET /v1/disk/resources?path=disk:/&limit=50&offset=0` — first 50 entries of the root.
 - `qadren_yandex_free_string` frees the JSON response received from Rust.

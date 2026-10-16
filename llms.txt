@@ -8,10 +8,10 @@ It manages independent storage connections and application nodes.
 Read `docs/decisions/D-018-local-first-priorities.md` first.
 
 - Release 1 has a local-first scope.
-- P0 native UI and Rust/SQLite/FFI baseline is complete (#26 closed). Do not start another general P0 audit.
+- The native UI and Rust/SQLite/FFI baseline is complete. Do not start another general baseline audit.
 - P1 is safe Local Filesystem to Local Filesystem execution through one Rust JobStore.
 - P2 is the scheduler, an independent local service, and local distribution.
-- Yandex Disk is post-release and parked (#16 closed, not planned for Release 1). Do not add API, OAuth, transfer, or live E2E work without a new owner decision.
+- Yandex Disk is post-release and parked. Do not add API, OAuth, transfer, or live E2E work without a new owner decision.
 - iCloud is post-release and parked, with no implementation date. Do not add an adapter, entitlement, UI, or feasibility test during Release 1.
 
 ## Required reading
@@ -50,8 +50,8 @@ Read the matching policy documents before you change storage, transfer, or destr
 Write new and changed project documentation in English in ASD-STE100 style.
 Use short active sentences and exact technical names.
 Do not claim full ASD-STE100 compliance without an approved-dictionary check.
-Write future Issue titles and bodies in the same style.
-Do not rewrite existing Issue history unless the owner asks for it.
+Write external work-tracker text in the same style.
+Do not rewrite external work-tracker history unless the owner asks for it.
 
 ## Verification
 

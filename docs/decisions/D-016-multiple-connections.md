@@ -19,7 +19,7 @@ One adapter type (`yandex_disk`, `s3`, `webdav`, `icloud_documents`, etc.) can b
 - For macOS iCloud Documents, availability depends on the system Apple ID/container: "unlimited connection instances" do not promise the technical capability to authorize several Apple IDs independently in one user session. The adapter must declare limitations honestly.
 
 ## Prototype Migration
-The current Yandex OAuth prototype PR #4 uses one Keychain record (`service=dev.qadren.yandex.oauth`, `account=default`) and one `YandexConnection` in SwiftUI. **This is a temporary code limitation, not an architectural decision.**
+The current Yandex OAuth prototype uses one Keychain record (`service=dev.qadren.yandex.oauth`, `account=default`) and one `YandexConnection` in SwiftUI. **This is a temporary code limitation, not an architectural decision.**
 
 Move to the multi-account model **without loss of the existing token**: during the first start after the update, detect the legacy record, create or suggest an explicit connection, move the credential to a unique record for the `connection_id` only after a successful write and check, and only then delete the legacy record. A migration refusal/error must not break the active connection. Do not log secrets.
 

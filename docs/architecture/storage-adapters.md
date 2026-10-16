@@ -1,6 +1,6 @@
 # Storage Adapters
 
-Status: **model accepted; first Local controller vertical slice implemented.** Local Filesystem and its Release 1 controller are under active development; Yandex Disk controller is moved to post-release P3, the code is preserved; iCloud is future-only for an indefinite period (D-018). `local_mkdir_new` creates only a new folder via Rust JobStore, durable attempt and metadata verification, without reading user content. Yandex Disk metadata and macOS UI are historically verified (Issue #2, PR #4/#9); content E2E is not yet proven.
+Status: **model accepted; first Local controller vertical slice implemented.** Local Filesystem and its Release 1 controller are under active development. Yandex Disk is post-release and its code is preserved. iCloud is future-only (D-018). `local_mkdir_new` creates only a new folder through Rust JobStore, durable attempt, and metadata verification. It does not read user content. Yandex Disk metadata and macOS UI source exist; content end-to-end behavior is not proven.
 
 ## Adapter type ≠ connection instance
 
@@ -19,11 +19,11 @@ Each adapter reports:
 
 The scheduler must not build a job based on an unconfirmed adapter function.
 
-## Preliminary Rust contract (Issue #14)
+## Preliminary Rust Contract
 
 In `core/src/capabilities.rs`, a declarative description of capabilities `CapabilityDeclaration`, `Operations`, `Platform` and `RequestedOperation` is defined. This model is for compatibility verification and is not a permission to perform I/O: the adapter must re-verify permissions, actual object availability, and for the main MacBook — consent to download content immediately before the operation.
 
-Current flags do not prove the implementation of content APIs or confirmation of cloud commit. Their detail, errors, capabilities completeness and FFI compatibility will continue in #14. Do not confuse `prerequisites_verified` with a stable permission: the actual state can change after verification.
+Current flags do not prove the implementation of content APIs or confirmation of cloud commit. Do not confuse `prerequisites_verified` with a stable permission. The actual state can change after verification.
 
 ## Yandex Disk
 

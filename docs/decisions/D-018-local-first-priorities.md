@@ -1,23 +1,32 @@
-# D-018 — Priority of local foundation and interfaces
+# D-018 — Local-First Release 1 Priorities
 
-**Date:** 2026-10-14. **Status:** accepted. **Overrides:** Release 1 queue in D-017, roadmap, and historical issues. Safety policies, D-016, and technical constraints remain.
+**Date:** 2026-10-14. **Status:** accepted. **Overrides:** earlier Release 1 sequencing in D-017 and historical plans. Safety policies, D-016, and technical constraints remain in force.
 
-## Development Sequence
+## Decision
 
-- **P0 — foundation and UX/UI.** First, remove identified build errors and discrepancies between `main` and local work; bring Rust Core, SQLite, narrow FFI, and SwiftUI to a stable baseline. Develop the native design system, components, monitoring widget canvas without a constant sidebar, settings window and MenuBarExtra, and empty queue/error/UNKNOWN states. Use `assets/qadren-logo.png` and `docs/design/`. Do not create a second Job Engine or fictitious indicators.
-- **P1 — local functional core.** Implement and verify UI → Rust JobStore → Local Filesystem → verification → SQLite → UI. Then implement local scenarios, crash recovery, consent policy, and a two-pane file manager. Start with metadata/dry-run and no-overwrite; perform dangerous operations only through safety-gates.
-- **P2 — autonomous local product.** Scheduler, independent Worker/service, session saving, verifiable Local↔Local operations, and distribution package. The absence of a cloud API does not block the local version.
-- **P3 / POST-RELEASE — Yandex Disk controller.** By direct decision of the owner, this is **removed from Release 1**. The owner reported an emergency state of Yandex and partial unavailability of Disk/API. **Do not perform new tasks, OAuth/API/transfer, or live E2E with Yandex Disk until a new separate decision is made.** Preserve existing OAuth/metadata/upload source code, connections, tests, and data; independent offline/mock regression checks without network requests are permitted. #16 is not a stage or gate of Release 1.
-- **P3 / POST-RELEASE, PARKED — iCloud without date.** According to the owner, the desired path requires an unavailable paid Apple Developer account. The connector, entitlement, UI, and integration research are not developed. #17 remains closed. The protection of Local FS against hidden File Provider materialization is not canceled.
+Release 1 is a local-first product. Build in this order:
 
-## Status clarification — 2026-10-16
+1. Keep the existing native SwiftUI baseline.
+2. Prove a safe macOS resident-file read boundary.
+3. Deliver one verified Local Filesystem to Local Filesystem no-overwrite copy through the Rust JobStore.
+4. Connect local Scenario synchronization to that verified copy path.
+5. Deliver independent local scheduling, service lifecycle, and macOS release evidence.
 
-P0 interface baseline [#26](https://github.com/Xsoid/QADREN/issues/26) has been closed as completed; do not treat P0 as an active development stage. Both [Yandex #16](https://github.com/Xsoid/QADREN/issues/16) and [iCloud #17](https://github.com/Xsoid/QADREN/issues/17) are closed as **not planned for Release 1**, solely to keep post-release work out of the active queue. They are future candidates without an automatic deadline or implementation commitment. Reopen the existing relevant Issue only after a separate owner decision. For local execution use the active [Epic #12](https://github.com/Xsoid/QADREN/issues/12) gates: safe native read → real no-overwrite copy → Scenario sync → autonomous Worker → release evidence.
+Yandex Disk and iCloud are post-release and parked. Do not add cloud API, OAuth, transfer, entitlement, or live end-to-end work without a separate owner decision. Preserve existing source code, local connection records, credentials, tests, and data. Offline regression checks that make no network request are permitted.
 
-## Management
+## Rationale
 
-Work only in `main`; no new branches and no mandatory PRs. Verify actual code and SHA before each task; do not count local unpushed commits from issue comments as part of origin/main. Set `VERIFIED` only after checks on a specific SHA; distinguish `PARTIAL`, `BLOCKED`, `PARKED`. Develop UI using existing read-only APIs and separately isolated preview fixtures without waiting for the cloud. The prohibition of unauthorized downloading to the main MacBook, durable attempts, no-overwrite, UNKNOWN/reconciliation, scoped consent, and the absence of proprietary versioning remain unchanged.
+The current local product needs a verified end-to-end operation before remote-provider scope. The owner reported Yandex Disk emergency conditions and partial Disk/API availability. iCloud capability needs a separate access and platform decision. Neither provider is a Release 1 dependency.
 
-Release 1 consists only of P0–P2: native UI and a verifiable **Local Filesystem** controller (JobStore, Policy, recovery, Local↔Local), then an autonomous local service and distribution package. Cloud integration is a separate post-release scope and is not a criterion for the local release.
+## Constraints
 
-See [roadmap](../roadmap.md) and [audit](../development/current-state-audit.md).
+Work in `main`. Verify the current code and SHA before each change. Use `VERIFIED` only for behavior checked on a specific SHA. Distinguish `PARTIAL`, `BLOCKED`, and `PARKED` in an evidence record.
+
+Preserve the prohibition on unauthorized download to the primary MacBook, durable attempts, no-overwrite, `UNKNOWN` with read-only reconciliation, scoped consent, and no proprietary content versioning in Release 1.
+
+## Consequences
+
+- The current local product sequence is in [the roadmap](../roadmap.md).
+- The current implementation and evidence boundaries are in [the audit](../development/current-state-audit.md) and [validation record](../development/release-1-validation.md).
+- Yandex Disk and iCloud remain future candidates without an automatic deadline or implementation commitment.
+- A later owner decision must update this decision and the affected contracts before cloud work resumes.

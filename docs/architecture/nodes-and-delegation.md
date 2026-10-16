@@ -33,4 +33,4 @@ After the Worker receives permissions and rules, the Worker must be able to exec
 
 ## Not designed now
 
-Discovery, pairs and trust between nodes, transport, authentication, distributed locking, log synchronization, delegation revocation, and the policy for selecting a new Worker. These issues must be resolved separately before implementation.
+Discovery, pairs and trust between nodes, transport, authentication, distributed locking, log synchronization, delegation revocation, and the policy for selecting a new Worker. Resolve these concerns separately before implementation.

@@ -31,7 +31,7 @@ In case of discrepancy: safety from `docs/policies/` and domain solutions from `
 | Synchronization functions, local uploads, confirmations | `docs/architecture/backup-model.md`, `docs/policies/` |
 | UI composition and interaction | `docs/design/*.md` files |
 | Spacing, palette, sizes, typography | `docs/design/tokens.json` + explanations in `visual-language.md` |
-| Existing API and runtime readiness | `main` source code, tests and issue #18/#22/#23 |
+| Existing API and runtime readiness | `main` source code, tests, and the current-state audit |
 | HTML demonstration | only stylistic and compositional reference |
 
 Do not change accepted documents "according to Codex taste"; describe and agree on any conflict. Documentation is not a permission to activate dangerous commands prematurely.

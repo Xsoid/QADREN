@@ -34,4 +34,4 @@ The application shows the core version/status from **real Rust FFI calls**, and 
 The script builds only the host architecture (arm64 or x86_64), not universal binaries. The script does not sign or notarize. The bundle identifier is temporary. You must verify the SwiftUI launch, linker behavior and clean-Mac installation on macOS. Do not consider this a release, agent, live iCloud adapter or production backup engine.
 
 ## Next steps
-See `docs/roadmap.md` and Release 1 Epic #12 for the current Scenario/Job development sequence. Earlier limitations document the bootstrap milestone, not the current entire product. Do not introduce inter-node connection in this phase.
+See `docs/roadmap.md` for the current Scenario and Job development sequence. Earlier limitations document the bootstrap milestone, not the current entire product. Do not introduce inter-node connection in this phase.

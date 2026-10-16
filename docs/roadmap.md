@@ -1,76 +1,77 @@
 # Roadmap and Acceptance Criteria
 
-Status: target plan, not a performance report.
+Status: current product sequence. This document is not a work log.
 
 ## Phase 0 — Documentation Normalization
 
-- README and AGENTS identify synchronization as the primary goal; BackupSet is marked as future-only.
-- The existing metadata-only Yandex adapter is not presented as a completed transfer.
+- README and AGENTS identify file synchronization as the primary product goal.
+- BackupSet is future-only.
+- The metadata-only Yandex adapter is not a completed transfer feature.
 - Do not change working code for terminology only without a migration plan.
 
-## Current Executable Queue D-018 — 2026-10-16
+## Current Product Sequence — 2026-10-17
 
-**Current priority: completed native UI baseline → verified Local Filesystem file copy → local Scenario sync → autonomous local product.** Yandex Disk and iCloud are both post-release parked work. Issues #16 and #17 are closed as not planned for Release 1; neither is cancelled forever or a release gate. [Decision](decisions/D-018-local-first-priorities.md) · [Epic #12](https://github.com/Xsoid/QADREN/issues/12).
+**Current sequence: native UI baseline → verified Local Filesystem file copy → local Scenario synchronization → autonomous local product.** Yandex Disk and iCloud are post-release work. They are not Release 1 gates. See [D-018](decisions/D-018-local-first-priorities.md).
 
-| Priority | Issues | Executable Result / Gate |
-|---|---|---|
-| **P0 / COMPLETED** | #26 (closed) | Existing SwiftUI design system and monitoring baseline accepted. Do not reopen or create a new generic P0. Outstanding release checks remain in #24; local connection safety remains in #25 |
-| **P1 / CRITICAL PATH** | #15, #18, #20, #25 | Prove safe macOS resident-file read, then one actual Local→Local no-overwrite copy through UI→Rust JobStore→Local FS→verification→SQLite→UI. Preserve scoped consent and UNKNOWN; do not build a second engine |
-| **P1 / LOCAL PRODUCT** | #19, #22 | Reuse implemented Scenario dry-run, File Manager navigation, mkdir Job, and copy metadata preview. Connect #22 to real copy Job #18, then verify #19 one-way and two-way local Scenario execution |
-| **P2 / AUTONOMY** | #21, #23, #24 | Run real local Scenarios on schedule in a single independent Worker after UI exit; test crash/restart and produce a verified macOS release. Diagnose Actions pre-runner failures independently |
-| **POST-RELEASE / PARKED** | #16, #17 (both closed, not planned for this release) | Yandex Disk and iCloud require separate owner decisions before reactivation. Preserve code, credentials, and local File Provider guards. No cloud adapter, API, entitlement, or live E2E work in Release 1 |
+| Priority | Product result and gate |
+|---|---|
+| **P0 / COMPLETE** | The SwiftUI design system, widget canvas, and monitoring baseline exist. Do not reopen general UI-baseline work. |
+| **P1 / CRITICAL PATH** | Prove a safe macOS resident-file read. Then perform one Local-to-Local no-overwrite copy through UI → Rust JobStore → Local Filesystem → verification → SQLite → UI. Preserve scoped consent and `UNKNOWN`. Do not build a second engine. |
+| **P1 / LOCAL PRODUCT** | Connect the existing Scenario dry-run, File Manager navigation, `mkdir` Job, and copy metadata preview to the verified copy Job. Verify one-way and two-way local Scenario execution. |
+| **P2 / AUTONOMY** | Run real local Scenarios on schedule in one independent Worker after UI exit. Test crash and restart recovery. Produce a verified macOS release. |
+| **POST-RELEASE / PARKED** | Yandex Disk and iCloud require a separate owner decision before reactivation. Preserve existing code, credentials, and Local File Provider guards. Do not add cloud adapter, API, entitlement, or live end-to-end work in Release 1. |
 
-### Task Stability and Requirement Sources
+## Requirement Ownership
 
-**Issue numbering is stable.** A change in priority `P0/P1/P2/P3` is an **edit to an existing task**, not a replacement, re-issue, or change of number. Do not use ranges such as `P1–P2` for child issues: each has one current starting priority; subsequent acceptance criteria remain in the same issue. Epic #12 may cover all phases. **P0 #26 is completed and closed.** The original #13 remains archived as `not planned / superseded`; remaining release and connection checks stay in #24/#25. Do not create new "audit", "stabilization", or "new plan" issues.
+Product decisions and safety policies define required behavior. D-018 defines the product order. This roadmap allocates the current product sequence. Architecture and design documents define implementation contracts. Code and recorded verification establish readiness.
 
-**Hierarchy:** product decisions and safety policies → D-018 (priorities) → this executable roadmap (allocation) → profile architecture and design (how it must work) → specific issue (scope of work) → actual code and verified tests (readiness stage). **Historical wording below the D-018 block in issues does not create a repeat mandatory scope.** When changing the sequence, edit existing documents and issues without creating parallel specifications. Regulatory safety guarantees and confirmed functions must not be removed from requirements for the purpose of reordering the queue.
+An external work tracker can record discussion and delivery history. It does not define requirements, architecture, readiness, or the active product sequence. The project remains usable when that tracker is unavailable.
 
-The previous detailed roadmap and G0–G6 are preserved in [Git history at `44538fe`](https://github.com/Xsoid/QADREN/blob/44538fe480ab17e3ee0c6114aaa3762a1c35d8c9/docs/roadmap.md) as an archived plan, not a second active specification.
+Do not create a parallel specification. When the sequence changes, update the canonical decision and the affected contract documents. Do not remove a safety guarantee or a confirmed function only to reorder work.
 
-**P0 is completed:** #26 is closed and #13 remains archived. Do not create new generic stabilization work. **For P1:** The G1 app-owned mock already exists in `job_execution.rs`; do not rewrite it as if it were missing. The next criterion is a **real local, secure, Job-linked operation**, not a new mock. In P2, do not mix background service readiness with interface component readiness.
+**P0 is complete.** Reuse the existing app-owned mock in `job_execution.rs`. The next criterion is a real, secure, Job-linked Local Filesystem operation, not another mock. Do not mix background-service readiness with interface-component readiness.
 
-**Local release gates:** successful build and tests on a fixed SHA; UI without mock metrics; Local Filesystem controller and Local↔Local scenario with recovery/consent; working independent service and installation. The Yandex Disk controller is a separate post-release scope, not a cloud gate for this release. Policies from `docs/policies/` remain mandatory.
+**Local release gates:** successful build and tests on a fixed SHA; UI without mock metrics; Local Filesystem controller and Local-to-Local Scenario with recovery and consent; working independent service and installation. Cloud adapters are separate post-release scope. Policies in `docs/policies/` remain mandatory.
 
-### Local Release Acceptance Scenarios P0–P2
+## Local Release Acceptance Scenarios P0–P2
 
-- Independent connection_id are preserved for local connections; cloud independence of credentials remains an invariant for future P3 and does not block the local release.
-- One-way and two-way detect changes based on the last agreed state and signal ambiguous conflicts; identical name/size does not prove byte equality.
-- Events received during a Job create one subsequent Job; the state of the old Job and its revision are not overwritten.
-- A restart, power failure, and subsequent start do not launch a dangerous operation twice without checking its result.
-- A manual task receives initial priority; an automatic task does not starve indefinitely; a local pause is preserved after reboot.
-- A preview request does not transfer content to the main MacBook; content downloads require explicit individual consent.
-- Mass deletion and an unresolved conflict do not result in silent data destruction.
-- Multiselect and operations on nested files work in the Job tree without double counting; progress is shown in bytes and files.
-- Closing the UI does not interrupt the service; reopening restores windows/panels/navigation and re-reads current states.
-- Unknown quota/ETA/Worker state is not displayed as a verified success.
-- Yandex Disk and iCloud are not conditions for the local release; new Yandex connections in P0–P2 are marked as deferred, and previous connections/secrets are preserved. No unconfirmed cloud operation is presented as available.
+- Preserve independent `connection_id` values for local connections. Cloud credential independence remains an invariant for later remote work and does not block the local release.
+- One-way and two-way synchronization detect changes from the last agreed state and signal ambiguous conflicts. An identical name and size do not prove byte equality.
+- Events received during a Job create one subsequent Job. Do not overwrite the old Job state or revision.
+- After restart or power failure, do not start a dangerous operation twice before checking its result.
+- A manual task receives initial priority. An automatic task does not starve indefinitely. A local pause persists after reboot.
+- A preview does not transfer content to the primary MacBook. Content download requires explicit individual consent.
+- Mass deletion and unresolved conflict do not silently destroy data.
+- Multiselect and nested-file operations work in the Job tree without double counting. Show progress in bytes and files.
+- Closing the UI does not interrupt the service. Reopening restores windows, panels, navigation, and current states.
+- Do not display unknown quota, ETA, or Worker state as verified success.
+- Yandex Disk and iCloud are not conditions for the local release. Do not present an unconfirmed cloud operation as available.
 
-### UI/UX Contract Release 1
+## UI/UX Contract Release 1
 
-For the implementation of the visual layer (#22, #23), the [design system](design/README.md), [widget layout](design/widget-system.md), and [UI checks](design/implementation.md) are mandatory. Monitoring is a customizable **widget canvas without a permanent Sidebar**; a separate settings panel may have navigation. The brand logo is taken from `assets/qadren-logo.png`. The design prototype is for demonstration and is not a confirmation of Core/Worker readiness or permission to activate insecure operations.
+The [design system](design/README.md), [widget layout](design/widget-system.md), and [UI checks](design/implementation.md) are mandatory for visual-layer changes. Monitoring is a customizable **widget canvas without a permanent Sidebar**. A separate settings panel can have navigation. The brand logo is `assets/qadren-logo.png`. A design prototype demonstrates interface behavior only. It does not confirm Core or Worker readiness and does not permit unsafe operations.
 
 ## Release 2 — Remote Workers
 
 - Develop and separately approve transport, mutual trust, command delivery, acknowledgments, revisions, logs, and idempotency.
-- The Worker handles local permissions/authorization and operational tasks; the Controller changes scenarios.
-- The Controller assigns a scenario manually to a compatible Worker; remote unavailability does not mean stoppage.
-- Reassignment requires confirmation of the release of the previous Worker; a forced disconnect leaves UNKNOWN Jobs blocked until reconciliation.
-- During re-pairing, state matching is performed; the Worker UI remains local.
-- Verify execution with the Controller disconnected and subsequent report loading without repeating effects.
+- The Worker handles local permissions, authorization, and operational tasks. The Controller changes Scenarios.
+- The Controller assigns a Scenario manually to a compatible Worker. Remote unavailability does not mean stoppage.
+- Reassignment requires confirmation that the previous Worker was released. A forced disconnect leaves `UNKNOWN` Jobs blocked until reconciliation.
+- During re-pairing, match state. Keep the Worker UI local.
+- Verify execution with the Controller disconnected. Load the later report without repeating effects.
 
 ## Deferred
 
-**iCloud Documents, synchronization and backup with iCloud:** future capability, not Release 1. Do not develop the container/adapter, UI, entitlements/native spike, or iCloud E2E; the original #17 is closed as not planned. Resume only by a separate product decision after checking the free/paid access method, platform requirements, and cloud confirmation. See [D-017](decisions/D-017-defer-icloud.md).
+**iCloud Documents, synchronization, and backup with iCloud:** future capability, not Release 1. Do not develop the container, adapter, UI, entitlement, native spike, or iCloud end-to-end flow. Resume only after a separate product decision that checks the access method, platform requirements, and cloud confirmation. See [D-017](decisions/D-017-defer-icloud.md).
 
-BackupSet, backup versions and recovery of old content; inter-scenario dependencies; custom Worker ACLs; proprietary search index; quota change analytics; remote UI Controller; Worker software update from Controller.
+BackupSet, backup versions, recovery of old content, inter-Scenario dependencies, custom Worker ACLs, proprietary search index, quota-change analytics, remote UI Controller, and Worker software update from Controller are also deferred.
 
 ## Negative Tests
 
-The happy-path alone cannot be tested for preservation. Connection breaks, API 429/5xx, token expiration, partial writes, repeat notifications, time/DST changes, destination unavailability, and race conditions between delete/reconnect and local pause are required. Record test results separately from plans.
+Do not validate preservation only on a happy path. Test connection breaks, API `429` and `5xx`, token expiration, partial writes, repeated notifications, time and DST changes, destination unavailability, and races between delete, reconnect, and local pause. Record results in the validation record, not in this plan.
 
 ## Currency Rule
 
-**Verified issue status 2026-10-16:** #26 is closed as completed. The native UI, layout and scheduler dispatch foundations already exist in `main`; #22 contains local copy metadata preview. Re-verify current HEAD before each patch. Only actual local copy, Scenario execution, autonomy, and release evidence remain active. [Code slice](development/current-state-audit.md).
+Re-verify the current `HEAD` before each patch. The native UI, layout, scheduler-dispatch foundation, File Manager metadata preview, and Scenario metadata snapshot exist in `main`. Real local copy, Scenario execution, autonomy, and release evidence remain incomplete. See the [current-state audit](development/current-state-audit.md).
 
-The historical plan G0–G6 from 2026-10-11 is replaced by the executable queue D-018 above. Reliability contracts (bound attempts, UNKNOWN, read-only reconciliation, consent, no-overwrite) are preserved but do not impose a cloud order. Verify statuses and SHAs via the [audit](development/current-state-audit.md), GitHub `main`, and the local working tree before any Codex package.
+This roadmap replaces the earlier G0–G6 plan. It preserves reliability contracts: durable attempts, `UNKNOWN`, read-only reconciliation, consent, and no-overwrite. These contracts do not impose a cloud-first order. Verify the current worktree and recorded local evidence before starting work.

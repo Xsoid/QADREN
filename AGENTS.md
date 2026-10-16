@@ -11,7 +11,7 @@
 ## Safety invariants
 
 - Keep Rust as the cross-platform core and SwiftUI as the macOS UI.
-- Release 1 uses Local Filesystem only. Yandex Disk and iCloud are post-release and parked. Their existing Issues remain closed until a separate owner decision. Keep File Provider safety guards.
+- Release 1 uses Local Filesystem only. Yandex Disk and iCloud are post-release and parked until a separate owner decision. Keep File Provider safety guards.
 - Use one Rust JobStore. A `Scenario` defines synchronization rules. A `Job` is one execution or one manual file operation.
 - Keep each `StorageConnection` independent. Bind OAuth and Keychain state to `connection_id`.
 - Do not save secrets in SQLite, Git, logs, or HTTP URLs.
@@ -24,7 +24,7 @@
 
 ## Documentation language
 
-Write new and changed project documentation, `llms.txt`, and future Issue titles and bodies in English and ASD-STE100 style. Use short active sentences and exact technical names. Do not claim full ASD-STE100 compliance without an approved-dictionary check. Speak to the owner in Russian. Do not rewrite existing Issue history unless the owner asks.
+Write new and changed project documentation, `llms.txt`, and future external work-tracker text in English and ASD-STE100 style. Use short active sentences and exact technical names. Do not claim full ASD-STE100 compliance without an approved-dictionary check. Speak to the owner in Russian. Do not rewrite external work-tracker history unless the owner asks.
 
 ## AI Docs Hub boundaries
 

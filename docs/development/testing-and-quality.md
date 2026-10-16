@@ -1,55 +1,55 @@
 # Testing and Quality Criteria
 
-Status: mandatory strategy. Bootstrap CI is implemented in `.github/workflows/bootstrap.yml`; additional integration checks are added as the corresponding features are implemented.
+Status: mandatory validation strategy. Bootstrap CI is implemented in `.github/workflows/bootstrap.yml`. Add integration checks with the feature that they validate.
 
 ## Test Pyramid
 
-1. **Rust unit tests:** Scenario/Job/FileSyncState rules, revisions, conflicts, deletions, state transitions, and policy engine (as implemented).
+1. **Rust unit tests:** Scenario, Job, `FileSyncState`, revision, conflict, deletion, state-transition, and policy rules.
 2. **Adapter contract tests:** API mocks with incomplete metadata, delays, authorization errors, and repeated responses.
-3. **Integration tests:** Rust/Swift FFI, Keychain, Yandex API, and Local Filesystem with test credentials/directories. iCloud adapter, entitlement, and integration checks are excluded from Release 1.
-4. **End-to-end:** two folders/two storages, real copies, failures, execution recovery from service state (without storage of historical content versions).
-5. **Resources:** idle CPU/RAM, local disk, network bytes, signed application size.
+3. **Integration tests:** Rust/Swift FFI, Keychain, Yandex API, and Local Filesystem with test credentials and directories. iCloud adapter, entitlement, and integration checks are outside Release 1.
+4. **End-to-end tests:** two folders or storage connections, real copies, failures, and execution recovery from service state. Do not store historical content versions.
+5. **Resource checks:** idle CPU and RAM, local disk, network bytes, and signed application size.
 
 ## Mandatory Scenarios for Each Data Operation
 
-- Transfer interruption; under-downloaded temporary object.
+- Transfer interruption and under-downloaded temporary object.
 - Restart between transfer and confirmation.
-- Double start of one job, repeat after timeout.
-- Token expiration, rate limit, cloud unavailability.
-- Conflict of independent versions, mass deletion.
-- Incorrect/missing checksum.
-- Primary MacBook: download initiated by QADREN **does not start without confirmation**, including verification and recovery.
-- Delegation: Controller does not download content and does not start the same job.
-- Yandex Disk: a successful API response does not prove the integrity of the written copy; Local FS prohibits hidden materialization of iCloud/File Provider placeholders.
+- Double start of one Job and repeat after timeout.
+- Token expiration, rate limit, and cloud unavailability.
+- Independent-version conflict and mass deletion.
+- Incorrect or missing checksum.
+- A QADREN-initiated download on the primary MacBook does not start without confirmation, including verification and recovery.
+- A Controller does not download content or start the same delegated Job.
+- A successful Yandex Disk API response does not prove integrity of the written copy. Local Filesystem rejects hidden iCloud or File Provider materialization.
 
-## Before Publication to main / Release
+## Before Publication to `main` or Release
 
-- Rust formatting and static analysis: `bash scripts/test-core.sh` (Rust fmt, clippy, and tests); CI already runs this script.
-- `cargo test`, platform Swift tests, and integration scenarios for available environments. For native Swift→Rust Job inventory bridge: `bash scripts/test-macos-job-inventory.sh`; it uses only a temporary app-owned mock root and does not start QADREN.app. For real Local controller `mkdir` bridge: `bash scripts/test-macos-local-workspace.sh`; it creates and deletes only a unique test root in the checkout and verifies no-overwrite. For actual macOS Keychain lifecycle: `bash scripts/test-macos-keychain.sh`; the runner uses an unpredictable test-only connection ID, verifies store/read/update/delete/idempotent delete, and removes only this test item.
-- Dependency/security review, verification of no secrets, verification of updated documents.
-- Release compilation for macOS, verification of .app completeness and dependencies.
-- Signing/notarization and clean-install smoke test during release to users.
-- If the test set is incomplete, the report in the working Issue and the final handoff must contain an explicit list of **not performed** items. Publication directly to `main` does not remove the requirement for code review and security review.
+- Run `bash scripts/test-core.sh` for Rust formatting, clippy, and tests.
+- Run applicable `cargo test`, platform Swift tests, and integration scenarios in available environments.
+- For the Swift-to-Rust Job inventory bridge, run `bash scripts/test-macos-job-inventory.sh`. It uses only a temporary app-owned mock root and does not start `QADREN.app`.
+- For the Local Filesystem `mkdir` bridge, run `bash scripts/test-macos-local-workspace.sh`. It creates and deletes only a unique test root in the checkout and verifies no-overwrite.
+- For the macOS Keychain lifecycle, run `bash scripts/test-macos-keychain.sh`. It uses an unpredictable test-only connection ID and removes only that test item.
+- Perform dependency and security review. Verify no secrets and updated canonical documentation.
+- Build the macOS artifact and verify `.app` completeness and dependencies.
+- Before a user release, verify signing, notarization, and a clean-install smoke test.
+- If a test set is incomplete, list every not-performed item in the validation record and final handoff. Publication directly to `main` does not remove code-review or security-review requirements.
 
-Establish performance thresholds and supported OS versions after the baseline prototype. iCloud sync/backup, entitlement spike, and iCloud E2E are outside active tasks and the release gate per D-017. Checks for standard macOS File Provider safety guards for the local adapter are maintained.
+Establish performance thresholds and supported OS versions after the baseline prototype. iCloud synchronization, backup, entitlement spike, and end-to-end work are outside the active release scope per D-017. Maintain standard macOS File Provider safety-guard checks for the local adapter.
 
-## Acceptance Evidence for Autonomous Agent
+## Acceptance Evidence
 
-Record for each gate and Issue: `base SHA` and final `HEAD`, command, OS/toolchain version, status PASS/FAIL/BLOCKED/SKIPPED, evidence source (unit/mock/native/live), commit link, and untested scenarios. Do not extrapolate Rust test results to macOS Keychain, Apple entitlements, or real cloud API. Mac checks performed by the user are valid only for the presented SHA and commands.
+Record for every gate: base SHA and final `HEAD`, command, OS and toolchain version, `PASS`, `FAIL`, `BLOCKED`, or `SKIPPED`, evidence source (unit, mock, native, or live), commit link, and untested scenarios. Do not extrapolate Rust test results to macOS Keychain, Apple entitlements, or a real cloud API. Mac checks performed by the owner are valid only for the recorded SHA and commands.
 
-If a Mac is unavailable, perform available Rust/static checks and stop **only the corresponding native gate**; do not declare release-ready. If the Hub is unavailable, run standard commands and review without the Hub. CI is optional and does not prove real integration by itself.
+If a Mac is unavailable, run available Rust and static checks. Stop only the corresponding native gate and do not claim release readiness. If the Hub is unavailable, run standard commands and review without it. Hosted CI does not prove real integration by itself.
 
-## Codex Transfer Verification (without changing product code)
+## Context Transfer Check
 
-Before independent execution of #18, perform one **read-only rehearsal** in a new Codex session. This is a check of the transferred context quality, not a request to start implementation.
+Before an independent implementation session, perform a read-only context check. Do not edit files or commit during this check.
 
-**Rehearsal Task:** read `AGENTS.md`, Epic #12, Issue #18, `docs/roadmap.md`, profile policies, and current code. Without commits or file editing, provide:
-1. Exact current HEAD and `git status -sb` (if the local tree is available); if the environment is unavailable, state that the check is not performed.
-2. A map of **existing** `JobStore`, `jobs_ffi.rs`, `JobInventory.swift`, `verification.rs`, `local_fs.rs` APIs with the exact difference between read-only inventory and execution.
-3. One minimal functional G1 acceptance scope: no-overwrite mock create, durable attempt until effect, verified/UNKNOWN outcome, FFI command, and real UI status. List negative tests.
-4. A list of conditions where the owner must be contacted: new data loss risk, policy conflict, missing Apple entitlement, production credentials/consent, undefined distribution decision.
-5. Code/security review plan, supported test commands, and explicitly unconfirmed real-Mac/live-cloud checks; no new JobStore, Backend Worker, or mandatory PRs.
+1. Record current `HEAD` and `git status -sb` when the local tree is available.
+2. Map existing `JobStore`, `jobs_ffi.rs`, `JobInventory.swift`, `verification.rs`, and `local_fs.rs` APIs. State the difference between read-only inventory and execution.
+3. Define one minimal functional acceptance scope: no-overwrite create, durable attempt before effect, verified or `UNKNOWN` outcome, FFI command, real UI status, and negative tests.
+4. List conditions that require owner input: new data-loss risk, policy conflict, missing Apple entitlement, production credentials or consent, or an undefined distribution decision.
+5. State the code and security review plan, supported test commands, and unconfirmed real-Mac or live-cloud checks.
 
-**PASS:** all five points match the current repository, real APIs are listed, safety policy is maintained, and false DONE is avoided. **FAIL:** Codex proposes to rewrite the queue, disable consent, treat mock as production-E2E, create BackupSet, assign another branch as the norm, or start file operations without preparing an attempt. **BLOCKED:** cannot access the repository/Issue. In case of FAIL, correct context sources in existing documents instead of inventing a separate memory system.
-
-Only after a successful rehearsal can independent implementation of the Issue start. Record the rehearsal result (SHA, PASS/FAIL/BLOCKED, deficiencies) in Issue #18. The rehearsal as part of current documentary preparation **is not yet performed**.
+The context check passes only when it matches current code and preserves safety policy. It fails if it proposes a second JobStore, disables consent, treats a mock as production end-to-end behavior, creates BackupSet, introduces a normal branch workflow, or starts a file effect without durable attempt preparation. If repository access is unavailable, record the check as unavailable and do not infer the missing state.

@@ -31,7 +31,7 @@ The main area is a flat list; do not group by provider as if there is only one c
 4. Check metadata / permissions; result with timestamp.
 5. Save independent connection ID; exit without a fake "Connected" message if an error occurs.
 
-For deletion/disabling: provide explicit information that provider files are not deleted, but new jobs may be blocked; consider active attempts and recoverable cleanup of SQLite/Keychain according to issue #25. Do not delete the registry and leave an orphan credential without managed recovery.
+For deletion or disabling: provide explicit information that provider files are not deleted, but new Jobs can be blocked. Consider active attempts and recoverable SQLite and Keychain cleanup. Do not delete the registry and leave an orphan credential without managed recovery.
 
 ## 4. Scenario: Master and Inspector
 

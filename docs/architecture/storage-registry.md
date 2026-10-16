@@ -1,4 +1,4 @@
-# Storage Connection Registry — Issue #2 / Stage 1
+# Storage Connection Registry
 
 Status: Registry v2, SwiftUI integration, independent Keychain OAuth by connection_id and metadata-only Yandex Disk are implemented in `main`. The multiple connections model [D-016](../decisions/D-016-multiple-connections.md) is accepted. Content operations and the synchronization engine are not implemented.
 

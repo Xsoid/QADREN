@@ -10,7 +10,7 @@ Existing entry points in `QADRENApp.swift`: `WindowGroup("QADREN", id: "monitori
 
 1. **Native titlebar/toolbar**: traffic lights, actual logo asset (20–24pt) + panel name, compact system health, global filter popovers, layout button, and context actions. Do not insert an 80px "banner".
 2. **Canvas**: scrollable adaptive grid without a sidebar. All widget types reside here. Navigation is handled via context within a widget, an inspector, or a temporary separate window.
-3. **Status bar**: one line containing the local Worker, service status, last update, and the number of unresolved critical issues. Use values with provenance/freshness. Do not simulate "running in background" until the lifecycle is complete.
+3. **Status bar**: one line containing the local Worker, service status, last update, and the number of unresolved critical conditions. Use values with provenance and freshness. Do not simulate "running in background" until the lifecycle is complete.
 
 ### Composition scheme (structure, not pixel dimensions)
 
