@@ -8,11 +8,11 @@ It manages independent storage connections and application nodes.
 Read `docs/decisions/D-018-local-first-priorities.md` first.
 
 - Release 1 has a local-first scope.
-- P0 is the native macOS UI and the Rust/SQLite/FFI foundation.
+- P0 native UI and Rust/SQLite/FFI baseline is complete (#26 closed). Do not start another general P0 audit.
 - P1 is safe Local Filesystem to Local Filesystem execution through one Rust JobStore.
 - P2 is the scheduler, an independent local service, and local distribution.
-- Yandex Disk is post-release work. Do not add API, OAuth, transfer, or live E2E work without a new owner decision.
-- iCloud is not planned. Do not add an adapter, entitlement, UI, or feasibility test.
+- Yandex Disk is post-release and parked (#16 closed, not planned for Release 1). Do not add API, OAuth, transfer, or live E2E work without a new owner decision.
+- iCloud is post-release and parked, with no implementation date. Do not add an adapter, entitlement, UI, or feasibility test during Release 1.
 
 ## Required reading
 
