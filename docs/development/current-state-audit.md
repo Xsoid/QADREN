@@ -24,13 +24,14 @@ The following are inspected: GitHub source tree, documentation, all issues, comm
 
 ## Issues — Managed Queue (D-018)
 
-- **P0 now — only #26:** complete existing `DesignSystem`/widget dashboard with native UI and build acceptance; **#13 is archived as superseded/not planned**, not VERIFIED: its baseline audit is complete, remainders are transferred to #26 (UI/macOS tests), #24 (GitHub Actions pre-runner failure, runtime resources/release), and #25 (Keychain/legacy migration/recovery).
-- **P1:** #15 Local FS; #18 Job engine; #20 policy; #25 remove/disconnect coordination. Acceptance — one real local operation via a single JobStore and a verifiable durable outcome. #22 dual-pane UI and #19 local Scenarios may be developed in independent secure parts.
+- **P0 / COMPLETED:** #26 is closed. The existing native UI baseline is complete. #13 remains archived as superseded/not planned. #24 owns remaining CI, runtime-resource, and release checks.
+- **P1 / critical path:** #15 Local FS; #18 Job engine; #20 policy; #25 remove/disconnect coordination. Acceptance — one real local file copy via a single JobStore and a verifiable durable outcome. #22 dual-pane UI and #19 local Scenarios may be developed in independent secure parts.
+- **P1 / local product:** #19 Scenario execution and #22 File Manager connect to the verified copy Job after #15, #18, and #20 provide the required safety boundary.
 - **P2:** #21 scheduler runtime and catch-up; #23 independent service + final UI integration; #24 security/build/local distribution.
 - **P3 post-release, parked:** #16 Yandex Disk controller. Preserve sources; it is not a Release 1 gate.
 - **Indefinitely parked:** #17 iCloud, closed. #2/#7/#14 are already closed, without re-implementation.
 
-Open issues are **PARTIAL** if the full DoD is not passed; do not close based on a single fresh commit or number of unit tests. #26 is created [separately](https://github.com/Xsoid/QADREN/issues/26) so that UI P0 does not depend on background service #23 P2.
+Open issues are **PARTIAL** if the full DoD is not passed; do not close based on a single fresh commit or number of unit tests.
 
 ## Priority Discrepancies
 
@@ -42,4 +43,4 @@ Open issues are **PARTIAL** if the full DoD is not passed; do not close based on
 6. CI on GitHub is currently red (for docs and code commits). Logs are unavailable: establish reproducible diagnostics, do not guess, and do not consider tests passed.
 7. The absence of an independent Worker and live Local↔Local synchronization cannot be compensated by a widget or mock demo.
 
-**Next executable result:** complete #26 visually verifiable P0 without rewriting current components; CI infrastructure diagnostics are recorded in #24, Keychain in #25; then link #18/#15/#20 with real Local FS. Work directly in `main` with mandatory verification of the actual SHA. Historical G0–G6 and old cloud requirements are not in the active queue.
+**Next executable result:** continue the P1 Local Filesystem copy path: safe macOS resident-content read (#15), one durable no-overwrite copy Job (#18), and scoped authorization/recovery (#20). #19 and #22 may advance only through their read-only interfaces until that path is verified. Work directly in `main` with mandatory verification of the actual SHA. Historical G0–G6 and old cloud requirements are not in the active queue.
