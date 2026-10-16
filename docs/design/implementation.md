@@ -6,7 +6,7 @@
 
 This documentation is a **visual-behavioral contract**, not an order to create non-existent Core APIs. Historical baseline before the October 14 push (do not apply without verification): `QADRENApp.swift` has WindowGroup monitoring, `scenario-settings` window, and MenuBarExtra. `MainView.swift` contains dashboard status tiles, jobs list, two local metadata panels, and connections/OAuth setup; `StorageConnections.swift`, `YandexConnection.swift`, `LocalWorkspace.swift`, and `JobInventory.swift` exist. The first full Rust Job execution/independent worker service is still passing roadmap gates. **Check HEAD before implementation**; this list may become obsolete.
 
-The UI shall not invent data pipelines, second queues, runtime history, or registries. The active controller for Release 1 is Local FS; Yandex UI/feature-work is moved beyond the release; preserve existing records/tokens. iCloud connection/sync/backup UI are excluded from active implementation (D-017). All changes occur in `main`; do not create feature/docs branches; do not propose automatic Work transition. Completion of documentation does not close Issue #23.
+The UI shall not invent data pipelines, second queues, runtime history, or registries. The active controller for Release 1 is Local FS; Yandex UI/feature-work is moved beyond the release; preserve existing records/tokens. iCloud connection/sync/backup UI are excluded from active implementation (D-017). VoiceOver support is out of scope; keyboard access and accurate SwiftUI accessibility metadata remain required. All changes occur in `main`; do not create feature/docs branches; do not propose automatic Work transition. Completion of documentation does not close Issue #23.
 
 ### Updated P0-Verification #26
 
@@ -70,7 +70,7 @@ Do not create empty directories or a separate file for every icon; the actual st
 2. `bash scripts/test-core.sh` (if changes are Swift-only, record the check status; do not present it as a UI test).
 3. `bash scripts/build-macos.sh` on a supported Mac + relevant Swift tests. If macOS is unavailable, mark as `BLOCKED`, not `PASS`.
 4. Visual review of screenshots in `dark` and `light` at 1180×760, 900×620, settings 980×700, and 760×560; ensure no overflow or broken layout. Do not count an HTML prototype as a native SwiftUI screenshot.
-5. `Reduce Motion`, `Increase Contrast`, VoiceOver keyboard navigation; verify focus state, full path tooltips, and disabled features.
+5. `Reduce Motion`, `Increase Contrast`, and keyboard navigation; verify focus state, full path tooltips, and disabled features. VoiceOver support is out of scope.
 
 ### Feature and Negative-State Matrix
 

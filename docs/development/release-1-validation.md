@@ -19,7 +19,7 @@ A mark of "implemented" or successful compilation **does not** replace behavior 
 
 - `./script/build_and_run.sh --verify --theme light` builds the real unsigned `dist/QADREN.app`, starts it with a process-only `light` override, and confirms the QADREN process. The override is a launch argument and does not change the user's durable theme preference; `dark` and `system` are available by the same path.
 - A light-theme native dashboard inspection found that a nonempty Registry could incorrectly give the Connections widget a green ready indicator while all entries were `offline` or `disconnected`. The widget now derives its aggregate and row status from the enabled Registry entries: error and authorization states take priority; all unavailable entries are offline; mixed statuses are unknown; all disabled entries are paused.
-- Current evidence is build/process verification and the deterministic Dashboard layout runner. Repeat native screenshots of the Monitoring window after the status correction, narrow-window review, and keyboard/VoiceOver checks remain **BLOCKED**, not passed, because the desktop automation could not retain that independently opened window in focus.
+- Current evidence includes build/process verification, the deterministic Dashboard layout runner, native light/dark screenshots, narrow-window review, and keyboard traversal. VoiceOver support is out of scope. Reduce Motion, Increase Contrast, and the full negative-state matrix remain unverified.
 
 ## Dispatcher workspace shell (2026-10-12)
 

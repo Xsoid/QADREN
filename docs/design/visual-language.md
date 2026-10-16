@@ -55,7 +55,7 @@ Overflow rule: a name may be truncated in compact preview, **full path is mandat
 
 ## 7. Themes, contrast, accessibility
 
-Support `dark`, `light`, `system`. Dark theme is the baseline; light theme uses separate explicitly defined semantic tokens from JSON, not CSS invert. Tokens must account for system High Contrast, Reduce Transparency, Reduce Motion, Dynamic Type, VoiceOver and keyboard. Minimum contrast for regular text 4.5:1, for large text 3:1; if a specific color pair fails — correct the implementation colors and document the difference. Icon + short caption are mandatory for dangerous statuses; color and glow are **not** the only signals.
+Support `dark`, `light`, `system`. Dark theme is the baseline; light theme uses separate explicitly defined semantic tokens from JSON, not CSS invert. Tokens must account for system High Contrast, Reduce Transparency, Reduce Motion, Dynamic Type, and keyboard use. VoiceOver support is out of scope. Minimum contrast for regular text 4.5:1, for large text 3:1; if a specific color pair fails — correct the implementation colors and document the difference. Icon + short caption are mandatory for dangerous statuses; color and glow are **not** the only signals.
 
 ## 8. Iconography and graphics
 

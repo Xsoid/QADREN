@@ -16,7 +16,7 @@ The following are inspected: GitHub source tree, documentation, all issues, comm
 | Scenario | `scenario_planner.rs`, Registry revisions/FileSyncState, dry-run FFI | Real metadata snapshots→Job submission→sync/recovery and conflicts are not proven |
 | Scheduler | `scheduler.rs`, `schedule_dispatch.rs` and dispatch FFI (`1223e8f`) | Outbox→queued Job exists; independent timer, background lifecycle, event debounce, and Scenario execution are absent |
 | UI theme/widget | `DesignSystem.swift`, `DashboardLayout.swift`, `DashboardLayoutTests.swift` | **Partially implemented:** QDTheme/QDWidgetFrame/QDLogo, per-window order/visibility, density, grid scale, Undo/Redo/persistence. Visual and native acceptance is required, not implementation from scratch |
-| UI windows/settings | `QADRENApp.swift`, `MainView.swift`, `SettingsPanel.swift` | Dashboard adaptive grid, separate Monitoring/Settings/File Manager, MenuBarExtra. Integration extension and accessibility are still partial; `MainView` contains legacy/mock actions |
+| UI windows/settings | `QADRENApp.swift`, `MainView.swift`, `SettingsPanel.swift` | Dashboard adaptive grid, separate Monitoring/Settings/File Manager, MenuBarExtra. Integration extension and keyboard accessibility are still partial; VoiceOver support is out of scope; `MainView` contains legacy/mock actions |
 | Yandex | `yandex.rs`, `yandex_ffi.rs`, `YandexConnection.swift` | Real OAuth/metadata/upload code and mock tests remain, but the controller is **moved beyond Release 1**; live E2E is not confirmed; #26 removes active Add/Connect/API flows without deleting tokens/connections |
 | iCloud | `ICloudAvailability.swift` (legacy metadata/status) | #17 `closed/not_planned`; do not develop, UI integration is absent/not required; Local FS guards remain |
 | Background service | Native windows and `workerStatus` | Independent service after UI closure is **not proven**, #23 P2 |
@@ -35,7 +35,7 @@ Open issues are **PARTIAL** if the full DoD is not passed; do not close based on
 ## Priority Discrepancies
 
 1. Project `main` now contains UI widget canvas/layout; old UI-A/B/C "create from scratch" tasks are obsolete. Reuse existing components.
-2. Design system and logo exist, but native dark/light/VoiceOver, screenshot, and layout acceptance are not proven.
+2. Design system and logo exist, but native dark/light, screenshot, and layout acceptance are not proven. VoiceOver support is out of scope.
 3. The first real Local controller slice is `local_mkdir_new`: the file manager button calls the Rust JobStore, which saves the attempt before `mkdir`, uses no-overwrite, and confirms the type of created folder. This is not file transfer and does not confirm Local↔Local copy readiness; reading content on macOS remains fail-closed due to File Provider safety.
 4. Yandex connection is historically present in code/UI (`SettingsPanel.swift` / `YandexConnectionCard`), but the owner decision is to postpone the controller beyond Release 1. Do not start new API developments. Hide/disable new flows without destroying existing credentials.
 5. Old Release 1 texts link the local release to Yandex OAuth/content/E2E. D-018 **breaks this dependency** and requires local-first.

@@ -15,7 +15,7 @@ SwiftUI layout/composition and Core/state bridge are separate: no visual compone
 
 | Component / contract | States, variants | Behavior and constraints |
 |---|---|---|
-| `QDIconButton(action, symbol, label)` | default, hover, pressed, focused, disabled, busy; secondary/primary/destructive | 28×28 pt preferred; title/VoiceOver label; contextual action; disabled is not clickable; pending must not be shown as a completed command |
+| `QDIconButton(action, symbol, label)` | default, hover, pressed, focused, disabled, busy; secondary/primary/destructive | 28×28 pt preferred; title and accessibility label; contextual action; disabled is not clickable; pending must not be shown as a completed command |
 | `QDStatusLabel(kind, text, evidence)` | ready, active, waiting, paused, needsAction, failed, unknown, offline, unsupported | icon + text + semantic color; UNKNOWN requires reconciliation, not "error"; do not show "success" based only on indirect report |
 | `QDBadge(count, severity)` | neutral/info/warning/danger/unknown | small numeric label; do not draw 0 if there is no value; severity is not determined by count |
 | `QDMetric(value?, unit, freshness, provenance)` | loaded, stale, unknown, inaccessible | numbers with monospacedDigit, units; nil → "—", not a fictional 0; tooltip with source and time |
@@ -54,7 +54,7 @@ The structure is strictly: `frame → header → content → optional footer →
 | Part | Composition | UX |
 |---|---|---|
 | Frame | background, thin border, clip, focus | uniform radius 8pt; normal state without glow |
-| Header (32pt) | 14pt icon, title 13pt semibold, optional count, trailing actions | menu "...", refresh, expand; actions may be hidden until hover, but VoiceOver/keyboard are available |
+| Header (32pt) | 14pt icon, title 13pt semibold, optional count, trailing actions | menu "...", refresh, expand; actions may be hidden until hover, but keyboard access is available |
 | Content | layout based on type and density | scroll only if content exists; no nested scroll-jank; empty state occupies a meaningful height |
 | Footer | freshness, units, additional actions | do not duplicate global statusbar |
 | Overlay | loading/stale/disabled, selected/edit handles | the message covers **only** the unavailable area and does not hide critical actions |
@@ -69,7 +69,7 @@ Border enhancement is allowed on hover; a widget selected in edit-mode draws a f
 
 The Inspector opens over/beside the current workspace without a navigation transition; on a narrow window it is a sheet, on a large window it is a temporary detail panel or a separate window. Closing returns focus to the selected row. For dangerous decisions, use a separate sheet/confirmation where the cancel/close button does not affect the Job. Do not automatically show a dialog for every event; an indicator collects pending items, and the user opens them intentionally.
 
-All elements have correct `accessibilityLabel`, `accessibilityValue`, `accessibilityHint`; Job progress is announced without spam; keyboard control is mandatory.
+Elements use accurate accessibility metadata where SwiftUI provides it. Keyboard control is mandatory. VoiceOver support is out of scope.
 
 ## 6. Visual states matrix (minimum)
 

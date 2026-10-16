@@ -85,4 +85,4 @@ The menu must quickly report health and actual values for active/waiting/attenti
 - Two windows: different layouts/filters, one shared Core job truth, no duplicate executions.
 - Monitoring/edit switch: no dirty layout loss, no widget duplicates in one panel, undo/redo and recovery.
 - 0 jobs, many jobs, auth failure, offline, unknown, consent, conflict: correct semantics, no false numbers/ETA.
-- No focus loss on refresh; keyboard, VoiceOver, contrast, and Reduced Motion are verified.
+- No focus loss on refresh; keyboard, contrast, and Reduced Motion are verified. VoiceOver support is out of scope.

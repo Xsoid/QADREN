@@ -71,4 +71,4 @@ Use the same palette/typography/logo/navigation focus, but **less glow**, more n
 - OAuth error, expired authorization, unavailable adapter, and lack of permissions have different states.
 - Scenario parameters correspond to real Core capabilities and revisions; no fake Run/Save/Provider copy.
 - After closing, the monitoring state is not reset, and the service does not change state.
-- Keyboard/VoiceOver, system controls, and min-size 760×560 work.
+- Keyboard, system controls, and min-size 760×560 work. VoiceOver support is out of scope.

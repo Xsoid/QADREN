@@ -84,4 +84,4 @@ First start panel (if data is available): at the top, a brief system-health line
 - 1000+ jobs → lazy rows/virtualization, stable IDs, bounded refresh; 0 memory leaks from monitoring.
 - No network, auth expired, rate-limit → reason and data freshness, not "connected" via old cache.
 - Job UNKNOWN, conflict, deleting connection with attempts → block dangerous commands, display reconciliation context.
-- Window restart, resolution change, light/dark, zoom, VoiceOver, Reduce Motion → layout remains readable, without overlaps and without loss of commands.
+- Window restart, resolution change, light/dark, zoom, and Reduce Motion → layout remains readable, without overlaps and without loss of commands. VoiceOver support is out of scope.
