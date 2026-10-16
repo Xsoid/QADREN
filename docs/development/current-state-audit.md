@@ -36,7 +36,7 @@ Open issues are **PARTIAL** if the full DoD is not passed; do not close based on
 
 1. Project `main` now contains UI widget canvas/layout; old UI-A/B/C "create from scratch" tasks are obsolete. Reuse existing components.
 2. Design system and logo exist, but native dark/light, screenshot, and layout acceptance are not proven. VoiceOver support is out of scope.
-3. The first real Local controller slice is `local_mkdir_new`: the file manager button calls the Rust JobStore, which saves the attempt before `mkdir`, uses no-overwrite, and confirms the type of created folder. This is not file transfer and does not confirm Local↔Local copy readiness; reading content on macOS remains fail-closed due to File Provider safety.
+3. The first real Local controller slice is `local_mkdir_new`: the file manager button calls the Rust JobStore, which saves the attempt before `mkdir`, uses no-overwrite, and confirms the type of created folder. This is not file transfer and does not confirm Local↔Local copy readiness.
 4. Yandex connection is historically present in code/UI (`SettingsPanel.swift` / `YandexConnectionCard`), but the owner decision is to postpone the controller beyond Release 1. Do not start new API developments. Hide/disable new flows without destroying existing credentials.
 5. Old Release 1 texts link the local release to Yandex OAuth/content/E2E. D-018 **breaks this dependency** and requires local-first.
 6. CI on GitHub is currently red (for docs and code commits). Logs are unavailable: establish reproducible diagnostics, do not guess, and do not consider tests passed.

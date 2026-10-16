@@ -15,6 +15,14 @@ A mark of "implemented" or successful compilation **does not** replace behavior 
 - The legacy `qadren_local_mkdir` ABI symbol is fail-closed. It returns `local_mkdir_requires_job` and does not create a directory. New directory creation must use the durable JobStore command above.
 - This is deliberately **not** content copy or Local↔Local synchronization. macOS content reads remain fail-closed because opening a File Provider placeholder could materialize it. Unknown post-effect outcomes are not retried blindly.
 
+## macOS generic File Provider residency boundary — #15 (2026-10-16)
+
+- **BLOCKED:** QADREN cannot safely enable content reads for an arbitrary user-selected Local Filesystem file on macOS. `LocalFilesystem::content_residency` reads `SF_DATALESS` without opening content. A set flag rejects the file. A clear flag is only a negative observation. It does not prove that an open will not materialize a File Provider item.
+- The public Foundation ubiquitous resource keys describe iCloud state only. Apple documents `FileManager.startDownloadingUbiquitousItem(at:)` as an operation that can start a download. The public File Provider API documents provider-extension storage, not a consumer API that certifies residency for an arbitrary path. Therefore, `stat`, `statfs`, `SF_DATALESS`, a clear extended attribute, and a non-iCloud URL must not authorize a read.
+- Existing negative macOS coverage is retained: `open_content`, `read_to_writer`, `copy_file_new`, `copy_file_new_with_reserve`, prepared-copy verification, and capabilities fail closed even after `GrantedForThisOperation`. The existing descriptor-relative root, traversal, symlink, inode, hardlink, case-collision, no-overwrite, and UNKNOWN protections remain required if a read proof becomes available.
+- This blocks only generic content reading and the #18 file-copy executor. Metadata listing, copy preview, and durable `local_mkdir_new` remain supported because they do not open user content. Do not turn an ambiguous source into a Job attempt, destination file, receipt, or retry.
+- The smallest safe future scope is an explicitly separate QADREN-managed test/source store whose files QADREN created and continuously tracks. It does not authorize copying arbitrary user-selected files and does not satisfy #15. A general Local→Local copy requires a documented public macOS residency guarantee or an owner-approved product-boundary change.
+
 ## Native UI acceptance utilities — #26 (2026-10-15)
 
 - `./script/build_and_run.sh --verify --theme light` builds the real unsigned `dist/QADREN.app`, starts it with a process-only `light` override, and confirms the QADREN process. The override is a launch argument and does not change the user's durable theme preference; `dark` and `system` are available by the same path.
