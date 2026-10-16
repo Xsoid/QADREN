@@ -95,7 +95,18 @@ final class StorageConnections: ObservableObject {
         } catch {
             // Refresh the listing without discarding the failure message.
             entries = (try? StorageRegistryBridge.list()) ?? entries
-            self.error = "Connection removal incomplete; retry Remove: " + error.localizedDescription
+            if error.localizedDescription == "connection_referenced_by_scenario" {
+                let scenarioName = (try? StorageRegistryBridge.listScenarios())?
+                    .first(where: { $0.left_connection_id == id || $0.right_connection_id == id })?
+                    .name
+                if let scenarioName {
+                    self.error = "Нельзя удалить подключение: его использует сценарий «\(scenarioName)». Сначала измените или удалите сценарий. Файлы на этом Mac не изменены."
+                } else {
+                    self.error = "Нельзя удалить подключение, пока его использует сценарий. Сначала измените или удалите сценарий. Файлы на этом Mac не изменены."
+                }
+            } else {
+                self.error = "Connection removal incomplete; retry Remove: " + error.localizedDescription
+            }
         }
     }
 

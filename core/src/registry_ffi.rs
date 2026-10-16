@@ -3,7 +3,7 @@
 //! No OAuth tokens or file contents are persisted by these methods.
 use crate::jobs::JobStore;
 use crate::model::ScenarioReference;
-use crate::registry::{Registry, ScenarioUpdate};
+use crate::registry::{Registry, RegistryError, ScenarioUpdate};
 use crate::scenario_planner::{ObservedFile, PlanAction, PlanItem, SideChange};
 use crate::schedule_dispatch::dispatch_pending_schedule_jobs;
 use chrono::{DateTime, Utc};
@@ -550,6 +550,9 @@ pub unsafe extern "C" fn qadren_registry_remove_after_job_gate(
         Ok(true) => output(json!({"ok":false,"error":"connection_has_unresolved_jobs"})),
         Ok(false) => match registry.remove(&id) {
             Ok(()) => output(json!({"ok":true,"data":true})),
+            Err(RegistryError::ConnectionReferencedByScenario) => {
+                output(json!({"ok":false,"error":"connection_referenced_by_scenario"}))
+            }
             Err(_) => output(json!({"ok":false,"error":"registry_unavailable"})),
         },
         Err(_) => output(json!({"ok":false,"error":"job_store_unavailable"})),
@@ -1096,6 +1099,51 @@ mod tests {
         let jobs = jobs.list_jobs().unwrap();
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].scenario_id.as_deref(), Some(scenario.as_str()));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn removal_gate_reports_a_connection_referenced_by_a_scenario() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!(
+            "qadren-ffi-removal-reference-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let registry_path = base.join("connections.sqlite3");
+        let jobs_path = base.join("jobs.sqlite3");
+        let registry = Registry::open(&registry_path).unwrap();
+        let left = registry.add("local_filesystem", "Left").unwrap();
+        let right = registry.add("local_filesystem", "Right").unwrap();
+        registry
+            .create_scenario("Documents", &left, "/", &right, "/archive", "left_to_right")
+            .unwrap();
+        registry.set_enabled(&left, false).unwrap();
+        drop(registry);
+        JobStore::open(&jobs_path).unwrap();
+
+        let registry_path = CString::new(registry_path.to_str().unwrap()).unwrap();
+        let jobs_path = CString::new(jobs_path.to_str().unwrap()).unwrap();
+        let connection = CString::new(left).unwrap();
+        let response = unsafe {
+            qadren_registry_remove_after_job_gate(
+                registry_path.as_ptr(),
+                jobs_path.as_ptr(),
+                connection.as_ptr(),
+            )
+        };
+        let result: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(response) }.to_str().unwrap()).unwrap();
+        unsafe { qadren_registry_free_string(response) };
+        assert_eq!(
+            result,
+            json!({"ok":false,"error":"connection_referenced_by_scenario"})
+        );
         std::fs::remove_dir_all(base).unwrap();
     }
 

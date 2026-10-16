@@ -26,6 +26,7 @@ pub enum RegistryError {
     InvalidSyncState,
     InsufficientEvidence,
     PlanningFailed,
+    ConnectionReferencedByScenario,
 }
 impl From<rusqlite::Error> for RegistryError {
     fn from(error: rusqlite::Error) -> Self {
@@ -392,6 +393,14 @@ impl Registry {
     /// Deletes *only* the local registry record. Never modifies remote cloud data.
     /// Credential revocation/removal is the platform credential store's responsibility.
     pub fn remove(&self, id: &str) -> Result<()> {
+        let referenced: bool = self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM scenarios WHERE left_connection_id=?1 OR right_connection_id=?1)",
+            [id],
+            |row| row.get(0),
+        )?;
+        if referenced {
+            return Err(RegistryError::ConnectionReferencedByScenario);
+        }
         self.changed(
             self.db
                 .execute("DELETE FROM storage_connections WHERE id=?1", [id])?,
@@ -1329,7 +1338,10 @@ mod tests {
         assert!(scenario.enabled);
         db.set_scenario_enabled(&id, false).unwrap();
         assert!(!db.list_scenarios().unwrap()[0].enabled);
-        assert!(matches!(db.remove(&left), Err(RegistryError::Database(_))));
+        assert!(matches!(
+            db.remove(&left),
+            Err(RegistryError::ConnectionReferencedByScenario)
+        ));
     }
 
     #[test]
