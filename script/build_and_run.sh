@@ -45,7 +45,11 @@ build_app() {
 }
 
 open_app() {
-  /usr/bin/open -n "$APP_BUNDLE" "${APP_ARGUMENTS[@]}"
+  if (( ${#APP_ARGUMENTS[@]} )); then
+    /usr/bin/open -n "$APP_BUNDLE" "${APP_ARGUMENTS[@]}"
+  else
+    /usr/bin/open -n "$APP_BUNDLE"
+  fi
 }
 
 stop_running_app
