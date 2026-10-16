@@ -123,6 +123,36 @@ pub unsafe extern "C" fn qadren_jobs_run_mock_create(
     }
 }
 
+/// Seed one durable UNKNOWN mock attempt for the feature-gated native UI test
+/// fixture. This symbol is absent from the production Core build.
+///
+/// # Safety
+/// Arguments must be valid, NUL-terminated strings for the duration of call.
+#[cfg(feature = "ui-test-fixtures")]
+#[no_mangle]
+pub unsafe extern "C" fn qadren_jobs_seed_unknown_ui_fixture(
+    database_path: *const c_char,
+    storage_root: *const c_char,
+    job_id: *const c_char,
+) -> *mut c_char {
+    let (Some(database_path), Some(storage_root), Some(job_id)) =
+        (input(database_path), input(storage_root), input(job_id))
+    else {
+        return response(json!({"ok": false, "error": "invalid_request"}));
+    };
+    match crate::job_execution::seed_unknown_mock_create_for_ui_fixture(
+        Path::new(database_path),
+        Path::new(storage_root),
+        job_id,
+    ) {
+        Ok(()) => response(json!({"ok": true, "data": {"status": "unknown"}})),
+        Err(crate::job_execution::MockCreateError::InvalidJobId) => {
+            response(json!({"ok": false, "error": "invalid_request"}))
+        }
+        Err(_) => response(json!({"ok": false, "error": "fixture_failed"})),
+    }
+}
+
 /// Execute one explicit Local Filesystem create-directory Job. Rust persists
 /// the attempt before `mkdir`; the operation never reads user-file contents.
 ///

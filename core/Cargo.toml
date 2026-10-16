@@ -9,6 +9,11 @@ publish = false
 name = "qadren_core"
 crate-type = ["staticlib", "rlib"]
 
+[features]
+# Builds narrow test fixtures for native macOS acceptance. The production app
+# never enables this feature.
+ui-test-fixtures = []
+
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 chrono-tz = "0.10"

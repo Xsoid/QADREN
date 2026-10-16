@@ -61,7 +61,7 @@ Do not create empty directories or a separate file for every icon; the actual st
 - Distinguish storages/jobs with the same display name by actual connection_id/Job ID.
 - Do not delete user files via remove connection; perform local credentials cleanup with recoverability per #25.
 - No secrets, auth URLs, access tokens, or file content in diagnostics, screenshots/previews, or analytics.
-- No preview/demo indicator shall enter runtime. Use a separate flag/fixture mode for UI tests only.
+- No preview/demo indicator shall enter runtime. Use a separate flag/fixture mode for UI tests only. The `ui-test-fixtures` Core feature is for native UNKNOWN acceptance only and is absent from the normal macOS build.
 
 ## 5. Pre-publication Verification
 

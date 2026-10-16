@@ -244,6 +244,30 @@ pub fn run_mock_create(
     run_mock_create_inner(database_path, storage_root, job_id, consent, None)
 }
 
+/// Create one durable UNKNOWN mock attempt for a native UI test fixture.
+///
+/// This is compiled only with `ui-test-fixtures`. It writes only the
+/// caller-supplied test paths and deliberately leaves the already-created
+/// app-owned mock artifact for read-only reconciliation.
+#[cfg(feature = "ui-test-fixtures")]
+pub fn seed_unknown_mock_create_for_ui_fixture(
+    database_path: &Path,
+    storage_root: &Path,
+    job_id: &str,
+) -> Result<(), MockCreateError> {
+    match run_mock_create_inner(
+        database_path,
+        storage_root,
+        job_id,
+        true,
+        Some(MockFault::CrashAfterEffect),
+    ) {
+        Err(MockCreateError::SimulatedCrashAfterEffect) => Ok(()),
+        Err(error) => Err(error),
+        Ok(_) => Err(MockCreateError::VerificationFailed),
+    }
+}
+
 /// Persist a mock Job without creating content. This is deliberately separate
 /// from execution so a user can cancel it before any external effect starts.
 pub fn queue_mock_create(
