@@ -10,6 +10,7 @@ struct MainView: View {
     @SceneStorage("qadren.monitoring.panel-id") private var monitoringPanelID = ""
     @State private var isEditingLayout = false
     @State private var localCopyPreview: LocalCopyPreview?
+    @State private var localCopyPreviewRequest: LocalCopyPreviewRequest?
     @State private var localCopyPreviewError: String?
     @State private var jobs: [JobRow] = []
     @State private var jobError: String?
@@ -98,6 +99,11 @@ struct MainView: View {
             }
             refreshJobs()
         }
+        .onChange(of: localWorkspace.root) { _ in invalidateLocalCopyPreviewIfNeeded() }
+        .onChange(of: localWorkspace.relativePath) { _ in invalidateLocalCopyPreviewIfNeeded() }
+        .onChange(of: localWorkspace.selectedNames) { _ in invalidateLocalCopyPreviewIfNeeded() }
+        .onChange(of: rightLocalWorkspace.root) { _ in invalidateLocalCopyPreviewIfNeeded() }
+        .onChange(of: rightLocalWorkspace.relativePath) { _ in invalidateLocalCopyPreviewIfNeeded() }
     }
 
     private var monitoringWorkspace: some View {
@@ -340,7 +346,9 @@ struct MainView: View {
                 Spacer()
             }
             .padding(.horizontal, 16)
-            if let preview = localCopyPreview {
+            if let preview = localCopyPreview,
+               let request = localCopyPreviewRequest,
+               request.isCurrent(source: localWorkspace, destination: rightLocalWorkspace) {
                 Notice(
                     text: copyPreviewText(preview),
                     symbol: preview.destination_exists ? "exclamationmark.triangle" : "doc.text.magnifyingglass"
@@ -360,12 +368,24 @@ struct MainView: View {
         let sources = localWorkspace.selectedRegularFilePaths
         guard sources.count == 1, let source = sources.first else { return }
         do {
-            localCopyPreview = try localWorkspace.previewCopy(sourceRelativePath: source, to: rightLocalWorkspace)
+            let request = try localWorkspace.copyPreviewRequest(sourceRelativePath: source, to: rightLocalWorkspace)
+            let preview = try localWorkspace.previewCopy(sourceRelativePath: source, to: rightLocalWorkspace)
+            localCopyPreviewRequest = request
+            localCopyPreview = preview
             localCopyPreviewError = nil
         } catch {
             localCopyPreview = nil
+            localCopyPreviewRequest = nil
             localCopyPreviewError = error.localizedDescription
         }
+    }
+
+    private func invalidateLocalCopyPreviewIfNeeded() {
+        guard let request = localCopyPreviewRequest,
+              !request.isCurrent(source: localWorkspace, destination: rightLocalWorkspace)
+        else { return }
+        localCopyPreview = nil
+        localCopyPreviewRequest = nil
     }
 
     private func copyPreviewText(_ preview: LocalCopyPreview) -> String {

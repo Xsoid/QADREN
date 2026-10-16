@@ -139,6 +139,9 @@ struct LocalWorkspaceTests {
             throw NSError(domain: "QADRENTests", code: 13, userInfo: [NSLocalizedDescriptionKey: "preview did not use the selected regular file"])
         }
         let preview = try previewSource.previewCopy(sourceRelativePath: "report.txt", to: previewDestination)
+        let previewRequest = try previewSource.copyPreviewRequest(
+            sourceRelativePath: "report.txt", to: previewDestination
+        )
         guard preview.source_relative == "report.txt",
               preview.destination_relative == "report.txt",
               preview.size == 7,
@@ -146,6 +149,20 @@ struct LocalWorkspaceTests {
               !FileManager.default.fileExists(atPath: previewDestinationRoot.appendingPathComponent("report.txt").path)
         else {
             throw NSError(domain: "QADRENTests", code: 14, userInfo: [NSLocalizedDescriptionKey: "metadata copy preview changed or misreported the destination"])
+        }
+        guard previewRequest.isCurrent(source: previewSource, destination: previewDestination) else {
+            throw NSError(domain: "QADRENTests", code: 15, userInfo: [NSLocalizedDescriptionKey: "new metadata preview was unexpectedly stale"])
+        }
+        previewSource.setSelected("report.txt", isSelected: false)
+        guard !previewRequest.isCurrent(source: previewSource, destination: previewDestination) else {
+            throw NSError(domain: "QADRENTests", code: 16, userInfo: [NSLocalizedDescriptionKey: "preview remained valid after source selection changed"])
+        }
+        previewSource.setSelected("report.txt", isSelected: true)
+        let replacementDestination = root.appendingPathComponent("preview-replacement", isDirectory: true)
+        try FileManager.default.createDirectory(at: replacementDestination, withIntermediateDirectories: false)
+        previewDestination.selectRoot(replacementDestination.path, connectionID: otherConnection)
+        guard !previewRequest.isCurrent(source: previewSource, destination: previewDestination) else {
+            throw NSError(domain: "QADRENTests", code: 17, userInfo: [NSLocalizedDescriptionKey: "preview remained valid after destination root changed"])
         }
         print("LocalWorkspace native Swift/FFI controller tests passed")
     }

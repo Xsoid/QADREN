@@ -35,6 +35,28 @@ struct LocalCopyPreview: Decodable, Equatable {
     let destination_exists: Bool
 }
 
+/// The exact metadata inputs used to produce a copy preview. A preview is not
+/// an authorization and it is invalid as soon as the selected source or either
+/// panel location changes. This prevents the UI from presenting an old plan as
+/// the plan for a later selection.
+struct LocalCopyPreviewRequest: Equatable {
+    let sourceConnectionID: String
+    let sourceRoot: String
+    let sourceRelativePath: String
+    let destinationConnectionID: String
+    let destinationRoot: String
+    let destinationRelativePath: String
+
+    @MainActor func isCurrent(source: LocalWorkspace, destination: LocalWorkspace) -> Bool {
+        source.boundConnectionID == sourceConnectionID
+            && source.root == sourceRoot
+            && source.selectedRegularFilePaths == [sourceRelativePath]
+            && destination.boundConnectionID == destinationConnectionID
+            && destination.root == destinationRoot
+            && destination.relativePath == destinationRelativePath
+    }
+}
+
 @MainActor final class LocalWorkspace: ObservableObject {
     /// A root is valid only for the independently selected Local connection in
     /// this panel. Switching connections clears all path-derived state before
@@ -289,6 +311,30 @@ struct LocalCopyPreview: Decodable, Equatable {
             )
         }
         return data
+    }
+
+    /// Capture the exact panel state that a metadata copy preview describes.
+    /// The caller must check this again before it displays or later uses the
+    /// preview. This does not grant consent or reserve the destination.
+    func copyPreviewRequest(
+        sourceRelativePath: String, to destination: LocalWorkspace
+    ) throws -> LocalCopyPreviewRequest {
+        guard let sourceConnectionID = boundConnectionID,
+              let sourceRoot = root,
+              let destinationConnectionID = destination.boundConnectionID,
+              let destinationRoot = destination.root,
+              selectedRegularFilePaths == [sourceRelativePath]
+        else {
+            throw StorageError.operation("Предпросмотр устарел: выберите один файл и папки в обеих панелях")
+        }
+        return LocalCopyPreviewRequest(
+            sourceConnectionID: sourceConnectionID,
+            sourceRoot: sourceRoot,
+            sourceRelativePath: sourceRelativePath,
+            destinationConnectionID: destinationConnectionID,
+            destinationRoot: destinationRoot,
+            destinationRelativePath: destination.relativePath
+        )
     }
 
     func findDirectoryReconciliations(connectionID: String, databasePath: String, registryPath: String) throws {
