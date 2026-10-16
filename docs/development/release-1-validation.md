@@ -17,22 +17,22 @@ Release 1 is a local-first macOS product. It includes one Rust JobStore, Local F
 
 ## Current Recorded Local Evidence
 
-The executable baseline is `03e67df`. Later commits in this sequence changed documentation only.
+The executable baseline is `fdfc0bc`.
 
 | Check | Result | Evidence scope |
 |---|---|---|
-| `bash scripts/test-core.sh` | PASS, 252 tests | Rust Core on `03e67df` |
-| `bash scripts/test-macos-scenario-dry-run.sh` | PASS | SwiftUI to Rust Scenario dry-run boundary on `03e67df` |
-| `bash scripts/build-macos.sh` | PASS | Unsigned macOS development bundle on `03e67df` |
+| `cargo test --manifest-path core/Cargo.toml --lib` | PASS, 253 tests | Rust Core on `fdfc0bc` |
+| `scripts/test-macos-local-workspace.sh` | PASS | SwiftUI to Rust Local file-copy bridge on `fdfc0bc` |
+| `bash scripts/build-macos.sh` | PASS | Unsigned macOS development bundle on `fdfc0bc` |
 
 ## Current Capability Evidence Matrix
 
 | Capability | Current evidence | Not yet established |
 |---|---|---|
-| Rust model and durable JobStore | Core test suite passes on the recorded baseline. | A real user Local-to-Local copy through the complete UI, JobStore, filesystem, verification, SQLite, and UI path. |
+| Rust model and durable JobStore | Core test suite and the manual Local-to-Local copy path pass on the recorded baseline. | Scenario submission to the copy path. |
 | App-owned mock operation | No-overwrite, durable-attempt, verification, and recovery tests exist in `job_execution.rs`. | User content transfer. The mock is not a release substitute. |
-| Local Filesystem metadata and `mkdir` | Rust and SwiftUI Local Filesystem interfaces exist. `mkdir` uses a durable Job path. | Generic arbitrary user-file content read on macOS and a verified no-overwrite copy. |
-| macOS File Provider safety | Local File Provider guards reject known nonresident values. | A public generic residency proof for arbitrary user-selected provider content. Keep user content read fail-closed until that proof exists. |
+| Local Filesystem metadata, `mkdir`, and manual copy | Rust and SwiftUI interfaces provide a confirmed one-file no-overwrite copy through JobStore. | Scenario submission and a real File Provider materialization run. |
+| macOS File Provider safety | A copy requires a user-confirmed, exact-scope durable decision before opening the source. | A real File Provider materialization run with a user-selected provider item. |
 | Scenario planning | Dry-run FFI passes. Enabled local connections gate the metadata snapshot. | Snapshot-to-Job submission, one-way and two-way execution, conflict handling, and recovery. |
 | Scheduler dispatch | Durable schedule dispatch can queue a Job. | Independent timer, app-exit lifecycle, event debounce, and real Scenario execution. |
 | Native UI | Design system, widget canvas, settings, and local file navigation exist. | Full visual acceptance, removal of legacy mock actions, and real-copy interaction. |
@@ -42,7 +42,7 @@ The executable baseline is `03e67df`. Later commits in this sequence changed doc
 
 1. Create a durable attempt before the external filesystem effect.
 2. Check capability, operation-specific consent, destination state, and no-overwrite.
-3. Check macOS file residency before reading user content. Reject an item when the required proof is absent.
+3. Record and consume exact one-time consent before reading user content that can materialize a File Provider item.
 4. Verify the copied destination after the effect and store the durable result.
 5. Use `UNKNOWN` if proof is lost. Reconcile in read-only mode. Do not retry blindly.
 6. Prove concurrent-change protection before any destructive Local Filesystem operation.
