@@ -9,6 +9,8 @@ struct MainView: View {
     @StateObject private var dashboardLayout = DashboardLayoutStore()
     @SceneStorage("qadren.monitoring.panel-id") private var monitoringPanelID = ""
     @State private var isEditingLayout = false
+    @State private var localCopyPreview: LocalCopyPreview?
+    @State private var localCopyPreviewError: String?
     @State private var jobs: [JobRow] = []
     @State private var jobError: String?
     let workspace: DispatcherSection
@@ -327,9 +329,49 @@ struct MainView: View {
                 )
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            HStack(spacing: 10) {
+                Button("Проверить план копирования") {
+                    previewSelectedLocalCopy()
+                }
+                .disabled(localWorkspace.selectedRegularFilePaths.count != 1 || localWorkspace.root == nil || rightLocalWorkspace.root == nil)
+                Text("Только метаданные; файл и Job не создаются.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            if let preview = localCopyPreview {
+                Notice(
+                    text: copyPreviewText(preview),
+                    symbol: preview.destination_exists ? "exclamationmark.triangle" : "doc.text.magnifyingglass"
+                )
+                .padding(.horizontal, 16)
+            }
+            if let localCopyPreviewError {
+                Notice(text: localCopyPreviewError, symbol: "exclamationmark.triangle")
+                    .padding(.horizontal, 16)
+            }
             Notice(text: "Создание новой папки доступно только через выбранное локальное подключение и Rust JobStore. Предпросмотр содержимого, копирование, перемещение, переименование и удаление остаются выключенными до реализации их безопасных Job-путей.", symbol: "shield")
                 .padding(16)
         }
+    }
+
+    private func previewSelectedLocalCopy() {
+        let sources = localWorkspace.selectedRegularFilePaths
+        guard sources.count == 1, let source = sources.first else { return }
+        do {
+            localCopyPreview = try localWorkspace.previewCopy(sourceRelativePath: source, to: rightLocalWorkspace)
+            localCopyPreviewError = nil
+        } catch {
+            localCopyPreview = nil
+            localCopyPreviewError = error.localizedDescription
+        }
+    }
+
+    private func copyPreviewText(_ preview: LocalCopyPreview) -> String {
+        let size = ByteCountFormatter.string(fromByteCount: Int64(clamping: preview.size), countStyle: .file)
+        let collision = preview.destination_exists ? " Назначение уже занято; операция была бы отклонена." : " Назначение свободно, но копирование пока не разрешено."
+        return "План: \(preview.source_relative) → \(preview.destination_relative), \(size).\(collision)"
     }
 
     private var scenarioSettingsWorkspace: some View {

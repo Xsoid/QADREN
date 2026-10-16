@@ -75,6 +75,80 @@ pub unsafe extern "C" fn qadren_local_metadata_snapshot(root: *const c_char) -> 
     }
 }
 
+/// Return a metadata-only, no-overwrite candidate for one manual Local copy.
+/// The result is a planning aid only: it does not create a Job, read content,
+/// reserve storage, or authorize an effect. Roots that are identical or nested
+/// are rejected so a later executor cannot mistake this preview for a safe
+/// cross-root transfer.
+///
+/// # Safety
+/// Pointers must reference valid NUL-terminated UTF-8 strings during this call.
+#[no_mangle]
+pub unsafe extern "C" fn qadren_local_copy_preview(
+    source_root: *const c_char,
+    source_relative: *const c_char,
+    destination_root: *const c_char,
+    destination_relative: *const c_char,
+) -> *mut c_char {
+    let (
+        Some(source_root),
+        Some(source_relative),
+        Some(destination_root),
+        Some(destination_relative),
+    ) = (
+        input(source_root),
+        input(source_relative),
+        input(destination_root),
+        input_allow_empty(destination_relative),
+    )
+    else {
+        return response(json!({"ok":false,"error":"invalid_request"}));
+    };
+    let result = (|| {
+        let source = LocalFilesystem::open(Path::new(source_root))?;
+        let destination = LocalFilesystem::open(Path::new(destination_root))?;
+        if source.overlaps_root(&destination)? {
+            return Err(crate::local_fs::LocalError::UnsafeEntry);
+        }
+        let source_path = Path::new(source_relative);
+        let source_entry = source.stat(source_path)?;
+        if source_entry.is_directory {
+            return Err(crate::local_fs::LocalError::UnsafeEntry);
+        }
+        // Listing the destination directory proves only metadata access. It
+        // does not reserve the name or authorize a future write.
+        destination.list(Path::new(destination_relative))?;
+        let name = source_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(crate::local_fs::LocalError::InvalidPath)?;
+        let destination_path = if destination_relative.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{destination_relative}/{name}")
+        };
+        let destination_exists = match destination.stat(Path::new(&destination_path)) {
+            Ok(_) => true,
+            Err(crate::local_fs::LocalError::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                false
+            }
+            Err(error) => return Err(error),
+        };
+        Ok(json!({
+            "source_relative": source_relative,
+            "destination_relative": destination_path,
+            "size": source_entry.size,
+            "destination_exists": destination_exists
+        }))
+    })();
+    match result {
+        Ok(data) => response(json!({"ok":true,"data":data})),
+        Err(_) => response(json!({"ok":false,"error":"local_copy_preview_unavailable"})),
+    }
+}
+
 #[no_mangle]
 /// # Safety
 /// Pointers must reference valid NUL-terminated UTF-8 strings during this call.
@@ -178,5 +252,61 @@ mod tests {
         assert!(value["data"][0]["checksum_md5"].is_null());
         unsafe { qadren_local_free_string(result) };
         std::fs::remove_dir_all(root_path).unwrap();
+    }
+
+    #[test]
+    fn copy_preview_uses_metadata_and_never_creates_a_destination() {
+        let base = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!(
+                "qadren-local-ffi-copy-preview-{}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        let source_path = base.join("source");
+        let destination_path = base.join("destination");
+        std::fs::create_dir_all(&source_path).unwrap();
+        std::fs::create_dir(&destination_path).unwrap();
+        std::fs::write(source_path.join("report.txt"), b"payload").unwrap();
+        let source_root = CString::new(source_path.to_str().unwrap()).unwrap();
+        let source_relative = CString::new("report.txt").unwrap();
+        let destination_root = CString::new(destination_path.to_str().unwrap()).unwrap();
+        let destination_relative = CString::new("").unwrap();
+        let result = unsafe {
+            qadren_local_copy_preview(
+                source_root.as_ptr(),
+                source_relative.as_ptr(),
+                destination_root.as_ptr(),
+                destination_relative.as_ptr(),
+            )
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(result) }.to_str().unwrap()).unwrap();
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["data"]["source_relative"], "report.txt");
+        assert_eq!(value["data"]["destination_relative"], "report.txt");
+        assert_eq!(value["data"]["size"], 7);
+        assert_eq!(value["data"]["destination_exists"], false);
+        assert!(!destination_path.join("report.txt").exists());
+        unsafe { qadren_local_free_string(result) };
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("outside.txt", destination_path.join("report.txt")).unwrap();
+            let result = unsafe {
+                qadren_local_copy_preview(
+                    source_root.as_ptr(),
+                    source_relative.as_ptr(),
+                    destination_root.as_ptr(),
+                    destination_relative.as_ptr(),
+                )
+            };
+            let value: serde_json::Value =
+                serde_json::from_str(unsafe { CStr::from_ptr(result) }.to_str().unwrap()).unwrap();
+            assert_eq!(value["ok"], false);
+            unsafe { qadren_local_free_string(result) };
+        }
+        std::fs::remove_dir_all(base).unwrap();
     }
 }

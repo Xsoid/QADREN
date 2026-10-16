@@ -124,6 +124,29 @@ struct LocalWorkspaceTests {
                 throw NSError(domain: "QADRENTests", code: 3, userInfo: [NSLocalizedDescriptionKey: "existing directory was changed"])
             }
         }
+
+        let previewSourceRoot = root.appendingPathComponent("preview-source", isDirectory: true)
+        let previewDestinationRoot = root.appendingPathComponent("preview-destination", isDirectory: true)
+        try FileManager.default.createDirectory(at: previewSourceRoot, withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(at: previewDestinationRoot, withIntermediateDirectories: false)
+        try Data("payload".utf8).write(to: previewSourceRoot.appendingPathComponent("report.txt"))
+        let previewSource = LocalWorkspace()
+        let previewDestination = LocalWorkspace()
+        previewSource.selectRoot(previewSourceRoot.path, connectionID: connection)
+        previewDestination.selectRoot(previewDestinationRoot.path, connectionID: otherConnection)
+        previewSource.setSelected("report.txt", isSelected: true)
+        guard previewSource.selectedRegularFilePaths == ["report.txt"] else {
+            throw NSError(domain: "QADRENTests", code: 13, userInfo: [NSLocalizedDescriptionKey: "preview did not use the selected regular file"])
+        }
+        let preview = try previewSource.previewCopy(sourceRelativePath: "report.txt", to: previewDestination)
+        guard preview.source_relative == "report.txt",
+              preview.destination_relative == "report.txt",
+              preview.size == 7,
+              !preview.destination_exists,
+              !FileManager.default.fileExists(atPath: previewDestinationRoot.appendingPathComponent("report.txt").path)
+        else {
+            throw NSError(domain: "QADRENTests", code: 14, userInfo: [NSLocalizedDescriptionKey: "metadata copy preview changed or misreported the destination"])
+        }
         print("LocalWorkspace native Swift/FFI controller tests passed")
     }
 }

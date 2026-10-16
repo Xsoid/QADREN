@@ -17,12 +17,23 @@ private func reconcileLocalDirectoryJob(
 private func listLocalDirectoryReconciliations(
     _ database: UnsafePointer<CChar>?, _ registry: UnsafePointer<CChar>?, _ root: UnsafePointer<CChar>?, _ connection: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_local_copy_preview")
+private func localCopyPreview(
+    _ sourceRoot: UnsafePointer<CChar>?, _ sourceRelative: UnsafePointer<CChar>?,
+    _ destinationRoot: UnsafePointer<CChar>?, _ destinationRelative: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
 
 struct LocalWorkspaceEntry: Decodable, Identifiable { let name: String; let is_directory: Bool; let size: UInt64; var id: String { name } }
 private struct LocalEnvelope<T: Decodable>: Decodable { let ok: Bool; let data: T?; let error: String? }
 private struct LocalJobResult: Decodable { let status: String; let reconciled: Bool? }
 private struct LocalJobEnvelope: Decodable { let ok: Bool; let data: LocalJobResult?; let error: String? }
 private struct LocalReconciliationCandidate: Decodable { let job_id: String }
+struct LocalCopyPreview: Decodable, Equatable {
+    let source_relative: String
+    let destination_relative: String
+    let size: UInt64
+    let destination_exists: Bool
+}
 
 @MainActor final class LocalWorkspace: ObservableObject {
     /// A root is valid only for the independently selected Local connection in
@@ -73,6 +84,14 @@ private struct LocalReconciliationCandidate: Decodable { let job_id: String }
     var selectedDirectory: String? {
         guard let root else { return nil }
         return relativePath.isEmpty ? root : root + "/" + relativePath
+    }
+    /// Relative paths for selected regular files in the currently visible
+    /// directory. This is metadata only; it never opens their content.
+    var selectedRegularFilePaths: [String] {
+        entries.compactMap { entry in
+            guard selectedNames.contains(entry.name), !entry.is_directory else { return nil }
+            return relativePath.isEmpty ? entry.name : relativePath + "/" + entry.name
+        }
     }
     func refresh() {
         guard let root else { return }
@@ -239,6 +258,37 @@ private struct LocalReconciliationCandidate: Decodable { let job_id: String }
         } catch {
             self.error = error.localizedDescription
         }
+    }
+
+    /// Produce one read-only Local-to-Local candidate. It does not create a
+    /// Job, request consent, reserve space, read bytes, or write a file.
+    func previewCopy(
+        sourceRelativePath: String, to destination: LocalWorkspace
+    ) throws -> LocalCopyPreview {
+        guard let root, let destinationRoot = destination.root else {
+            throw StorageError.operation("Выберите папки в обеих панелях")
+        }
+        let pointer = root.withCString { sourceRoot in
+            sourceRelativePath.withCString { sourceRelative in
+                destinationRoot.withCString { destinationRoot in
+                    destination.relativePath.withCString { destinationRelative in
+                        localCopyPreview(sourceRoot, sourceRelative, destinationRoot, destinationRelative)
+                    }
+                }
+            }
+        }
+        guard let pointer else { throw StorageError.operation("Local copy preview unavailable") }
+        defer { localFree(pointer) }
+        let result = try JSONDecoder().decode(
+            LocalEnvelope<LocalCopyPreview>.self,
+            from: Data(String(cString: pointer).utf8)
+        )
+        guard result.ok, let data = result.data else {
+            throw StorageError.operation(
+                "Предпросмотр недоступен: выберите разные непересекающиеся локальные папки."
+            )
+        }
+        return data
     }
 
     func findDirectoryReconciliations(connectionID: String, databasePath: String, registryPath: String) throws {
