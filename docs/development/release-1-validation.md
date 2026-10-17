@@ -17,19 +17,19 @@ Release 1 is a local-first macOS product. It includes one Rust JobStore, Local F
 
 ## Current Recorded Local Evidence
 
-The executable baseline is `3a24816`.
+The executable baseline is `2e99213`.
 
 | Check | Result | Evidence scope |
 |---|---|---|
-| `cargo test --manifest-path core/Cargo.toml --lib` | PASS, 263 tests | Rust Core on `3a24816` |
-| `scripts/test-macos-local-workspace.sh` | PASS | SwiftUI to Rust Local file-copy bridge on `3a24816` |
-| `./script/build_and_run.sh --verify` | PASS | Unsigned local development bundle and running QADREN process on `3a24816` |
+| `cargo test --manifest-path core/Cargo.toml --lib` | PASS, 263 tests | Rust Core on `2e99213` |
+| `scripts/test-macos-local-workspace.sh` | PASS | SwiftUI to Rust Local file-copy bridge on `2e99213` |
+| `./script/build_and_run.sh --verify` | PASS | Unsigned local development bundle and running QADREN process on `2e99213` |
 
 ## Current Capability Evidence Matrix
 
 | Capability | Current evidence | Not yet established |
 |---|---|---|
-| Rust model and durable JobStore | Core test suite and manual and Scenario Local-to-Local no-overwrite copy paths pass on the recorded baseline. Rust core and FFI have a staged controlled replacement for an existing regular Local file. Persisted UNKNOWN copies, including replacements, can be listed for the bound destination root and checked through read-only exact metadata reconciliation. | Replacement is not exposed through SwiftUI. Real File Provider materialization evidence is not recorded. |
+| Rust model and durable JobStore | Core test suite and manual and Scenario Local-to-Local no-overwrite copy paths pass on the recorded baseline. Rust core, FFI, and File Manager have a staged controlled replacement for an existing regular Local file. Persisted UNKNOWN copies, including replacements, can be listed for the bound destination root and checked through read-only exact metadata reconciliation. | Real File Provider materialization evidence is not recorded. |
 | App-owned mock operation | No-overwrite, durable-attempt, verification, and recovery tests exist in `job_execution.rs`. | User content transfer. The mock is not a release substitute. |
 | Local Filesystem metadata, `mkdir`, and copy | Rust and SwiftUI interfaces provide confirmed one-file no-overwrite copy through JobStore. Local metadata revisions support a revision-bound Scenario baseline. | A real File Provider materialization run. |
 | macOS File Provider safety | A copy requires a user-confirmed, exact-scope durable decision before opening the source. | A real File Provider materialization run with a user-selected provider item. |
