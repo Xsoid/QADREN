@@ -589,6 +589,7 @@ private struct ScenarioDryRunView: View {
     @State private var error: String?
     @State private var hasRequestedPreview = false
     @State private var pendingCreate: ScenarioPlanItem?
+    @State private var pendingUpdate: ScenarioPlanItem?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -644,6 +645,10 @@ private struct ScenarioDryRunView: View {
                             Button("Создать копию") { pendingCreate = item }
                                 .buttonStyle(.bordered)
                         }
+                        if item.action.kind == "update" {
+                            Button("Заменить файл", role: .destructive) { pendingUpdate = item }
+                                .buttonStyle(.bordered)
+                        }
                     }
                     .padding(.vertical, 4)
                 }
@@ -658,6 +663,14 @@ private struct ScenarioDryRunView: View {
             Button("Загрузить и создать") { executePendingCreate() }
         } message: {
             Text("macOS может скачать исходный файл из File Provider на этот Mac. QADREN создаст только этот файл, не заменит файл назначения и сохранит Job с точной ревизией сценария.")
+        }
+        .alert("Разрешить загрузку и замену файла?", isPresented: Binding(
+            get: { pendingUpdate != nil }, set: { if !$0 { pendingUpdate = nil } }
+        )) {
+            Button("Отмена", role: .cancel) { pendingUpdate = nil }
+            Button("Загрузить и заменить", role: .destructive) { executePendingUpdate() }
+        } message: {
+            Text("macOS может скачать исходный файл из File Provider на этот Mac. QADREN заменит только этот существующий файл назначения и сохранит Job с точной ревизией сценария.")
         }
     }
 
@@ -690,6 +703,17 @@ private struct ScenarioDryRunView: View {
             loadPlan()
         } catch {
             self.error = "Не удалось создать копию по сценарию: " + error.localizedDescription
+        }
+    }
+
+    private func executePendingUpdate() {
+        guard let item = pendingUpdate else { return }
+        pendingUpdate = nil
+        do {
+            try StorageRegistryBridge.executeScenarioUpdate(scenario: scenario, item: item)
+            loadPlan()
+        } catch {
+            self.error = "Не удалось обновить файл по сценарию: " + error.localizedDescription
         }
     }
 

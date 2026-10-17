@@ -582,6 +582,50 @@ pub fn run_local_scenario_file_copy(
     )
 }
 
+/// Execute one explicitly confirmed replacement proposed by an exact Scenario
+/// revision. This is a one-way update only; the immutable Scenario endpoint
+/// binding is checked before the durable replacement attempt is created.
+#[allow(clippy::too_many_arguments)]
+pub fn run_local_scenario_file_replace(
+    database_path: &Path,
+    registry_path: &Path,
+    scenario_id: &str,
+    scenario_revision: u64,
+    source_root: &Path,
+    source_connection_id: &str,
+    source_relative: &Path,
+    destination_root: &Path,
+    destination_connection_id: &str,
+    destination_relative: &Path,
+    job_id: &str,
+    consent: bool,
+) -> Result<LocalFileCopyStatus, LocalFileCopyError> {
+    let registry = Registry::open(registry_path).map_err(|_| LocalFileCopyError::ScenarioUnavailable)?;
+    let scenario = registry
+        .get_scenario_revision(scenario_id, scenario_revision)
+        .map_err(|_| LocalFileCopyError::ScenarioUnavailable)?
+        .ok_or(LocalFileCopyError::ScenarioUnavailable)?;
+    let source_root = source_root.to_str().ok_or(LocalFileCopyError::InvalidRequest)?;
+    let destination_root = destination_root.to_str().ok_or(LocalFileCopyError::InvalidRequest)?;
+    let is_left_to_right = scenario.left_connection_id == source_connection_id
+        && scenario.left_root == source_root
+        && scenario.right_connection_id == destination_connection_id
+        && scenario.right_root == destination_root;
+    let is_right_to_left = scenario.direction == "bidirectional"
+        && scenario.right_connection_id == source_connection_id
+        && scenario.right_root == source_root
+        && scenario.left_connection_id == destination_connection_id
+        && scenario.left_root == destination_root;
+    if !is_left_to_right && !is_right_to_left {
+        return Err(LocalFileCopyError::ScenarioScopeMismatch);
+    }
+    run_local_file_copy_inner(
+        database_path, registry_path, Path::new(source_root), source_connection_id, source_relative,
+        Path::new(destination_root), destination_connection_id, destination_relative, job_id, consent,
+        Some((scenario_id, scenario_revision, is_left_to_right)), true,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_local_file_copy_inner(
     database_path: &Path,
@@ -1514,6 +1558,34 @@ mod tests {
             ),
             Err(LocalFileCopyError::ScenarioScopeMismatch)
         ));
+    }
+
+    #[test]
+    fn scenario_replace_binds_the_exact_revision_and_replaces_existing_file() {
+        let (database, registry_path, source_root, source_connection) = local_fixture("scenario-replace");
+        let destination_root = source_root.parent().unwrap().join("scenario-replace-destination-root");
+        fs::create_dir(&source_root).unwrap();
+        fs::create_dir(&destination_root).unwrap();
+        fs::write(source_root.join("report.txt"), b"new report").unwrap();
+        fs::write(destination_root.join("report.txt"), b"old report").unwrap();
+        let registry = Registry::open(&registry_path).unwrap();
+        let destination_connection = registry.add("local_filesystem", "Scenario Destination").unwrap();
+        let scenario = registry.create_scenario(
+            "Scenario update", &source_connection, source_root.to_str().unwrap(),
+            &destination_connection, destination_root.to_str().unwrap(), "left_to_right",
+        ).unwrap();
+
+        assert_eq!(
+            run_local_scenario_file_replace(
+                &database, &registry_path, &scenario, 1, &source_root, &source_connection, Path::new("report.txt"),
+                &destination_root, &destination_connection, Path::new("report.txt"), "scenario-replace-1", true,
+            ).unwrap(),
+            LocalFileCopyStatus::Completed
+        );
+        assert_eq!(fs::read(destination_root.join("report.txt")).unwrap(), b"new report");
+        let stored = JobStore::open(&database).unwrap().get("scenario-replace-1").unwrap().unwrap();
+        assert_eq!(stored.scenario_id.as_deref(), Some(scenario.as_str()));
+        assert_eq!(stored.scenario_revision, Some(1));
     }
 
     #[test]
