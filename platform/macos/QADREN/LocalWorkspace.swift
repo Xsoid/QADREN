@@ -17,6 +17,10 @@ private func reconcileLocalDirectoryJob(
 private func listLocalDirectoryReconciliations(
     _ database: UnsafePointer<CChar>?, _ registry: UnsafePointer<CChar>?, _ root: UnsafePointer<CChar>?, _ connection: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_jobs_list_local_file_copy_reconciliations")
+private func listLocalFileCopyReconciliations(
+    _ database: UnsafePointer<CChar>?, _ registry: UnsafePointer<CChar>?, _ root: UnsafePointer<CChar>?, _ connection: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_local_copy_preview")
 private func localCopyPreview(
     _ sourceRoot: UnsafePointer<CChar>?, _ sourceRelative: UnsafePointer<CChar>?,
@@ -436,6 +440,47 @@ struct LocalCopyPreviewRequest: Equatable {
                 error = "Результат копирования всё ещё не подтверждён. Повтор не выполнен."
             }
         } catch { self.error = error.localizedDescription }
+    }
+
+    /// Find only UNKNOWN local-copy Jobs bound to this selected destination
+    /// root and connection. This is an inventory request; it does not inspect
+    /// files or repeat a copy.
+    func findFileCopyReconciliations(connectionID: String) {
+        guard let root else { return }
+        guard !connectionID.isEmpty else {
+            error = "Выберите локальное подключение"
+            return
+        }
+        guard boundConnectionID == nil || boundConnectionID == connectionID else {
+            error = "Выберите папку для текущего локального подключения"
+            return
+        }
+        do {
+            let databasePath = try JobInventory.paths().database
+            let registryPath = try StorageRegistryBridge.databasePath()
+            let pointer = databasePath.withCString { database in
+                registryPath.withCString { registry in
+                    root.withCString { root in
+                        connectionID.withCString { connection in
+                            listLocalFileCopyReconciliations(database, registry, root, connection)
+                        }
+                    }
+                }
+            }
+            guard let pointer else { throw StorageError.operation("Local copy reconciliation inventory unavailable") }
+            defer { localFree(pointer) }
+            let result = try JSONDecoder().decode(
+                LocalEnvelope<[LocalReconciliationCandidate]>.self,
+                from: Data(String(cString: pointer).utf8)
+            )
+            guard result.ok, let candidates = result.data else {
+                throw StorageError.operation(result.error ?? "Local copy reconciliation inventory failed")
+            }
+            copyReconciliationJobIDs = candidates.map(\.job_id)
+            error = nil
+        } catch {
+            self.error = error.localizedDescription
+        }
     }
 
     func findDirectoryReconciliations(connectionID: String, databasePath: String, registryPath: String) throws {

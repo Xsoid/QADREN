@@ -723,6 +723,10 @@ private struct FileManagerPane: View {
                         workspace.findDirectoryReconciliations(connectionID: selectedConnectionID)
                     }
                     .disabled(!selectedConnectionIsAvailable)
+                    Button("Показать неопределённые копирования") {
+                        workspace.findFileCopyReconciliations(connectionID: selectedConnectionID)
+                    }
+                    .disabled(!selectedConnectionIsAvailable)
                     ForEach(workspace.reconciliationJobIDs, id: \.self) { jobID in
                         HStack(spacing: 8) {
                             Text("Создание папки требует проверки")

@@ -74,6 +74,54 @@ pub unsafe extern "C" fn qadren_jobs_reconcile_local_file_copy(
     }
 }
 
+/// List existing UNKNOWN Local Filesystem copy Jobs that are durably bound to
+/// the supplied destination root and enabled connection. This inventory does
+/// not inspect target paths, read content, complete a Job, or retry an effect.
+/// JobStore retains its normal restart-to-UNKNOWN rule.
+///
+/// # Safety
+/// Arguments must be valid, NUL-terminated strings for the duration of call.
+#[no_mangle]
+pub unsafe extern "C" fn qadren_jobs_list_local_file_copy_reconciliations(
+    database_path: *const c_char,
+    registry_path: *const c_char,
+    destination_root: *const c_char,
+    destination_connection_id: *const c_char,
+) -> *mut c_char {
+    let (Some(database_path), Some(registry_path), Some(destination_root), Some(destination_connection_id)) = (
+        input(database_path),
+        input(registry_path),
+        input(destination_root),
+        input(destination_connection_id),
+    ) else {
+        return response(json!({"ok": false, "error": "invalid_request"}));
+    };
+    match crate::job_execution::local_file_copy_reconciliation_candidates(
+        Path::new(database_path),
+        Path::new(registry_path),
+        Path::new(destination_root),
+        destination_connection_id,
+    ) {
+        Ok(candidates) => response(json!({
+            "ok": true,
+            "data": candidates.into_iter().map(|candidate| json!({"job_id": candidate.job_id})).collect::<Vec<_>>()
+        })),
+        Err(crate::job_execution::LocalFileCopyError::InvalidRequest) => {
+            response(json!({"ok": false, "error": "invalid_request"}))
+        }
+        Err(crate::job_execution::LocalFileCopyError::ConnectionUnavailable) => {
+            response(json!({"ok": false, "error": "local_connection_unavailable"}))
+        }
+        Err(crate::job_execution::LocalFileCopyError::Local(_)) => {
+            response(json!({"ok": false, "error": "reconciliation_unavailable"}))
+        }
+        Err(crate::job_execution::LocalFileCopyError::Store(_)) => {
+            response(json!({"ok": false, "error": "job_store_unavailable"}))
+        }
+        Err(_) => response(json!({"ok": false, "error": "reconciliation_failed"})),
+    }
+}
+
 /// Return JSON-encoded persisted jobs for a caller-owned C string path.
 ///
 /// # Safety
@@ -1045,6 +1093,19 @@ mod tests {
         let root = CString::new(base.to_str().unwrap()).unwrap();
         let connection = CString::new(connection_id).unwrap();
         let job = CString::new(job_id).unwrap();
+        let candidates = unsafe {
+            qadren_jobs_list_local_file_copy_reconciliations(
+                database.as_ptr(),
+                registry.as_ptr(),
+                root.as_ptr(),
+                connection.as_ptr(),
+            )
+        };
+        assert!(unsafe { CStr::from_ptr(candidates) }
+            .to_str()
+            .unwrap()
+            .contains("local-copy-ffi-reconcile"));
+        unsafe { qadren_jobs_free_string(candidates) };
         let response = unsafe {
             qadren_jobs_reconcile_local_file_copy(
                 database.as_ptr(),

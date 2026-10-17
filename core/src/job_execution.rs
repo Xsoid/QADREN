@@ -49,6 +49,14 @@ pub struct LocalDirectoryReconciliationCandidate {
     pub job_id: String,
 }
 
+/// A durable Local Filesystem copy Job that can be inspected for
+/// reconciliation in the currently opened destination root. This is inventory
+/// metadata; it is not evidence that the copy completed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalFileCopyReconciliationCandidate {
+    pub job_id: String,
+}
+
 /// Result of a read-only check of an UNKNOWN mock operation.  This never
 /// retries a write: only an exact match with the durable expectation can
 /// resolve the existing attempt.
@@ -749,6 +757,48 @@ pub fn reconcile_local_file_copy(
     Ok(LocalFileCopyReconciliationStatus::Completed)
 }
 
+/// List UNKNOWN Local Filesystem copy Jobs bound to exactly this opened
+/// destination root and Local connection. This does not inspect target paths,
+/// read content, retry an effect, or complete a Job. Opening JobStore may
+/// preserve its existing restart rule that turns an interrupted active attempt
+/// into UNKNOWN before this inventory is returned.
+pub fn local_file_copy_reconciliation_candidates(
+    database_path: &Path,
+    registry_path: &Path,
+    destination_root: &Path,
+    destination_connection_id: &str,
+) -> Result<Vec<LocalFileCopyReconciliationCandidate>, LocalFileCopyError> {
+    if destination_connection_id.is_empty() {
+        return Err(LocalFileCopyError::InvalidRequest);
+    }
+    if !enabled_local_connection(registry_path, destination_connection_id) {
+        return Err(LocalFileCopyError::ConnectionUnavailable);
+    }
+    let destination = LocalFilesystem::open(destination_root).map_err(LocalFileCopyError::Local)?;
+    let identity = destination.root_identity().map_err(LocalFileCopyError::Local)?;
+    let root_identity = format!("unix:{}:{}", identity.device, identity.inode);
+    let store = JobStore::open(database_path)?;
+    let mut candidates = Vec::new();
+    for attempt in store.unresolved_attempts()? {
+        if attempt.status != "unknown"
+            || attempt.operation_kind.as_deref() != Some("local_copy_new")
+            || attempt.target_connection_id.as_deref() != Some(destination_connection_id)
+            || store
+                .attempt_root_identity(&attempt.job_id, &attempt.attempt_id)?
+                .as_deref()
+                != Some(root_identity.as_str())
+        {
+            continue;
+        }
+        candidates.push(LocalFileCopyReconciliationCandidate {
+            job_id: attempt.job_id,
+        });
+    }
+    candidates.sort_by(|left, right| left.job_id.cmp(&right.job_id));
+    candidates.dedup_by(|left, right| left.job_id == right.job_id);
+    Ok(candidates)
+}
+
 /// Reconcile an UNKNOWN Local Filesystem directory creation without writing,
 /// deleting, or retrying. A different root, disabled connection, missing
 /// binding, or mismatched target remains UNKNOWN.
@@ -1262,6 +1312,43 @@ mod tests {
             LocalFileCopyReconciliationStatus::Completed
         );
         assert_eq!(JobStore::open(&database).unwrap().state("copy-unknown").unwrap(), Some(JobState::Completed));
+    }
+
+    #[test]
+    fn local_file_copy_reconciliation_inventory_requires_the_bound_destination_root() {
+        let (database, registry_path, root, _) = local_fixture("copy-reconcile-inventory");
+        let destination_root = root.parent().unwrap().join("copy-reconcile-inventory-destination");
+        let other_root = root.parent().unwrap().join("copy-reconcile-inventory-other");
+        fs::create_dir(&destination_root).unwrap();
+        fs::create_dir(&other_root).unwrap();
+        let registry = Registry::open(&registry_path).unwrap();
+        let connection = registry.add("local_filesystem", "Copy destination").unwrap();
+        let destination = LocalFilesystem::open(&destination_root).unwrap();
+        let identity = destination.root_identity().unwrap();
+        let root_identity = format!("unix:{}:{}", identity.device, identity.inode);
+        let mut store = JobStore::open(&database).unwrap();
+        store.enqueue("copy-inventory-unknown", None).unwrap();
+        store.advance(
+            "copy-inventory-unknown", JobState::Queued, JobState::Running,
+            Confirmation::Confirmed(EvidenceLevel::Requested),
+        ).unwrap();
+        store.prepare_bound_attempt_with_root_identity(
+            "copy-inventory-unknown", "copy-inventory-unknown-attempt", "local_copy_new", &connection,
+            "copied.txt", 7, "00000000000000000000000000000000", &root_identity,
+        ).unwrap();
+        drop(store);
+
+        assert_eq!(
+            local_file_copy_reconciliation_candidates(
+                &database, &registry_path, &destination_root, &connection,
+            ).unwrap(),
+            vec![LocalFileCopyReconciliationCandidate {
+                job_id: "copy-inventory-unknown".to_owned(),
+            }]
+        );
+        assert!(local_file_copy_reconciliation_candidates(
+            &database, &registry_path, &other_root, &connection,
+        ).unwrap().is_empty());
     }
 
     #[test]
