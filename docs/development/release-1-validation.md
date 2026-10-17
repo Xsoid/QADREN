@@ -17,13 +17,13 @@ Release 1 is a local-first macOS product. It includes one Rust JobStore, Local F
 
 ## Current Recorded Local Evidence
 
-The executable baseline is `61436f5`.
+The executable baseline is `43ded58`.
 
 | Check | Result | Evidence scope |
 |---|---|---|
-| `cargo test --manifest-path core/Cargo.toml --lib` | PASS, 254 tests | Rust Core on `61436f5` |
-| `scripts/test-macos-local-workspace.sh` | PASS | SwiftUI to Rust Local file-copy bridge on `61436f5` |
-| `bash scripts/build-macos.sh` | PASS | Unsigned macOS development bundle on `61436f5` |
+| `cargo test --manifest-path core/Cargo.toml --lib` | PASS, 254 tests | Rust Core on `43ded58` |
+| `scripts/test-macos-local-workspace.sh` | PASS | SwiftUI to Rust Local file-copy bridge on `43ded58` |
+| `bash scripts/build-macos.sh` | PASS | Unsigned macOS development bundle on `43ded58` |
 
 ## Current Capability Evidence Matrix
 
