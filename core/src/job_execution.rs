@@ -1,11 +1,12 @@
 //! The first G1 execution slice: an explicit, app-owned mock destination.
 //! It never contacts a provider or reads user/cloud content.
 use crate::confirmation::{Confirmation, EvidenceLevel};
-use crate::jobs::{JobStore, JobStoreError};
+use crate::jobs::{JobStore, JobStoreError, ScenarioCopyBaselineOutboxEntry};
 use crate::local_fs::{ContentReadConsent, LocalError, LocalFilesystem};
-use crate::model::JobState;
+use crate::model::{ConfirmedFileVersion, JobState, ScenarioReference};
 use crate::policy::{Decision, OperationScope, ProtectedOperation};
 use crate::registry::Registry;
+use crate::scenario_copy_dispatch::dispatch_pending_scenario_copy_baselines;
 use crate::verification::{OperationVerifier, VerifiedReceipt};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -543,7 +544,7 @@ pub fn run_local_scenario_file_copy(
     run_local_file_copy_inner(
         database_path, registry_path, Path::new(source_root), source_connection_id, source_relative,
         Path::new(destination_root), destination_connection_id, destination_relative, job_id, consent,
-        Some((scenario_id, scenario_revision)),
+        Some((scenario_id, scenario_revision, is_left_to_right)),
     )
 }
 
@@ -559,13 +560,14 @@ fn run_local_file_copy_inner(
     destination_relative: &Path,
     job_id: &str,
     consent: bool,
-    scenario: Option<(&str, u64)>,
+    scenario: Option<(&str, u64, bool)>,
 ) -> Result<LocalFileCopyStatus, LocalFileCopyError> {
     if !valid_job_id(job_id)
         || source_connection_id.is_empty()
         || destination_connection_id.is_empty()
         || source_relative.as_os_str().is_empty()
         || destination_relative.as_os_str().is_empty()
+        || (scenario.is_some() && source_relative != destination_relative)
     {
         return Err(LocalFileCopyError::InvalidRequest);
     }
@@ -597,7 +599,7 @@ fn run_local_file_copy_inner(
     })?;
     let mut store = JobStore::open(database_path)?;
     if let Some(existing) = store.get(job_id)? { return Ok(LocalFileCopyStatus::Existing(existing.state)); }
-    store.enqueue(job_id, scenario)?;
+    store.enqueue(job_id, scenario.map(|(id, revision, _)| (id, revision)))?;
     store.advance(
         job_id,
         JobState::Queued,
@@ -640,12 +642,50 @@ fn run_local_file_copy_inner(
         Err(error @ LocalError::OutcomeUnknown(_)) => return Err(LocalFileCopyError::OutcomeUnknown(error)),
         Err(error) => return Err(LocalFileCopyError::Local(error)),
     }
-    match destination.stat(destination_relative) {
-        Ok(entry) if !entry.is_directory && entry.size == source_entry.size => {}
+    let destination_entry = match destination.stat(destination_relative) {
+        Ok(entry) if !entry.is_directory && entry.size == source_entry.size => entry,
         _ => return Err(LocalFileCopyError::VerificationFailed),
-    }
+    };
+    let baseline = if let Some((scenario_id, scenario_revision, source_is_left)) = scenario {
+        let source_after = source.stat(source_relative).map_err(LocalFileCopyError::Local)?;
+        if source_after.is_directory
+            || source_after.object_revision != source_entry.object_revision
+            || source_after.size != source_entry.size
+        {
+            return Err(LocalFileCopyError::VerificationFailed);
+        }
+        let source_version = ConfirmedFileVersion {
+            object_revision: source_after.object_revision,
+            size: source_after.size,
+            checksum_md5: None,
+        };
+        let destination_version = ConfirmedFileVersion {
+            object_revision: destination_entry.object_revision,
+            size: destination_entry.size,
+            checksum_md5: None,
+        };
+        Some(ScenarioCopyBaselineOutboxEntry {
+            job_id: job_id.to_owned(),
+            scenario: ScenarioReference {
+                scenario_id: scenario_id.to_owned(),
+                revision: scenario_revision,
+            },
+            relative_path: source_path.to_owned(),
+            left: if source_is_left { source_version.clone() } else { destination_version.clone() },
+            right: if source_is_left { destination_version } else { source_version },
+        })
+    } else {
+        None
+    };
     let receipt = VerifiedReceipt::metadata_verified(&attempt_id, "local_copy_new", destination_connection_id, target_path);
-    store.complete_attempt(job_id, &attempt_id, &receipt)?;
+    store.complete_attempt_with_scenario_copy_baseline(job_id, &attempt_id, &receipt, baseline.as_ref())?;
+    if baseline.is_some() {
+        // Completion is already durable. A failed Registry write leaves the
+        // outbox pending for a later, idempotent local-only delivery.
+        if let Ok(registry) = Registry::open(registry_path) {
+            let _ = dispatch_pending_scenario_copy_baselines(&registry, &mut store);
+        }
+    }
     Ok(LocalFileCopyStatus::Completed)
 }
 
@@ -1137,6 +1177,7 @@ mod tests {
 
     #[test]
     fn scenario_copy_binds_the_exact_revision_and_endpoint_scope() {
+        use crate::scenario_planner::{ObservedFile, PlanAction};
         let (database, registry_path, source_root, source_connection) = local_fixture("scenario-copy");
         let destination_root = source_root.parent().unwrap().join("scenario-destination-root");
         fs::create_dir(&source_root).unwrap();
@@ -1158,6 +1199,54 @@ mod tests {
         let stored = JobStore::open(&database).unwrap().get("scenario-copy-1").unwrap().unwrap();
         assert_eq!(stored.scenario_id.as_deref(), Some(scenario.as_str()));
         assert_eq!(stored.scenario_revision, Some(1));
+        let baseline = Registry::open(&registry_path)
+            .unwrap()
+            .list_confirmed_file_states(&ScenarioReference {
+                scenario_id: scenario.clone(),
+                revision: 1,
+            })
+            .unwrap();
+        assert_eq!(baseline.len(), 1);
+        assert_eq!(baseline[0].relative_path, "source.txt");
+        assert_eq!(baseline[0].left.as_ref().unwrap().size, 7);
+        assert_eq!(baseline[0].right.as_ref().unwrap().size, 7);
+        assert!(baseline[0].left.as_ref().unwrap().object_revision.is_some());
+        assert!(baseline[0].right.as_ref().unwrap().object_revision.is_some());
+        assert!(JobStore::open(&database)
+            .unwrap()
+            .pending_scenario_copy_baseline_outbox()
+            .unwrap()
+            .is_empty());
+        let source_entry = LocalFilesystem::open(&source_root)
+            .unwrap()
+            .stat(Path::new("source.txt"))
+            .unwrap();
+        let destination_entry = LocalFilesystem::open(&destination_root)
+            .unwrap()
+            .stat(Path::new("source.txt"))
+            .unwrap();
+        let plan = Registry::open(&registry_path)
+            .unwrap()
+            .plan_scenario_dry_run(
+                &ScenarioReference {
+                    scenario_id: scenario.clone(),
+                    revision: 1,
+                },
+                &[ObservedFile {
+                    relative_path: "source.txt".into(),
+                    object_revision: source_entry.object_revision,
+                    size: source_entry.size,
+                    checksum_md5: None,
+                }],
+                &[ObservedFile {
+                    relative_path: "source.txt".into(),
+                    object_revision: destination_entry.object_revision,
+                    size: destination_entry.size,
+                    checksum_md5: None,
+                }],
+            )
+            .unwrap();
+        assert_eq!(plan[0].action, PlanAction::NoAction);
         assert!(matches!(
             run_local_scenario_file_copy(
                 &database, &registry_path, &scenario, 1, &destination_root, &source_connection, Path::new("source.txt"),

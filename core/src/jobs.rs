@@ -1,7 +1,7 @@
 //! Durable Job metadata. No content bytes, credentials or transfer side effects.
 //! Stored independently from StorageConnection Registry until cross-links are specified.
 use crate::confirmation::Confirmation;
-use crate::model::JobState;
+use crate::model::{ConfirmedFileVersion, JobState, ScenarioReference};
 use crate::policy::{Decision, OperationScope, ProtectedOperation};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
@@ -126,6 +126,18 @@ pub struct StoredOperationDecision {
     pub consumed: bool,
 }
 
+/// A completed Scenario copy awaiting an idempotent Registry baseline write.
+/// The record is JobStore-owned so the copy completion and its hand-off are
+/// durable in one SQLite transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioCopyBaselineOutboxEntry {
+    pub job_id: String,
+    pub scenario: ScenarioReference,
+    pub relative_path: String,
+    pub left: ConfirmedFileVersion,
+    pub right: ConfirmedFileVersion,
+}
+
 pub struct JobStore {
     db: Connection,
     // Separate SQLite file holds a process-lifetime write transaction.
@@ -241,7 +253,7 @@ impl JobStore {
 
     fn initialize(db: Connection, owner_lock: Option<Connection>) -> Result<Self> {
         let version: i32 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 11 {
+        if version > 12 {
             return Err(JobStoreError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -482,6 +494,26 @@ impl JobStore {
                  PRAGMA user_version = 11;
                  COMMIT;
                  PRAGMA foreign_keys = ON;",
+            )?;
+        }
+        if version <= 11 {
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE scenario_copy_baseline_outbox (
+                   job_id TEXT PRIMARY KEY NOT NULL REFERENCES jobs(id),
+                   scenario_id TEXT NOT NULL,
+                   scenario_revision INTEGER NOT NULL CHECK(scenario_revision > 0),
+                   relative_path TEXT NOT NULL,
+                   left_object_revision TEXT,
+                   left_size INTEGER NOT NULL CHECK(left_size >= 0),
+                   left_checksum_md5 TEXT,
+                   right_object_revision TEXT,
+                   right_size INTEGER NOT NULL CHECK(right_size >= 0),
+                   right_checksum_md5 TEXT,
+                   dispatched INTEGER NOT NULL DEFAULT 0 CHECK(dispatched IN (0,1))
+                 );
+                 PRAGMA user_version = 12;
+                 COMMIT;",
             )?;
         }
         db.pragma_update(None, "foreign_keys", "ON")?;
@@ -1431,6 +1463,19 @@ impl JobStore {
         attempt_id: &str,
         receipt: &crate::verification::VerifiedReceipt,
     ) -> Result<()> {
+        self.complete_attempt_with_scenario_copy_baseline(job_id, attempt_id, receipt, None)
+    }
+
+    /// Complete an attempt and persist the Scenario-copy baseline hand-off in
+    /// the same JobStore transaction. The Registry write happens later and is
+    /// idempotent, so a crash cannot lose a completed copy's baseline.
+    pub fn complete_attempt_with_scenario_copy_baseline(
+        &mut self,
+        job_id: &str,
+        attempt_id: &str,
+        receipt: &crate::verification::VerifiedReceipt,
+        baseline: Option<&ScenarioCopyBaselineOutboxEntry>,
+    ) -> Result<()> {
         self.check_storage_identity()?;
         if receipt.attempt_id() != attempt_id {
             return Err(JobStoreError::UntrustedEvidence);
@@ -1504,8 +1549,104 @@ impl JobStore {
             "INSERT INTO job_events(job_id,state,kind) VALUES (?1,'completed','transition')",
             [job_id],
         )?;
+        if let Some(baseline) = baseline {
+            if baseline.job_id != job_id
+                || baseline.scenario.scenario_id.is_empty()
+                || baseline.scenario.revision == 0
+                || baseline.relative_path.is_empty()
+            {
+                return Err(JobStoreError::InvalidId);
+            }
+            tx.execute(
+                "INSERT INTO scenario_copy_baseline_outbox(
+                    job_id,scenario_id,scenario_revision,relative_path,
+                    left_object_revision,left_size,left_checksum_md5,
+                    right_object_revision,right_size,right_checksum_md5
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                params![
+                    baseline.job_id,
+                    baseline.scenario.scenario_id,
+                    baseline.scenario.revision as i64,
+                    baseline.relative_path,
+                    baseline.left.object_revision,
+                    baseline.left.size as i64,
+                    baseline.left.checksum_md5,
+                    baseline.right.object_revision,
+                    baseline.right.size as i64,
+                    baseline.right.checksum_md5,
+                ],
+            )?;
+        }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Return undelivered, completed Scenario-copy baseline records. Reading
+    /// this queue neither accesses adapters nor changes any Registry state.
+    pub fn pending_scenario_copy_baseline_outbox(
+        &self,
+    ) -> Result<Vec<ScenarioCopyBaselineOutboxEntry>> {
+        let mut statement = self.db.prepare(
+            "SELECT job_id,scenario_id,scenario_revision,relative_path,
+                    left_object_revision,left_size,left_checksum_md5,
+                    right_object_revision,right_size,right_checksum_md5
+             FROM scenario_copy_baseline_outbox
+             WHERE dispatched=0 ORDER BY job_id",
+        )?;
+        let entries = statement
+            .query_map([], |row| {
+                let revision: i64 = row.get(2)?;
+                let left_size: i64 = row.get(5)?;
+                let right_size: i64 = row.get(8)?;
+                if revision <= 0 || left_size < 0 || right_size < 0 {
+                    return Err(rusqlite::Error::InvalidQuery);
+                }
+                Ok(ScenarioCopyBaselineOutboxEntry {
+                    job_id: row.get(0)?,
+                    scenario: ScenarioReference {
+                        scenario_id: row.get(1)?,
+                        revision: revision as u64,
+                    },
+                    relative_path: row.get(3)?,
+                    left: ConfirmedFileVersion {
+                        object_revision: row.get(4)?,
+                        size: left_size as u64,
+                        checksum_md5: row.get(6)?,
+                    },
+                    right: ConfirmedFileVersion {
+                        object_revision: row.get(7)?,
+                        size: right_size as u64,
+                        checksum_md5: row.get(9)?,
+                    },
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(JobStoreError::from)?;
+        Ok(entries)
+    }
+
+    /// Acknowledge one baseline only after Registry durably accepted it.
+    pub fn mark_scenario_copy_baseline_dispatched(&mut self, job_id: &str) -> Result<bool> {
+        let changed = self.db.execute(
+            "UPDATE scenario_copy_baseline_outbox SET dispatched=1
+             WHERE job_id=?1 AND dispatched=0",
+            [job_id],
+        )?;
+        if changed != 0 {
+            return Ok(true);
+        }
+        let exists: Option<String> = self
+            .db
+            .query_row(
+                "SELECT job_id FROM scenario_copy_baseline_outbox WHERE job_id=?1",
+                [job_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if exists.is_none() {
+            return Err(JobStoreError::NotFound);
+        }
+        Ok(false)
     }
 
     /// Record a refusal that the adapter proves occurred before it could make
@@ -2308,7 +2449,7 @@ mod tests {
             .db
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 11);
+        assert_eq!(version, 12);
     }
 
     #[test]

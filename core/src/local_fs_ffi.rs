@@ -30,7 +30,7 @@ fn metadata_snapshot(root: &str) -> crate::local_fs::Result<serde_json::Value> {
                     (!entry.is_directory).then(|| {
                         json!({
                             "relative_path": relative_path.to_string_lossy(),
-                            "object_revision": null,
+                            "object_revision": entry.object_revision,
                             "size": entry.size,
                             "checksum_md5": null
                         })
@@ -289,7 +289,17 @@ mod tests {
         assert_eq!(value["data"].as_array().unwrap().len(), 1);
         assert_eq!(value["data"][0]["relative_path"], "nested/report.txt");
         assert_eq!(value["data"][0]["size"], 7);
+        let first_revision = value["data"][0]["object_revision"]
+            .as_str()
+            .expect("Local metadata snapshot must identify a local file")
+            .to_owned();
         assert!(value["data"][0]["checksum_md5"].is_null());
+        unsafe { qadren_local_free_string(result) };
+        std::fs::write(root_path.join("nested/report.txt"), b"changed").unwrap();
+        let result = unsafe { qadren_local_metadata_snapshot(root.as_ptr()) };
+        let value: serde_json::Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(result) }.to_str().unwrap()).unwrap();
+        assert_ne!(value["data"][0]["object_revision"], first_revision);
         unsafe { qadren_local_free_string(result) };
         std::fs::remove_dir_all(root_path).unwrap();
     }

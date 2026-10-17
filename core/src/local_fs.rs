@@ -52,6 +52,10 @@ pub struct LocalEntry {
     pub name: String,
     pub is_directory: bool,
     pub size: u64,
+    /// Endpoint-local metadata identity. It never proves cross-endpoint
+    /// content equality, but lets a Scenario compare a later local scan with
+    /// its own confirmed baseline without opening file content.
+    pub object_revision: Option<String>,
 }
 
 /// Identity for detecting renamed or substituted directory entries.
@@ -375,6 +379,7 @@ impl LocalFilesystem {
                 name: path.file_name().unwrap().to_string_lossy().into_owned(),
                 is_directory: m.is_dir(),
                 size: m.len(),
+                object_revision: None,
             })
         }
     }
@@ -408,6 +413,7 @@ impl LocalFilesystem {
                     name: item.file_name().to_string_lossy().into_owned(),
                     is_directory: meta.is_dir(),
                     size: meta.len(),
+                    object_revision: None,
                 });
             }
             items.sort_by(|a, b| a.name.cmp(&b.name));

@@ -284,7 +284,38 @@ fn directory(root: &File, relative: &Path) -> Result<File> {
 
 /// Read leaf metadata without opening file content. This avoids triggering
 /// placeholder materialization through metadata-only list/stat calls.
-fn leaf_metadata(directory: &File, leaf: &CStr) -> Result<(bool, u64)> {
+fn local_object_revision(info: &libc::stat) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        return Some(format!(
+            "local:{}:{}:{}:{}:{}:{}",
+            info.st_dev,
+            info.st_ino,
+            info.st_mtime,
+            info.st_mtime_nsec,
+            info.st_ctime,
+            info.st_ctime_nsec,
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return Some(format!(
+            "local:{}:{}:{}:{}:{}:{}",
+            info.st_dev,
+            info.st_ino,
+            info.st_mtim.tv_sec,
+            info.st_mtim.tv_nsec,
+            info.st_ctim.tv_sec,
+            info.st_ctim.tv_nsec,
+        ));
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+/// Read leaf metadata without opening file content. This avoids triggering
+/// placeholder materialization through metadata-only list/stat calls.
+fn leaf_metadata(directory: &File, leaf: &CStr) -> Result<(bool, u64, Option<String>)> {
     let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
     let result = unsafe {
         libc::fstatat(
@@ -302,7 +333,11 @@ fn leaf_metadata(directory: &File, leaf: &CStr) -> Result<(bool, u64)> {
     if kind != libc::S_IFREG && kind != libc::S_IFDIR {
         return Err(LocalError::UnsafeEntry);
     }
-    Ok((kind == libc::S_IFDIR, info.st_size.max(0) as u64))
+    Ok((
+        kind == libc::S_IFDIR,
+        info.st_size.max(0) as u64,
+        local_object_revision(&info),
+    ))
 }
 
 /// Inspect an inode relative to the pinned root without opening content.
@@ -446,12 +481,13 @@ pub fn list(root: &File, relative: &Path) -> Result<Vec<LocalEntry>> {
             continue;
         }
         let leaf = CString::new(bytes).map_err(|_| LocalError::InvalidPath)?;
-        let (is_directory, size) = leaf_metadata(&dir, &leaf)?;
+        let (is_directory, size, object_revision) = leaf_metadata(&dir, &leaf)?;
         let name = std::str::from_utf8(bytes).map_err(|_| LocalError::UnsafeEntry)?;
         entries.push(LocalEntry {
             name: name.to_owned(),
             is_directory,
             size,
+            object_revision,
         });
     }
     entries.sort_by(|a, b| a.name.cmp(&b.name));
@@ -541,7 +577,7 @@ pub fn has_exact_directory(root: &File, relative: &Path, leaf: &str) -> Result<b
         let raw = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
         if raw == leaf.as_bytes() {
             let leaf_name = name(std::ffi::OsStr::from_bytes(raw))?;
-            let (is_directory, _) = leaf_metadata(&dir, leaf_name.as_c_str())?;
+            let (is_directory, _, _) = leaf_metadata(&dir, leaf_name.as_c_str())?;
             return Ok(is_directory);
         }
     }
@@ -560,7 +596,7 @@ pub fn directory_identity(root: &File, relative: &Path) -> Result<(u64, u64)> {
 /// Metadata lookup without opening the final file or resolving symlinks.
 pub fn stat(root: &File, target: &Path) -> Result<LocalEntry> {
     let (directory, name) = parent(root, target)?;
-    let (is_directory, size) = leaf_metadata(&directory, &name)?;
+    let (is_directory, size, object_revision) = leaf_metadata(&directory, &name)?;
     let display_name = target
         .file_name()
         .ok_or(LocalError::InvalidPath)?
@@ -571,6 +607,7 @@ pub fn stat(root: &File, target: &Path) -> Result<LocalEntry> {
         name: display_name,
         is_directory,
         size,
+        object_revision,
     })
 }
 
