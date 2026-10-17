@@ -32,6 +32,10 @@ private func runLocalScenarioCopyJob(
     _ destinationRoot: UnsafePointer<CChar>?, _ destinationConnection: UnsafePointer<CChar>?, _ destinationRelative: UnsafePointer<CChar>?,
     _ jobID: UnsafePointer<CChar>?, _ consent: Bool
 ) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_jobs_dispatch_scenario_copy_baselines")
+private func dispatchScenarioCopyBaselines(
+    _ jobs: UnsafePointer<CChar>?, _ registry: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_scenario_schedules_list")
 private func scenarioSchedulesList(
     _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?
@@ -136,6 +140,9 @@ struct ScenarioSnapshotItem: Codable {
     let object_revision: String?
     let size: UInt64
     let checksum_md5: String?
+}
+private struct ScenarioBaselineDispatchStatus: Decodable {
+    let dispatched: Int
 }
 struct ScenarioPlanAction: Decodable {
     let kind: String
@@ -266,6 +273,19 @@ enum StorageRegistryBridge {
                 }
             }
         }
+    }
+
+    /// Deliver durable Scenario-copy baselines before a dry-run reads them.
+    /// This has no adapter effect and never repeats a file copy.
+    static func dispatchPendingScenarioCopyBaselines() throws {
+        let registry = try path
+        let jobs = try JobInventory.paths().database
+        let pointer = jobs.withCString { jobs in
+            registry.withCString { registry in
+                dispatchScenarioCopyBaselines(jobs, registry)
+            }
+        }
+        let _: ScenarioBaselineDispatchStatus = try unwrap(pointer, as: ScenarioBaselineDispatchStatus.self)
     }
 
     /// Produce a read-only plan for the exact stored Scenario revision from

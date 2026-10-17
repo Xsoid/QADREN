@@ -1,6 +1,8 @@
 //! Narrow Job commands exposed to the local macOS application.
 //! Execution and state transitions remain inside Rust.
 use crate::jobs::JobStore;
+use crate::registry::Registry;
+use crate::scenario_copy_dispatch::dispatch_pending_scenario_copy_baselines;
 use serde_json::json;
 use std::ffi::{c_char, CStr, CString};
 use std::path::Path;
@@ -19,6 +21,35 @@ fn response(value: serde_json::Value) -> *mut c_char {
     CString::new(value.to_string())
         .expect("JSON output cannot contain raw NUL")
         .into_raw()
+}
+
+/// Deliver completed Scenario-copy baselines before a later dry-run reads the
+/// Registry. This never scans an adapter, opens content, or repeats a copy.
+/// A Registry failure leaves the JobStore outbox pending.
+///
+/// # Safety
+/// Arguments must be valid, NUL-terminated strings for the duration of call.
+#[no_mangle]
+pub unsafe extern "C" fn qadren_jobs_dispatch_scenario_copy_baselines(
+    database_path: *const c_char,
+    registry_path: *const c_char,
+) -> *mut c_char {
+    let (Some(database_path), Some(registry_path)) = (input(database_path), input(registry_path))
+    else {
+        return response(json!({"ok":false,"error":"invalid_request"}));
+    };
+    let result = (|| {
+        let registry = Registry::open(Path::new(registry_path))
+            .map_err(|_| crate::jobs::JobStoreError::NotFound)?;
+        let mut jobs = JobStore::open(Path::new(database_path))?;
+        let dispatched = dispatch_pending_scenario_copy_baselines(&registry, &mut jobs)
+            .map_err(|_| crate::jobs::JobStoreError::NotFound)?;
+        Ok::<_, crate::jobs::JobStoreError>(dispatched)
+    })();
+    match result {
+        Ok(dispatched) => response(json!({"ok":true,"data":{"dispatched":dispatched}})),
+        Err(_) => response(json!({"ok":false,"error":"scenario_baseline_dispatch_unavailable"})),
+    }
 }
 
 /// Return JSON-encoded persisted jobs for a caller-owned C string path.

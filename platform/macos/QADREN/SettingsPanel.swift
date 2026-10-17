@@ -666,6 +666,7 @@ private struct ScenarioDryRunView: View {
         error = nil
         defer { isLoading = false; hasRequestedPreview = true }
         do {
+            try StorageRegistryBridge.dispatchPendingScenarioCopyBaselines()
             let left = try StorageRegistryBridge.localScenarioSnapshot(
                 root: scenario.left_root, connectionID: scenario.left_connection_id
             )
