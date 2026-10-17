@@ -17,15 +17,15 @@ Release 1 is a local-first macOS product. It includes one Rust JobStore, Local F
 
 ## Current Recorded Local Evidence
 
-The executable baseline is `4131daf`.
+The executable baseline is `f9121b2`.
 
 | Check | Result | Evidence scope |
 |---|---|---|
-| `cargo clippy --manifest-path core/Cargo.toml --lib -- -D warnings` | PASS | Rust Core lint on `4131daf` |
-| `cargo test --manifest-path core/Cargo.toml --lib` | PASS, 266 tests | Rust Core on `4131daf` |
-| `scripts/test-macos-local-workspace.sh` | PASS | SwiftUI to Rust Local file-copy bridge on `4131daf` |
-| `scripts/test-macos-scenario-dry-run.sh` | PASS | SwiftUI Scenario metadata and FFI bridge on `4131daf` |
-| `./script/build_and_run.sh --verify` | PASS | Unsigned local development bundle and running QADREN process on `4131daf` |
+| `cargo clippy --manifest-path core/Cargo.toml --lib -- -D warnings` | PASS | Rust Core lint on `f9121b2` |
+| `cargo test --manifest-path core/Cargo.toml --lib` | PASS, 269 tests | Rust Core on `f9121b2` |
+| `scripts/test-macos-local-workspace.sh` | PASS | SwiftUI to Rust Local file-copy bridge on `f9121b2` |
+| `scripts/test-macos-scenario-dry-run.sh` | PASS | SwiftUI Scenario metadata, conflict queue, and FFI bridge on `f9121b2` |
+| `./script/build_and_run.sh --verify` | PASS | Unsigned local development bundle and running QADREN process on `f9121b2` |
 
 `cargo fmt --manifest-path core/Cargo.toml --check` does not pass on this baseline. It reports existing formatting differences outside the Local Scenario update patch. Resolve or explicitly accept that debt before a Release claim.
 
@@ -37,7 +37,7 @@ The executable baseline is `4131daf`.
 | App-owned mock operation | No-overwrite, durable-attempt, verification, and recovery tests exist in `job_execution.rs`. | User content transfer. The mock is not a release substitute. |
 | Local Filesystem metadata, `mkdir`, and copy | Rust and SwiftUI interfaces provide confirmed one-file no-overwrite copy through JobStore. Local metadata revisions support a revision-bound Scenario baseline. | A real File Provider materialization run. |
 | macOS File Provider safety | A copy requires a user-confirmed, exact-scope durable decision before opening the source. | A real File Provider materialization run with a user-selected provider item. |
-| Scenario planning | Dry-run FFI passes. Enabled local connections gate the metadata snapshot. User-confirmed `Create` and `Update` items submit pinned Jobs in a permitted direction and write `FileSyncState` through a durable outbox. | Batch and autonomous multi-item execution, conflict handling, and recovery. |
+| Scenario planning and conflict queue | Dry-run FFI passes. Enabled local connections gate the metadata snapshot. User-confirmed `Create` and `Update` items submit pinned Jobs in a permitted direction and write `FileSyncState` through a durable outbox. A revision-bound Registry queue records a user-selected source and one compatible content or deletion decision. It has no JobStore dependency and does not block ordinary transfers. | Batch and autonomous multi-item execution, conflict-effect execution, and recovery. A selected conflict decision is not an external effect. |
 | Scheduler dispatch | Durable schedule dispatch can queue a Job. | Independent timer, app-exit lifecycle, event debounce, and real Scenario execution. |
 | Native UI | Design system, widget canvas, settings, and local file navigation exist. | Full visual acceptance, removal of legacy mock actions, and real-copy interaction. |
 | Distribution | The macOS build script creates an unsigned development bundle. | Signing, notarization, clean install, restart validation, and release package. |
