@@ -1009,6 +1009,28 @@ impl LocalFilesystem {
         }
     }
 
+    /// Atomically replace an existing regular file with a staged regular file.
+    /// The caller must persist a durable attempt and reconcile an uncertain
+    /// post-effect result. This is not a no-overwrite creation primitive.
+    pub fn rename_file_replace(&self, from: &Path, to: &Path) -> Result<()> {
+        Self::relative(from)?;
+        Self::relative(to)?;
+        if from == to {
+            return Err(LocalError::AlreadyExists);
+        }
+        #[cfg(unix)]
+        {
+            if matches!(self.stat(to), Ok(entry) if entry.is_directory) {
+                return Err(LocalError::UnsafeEntry);
+            }
+            secure::rename_file_replace(&self.root_fd, from, to)
+        }
+        #[cfg(not(unix))]
+        {
+            Err(LocalError::UnsafeEntry)
+        }
+    }
+
     /// Checked rename for a previously previewed source. Refuses an already
     /// stale preview, but concurrent writers may still replace the source
     /// after the check. Not exposed to automatic jobs.
@@ -2770,6 +2792,39 @@ mod tests {
         ));
         assert_eq!(fs::read(root.join("source.bin")).unwrap(), b"source");
         assert_eq!(fs::read(root.join("target.bin")).unwrap(), b"protected");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_replace_swaps_regular_destination() {
+        let root = sandbox();
+        fs::write(root.join("staged.bin"), b"new").unwrap();
+        fs::write(root.join("destination.bin"), b"old").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        adapter
+            .rename_file_replace(Path::new("staged.bin"), Path::new("destination.bin"))
+            .unwrap();
+        assert!(!root.join("staged.bin").exists());
+        assert_eq!(fs::read(root.join("destination.bin")).unwrap(), b"new");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_replace_rejects_destination_symlink() {
+        use std::os::unix::fs::symlink;
+        let root = sandbox();
+        fs::write(root.join("staged.bin"), b"new").unwrap();
+        fs::write(root.join("protected.bin"), b"old").unwrap();
+        symlink("protected.bin", root.join("destination.bin")).unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        assert!(matches!(
+            adapter.rename_file_replace(Path::new("staged.bin"), Path::new("destination.bin")),
+            Err(LocalError::UnsafeEntry)
+        ));
+        assert_eq!(fs::read(root.join("staged.bin")).unwrap(), b"new");
+        assert_eq!(fs::read(root.join("protected.bin")).unwrap(), b"old");
         fs::remove_dir_all(root).unwrap();
     }
 

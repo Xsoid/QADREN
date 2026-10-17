@@ -156,6 +156,62 @@ pub fn rename_file_noreplace(root: &File, from: &Path, to: &Path) -> Result<()> 
     Ok(())
 }
 
+/// Atomically replace one regular destination entry with a checked regular
+/// source entry. The caller owns the replacement policy and must persist the
+/// attempt before this effect. This primitive never follows a destination
+/// symlink and reports a post-publication identity mismatch as UNKNOWN.
+pub fn rename_file_replace(root: &File, from: &Path, to: &Path) -> Result<()> {
+    let (source_dir, source_name) = parent(root, from)?;
+    let (target_dir, target_name) = parent(root, to)?;
+    let source = file_identity(root, from)?;
+    let mut source_info = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe {
+        libc::fstatat(source_dir.as_raw_fd(), source_name.as_ptr(), source_info.as_mut_ptr(), libc::AT_SYMLINK_NOFOLLOW)
+    } != 0 {
+        return Err(LocalError::Io(io::Error::last_os_error()));
+    }
+    let source_info = unsafe { source_info.assume_init() };
+    #[cfg(target_os = "macos")]
+    reject_dataless_mutation(&source_info)?;
+    if source_info.st_mode & libc::S_IFMT != libc::S_IFREG
+        || source_info.st_nlink != 1
+        || source_info.st_dev as u64 != source.device
+        || source_info.st_ino != source.inode
+        || source_info.st_size.max(0) as u64 != source.size
+    {
+        return Err(LocalError::UnsafeEntry);
+    }
+    let mut target_info = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe {
+        libc::fstatat(target_dir.as_raw_fd(), target_name.as_ptr(), target_info.as_mut_ptr(), libc::AT_SYMLINK_NOFOLLOW)
+    } != 0 {
+        return Err(LocalError::Io(io::Error::last_os_error()));
+    }
+    let target_info = unsafe { target_info.assume_init() };
+    #[cfg(target_os = "macos")]
+    reject_dataless_mutation(&target_info)?;
+    if target_info.st_mode & libc::S_IFMT != libc::S_IFREG || target_info.st_nlink != 1 {
+        return Err(LocalError::UnsafeEntry);
+    }
+    #[cfg(target_os = "linux")]
+    let outcome = unsafe {
+        libc::renameat(source_dir.as_raw_fd(), source_name.as_ptr(), target_dir.as_raw_fd(), target_name.as_ptr())
+    };
+    #[cfg(target_os = "macos")]
+    let outcome = unsafe {
+        libc::renameatx_np(source_dir.as_raw_fd(), source_name.as_ptr(), target_dir.as_raw_fd(), target_name.as_ptr(), 0)
+    };
+    if outcome != 0 {
+        return Err(rename_failure(io::Error::last_os_error()));
+    }
+    if !matches!(file_identity(root, to), Ok(identity) if identity == source) {
+        return Err(LocalError::OutcomeUnknown(io::Error::other(
+            "replaced destination identity differs from staged source",
+        )));
+    }
+    Ok(())
+}
+
 fn name(path: &std::ffi::OsStr) -> Result<CString> {
     CString::new(path.as_bytes()).map_err(|_| LocalError::InvalidPath)
 }
