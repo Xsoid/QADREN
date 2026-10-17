@@ -1226,10 +1226,15 @@ impl Registry {
         if !valid_decision {
             return Err(RegistryError::InvalidSyncState);
         }
+        let state = if matches!(decision, "skip_transfer" | "keep_file") {
+            "completed"
+        } else {
+            "selected"
+        };
         self.changed(self.db.execute(
-            "UPDATE scenario_conflict_tasks SET source_is_left=?1,decision=?2,state='selected'
-             WHERE id=?3 AND state IN ('pending','selected')",
-            params![source_is_left, decision, id],
+            "UPDATE scenario_conflict_tasks SET source_is_left=?1,decision=?2,state=?3
+             WHERE id=?4 AND state IN ('pending','selected')",
+            params![source_is_left, decision, state, id],
         )?)
     }
 
@@ -1655,6 +1660,15 @@ mod tests {
         ));
         db.select_conflict_task(&deletion_id, Some(true), "keep_file")
             .unwrap();
+        assert_eq!(
+            db.list_conflict_tasks(&reference)
+                .unwrap()
+                .into_iter()
+                .find(|task| task.id == deletion_id)
+                .unwrap()
+                .state,
+            "completed"
+        );
     }
 
     #[test]
