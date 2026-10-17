@@ -368,6 +368,8 @@ pub unsafe extern "C" fn qadren_jobs_run_local_file_copy(
         Err(crate::job_execution::LocalFileCopyError::ConnectionUnavailable) => response(json!({"ok":false,"error":"local_connection_unavailable"})),
         Err(crate::job_execution::LocalFileCopyError::ScenarioUnavailable) => response(json!({"ok":false,"error":"scenario_unavailable"})),
         Err(crate::job_execution::LocalFileCopyError::ScenarioScopeMismatch) => response(json!({"ok":false,"error":"scenario_scope_mismatch"})),
+        Err(crate::job_execution::LocalFileCopyError::ConflictUnavailable) => response(json!({"ok":false,"error":"conflict_unavailable"})),
+        Err(crate::job_execution::LocalFileCopyError::ConflictStale) => response(json!({"ok":false,"error":"conflict_stale"})),
         Err(crate::job_execution::LocalFileCopyError::CapabilityUnavailable) => response(json!({"ok":false,"error":"local_capability_unavailable"})),
         Err(crate::job_execution::LocalFileCopyError::VerificationFailed) => response(json!({"ok":false,"error":"verification_failed"})),
         Err(crate::job_execution::LocalFileCopyError::OutcomeUnknown(_)) => response(json!({"ok":false,"error":"outcome_unknown"})),
@@ -415,6 +417,8 @@ pub unsafe extern "C" fn qadren_jobs_run_local_file_replace(
         Err(crate::job_execution::LocalFileCopyError::ConnectionUnavailable) => response(json!({"ok":false,"error":"local_connection_unavailable"})),
         Err(crate::job_execution::LocalFileCopyError::ScenarioUnavailable) => response(json!({"ok":false,"error":"scenario_unavailable"})),
         Err(crate::job_execution::LocalFileCopyError::ScenarioScopeMismatch) => response(json!({"ok":false,"error":"scenario_scope_mismatch"})),
+        Err(crate::job_execution::LocalFileCopyError::ConflictUnavailable) => response(json!({"ok":false,"error":"conflict_unavailable"})),
+        Err(crate::job_execution::LocalFileCopyError::ConflictStale) => response(json!({"ok":false,"error":"conflict_stale"})),
         Err(crate::job_execution::LocalFileCopyError::CapabilityUnavailable) => response(json!({"ok":false,"error":"local_capability_unavailable"})),
         Err(crate::job_execution::LocalFileCopyError::VerificationFailed) => response(json!({"ok":false,"error":"verification_failed"})),
         Err(crate::job_execution::LocalFileCopyError::OutcomeUnknown(_)) => response(json!({"ok":false,"error":"outcome_unknown"})),
@@ -457,6 +461,8 @@ pub unsafe extern "C" fn qadren_jobs_run_local_scenario_file_copy(
         Err(crate::job_execution::LocalFileCopyError::ConnectionUnavailable) => response(json!({"ok":false,"error":"local_connection_unavailable"})),
         Err(crate::job_execution::LocalFileCopyError::ScenarioUnavailable) => response(json!({"ok":false,"error":"scenario_unavailable"})),
         Err(crate::job_execution::LocalFileCopyError::ScenarioScopeMismatch) => response(json!({"ok":false,"error":"scenario_scope_mismatch"})),
+        Err(crate::job_execution::LocalFileCopyError::ConflictUnavailable) => response(json!({"ok":false,"error":"conflict_unavailable"})),
+        Err(crate::job_execution::LocalFileCopyError::ConflictStale) => response(json!({"ok":false,"error":"conflict_stale"})),
         Err(crate::job_execution::LocalFileCopyError::CapabilityUnavailable) => response(json!({"ok":false,"error":"local_capability_unavailable"})),
         Err(crate::job_execution::LocalFileCopyError::VerificationFailed) => response(json!({"ok":false,"error":"verification_failed"})),
         Err(crate::job_execution::LocalFileCopyError::OutcomeUnknown(_)) => response(json!({"ok":false,"error":"outcome_unknown"})),
@@ -498,12 +504,38 @@ pub unsafe extern "C" fn qadren_jobs_run_local_scenario_file_replace(
         Err(crate::job_execution::LocalFileCopyError::ConnectionUnavailable) => response(json!({"ok":false,"error":"local_connection_unavailable"})),
         Err(crate::job_execution::LocalFileCopyError::ScenarioUnavailable) => response(json!({"ok":false,"error":"scenario_unavailable"})),
         Err(crate::job_execution::LocalFileCopyError::ScenarioScopeMismatch) => response(json!({"ok":false,"error":"scenario_scope_mismatch"})),
+        Err(crate::job_execution::LocalFileCopyError::ConflictUnavailable) => response(json!({"ok":false,"error":"conflict_unavailable"})),
+        Err(crate::job_execution::LocalFileCopyError::ConflictStale) => response(json!({"ok":false,"error":"conflict_stale"})),
         Err(crate::job_execution::LocalFileCopyError::CapabilityUnavailable) => response(json!({"ok":false,"error":"local_capability_unavailable"})),
         Err(crate::job_execution::LocalFileCopyError::VerificationFailed) => response(json!({"ok":false,"error":"verification_failed"})),
         Err(crate::job_execution::LocalFileCopyError::OutcomeUnknown(_)) => response(json!({"ok":false,"error":"outcome_unknown"})),
         Err(crate::job_execution::LocalFileCopyError::InvalidRequest) => response(json!({"ok":false,"error":"invalid_request"})),
         Err(crate::job_execution::LocalFileCopyError::Local(_)) => response(json!({"ok":false,"error":"local_operation_failed"})),
         Err(crate::job_execution::LocalFileCopyError::Store(_)) => response(json!({"ok":false,"error":"job_store_unavailable"})),
+    }
+}
+
+/// Execute one selected conflict replacement after snapshot revalidation.
+/// # Safety
+/// Arguments must be valid, NUL-terminated strings for the duration of call.
+#[no_mangle]
+pub unsafe extern "C" fn qadren_jobs_run_local_scenario_conflict_replace(
+    database_path: *const c_char, registry_path: *const c_char,
+    conflict_id: *const c_char, job_id: *const c_char, consent: bool,
+) -> *mut c_char {
+    let (Some(database_path), Some(registry_path), Some(conflict_id), Some(job_id)) = (
+        input(database_path), input(registry_path), input(conflict_id), input(job_id),
+    ) else { return response(json!({"ok":false,"error":"invalid_request"})); };
+    match crate::job_execution::run_local_scenario_conflict_replace(
+        Path::new(database_path), Path::new(registry_path), conflict_id, job_id, consent,
+    ) {
+        Ok(crate::job_execution::LocalFileCopyStatus::Completed) => response(json!({"ok":true,"data":{"status":"completed"}})),
+        Ok(crate::job_execution::LocalFileCopyStatus::Existing(state)) => response(json!({"ok":true,"data":{"status":format!("{:?}", state).to_ascii_lowercase(),"existing":true}})),
+        Err(crate::job_execution::LocalFileCopyError::ConflictStale) => response(json!({"ok":false,"error":"conflict_stale"})),
+        Err(crate::job_execution::LocalFileCopyError::ConflictUnavailable) => response(json!({"ok":false,"error":"conflict_unavailable"})),
+        Err(crate::job_execution::LocalFileCopyError::ConsentRequired) => response(json!({"ok":false,"error":"consent_required"})),
+        Err(crate::job_execution::LocalFileCopyError::OutcomeUnknown(_)) => response(json!({"ok":false,"error":"outcome_unknown"})),
+        Err(_) => response(json!({"ok":false,"error":"conflict_replace_failed"})),
     }
 }
 
@@ -1312,5 +1344,52 @@ mod tests {
             JobStore::open(&database_path).unwrap().state("scenario-replace-ffi").unwrap(),
             Some(JobState::Completed)
         );
+    }
+
+    #[test]
+    fn selected_conflict_replace_executes_through_the_c_abi() {
+        let base = fs::canonicalize(std::env::temp_dir()).unwrap().join(format!(
+            "qadren-ffi-conflict-replace-{}",
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let source_root = base.join("source");
+        let destination_root = base.join("destination");
+        fs::create_dir_all(&source_root).unwrap();
+        fs::create_dir(&destination_root).unwrap();
+        fs::write(source_root.join("report.txt"), b"new contents").unwrap();
+        fs::write(destination_root.join("report.txt"), b"old contents").unwrap();
+        let database_path = base.join("jobs.sqlite3");
+        let registry_path = base.join("connections.sqlite3");
+        let registry = crate::registry::Registry::open(&registry_path).unwrap();
+        let source_connection = registry.add("local_filesystem", "Source Local").unwrap();
+        let destination_connection = registry.add("local_filesystem", "Destination Local").unwrap();
+        let scenario_id = registry.create_scenario(
+            "Conflict report", &source_connection, source_root.to_str().unwrap(),
+            &destination_connection, destination_root.to_str().unwrap(), "left_to_right",
+        ).unwrap();
+        let source = crate::local_fs::LocalFilesystem::open(&source_root).unwrap()
+            .stat(Path::new("report.txt")).unwrap();
+        let destination = crate::local_fs::LocalFilesystem::open(&destination_root).unwrap()
+            .stat(Path::new("report.txt")).unwrap();
+        let task = registry.queue_conflict_task(
+            &crate::model::ScenarioReference { scenario_id, revision: 1 }, "report.txt", "content", None,
+            Some(&crate::model::ConfirmedFileVersion { object_revision: source.object_revision, size: source.size, checksum_md5: None }),
+            Some(&crate::model::ConfirmedFileVersion { object_revision: destination.object_revision, size: destination.size, checksum_md5: None }),
+        ).unwrap();
+        registry.select_conflict_task(&task, Some(true), "replace_from_source").unwrap();
+        let database = CString::new(database_path.to_str().unwrap()).unwrap();
+        let registry_path = CString::new(registry_path.to_str().unwrap()).unwrap();
+        let task = CString::new(task).unwrap();
+        let job = CString::new("conflict-replace-ffi").unwrap();
+
+        let response = unsafe {
+            qadren_jobs_run_local_scenario_conflict_replace(
+                database.as_ptr(), registry_path.as_ptr(), task.as_ptr(), job.as_ptr(), true,
+            )
+        };
+        let message = unsafe { CStr::from_ptr(response) }.to_str().unwrap();
+        assert!(message.contains("\"completed\""), "{message}");
+        unsafe { qadren_jobs_free_string(response) };
+        assert_eq!(fs::read(destination_root.join("report.txt")).unwrap(), b"new contents");
     }
 }

@@ -117,10 +117,22 @@ pub enum LocalFileCopyError {
     ConnectionUnavailable,
     ScenarioUnavailable,
     ScenarioScopeMismatch,
+    ConflictUnavailable,
+    ConflictStale,
     VerificationFailed,
     OutcomeUnknown(LocalError),
     Local(LocalError),
     Store(JobStoreError),
+}
+
+fn matches_conflict_snapshot(
+    entry: &crate::local_fs::LocalEntry,
+    expected: &ConfirmedFileVersion,
+) -> bool {
+    !entry.is_directory
+        && entry.size == expected.size
+        && entry.object_revision.is_some()
+        && entry.object_revision == expected.object_revision
 }
 
 fn enabled_local_connection(registry_path: &Path, connection_id: &str) -> bool {
@@ -520,7 +532,7 @@ pub fn run_local_file_copy(
 ) -> Result<LocalFileCopyStatus, LocalFileCopyError> {
     run_local_file_copy_inner(
         database_path, registry_path, source_root, source_connection_id, source_relative,
-        destination_root, destination_connection_id, destination_relative, job_id, consent, None, false,
+        destination_root, destination_connection_id, destination_relative, job_id, consent, None, false, None,
     )
 }
 
@@ -534,7 +546,7 @@ pub fn run_local_file_replace(
 ) -> Result<LocalFileCopyStatus, LocalFileCopyError> {
     run_local_file_copy_inner(
         database_path, registry_path, source_root, source_connection_id, source_relative,
-        destination_root, destination_connection_id, destination_relative, job_id, consent, None, true,
+        destination_root, destination_connection_id, destination_relative, job_id, consent, None, true, None,
     )
 }
 
@@ -579,7 +591,7 @@ pub fn run_local_scenario_file_copy(
     run_local_file_copy_inner(
         database_path, registry_path, Path::new(source_root), source_connection_id, source_relative,
         Path::new(destination_root), destination_connection_id, destination_relative, job_id, consent,
-        Some((scenario_id, scenario_revision, is_left_to_right)), false,
+        Some((scenario_id, scenario_revision, is_left_to_right)), false, None,
     )
 }
 
@@ -601,6 +613,29 @@ pub fn run_local_scenario_file_replace(
     destination_relative: &Path,
     job_id: &str,
     consent: bool,
+) -> Result<LocalFileCopyStatus, LocalFileCopyError> {
+    run_local_scenario_file_replace_checked(
+        database_path, registry_path, scenario_id, scenario_revision, source_root,
+        source_connection_id, source_relative, destination_root, destination_connection_id,
+        destination_relative, job_id, consent, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_local_scenario_file_replace_checked(
+    database_path: &Path,
+    registry_path: &Path,
+    scenario_id: &str,
+    scenario_revision: u64,
+    source_root: &Path,
+    source_connection_id: &str,
+    source_relative: &Path,
+    destination_root: &Path,
+    destination_connection_id: &str,
+    destination_relative: &Path,
+    job_id: &str,
+    consent: bool,
+    expected_snapshots: Option<(&ConfirmedFileVersion, &ConfirmedFileVersion)>,
 ) -> Result<LocalFileCopyStatus, LocalFileCopyError> {
     let registry = Registry::open(registry_path).map_err(|_| LocalFileCopyError::ScenarioUnavailable)?;
     let scenario = registry
@@ -624,8 +659,80 @@ pub fn run_local_scenario_file_replace(
     run_local_file_copy_inner(
         database_path, registry_path, Path::new(source_root), source_connection_id, source_relative,
         Path::new(destination_root), destination_connection_id, destination_relative, job_id, consent,
-        Some((scenario_id, scenario_revision, is_left_to_right)), true,
+        Some((scenario_id, scenario_revision, is_left_to_right)), true, expected_snapshots,
     )
+}
+
+/// Execute the selected replacement decision from the independent conflict
+/// queue. Both dry-run snapshots must still match before a Job can be created.
+#[allow(clippy::too_many_arguments)]
+pub fn run_local_scenario_conflict_replace(
+    database_path: &Path,
+    registry_path: &Path,
+    conflict_id: &str,
+    job_id: &str,
+    consent: bool,
+) -> Result<LocalFileCopyStatus, LocalFileCopyError> {
+    let registry = Registry::open(registry_path).map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
+    let task = registry.selected_conflict_task(conflict_id)
+        .map_err(|_| LocalFileCopyError::ConflictUnavailable)?
+        .ok_or(LocalFileCopyError::ConflictUnavailable)?;
+    if task.kind != "content" || task.decision.as_deref() != Some("replace_from_source") {
+        return Err(LocalFileCopyError::ConflictUnavailable);
+    }
+    let (Some(source_is_left), Some(left), Some(right)) = (task.source_is_left, task.left.as_ref(), task.right.as_ref()) else {
+        return Err(LocalFileCopyError::ConflictUnavailable);
+    };
+    let scenario = registry.get_scenario_revision(&task.scenario.scenario_id, task.scenario.revision)
+        .map_err(|_| LocalFileCopyError::ConflictUnavailable)?
+        .ok_or(LocalFileCopyError::ConflictUnavailable)?;
+    let (source_root, source_connection, destination_root, destination_connection, source_expected, destination_expected) = if source_is_left {
+        (&scenario.left_root, &scenario.left_connection_id, &scenario.right_root, &scenario.right_connection_id, left, right)
+    } else {
+        (&scenario.right_root, &scenario.right_connection_id, &scenario.left_root, &scenario.left_connection_id, right, left)
+    };
+    let path = Path::new(&task.relative_path);
+    let source = LocalFilesystem::open(Path::new(source_root)).map_err(LocalFileCopyError::Local)?;
+    let destination = LocalFilesystem::open(Path::new(destination_root)).map_err(LocalFileCopyError::Local)?;
+    let current_source = match source.stat(path) {
+        Ok(entry) => entry,
+        Err(LocalError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            registry.mark_conflict_task_stale(conflict_id).map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
+            return Err(LocalFileCopyError::ConflictStale);
+        }
+        Err(error) => return Err(LocalFileCopyError::Local(error)),
+    };
+    let current_destination = match destination.stat(path) {
+        Ok(entry) => entry,
+        Err(LocalError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            registry.mark_conflict_task_stale(conflict_id).map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
+            return Err(LocalFileCopyError::ConflictStale);
+        }
+        Err(error) => return Err(LocalFileCopyError::Local(error)),
+    };
+    if !matches_conflict_snapshot(&current_source, source_expected)
+        || !matches_conflict_snapshot(&current_destination, destination_expected)
+    {
+        registry.mark_conflict_task_stale(conflict_id).map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
+        return Err(LocalFileCopyError::ConflictStale);
+    }
+    let result = run_local_scenario_file_replace_checked(
+        database_path, registry_path, &task.scenario.scenario_id, task.scenario.revision,
+        Path::new(source_root), source_connection, path,
+        Path::new(destination_root), destination_connection, path, job_id, consent,
+        Some((source_expected, destination_expected)),
+    );
+    let result = match result {
+        Err(LocalFileCopyError::ConflictStale) => {
+            registry.mark_conflict_task_stale(conflict_id).map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
+            return Err(LocalFileCopyError::ConflictStale);
+        }
+        result => result?,
+    };
+    if result == LocalFileCopyStatus::Completed {
+        registry.complete_conflict_task(conflict_id).map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
+    }
+    Ok(result)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -642,6 +749,7 @@ fn run_local_file_copy_inner(
     consent: bool,
     scenario: Option<(&str, u64, bool)>,
     replace_existing: bool,
+    expected_snapshots: Option<(&ConfirmedFileVersion, &ConfirmedFileVersion)>,
 ) -> Result<LocalFileCopyStatus, LocalFileCopyError> {
     if !valid_job_id(job_id)
         || source_connection_id.is_empty()
@@ -666,12 +774,19 @@ fn run_local_file_copy_inner(
     }
     let source_entry = source.stat(source_relative).map_err(LocalFileCopyError::Local)?;
     if source_entry.is_directory { return Err(LocalFileCopyError::InvalidRequest); }
-    match destination.stat(destination_relative) {
-        Ok(entry) if replace_existing && !entry.is_directory => {}
+    let destination_entry = match destination.stat(destination_relative) {
+        Ok(entry) if replace_existing && !entry.is_directory => Some(entry),
         Ok(_) if replace_existing => return Err(LocalFileCopyError::InvalidRequest),
         Ok(_) => return Err(LocalFileCopyError::TargetExists),
-        Err(LocalError::Io(error)) if !replace_existing && error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(LocalError::Io(error)) if !replace_existing && error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(LocalFileCopyError::Local(error)),
+    };
+    if let Some((source_expected, destination_expected)) = expected_snapshots {
+        if !matches_conflict_snapshot(&source_entry, source_expected)
+            || !destination_entry.as_ref().is_some_and(|entry| matches_conflict_snapshot(entry, destination_expected))
+        {
+            return Err(LocalFileCopyError::ConflictStale);
+        }
     }
     let source_path = source_relative.to_str().ok_or(LocalFileCopyError::InvalidRequest)?;
     let target_path = destination_relative.to_str().ok_or(LocalFileCopyError::InvalidRequest)?;
@@ -1588,6 +1703,66 @@ mod tests {
         let stored = JobStore::open(&database).unwrap().get("scenario-replace-1").unwrap().unwrap();
         assert_eq!(stored.scenario_id.as_deref(), Some(scenario.as_str()));
         assert_eq!(stored.scenario_revision, Some(1));
+    }
+
+    #[test]
+    fn selected_conflict_replace_revalidates_snapshots_and_completes_its_task() {
+        let (database, registry_path, source_root, source_connection) = local_fixture("conflict-replace");
+        let destination_root = source_root.parent().unwrap().join("conflict-replace-destination");
+        fs::create_dir(&source_root).unwrap();
+        fs::create_dir(&destination_root).unwrap();
+        fs::write(source_root.join("report.txt"), b"new report").unwrap();
+        fs::write(destination_root.join("report.txt"), b"old report").unwrap();
+        let registry = Registry::open(&registry_path).unwrap();
+        let destination_connection = registry.add("local_filesystem", "Destination").unwrap();
+        let scenario_id = registry.create_scenario(
+            "Conflict", &source_connection, source_root.to_str().unwrap(),
+            &destination_connection, destination_root.to_str().unwrap(), "left_to_right",
+        ).unwrap();
+        let source = LocalFilesystem::open(&source_root).unwrap().stat(Path::new("report.txt")).unwrap();
+        let destination = LocalFilesystem::open(&destination_root).unwrap().stat(Path::new("report.txt")).unwrap();
+        let task = registry.queue_conflict_task(
+            &ScenarioReference { scenario_id: scenario_id.clone(), revision: 1 }, "report.txt", "content", None,
+            Some(&ConfirmedFileVersion { object_revision: source.object_revision, size: source.size, checksum_md5: None }),
+            Some(&ConfirmedFileVersion { object_revision: destination.object_revision, size: destination.size, checksum_md5: None }),
+        ).unwrap();
+        registry.select_conflict_task(&task, Some(true), "replace_from_source").unwrap();
+        assert_eq!(run_local_scenario_conflict_replace(&database, &registry_path, &task, "conflict-replace-1", true).unwrap(), LocalFileCopyStatus::Completed);
+        assert_eq!(fs::read(destination_root.join("report.txt")).unwrap(), b"new report");
+        assert_eq!(registry.selected_conflict_task(&task).unwrap(), None);
+    }
+
+    #[test]
+    fn selected_conflict_replace_marks_task_stale_when_the_destination_changed() {
+        let (database, registry_path, source_root, source_connection) = local_fixture("conflict-replace-stale");
+        let destination_root = source_root.parent().unwrap().join("conflict-replace-stale-destination");
+        fs::create_dir(&source_root).unwrap();
+        fs::create_dir(&destination_root).unwrap();
+        fs::write(source_root.join("report.txt"), b"source version").unwrap();
+        fs::write(destination_root.join("report.txt"), b"queued destination").unwrap();
+        let registry = Registry::open(&registry_path).unwrap();
+        let destination_connection = registry.add("local_filesystem", "Destination").unwrap();
+        let scenario_id = registry.create_scenario(
+            "Conflict", &source_connection, source_root.to_str().unwrap(),
+            &destination_connection, destination_root.to_str().unwrap(), "left_to_right",
+        ).unwrap();
+        let source = LocalFilesystem::open(&source_root).unwrap().stat(Path::new("report.txt")).unwrap();
+        let destination = LocalFilesystem::open(&destination_root).unwrap().stat(Path::new("report.txt")).unwrap();
+        let task = registry.queue_conflict_task(
+            &ScenarioReference { scenario_id: scenario_id.clone(), revision: 1 }, "report.txt", "content", None,
+            Some(&ConfirmedFileVersion { object_revision: source.object_revision, size: source.size, checksum_md5: None }),
+            Some(&ConfirmedFileVersion { object_revision: destination.object_revision, size: destination.size, checksum_md5: None }),
+        ).unwrap();
+        registry.select_conflict_task(&task, Some(true), "replace_from_source").unwrap();
+        fs::write(destination_root.join("report.txt"), b"changed after dry run").unwrap();
+
+        assert!(matches!(
+            run_local_scenario_conflict_replace(&database, &registry_path, &task, "conflict-replace-stale-1", true),
+            Err(LocalFileCopyError::ConflictStale)
+        ));
+        assert_eq!(fs::read(destination_root.join("report.txt")).unwrap(), b"changed after dry run");
+        let stored = registry.list_conflict_tasks(&ScenarioReference { scenario_id, revision: 1 }).unwrap();
+        assert_eq!(stored.into_iter().find(|entry| entry.id == task).unwrap().state, "stale");
     }
 
     #[test]

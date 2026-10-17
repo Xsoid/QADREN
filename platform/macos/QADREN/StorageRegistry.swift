@@ -54,6 +54,11 @@ private func runLocalScenarioReplaceJob(
     _ destinationRoot: UnsafePointer<CChar>?, _ destinationConnection: UnsafePointer<CChar>?, _ destinationRelative: UnsafePointer<CChar>?,
     _ jobID: UnsafePointer<CChar>?, _ consent: Bool
 ) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_jobs_run_local_scenario_conflict_replace")
+private func runLocalScenarioConflictReplaceJob(
+    _ jobs: UnsafePointer<CChar>?, _ registry: UnsafePointer<CChar>?,
+    _ conflictID: UnsafePointer<CChar>?, _ jobID: UnsafePointer<CChar>?, _ consent: Bool
+) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_jobs_dispatch_scenario_copy_baselines")
 private func dispatchScenarioCopyBaselines(
     _ jobs: UnsafePointer<CChar>?, _ registry: UnsafePointer<CChar>?
@@ -408,6 +413,18 @@ enum StorageRegistryBridge {
                 }
             }
         }
+    }
+
+    static func executeScenarioConflictReplace(id: String) throws {
+        let registry = try path
+        let jobs = try JobInventory.paths().database
+        let jobID = "scenario-conflict-replace-" + UUID().uuidString.lowercased()
+        let pointer = jobs.withCString { jobs in registry.withCString { registry in
+            id.withCString { id in jobID.withCString { jobID in
+                runLocalScenarioConflictReplaceJob(jobs, registry, id, jobID, true)
+            }}
+        }}
+        let _: ScenarioJobStatus = try unwrap(pointer, as: ScenarioJobStatus.self)
     }
 
     /// Submit one `create` proposal after its separate materialization consent.

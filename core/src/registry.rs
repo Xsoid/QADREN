@@ -1236,6 +1236,46 @@ impl Registry {
         Ok(tasks)
     }
 
+    pub fn mark_conflict_task_stale(&self, id: &str) -> Result<()> {
+        self.changed(self.db.execute(
+            "UPDATE scenario_conflict_tasks SET state='stale' WHERE id=?1 AND state IN ('pending','selected')",
+            params![id],
+        )?)
+    }
+
+    pub fn complete_conflict_task(&self, id: &str) -> Result<()> {
+        self.changed(self.db.execute(
+            "UPDATE scenario_conflict_tasks SET state='completed' WHERE id=?1 AND state='selected'",
+            params![id],
+        )?)
+    }
+
+    /// Read one task only when it is still eligible for an explicit effect.
+    /// Callers must revalidate both persisted snapshots before acting.
+    pub fn selected_conflict_task(&self, id: &str) -> Result<Option<ScenarioConflictTask>> {
+        let Some(task) = self
+            .db
+            .query_row(
+                "SELECT scenario_id,scenario_revision FROM scenario_conflict_tasks
+             WHERE id=?1 AND state='selected'",
+                params![id],
+                |row| {
+                    Ok(ScenarioReference {
+                        scenario_id: row.get(0)?,
+                        revision: row.get::<_, i64>(1)? as u64,
+                    })
+                },
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        Ok(self
+            .list_conflict_tasks(&task)?
+            .into_iter()
+            .find(|entry| entry.id == id))
+    }
+
     pub fn select_conflict_task(
         &self,
         id: &str,
@@ -1673,6 +1713,13 @@ mod tests {
         assert_eq!(selected[0].source_is_left, Some(false));
         assert_eq!(selected[0].decision.as_deref(), Some("replace_from_source"));
         assert_eq!(selected[0].state, "selected");
+        assert_eq!(db.selected_conflict_task(&id).unwrap().unwrap().id, id);
+        db.mark_conflict_task_stale(&id).unwrap();
+        assert!(db.selected_conflict_task(&id).unwrap().is_none());
+        assert_eq!(
+            db.list_conflict_tasks(&reference).unwrap()[0].state,
+            "stale"
+        );
 
         let reopened = db
             .queue_conflict_task(

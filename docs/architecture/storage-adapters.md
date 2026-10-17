@@ -49,7 +49,9 @@ The Rust core, FFI, and File Manager have `local_copy_replace` for one manually 
 
 For a Scenario `Create`, the source and destination relative paths must be equal and the Job stores the exact Scenario revision. The source and destination local metadata revisions are saved to a JobStore outbox in the same transaction as Job completion. The app delivers pending entries before a Scenario dry-run. Delivery records the revision-bound `FileSyncState` in Registry. Delivery can repeat after a crash. It does not repeat the copy.
 
-For a Scenario `Update`, the planner must propose `update` from the permitted source to the unchanged destination. A bidirectional Scenario can propose either direction. The app requires separate destructive consent for each item. Rust reloads the exact Scenario revision and checks both endpoint roots, both connection IDs, and the permitted direction before it creates a `local_copy_replace` Job. The Job uses the controlled replacement protocol. Batch and autonomous multi-item execution and conflict execution are not implemented.
+For a Scenario `Update`, the planner must propose `update` from the permitted source to the unchanged destination. A bidirectional Scenario can propose either direction. The app requires separate destructive consent for each item. Rust reloads the exact Scenario revision and checks both endpoint roots, both connection IDs, and the permitted direction before it creates a `local_copy_replace` Job. The Job uses the controlled replacement protocol.
+
+The alternative conflict queue stores exact metadata snapshots for both sides. A selected `replace_from_source` decision can run only after a second snapshot check, immediately before its durable replacement attempt. A changed or missing source or destination marks the task `stale` and starts no replacement. Completion marks the task complete. The queue remains independent from JobStore and does not block ordinary transfers. `replace_if_newer` and deletion decisions do not execute an external effect in Release 1. Batch and autonomous multi-item execution are not implemented.
 
 ## New adapters
 

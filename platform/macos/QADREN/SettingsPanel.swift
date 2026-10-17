@@ -593,6 +593,7 @@ private struct ScenarioDryRunView: View {
     @State private var conflictTasks: [ScenarioConflictTask] = []
     @State private var leftSnapshot: [ScenarioSnapshotItem] = []
     @State private var rightSnapshot: [ScenarioSnapshotItem] = []
+    @State private var pendingConflictReplace: ScenarioConflictTask?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -665,13 +666,14 @@ private struct ScenarioDryRunView: View {
                 Divider()
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Альтернативная очередь конфликтов").font(.title2.bold())
-                    Text("Эта очередь независима от обычных переносов. Выберите источник, затем решение. Сохранение решения пока не запускает перенос или удаление.")
+                    Text("Эта очередь независима от обычных переносов. Выберите источник, затем решение. Замена из источника требует отдельного подтверждения.")
                         .font(.callout).foregroundStyle(.secondary)
                     ForEach(conflictTasks) { task in
                         ScenarioConflictTaskView(
                             scenario: scenario,
                             task: task,
-                            saveDecision: saveConflictDecision
+                            saveDecision: saveConflictDecision,
+                            executeReplace: { pendingConflictReplace = $0 }
                         )
                     }
                 }
@@ -694,6 +696,14 @@ private struct ScenarioDryRunView: View {
             Button("Загрузить и заменить", role: .destructive) { executePendingUpdate() }
         } message: {
             Text("macOS может скачать исходный файл из File Provider на этот Mac. QADREN заменит только этот существующий файл назначения и сохранит Job с точной ревизией сценария.")
+        }
+        .alert("Выполнить решение конфликта?", isPresented: Binding(
+            get: { pendingConflictReplace != nil }, set: { if !$0 { pendingConflictReplace = nil } }
+        )) {
+            Button("Отмена", role: .cancel) { pendingConflictReplace = nil }
+            Button("Загрузить и заменить", role: .destructive) { executePendingConflictReplace() }
+        } message: {
+            Text("QADREN ещё раз проверит обе стороны по сохранённому снимку. При изменении задача станет устаревшей, а замена не начнётся.")
         }
     }
 
@@ -754,6 +764,18 @@ private struct ScenarioDryRunView: View {
         }
     }
 
+    private func executePendingConflictReplace() {
+        guard let task = pendingConflictReplace else { return }
+        pendingConflictReplace = nil
+        do {
+            try StorageRegistryBridge.executeScenarioConflictReplace(id: task.id)
+            loadConflictTasks()
+        } catch {
+            self.error = "Не удалось выполнить решение конфликта: " + error.localizedDescription
+            loadConflictTasks()
+        }
+    }
+
     private func executePendingCreate() {
         guard let item = pendingCreate else { return }
         pendingCreate = nil
@@ -802,16 +824,19 @@ private struct ScenarioConflictTaskView: View {
     let scenario: ScenarioEntry
     let task: ScenarioConflictTask
     let saveDecision: (ScenarioConflictTask, Bool, String) -> Void
+    let executeReplace: (ScenarioConflictTask) -> Void
     @State private var sourceIsLeft: Bool?
 
     init(
         scenario: ScenarioEntry,
         task: ScenarioConflictTask,
-        saveDecision: @escaping (ScenarioConflictTask, Bool, String) -> Void
+        saveDecision: @escaping (ScenarioConflictTask, Bool, String) -> Void,
+        executeReplace: @escaping (ScenarioConflictTask) -> Void
     ) {
         self.scenario = scenario
         self.task = task
         self.saveDecision = saveDecision
+        self.executeReplace = executeReplace
         _sourceIsLeft = State(initialValue: task.source_is_left)
     }
 
@@ -853,6 +878,11 @@ private struct ScenarioConflictTaskView: View {
                 if let decision = task.decision {
                     Text("Сохранённое решение: \(decisionTitle(decision))")
                         .font(.caption).foregroundStyle(.secondary)
+                }
+                if task.state == "selected" && task.decision == "replace_from_source" {
+                    Button("Выполнить замену из источника", role: .destructive) {
+                        executeReplace(task)
+                    }
                 }
             }
         }
