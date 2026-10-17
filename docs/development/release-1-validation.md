@@ -17,14 +17,14 @@ Release 1 is a local-first macOS product. It includes one Rust JobStore, Local F
 
 ## Current Recorded Local Evidence
 
-The executable baseline is `a0b75f7`.
+The executable baseline is `14bd119`.
 
 | Check | Result | Evidence scope |
 |---|---|---|
-| `cargo test --manifest-path core/Cargo.toml --lib` | PASS, 265 tests | Rust Core on `a0b75f7` |
-| `scripts/test-macos-local-workspace.sh` | PASS | SwiftUI to Rust Local file-copy bridge on `a0b75f7` |
-| `scripts/test-macos-scenario-dry-run.sh` | PASS | SwiftUI Scenario metadata and FFI bridge on `a0b75f7` |
-| `./script/build_and_run.sh --verify` | PASS | Unsigned local development bundle and running QADREN process on `a0b75f7` |
+| `cargo test --manifest-path core/Cargo.toml --lib` | PASS, 266 tests | Rust Core on `14bd119` |
+| `scripts/test-macos-local-workspace.sh` | PASS | SwiftUI to Rust Local file-copy bridge on `14bd119` |
+| `scripts/test-macos-scenario-dry-run.sh` | PASS | SwiftUI Scenario metadata and FFI bridge on `14bd119` |
+| `./script/build_and_run.sh --verify` | PASS | Unsigned local development bundle and running QADREN process on `14bd119` |
 
 ## Current Capability Evidence Matrix
 
@@ -34,7 +34,7 @@ The executable baseline is `a0b75f7`.
 | App-owned mock operation | No-overwrite, durable-attempt, verification, and recovery tests exist in `job_execution.rs`. | User content transfer. The mock is not a release substitute. |
 | Local Filesystem metadata, `mkdir`, and copy | Rust and SwiftUI interfaces provide confirmed one-file no-overwrite copy through JobStore. Local metadata revisions support a revision-bound Scenario baseline. | A real File Provider materialization run. |
 | macOS File Provider safety | A copy requires a user-confirmed, exact-scope durable decision before opening the source. | A real File Provider materialization run with a user-selected provider item. |
-| Scenario planning | Dry-run FFI passes. Enabled local connections gate the metadata snapshot. User-confirmed `Create` and one-way `Update` items submit pinned Jobs and write `FileSyncState` through a durable outbox. | Two-way execution, conflict handling, and recovery. |
+| Scenario planning | Dry-run FFI passes. Enabled local connections gate the metadata snapshot. User-confirmed `Create` and `Update` items submit pinned Jobs in a permitted direction and write `FileSyncState` through a durable outbox. | Batch and autonomous multi-item execution, conflict handling, and recovery. |
 | Scheduler dispatch | Durable schedule dispatch can queue a Job. | Independent timer, app-exit lifecycle, event debounce, and real Scenario execution. |
 | Native UI | Design system, widget canvas, settings, and local file navigation exist. | Full visual acceptance, removal of legacy mock actions, and real-copy interaction. |
 | Distribution | The macOS build script creates an unsigned development bundle. | Signing, notarization, clean install, restart validation, and release package. |
