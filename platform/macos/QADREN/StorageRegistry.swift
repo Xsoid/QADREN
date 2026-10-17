@@ -24,7 +24,8 @@ private func scenarioDryRun(
 @_silgen_name("qadren_scenario_conflicts_queue")
 private func scenarioConflictQueue(
     _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?, _ revision: UInt64,
-    _ relativePath: UnsafePointer<CChar>?, _ kind: UnsafePointer<CChar>?, _ sourceIsLeft: Int32
+    _ relativePath: UnsafePointer<CChar>?, _ kind: UnsafePointer<CChar>?, _ sourceIsLeft: Int32,
+    _ leftSnapshot: UnsafePointer<CChar>?, _ rightSnapshot: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_scenario_conflicts_list")
 private func scenarioConflictList(
@@ -167,6 +168,8 @@ private struct ScenarioBaselineDispatchStatus: Decodable {
 }
 struct ScenarioPlanAction: Decodable {
     let kind: String
+    let left: ScenarioSnapshotItem?
+    let right: ScenarioSnapshotItem?
     let from_left: Bool?
     let on_left: Bool?
     let reason: String?
@@ -347,20 +350,26 @@ enum StorageRegistryBridge {
     /// It neither creates a Job nor reads or changes file content.
     static func queueScenarioConflict(
         scenario: ScenarioEntry, relativePath: String, kind: String,
+        left: ScenarioSnapshotItem?, right: ScenarioSnapshotItem?,
         sourceIsLeft: Bool? = nil, databasePath: String? = nil
     ) throws -> String {
         let database = try databasePath ?? path
         let source = sourceIsLeft.map { $0 ? Int32(1) : Int32(0) } ?? -1
+        let encoder = JSONEncoder()
+        let leftJSON = String(decoding: try encoder.encode(left), as: UTF8.self)
+        let rightJSON = String(decoding: try encoder.encode(right), as: UTF8.self)
         let result: NewConnection = try database.withCString { database in
             try scenario.id.withCString { scenarioID in
                 try relativePath.withCString { relativePath in
                     try kind.withCString { kind in
-                        try unwrap(
-                            scenarioConflictQueue(
-                                database, scenarioID, scenario.revision, relativePath, kind, source
-                            ),
-                            as: NewConnection.self
-                        )
+                        try leftJSON.withCString { leftJSON in
+                            try rightJSON.withCString { rightJSON in
+                                try unwrap(
+                                    scenarioConflictQueue(database, scenarioID, scenario.revision, relativePath, kind, source, leftJSON, rightJSON),
+                                    as: NewConnection.self
+                                )
+                            }
+                        }
                     }
                 }
             }

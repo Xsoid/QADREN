@@ -127,6 +127,10 @@ pub struct ScenarioConflictTask {
     pub scenario: ScenarioReference,
     pub relative_path: String,
     pub kind: String,
+    /// Metadata observed by the authorized dry-run. These values are not
+    /// content and must be revalidated before an effect is attempted.
+    pub left: Option<ConfirmedFileVersion>,
+    pub right: Option<ConfirmedFileVersion>,
     pub source_is_left: Option<bool>,
     pub decision: Option<String>,
     pub state: String,
@@ -154,7 +158,7 @@ impl Registry {
         }
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 10 {
+        if version > 11 {
             return Err(RegistryError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -327,6 +331,19 @@ impl Registry {
                     UNIQUE(scenario_id,scenario_revision,relative_path,kind)
                  );
                  PRAGMA user_version = 10;
+                 COMMIT;",
+            )?;
+        }
+        if version <= 10 {
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE scenario_conflict_tasks ADD COLUMN left_object_revision TEXT;
+                 ALTER TABLE scenario_conflict_tasks ADD COLUMN left_size INTEGER;
+                 ALTER TABLE scenario_conflict_tasks ADD COLUMN left_checksum_md5 TEXT;
+                 ALTER TABLE scenario_conflict_tasks ADD COLUMN right_object_revision TEXT;
+                 ALTER TABLE scenario_conflict_tasks ADD COLUMN right_size INTEGER;
+                 ALTER TABLE scenario_conflict_tasks ADD COLUMN right_checksum_md5 TEXT;
+                 PRAGMA user_version = 11;
                  COMMIT;",
             )?;
         }
@@ -1112,11 +1129,18 @@ impl Registry {
         relative_path: &str,
         kind: &str,
         source_is_left: Option<bool>,
+        left: Option<&ConfirmedFileVersion>,
+        right: Option<&ConfirmedFileVersion>,
     ) -> Result<String> {
         if !valid_sync_path(relative_path)
             || !matches!(kind, "content" | "deletion")
             || scenario.scenario_id.is_empty()
             || scenario.revision == 0
+        {
+            return Err(RegistryError::InvalidSyncState);
+        }
+        if (kind == "content" && (left.is_none() || right.is_none()))
+            || (kind == "deletion" && left.is_none() && right.is_none())
         {
             return Err(RegistryError::InvalidSyncState);
         }
@@ -1136,17 +1160,29 @@ impl Registry {
             .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
         self.db.execute(
             "INSERT INTO scenario_conflict_tasks(
-                id,scenario_id,scenario_revision,relative_path,kind,source_is_left,decision,state
-             ) VALUES(?1,?2,?3,?4,?5,?6,NULL,'pending')
+                id,scenario_id,scenario_revision,relative_path,kind,source_is_left,decision,state,
+                left_object_revision,left_size,left_checksum_md5,
+                right_object_revision,right_size,right_checksum_md5
+             ) VALUES(?1,?2,?3,?4,?5,?6,NULL,'pending',?7,?8,?9,?10,?11,?12)
              ON CONFLICT(scenario_id,scenario_revision,relative_path,kind) DO UPDATE SET
-                source_is_left=excluded.source_is_left, decision=NULL, state='pending'",
+                source_is_left=excluded.source_is_left, decision=NULL, state='pending',
+                left_object_revision=excluded.left_object_revision,left_size=excluded.left_size,
+                left_checksum_md5=excluded.left_checksum_md5,
+                right_object_revision=excluded.right_object_revision,right_size=excluded.right_size,
+                right_checksum_md5=excluded.right_checksum_md5",
             params![
                 id,
                 scenario.scenario_id,
                 scenario.revision as i64,
                 relative_path,
                 kind,
-                source_is_left
+                source_is_left,
+                left.and_then(|value| value.object_revision.as_deref()),
+                left.map(|value| value.size as i64),
+                left.and_then(|value| value.checksum_md5.as_deref()),
+                right.and_then(|value| value.object_revision.as_deref()),
+                right.map(|value| value.size as i64),
+                right.and_then(|value| value.checksum_md5.as_deref())
             ],
         )?;
         self.db
@@ -1169,7 +1205,9 @@ impl Registry {
         scenario: &ScenarioReference,
     ) -> Result<Vec<ScenarioConflictTask>> {
         let mut statement = self.db.prepare(
-            "SELECT id,scenario_id,scenario_revision,relative_path,kind,source_is_left,decision,state
+            "SELECT id,scenario_id,scenario_revision,relative_path,kind,source_is_left,decision,state,
+                    left_object_revision,left_size,left_checksum_md5,
+                    right_object_revision,right_size,right_checksum_md5
              FROM scenario_conflict_tasks WHERE scenario_id=?1 AND scenario_revision=?2
              ORDER BY state, relative_path, id",
         )?;
@@ -1185,6 +1223,8 @@ impl Registry {
                         },
                         relative_path: row.get(3)?,
                         kind: row.get(4)?,
+                        left: decode_confirmed_version(row, 8, 9, 10)?,
+                        right: decode_confirmed_version(row, 11, 12, 13)?,
                         source_is_left: row.get(5)?,
                         decision: row.get(6)?,
                         state: row.get(7)?,
@@ -1371,6 +1411,14 @@ fn validate_schedule(timezone: &str, weekday: u8, hour: u8, minute: u8) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn conflict_snapshot(revision: &str) -> ConfirmedFileVersion {
+        ConfirmedFileVersion {
+            object_revision: Some(revision.into()),
+            size: 3,
+            checksum_md5: None,
+        }
+    }
 
     #[test]
     fn registry_create_list_rename_disable_remove() {
@@ -1591,7 +1639,14 @@ mod tests {
         };
 
         let id = db
-            .queue_conflict_task(&reference, "report.pdf", "content", None)
+            .queue_conflict_task(
+                &reference,
+                "report.pdf",
+                "content",
+                None,
+                Some(&conflict_snapshot("left")),
+                Some(&conflict_snapshot("right")),
+            )
             .unwrap();
         assert_eq!(
             db.list_conflict_tasks(&reference).unwrap(),
@@ -1600,6 +1655,8 @@ mod tests {
                 scenario: reference.clone(),
                 relative_path: "report.pdf".into(),
                 kind: "content".into(),
+                left: Some(conflict_snapshot("left")),
+                right: Some(conflict_snapshot("right")),
                 source_is_left: None,
                 decision: None,
                 state: "pending".into(),
@@ -1618,7 +1675,14 @@ mod tests {
         assert_eq!(selected[0].state, "selected");
 
         let reopened = db
-            .queue_conflict_task(&reference, "report.pdf", "content", None)
+            .queue_conflict_task(
+                &reference,
+                "report.pdf",
+                "content",
+                None,
+                Some(&conflict_snapshot("left")),
+                Some(&conflict_snapshot("right")),
+            )
             .unwrap();
         assert_eq!(reopened, id);
         let reopened_task = db.list_conflict_tasks(&reference).unwrap();
@@ -1640,7 +1704,14 @@ mod tests {
             revision: 1,
         };
         let content_id = db
-            .queue_conflict_task(&reference, "report.pdf", "content", None)
+            .queue_conflict_task(
+                &reference,
+                "report.pdf",
+                "content",
+                None,
+                Some(&conflict_snapshot("left")),
+                Some(&conflict_snapshot("right")),
+            )
             .unwrap();
         assert!(matches!(
             db.select_conflict_task(&content_id, None, "skip_transfer"),
@@ -1652,7 +1723,14 @@ mod tests {
         ));
 
         let deletion_id = db
-            .queue_conflict_task(&reference, "removed.txt", "deletion", None)
+            .queue_conflict_task(
+                &reference,
+                "removed.txt",
+                "deletion",
+                None,
+                Some(&conflict_snapshot("left")),
+                None,
+            )
             .unwrap();
         assert!(matches!(
             db.select_conflict_task(&deletion_id, Some(true), "replace_if_newer"),

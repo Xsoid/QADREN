@@ -50,6 +50,16 @@ impl From<ObservedFileInput> for ObservedFile {
     }
 }
 
+fn conflict_snapshot(
+    value: Option<ObservedFileInput>,
+) -> Option<crate::model::ConfirmedFileVersion> {
+    value.map(|value| crate::model::ConfirmedFileVersion {
+        object_revision: value.object_revision,
+        size: value.size,
+        checksum_md5: value.checksum_md5,
+    })
+}
+
 fn side_change_value(value: SideChange) -> &'static str {
     match value {
         SideChange::Unchanged => "unchanged",
@@ -102,6 +112,8 @@ fn conflict_task_value(task: crate::registry::ScenarioConflictTask) -> Value {
         "scenario_revision": task.scenario.revision,
         "relative_path": task.relative_path,
         "kind": task.kind,
+        "left": task.left.map(|v| json!({"object_revision":v.object_revision,"size":v.size,"checksum_md5":v.checksum_md5})),
+        "right": task.right.map(|v| json!({"object_revision":v.object_revision,"size":v.size,"checksum_md5":v.checksum_md5})),
         "source_is_left": task.source_is_left,
         "decision": task.decision,
         "state": task.state,
@@ -282,18 +294,38 @@ pub extern "C" fn qadren_scenario_conflicts_queue(
     relative_path: *const c_char,
     kind: *const c_char,
     source_is_left_value: i32,
+    left_snapshot_json: *const c_char,
+    right_snapshot_json: *const c_char,
 ) -> *mut c_char {
-    let (Some(scenario_id), Some(relative_path), Some(kind), Some(source_is_left)) = (
+    let (
+        Some(scenario_id),
+        Some(relative_path),
+        Some(kind),
+        Some(source_is_left),
+        Some(left_json),
+        Some(right_json),
+    ) = (
         input(scenario_id),
         input(relative_path),
         input(kind),
         source_is_left(source_is_left_value),
-    ) else {
+        input(left_snapshot_json),
+        input(right_snapshot_json),
+    )
+    else {
         return output(json!({"ok":false,"error":"invalid_input"}));
     };
     if scenario_id.is_empty() || revision == 0 {
         return output(json!({"ok":false,"error":"invalid_input"}));
     }
+    let (Ok(left), Ok(right)) = (
+        serde_json::from_str::<Option<ObservedFileInput>>(&left_json),
+        serde_json::from_str::<Option<ObservedFileInput>>(&right_json),
+    ) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    let left = conflict_snapshot(left);
+    let right = conflict_snapshot(right);
     let reference = ScenarioReference {
         scenario_id,
         revision,
@@ -304,6 +336,8 @@ pub extern "C" fn qadren_scenario_conflicts_queue(
             &relative_path,
             &kind,
             source_is_left,
+            left.as_ref(),
+            right.as_ref(),
         )?}))
     })
 }
@@ -1178,6 +1212,8 @@ mod tests {
         let scenario_id = CString::new(scenario_id).unwrap();
         let relative_path = CString::new("report.pdf").unwrap();
         let content = CString::new("content").unwrap();
+        let left_snapshot = CString::new(r#"{"relative_path":"report.pdf","object_revision":"left-v1","size":3,"checksum_md5":null}"#).unwrap();
+        let right_snapshot = CString::new(r#"{"relative_path":"report.pdf","object_revision":"right-v1","size":3,"checksum_md5":null}"#).unwrap();
         let queued_pointer = qadren_scenario_conflicts_queue(
             database.as_ptr(),
             scenario_id.as_ptr(),
@@ -1185,6 +1221,8 @@ mod tests {
             relative_path.as_ptr(),
             content.as_ptr(),
             -1,
+            left_snapshot.as_ptr(),
+            right_snapshot.as_ptr(),
         );
         let queued: Value =
             serde_json::from_str(unsafe { CStr::from_ptr(queued_pointer) }.to_str().unwrap())

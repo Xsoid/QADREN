@@ -591,6 +591,8 @@ private struct ScenarioDryRunView: View {
     @State private var pendingCreate: ScenarioPlanItem?
     @State private var pendingUpdate: ScenarioPlanItem?
     @State private var conflictTasks: [ScenarioConflictTask] = []
+    @State private var leftSnapshot: [ScenarioSnapshotItem] = []
+    @State private var rightSnapshot: [ScenarioSnapshotItem] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -707,6 +709,8 @@ private struct ScenarioDryRunView: View {
             let right = try StorageRegistryBridge.localScenarioSnapshot(
                 root: scenario.right_root, connectionID: scenario.right_connection_id
             )
+            leftSnapshot = left
+            rightSnapshot = right
             plan = try StorageRegistryBridge.dryRunScenario(
                 id: scenario.id, revision: scenario.revision, left: left, right: right
             )
@@ -721,7 +725,9 @@ private struct ScenarioDryRunView: View {
         let kind = item.action.kind == "conflict" ? "content" : "deletion"
         do {
             _ = try StorageRegistryBridge.queueScenarioConflict(
-                scenario: scenario, relativePath: item.relative_path, kind: kind
+                scenario: scenario, relativePath: item.relative_path, kind: kind,
+                left: leftSnapshot.first { $0.relative_path == item.relative_path },
+                right: rightSnapshot.first { $0.relative_path == item.relative_path }
             )
             loadConflictTasks()
         } catch {

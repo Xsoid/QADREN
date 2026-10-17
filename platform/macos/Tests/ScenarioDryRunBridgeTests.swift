@@ -143,7 +143,9 @@ struct ScenarioDryRunBridgeTests {
             revision: 1
         )
         let conflictID = try StorageRegistryBridge.queueScenarioConflict(
-            scenario: scenario, relativePath: "report.txt", kind: "content", databasePath: database
+            scenario: scenario, relativePath: "report.txt", kind: "content",
+            left: leftSnapshot[0], right: leftSnapshot[0],
+            databasePath: database
         )
         var conflicts = try StorageRegistryBridge.listScenarioConflicts(
             scenario: scenario, databasePath: database
