@@ -33,6 +33,13 @@ private func runLocalFileCopyJob(
     _ destinationRoot: UnsafePointer<CChar>?, _ destinationConnection: UnsafePointer<CChar>?, _ destinationRelative: UnsafePointer<CChar>?,
     _ jobID: UnsafePointer<CChar>?, _ consent: Bool
 ) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_jobs_run_local_file_replace")
+private func runLocalFileReplaceJob(
+    _ database: UnsafePointer<CChar>?, _ registry: UnsafePointer<CChar>?,
+    _ sourceRoot: UnsafePointer<CChar>?, _ sourceConnection: UnsafePointer<CChar>?, _ sourceRelative: UnsafePointer<CChar>?,
+    _ destinationRoot: UnsafePointer<CChar>?, _ destinationConnection: UnsafePointer<CChar>?, _ destinationRelative: UnsafePointer<CChar>?,
+    _ jobID: UnsafePointer<CChar>?, _ consent: Bool
+) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_jobs_reconcile_local_file_copy")
 private func reconcileLocalFileCopyJob(
     _ database: UnsafePointer<CChar>?, _ registry: UnsafePointer<CChar>?, _ root: UnsafePointer<CChar>?, _ connection: UnsafePointer<CChar>?,
@@ -61,6 +68,7 @@ struct LocalCopyPreviewRequest: Equatable {
     let sourceRelativePath: String
     let destinationConnectionID: String
     let destinationRoot: String
+    let destinationDirectoryRelativePath: String
     let destinationRelativePath: String
 
     @MainActor func isCurrent(source: LocalWorkspace, destination: LocalWorkspace) -> Bool {
@@ -69,7 +77,7 @@ struct LocalCopyPreviewRequest: Equatable {
             && source.selectedRegularFilePaths == [sourceRelativePath]
             && destination.boundConnectionID == destinationConnectionID
             && destination.root == destinationRoot
-            && destination.relativePath == destinationRelativePath
+            && destination.relativePath == destinationDirectoryRelativePath
     }
 }
 
@@ -346,13 +354,18 @@ struct LocalCopyPreviewRequest: Equatable {
         else {
             throw StorageError.operation("Предпросмотр устарел: выберите один файл и папки в обеих панелях")
         }
+        let destinationLeaf = (sourceRelativePath as NSString).lastPathComponent
+        let destinationRelativePath = destination.relativePath.isEmpty
+            ? destinationLeaf
+            : destination.relativePath + "/" + destinationLeaf
         return LocalCopyPreviewRequest(
             sourceConnectionID: sourceConnectionID,
             sourceRoot: sourceRoot,
             sourceRelativePath: sourceRelativePath,
             destinationConnectionID: destinationConnectionID,
             destinationRoot: destinationRoot,
-            destinationRelativePath: destination.relativePath
+            destinationDirectoryRelativePath: destination.relativePath,
+            destinationRelativePath: destinationRelativePath
         )
     }
 
@@ -411,6 +424,63 @@ struct LocalCopyPreviewRequest: Equatable {
                 throw StorageError.operation("Файл с таким именем уже есть в папке назначения.")
             }
             throw StorageError.operation(result.error ?? "Local copy Job failed")
+        }
+        error = nil
+        refresh()
+        destination.refresh()
+        return jobID
+    }
+
+    /// Replaces one existing regular destination file only after the same
+    /// exact-source confirmation required for a new Local copy.
+    @discardableResult func replaceFile(
+        request: LocalCopyPreviewRequest, to destination: LocalWorkspace
+    ) throws -> String {
+        try replaceFile(
+            request: request,
+            to: destination,
+            databasePath: try JobInventory.paths().database,
+            registryPath: try StorageRegistryBridge.databasePath()
+        )
+    }
+
+    /// Test seam for the controlled replacement bridge.
+    @discardableResult func replaceFile(
+        request: LocalCopyPreviewRequest, to destination: LocalWorkspace,
+        databasePath: String, registryPath: String
+    ) throws -> String {
+        guard request.isCurrent(source: self, destination: destination) else {
+            throw StorageError.operation("План замены устарел. Проверьте его ещё раз.")
+        }
+        let jobID = "local-replace-" + UUID().uuidString.lowercased()
+        let pointer = databasePath.withCString { database in
+            registryPath.withCString { registry in
+                request.sourceRoot.withCString { sourceRoot in
+                    request.sourceConnectionID.withCString { sourceConnection in
+                        request.sourceRelativePath.withCString { sourceRelative in
+                            request.destinationRoot.withCString { destinationRoot in
+                                request.destinationConnectionID.withCString { destinationConnection in
+                                    request.destinationRelativePath.withCString { destinationRelative in
+                                        jobID.withCString { identifier in
+                                            runLocalFileReplaceJob(database, registry, sourceRoot, sourceConnection, sourceRelative, destinationRoot, destinationConnection, destinationRelative, identifier, true)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        guard let pointer else { throw StorageError.operation("Local replacement Job unavailable") }
+        defer { localFree(pointer) }
+        let result = try JSONDecoder().decode(LocalJobEnvelope.self, from: Data(String(cString: pointer).utf8))
+        guard result.ok else {
+            if result.error == "outcome_unknown" {
+                destination.copyReconciliationJobIDs = [jobID]
+                throw StorageError.operation("Результат замены не подтверждён. Проверьте файлы до повторной попытки.")
+            }
+            throw StorageError.operation(result.error ?? "Local replacement Job failed")
         }
         error = nil
         refresh()

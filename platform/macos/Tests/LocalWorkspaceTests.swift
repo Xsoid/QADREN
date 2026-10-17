@@ -158,6 +158,23 @@ struct LocalWorkspaceTests {
             throw NSError(domain: "QADRENTests", code: 16, userInfo: [NSLocalizedDescriptionKey: "preview remained valid after source selection changed"])
         }
         previewSource.setSelected("report.txt", isSelected: true)
+        try Data("old file".utf8).write(to: previewDestinationRoot.appendingPathComponent("report.txt"))
+        let replacementPreview = try previewSource.previewCopy(sourceRelativePath: "report.txt", to: previewDestination)
+        let replacementRequest = try previewSource.copyPreviewRequest(
+            sourceRelativePath: "report.txt", to: previewDestination
+        )
+        guard replacementPreview.destination_exists else {
+            throw NSError(domain: "QADRENTests", code: 18, userInfo: [NSLocalizedDescriptionKey: "replacement preview did not report the existing destination"])
+        }
+        _ = try previewSource.replaceFile(
+            request: replacementRequest,
+            to: previewDestination,
+            databasePath: database,
+            registryPath: registry
+        )
+        guard try Data(contentsOf: previewDestinationRoot.appendingPathComponent("report.txt")) == Data("payload".utf8) else {
+            throw NSError(domain: "QADRENTests", code: 19, userInfo: [NSLocalizedDescriptionKey: "controlled replacement did not publish the selected source"])
+        }
         let replacementDestination = root.appendingPathComponent("preview-replacement", isDirectory: true)
         try FileManager.default.createDirectory(at: replacementDestination, withIntermediateDirectories: false)
         previewDestination.selectRoot(replacementDestination.path, connectionID: otherConnection)

@@ -13,6 +13,7 @@ struct MainView: View {
     @State private var localCopyPreviewRequest: LocalCopyPreviewRequest?
     @State private var localCopyPreviewError: String?
     @State private var isLocalCopyConfirmationPresented = false
+    @State private var isLocalReplaceConfirmationPresented = false
     @State private var jobs: [JobRow] = []
     @State private var jobError: String?
     let workspace: DispatcherSection
@@ -110,6 +111,12 @@ struct MainView: View {
             Button("Загрузить и скопировать") { copyConfirmedLocalFile() }
         } message: {
             Text("macOS может скачать выбранный исходный файл из File Provider на этот Mac. QADREN скопирует только этот файл и не заменит существующий файл назначения.")
+        }
+        .alert("Разрешить загрузку и замену?", isPresented: $isLocalReplaceConfirmationPresented) {
+            Button("Отмена", role: .cancel) {}
+            Button("Загрузить и заменить", role: .destructive) { replaceConfirmedLocalFile() }
+        } message: {
+            Text("macOS может скачать выбранный исходный файл из File Provider на этот Mac. QADREN заменит только существующий выбранный файл назначения. Новой версии файла не создаётся.")
         }
     }
 
@@ -351,6 +358,10 @@ struct MainView: View {
                     isLocalCopyConfirmationPresented = true
                 }
                 .disabled(localCopyPreview == nil || localCopyPreview?.destination_exists == true || localCopyPreviewRequest?.isCurrent(source: localWorkspace, destination: rightLocalWorkspace) != true)
+                Button("Заменить файл", role: .destructive) {
+                    isLocalReplaceConfirmationPresented = true
+                }
+                .disabled(localCopyPreview == nil || localCopyPreview?.destination_exists != true || localCopyPreviewRequest?.isCurrent(source: localWorkspace, destination: rightLocalWorkspace) != true)
                 Text("Только метаданные; файл и Job не создаются.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -370,7 +381,7 @@ struct MainView: View {
                 Notice(text: localCopyPreviewError, symbol: "exclamationmark.triangle")
                     .padding(.horizontal, 16)
             }
-            Notice(text: "Создание папок и копирование файлов идут только через Rust JobStore. Копирование требует отдельного подтверждения загрузки исходного файла; перемещение, переименование и удаление выключены.", symbol: "shield")
+            Notice(text: "Создание папок, копирование и контролируемая замена файлов идут только через Rust JobStore. Каждая операция требует отдельного подтверждения загрузки исходного файла; перемещение, переименование и удаление выключены.", symbol: "shield")
                 .padding(16)
         }
     }
@@ -412,9 +423,22 @@ struct MainView: View {
         }
     }
 
+    private func replaceConfirmedLocalFile() {
+        guard let request = localCopyPreviewRequest else { return }
+        do {
+            _ = try localWorkspace.replaceFile(request: request, to: rightLocalWorkspace)
+            localCopyPreview = nil
+            localCopyPreviewRequest = nil
+            localCopyPreviewError = nil
+            refreshJobs()
+        } catch {
+            localCopyPreviewError = error.localizedDescription
+        }
+    }
+
     private func copyPreviewText(_ preview: LocalCopyPreview) -> String {
         let size = ByteCountFormatter.string(fromByteCount: Int64(clamping: preview.size), countStyle: .file)
-        let collision = preview.destination_exists ? " Назначение уже занято; операция будет отклонена." : " Назначение свободно. Подтвердите загрузку исходного файла для копирования."
+        let collision = preview.destination_exists ? " Назначение занято. Подтвердите загрузку исходного файла для контролируемой замены." : " Назначение свободно. Подтвердите загрузку исходного файла для копирования."
         return "План: \(preview.source_relative) → \(preview.destination_relative), \(size).\(collision)"
     }
 
