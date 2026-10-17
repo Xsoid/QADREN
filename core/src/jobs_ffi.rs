@@ -52,6 +52,28 @@ pub unsafe extern "C" fn qadren_jobs_dispatch_scenario_copy_baselines(
     }
 }
 
+/// Read-only reconciliation for one UNKNOWN Local copy Job.
+#[no_mangle]
+pub unsafe extern "C" fn qadren_jobs_reconcile_local_file_copy(
+    database_path: *const c_char, registry_path: *const c_char,
+    destination_root: *const c_char, destination_connection_id: *const c_char,
+    job_id: *const c_char,
+) -> *mut c_char {
+    let (Some(database), Some(registry), Some(root), Some(connection), Some(job)) = (
+        input(database_path), input(registry_path), input(destination_root),
+        input(destination_connection_id), input(job_id),
+    ) else { return response(json!({"ok":false,"error":"invalid_request"})); };
+    match crate::job_execution::reconcile_local_file_copy(
+        Path::new(database), Path::new(registry), Path::new(root), connection, job,
+    ) {
+        Ok(crate::job_execution::LocalFileCopyReconciliationStatus::Completed) => response(json!({"ok":true,"data":{"status":"completed","reconciled":true}})),
+        Ok(crate::job_execution::LocalFileCopyReconciliationStatus::StillUnknown) => response(json!({"ok":true,"data":{"status":"unknown","reconciled":false}})),
+        Ok(crate::job_execution::LocalFileCopyReconciliationStatus::Existing(state)) => response(json!({"ok":true,"data":{"status":format!("{:?}", state).to_ascii_lowercase(),"existing":true,"reconciled":false}})),
+        Err(crate::job_execution::LocalFileCopyError::InvalidRequest) => response(json!({"ok":false,"error":"invalid_request"})),
+        Err(_) => response(json!({"ok":false,"error":"local_copy_reconciliation_unavailable"})),
+    }
+}
+
 /// Return JSON-encoded persisted jobs for a caller-owned C string path.
 ///
 /// # Safety
@@ -956,6 +978,75 @@ mod tests {
         unsafe { qadren_jobs_free_string(candidates) };
         let response = unsafe {
             qadren_jobs_reconcile_local_directory_create(
+                database.as_ptr(),
+                registry.as_ptr(),
+                root.as_ptr(),
+                connection.as_ptr(),
+                job.as_ptr(),
+            )
+        };
+        assert!(unsafe { CStr::from_ptr(response) }
+            .to_str()
+            .unwrap()
+            .contains("\"reconciled\":true"));
+        unsafe { qadren_jobs_free_string(response) };
+        let store = JobStore::open(&database_path).unwrap();
+        assert_eq!(store.state(job_id).unwrap(), Some(JobState::Completed));
+    }
+
+    #[test]
+    fn local_copy_reconciliation_completes_exact_unknown_attempt_through_the_c_abi() {
+        let base = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join(format!(
+                "qadren-ffi-local-copy-reconcile-{}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        fs::create_dir(&base).unwrap();
+        let database_path = base.join("jobs.sqlite3");
+        let registry_path = base.join("connections.sqlite3");
+        let registry = crate::registry::Registry::open(&registry_path).unwrap();
+        let connection_id = registry.add("local_filesystem", "Test Local").unwrap();
+        let local = crate::local_fs::LocalFilesystem::open(&base).unwrap();
+        let identity = local.root_identity().unwrap();
+        let root_identity = format!("unix:{}:{}", identity.device, identity.inode);
+        let job_id = "local-copy-ffi-reconcile";
+        let mut store = JobStore::open(&database_path).unwrap();
+        store.enqueue(job_id, None).unwrap();
+        store
+            .advance(
+                job_id,
+                JobState::Queued,
+                JobState::Running,
+                Confirmation::Confirmed(crate::confirmation::EvidenceLevel::Requested),
+            )
+            .unwrap();
+        store
+            .prepare_bound_attempt_with_root_identity(
+                job_id,
+                "local-copy-ffi-reconcile-attempt-1",
+                "local_copy_new",
+                &connection_id,
+                "copied-by-reconciliation.txt",
+                7,
+                "00000000000000000000000000000000",
+                &root_identity,
+            )
+            .unwrap();
+        drop(store);
+        fs::write(base.join("copied-by-reconciliation.txt"), b"payload").unwrap();
+
+        let database = CString::new(database_path.to_str().unwrap()).unwrap();
+        let registry = CString::new(registry_path.to_str().unwrap()).unwrap();
+        let root = CString::new(base.to_str().unwrap()).unwrap();
+        let connection = CString::new(connection_id).unwrap();
+        let job = CString::new(job_id).unwrap();
+        let response = unsafe {
+            qadren_jobs_reconcile_local_file_copy(
                 database.as_ptr(),
                 registry.as_ptr(),
                 root.as_ptr(),

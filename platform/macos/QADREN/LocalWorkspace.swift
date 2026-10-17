@@ -29,6 +29,11 @@ private func runLocalFileCopyJob(
     _ destinationRoot: UnsafePointer<CChar>?, _ destinationConnection: UnsafePointer<CChar>?, _ destinationRelative: UnsafePointer<CChar>?,
     _ jobID: UnsafePointer<CChar>?, _ consent: Bool
 ) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_jobs_reconcile_local_file_copy")
+private func reconcileLocalFileCopyJob(
+    _ database: UnsafePointer<CChar>?, _ registry: UnsafePointer<CChar>?, _ root: UnsafePointer<CChar>?, _ connection: UnsafePointer<CChar>?,
+    _ jobID: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
 
 struct LocalWorkspaceEntry: Decodable, Identifiable { let name: String; let is_directory: Bool; let size: UInt64; var id: String { name } }
 private struct LocalEnvelope<T: Decodable>: Decodable { let ok: Bool; let data: T?; let error: String? }
@@ -80,6 +85,7 @@ struct LocalCopyPreviewRequest: Equatable {
     /// This exists only after Rust reports a potentially effected mkdir as
     /// UNKNOWN. It is an explicit user action, never an automatic retry.
     @Published private(set) var reconciliationJobIDs: [String] = []
+    @Published private(set) var copyReconciliationJobIDs: [String] = []
 
     func chooseRoot(for connectionID: String) {
         guard !connectionID.isEmpty else {
@@ -100,6 +106,7 @@ struct LocalCopyPreviewRequest: Equatable {
         entries = []
         selectedNames.removeAll()
         reconciliationJobIDs = []
+        copyReconciliationJobIDs = []
         error = nil
     }
     func selectRoot(_ path: String, connectionID: String? = nil) {
@@ -108,6 +115,7 @@ struct LocalCopyPreviewRequest: Equatable {
         relativePath = ""
         selectedNames.removeAll()
         reconciliationJobIDs = []
+        copyReconciliationJobIDs = []
         refresh()
     }
     var selectedDirectory: String? {
@@ -392,6 +400,7 @@ struct LocalCopyPreviewRequest: Equatable {
         let result = try JSONDecoder().decode(LocalJobEnvelope.self, from: Data(String(cString: pointer).utf8))
         guard result.ok else {
             if result.error == "outcome_unknown" {
+                destination.copyReconciliationJobIDs = [jobID]
                 throw StorageError.operation("Результат копирования не подтверждён. Проверьте файлы до повторной попытки.")
             }
             if result.error == "target_exists" {
@@ -403,6 +412,30 @@ struct LocalCopyPreviewRequest: Equatable {
         refresh()
         destination.refresh()
         return jobID
+    }
+
+    /// Inspect one UNKNOWN destination copy without reading content or retrying.
+    func reconcileFileCopy(jobID: String, connectionID: String) {
+        guard let root else { return }
+        do {
+            let database = try JobInventory.paths().database
+            let registry = try StorageRegistryBridge.databasePath()
+            let pointer = database.withCString { database in registry.withCString { registry in root.withCString { root in connectionID.withCString { connection in jobID.withCString { jobID in
+                reconcileLocalFileCopyJob(database, registry, root, connection, jobID)
+            }}}} }
+            guard let pointer else { throw StorageError.operation("Local copy reconciliation unavailable") }
+            defer { localFree(pointer) }
+            let result = try JSONDecoder().decode(LocalJobEnvelope.self, from: Data(String(cString: pointer).utf8))
+            guard result.ok, let data = result.data else { throw StorageError.operation(result.error ?? "Local copy reconciliation failed") }
+            if data.reconciled == true || data.status == "completed" {
+                copyReconciliationJobIDs = []
+                error = nil
+                refresh()
+            } else {
+                copyReconciliationJobIDs = [jobID]
+                error = "Результат копирования всё ещё не подтверждён. Повтор не выполнен."
+            }
+        } catch { self.error = error.localizedDescription }
     }
 
     func findDirectoryReconciliations(connectionID: String, databasePath: String, registryPath: String) throws {

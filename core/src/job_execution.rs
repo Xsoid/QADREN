@@ -88,6 +88,14 @@ pub enum LocalFileCopyStatus {
     Existing(JobState),
 }
 
+/// Result of a read-only reconciliation for an UNKNOWN Local copy Job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalFileCopyReconciliationStatus {
+    Completed,
+    StillUnknown,
+    Existing(JobState),
+}
+
 #[derive(Debug)]
 pub enum LocalFileCopyError {
     InvalidRequest,
@@ -689,6 +697,58 @@ fn run_local_file_copy_inner(
     Ok(LocalFileCopyStatus::Completed)
 }
 
+/// Reconcile one UNKNOWN Local copy without reading content, writing, or
+/// retrying. Completion requires the durable destination-root binding and an
+/// existing regular file with the exact stored size.
+pub fn reconcile_local_file_copy(
+    database_path: &Path,
+    registry_path: &Path,
+    destination_root: &Path,
+    destination_connection_id: &str,
+    job_id: &str,
+) -> Result<LocalFileCopyReconciliationStatus, LocalFileCopyError> {
+    if !valid_job_id(job_id) || destination_connection_id.is_empty() {
+        return Err(LocalFileCopyError::InvalidRequest);
+    }
+    if !enabled_local_connection(registry_path, destination_connection_id) {
+        return Ok(LocalFileCopyReconciliationStatus::StillUnknown);
+    }
+    let destination = LocalFilesystem::open(destination_root).map_err(LocalFileCopyError::Local)?;
+    let identity = destination.root_identity().map_err(LocalFileCopyError::Local)?;
+    let root_identity = format!("unix:{}:{}", identity.device, identity.inode);
+    let mut store = JobStore::open(database_path)?;
+    let Some(job) = store.get(job_id)? else {
+        return Err(LocalFileCopyError::Store(JobStoreError::NotFound));
+    };
+    if job.state != JobState::Unknown {
+        return Ok(LocalFileCopyReconciliationStatus::Existing(job.state));
+    }
+    let attempts = store.unresolved_attempts()?;
+    let matching: Vec<_> = attempts.iter().filter(|attempt| {
+        attempt.job_id == job_id
+            && attempt.status == "unknown"
+            && attempt.operation_kind.as_deref() == Some("local_copy_new")
+            && attempt.target_connection_id.as_deref() == Some(destination_connection_id)
+    }).collect();
+    if matching.len() != 1 { return Ok(LocalFileCopyReconciliationStatus::StillUnknown); }
+    let attempt = matching[0];
+    let Some(expected) = store.expected_metadata(job_id, &attempt.attempt_id)? else {
+        return Ok(LocalFileCopyReconciliationStatus::StillUnknown);
+    };
+    if expected.operation_kind != "local_copy_new"
+        || expected.target_connection_id != destination_connection_id
+        || store.attempt_root_identity(job_id, &attempt.attempt_id)?.as_deref() != Some(root_identity.as_str())
+    {
+        return Ok(LocalFileCopyReconciliationStatus::StillUnknown);
+    }
+    if !matches!(destination.stat(Path::new(&expected.target_path)), Ok(entry) if !entry.is_directory && entry.size == expected.expected_size) {
+        return Ok(LocalFileCopyReconciliationStatus::StillUnknown);
+    }
+    let receipt = VerifiedReceipt::metadata_verified(&attempt.attempt_id, "local_copy_new", destination_connection_id, &expected.target_path);
+    store.complete_attempt(job_id, &attempt.attempt_id, &receipt)?;
+    Ok(LocalFileCopyReconciliationStatus::Completed)
+}
+
 /// Reconcile an UNKNOWN Local Filesystem directory creation without writing,
 /// deleting, or retrying. A different root, disabled connection, missing
 /// binding, or mismatched target remains UNKNOWN.
@@ -1173,6 +1233,35 @@ mod tests {
             Err(LocalFileCopyError::TargetExists)
         ));
         assert_eq!(fs::read(destination_root.join("source.txt")).unwrap(), b"copy me");
+    }
+
+    #[test]
+    fn local_file_copy_reconciliation_requires_exact_destination_evidence() {
+        let (database, registry_path, root, _) = local_fixture("copy-reconcile");
+        let destination_root = root.parent().unwrap().join("copy-reconcile-destination");
+        fs::create_dir(&destination_root).unwrap();
+        let registry = Registry::open(&registry_path).unwrap();
+        let connection = registry.add("local_filesystem", "Copy destination").unwrap();
+        let destination = LocalFilesystem::open(&destination_root).unwrap();
+        let identity = destination.root_identity().unwrap();
+        let root_identity = format!("unix:{}:{}", identity.device, identity.inode);
+        let mut store = JobStore::open(&database).unwrap();
+        store.enqueue("copy-unknown", None).unwrap();
+        store.advance(
+            "copy-unknown", JobState::Queued, JobState::Running,
+            Confirmation::Confirmed(EvidenceLevel::Requested),
+        ).unwrap();
+        store.prepare_bound_attempt_with_root_identity(
+            "copy-unknown", "copy-unknown-attempt", "local_copy_new", &connection,
+            "copied.txt", 7, "00000000000000000000000000000000", &root_identity,
+        ).unwrap();
+        drop(store);
+        fs::write(destination_root.join("copied.txt"), b"payload").unwrap();
+        assert_eq!(
+            reconcile_local_file_copy(&database, &registry_path, &destination_root, &connection, "copy-unknown").unwrap(),
+            LocalFileCopyReconciliationStatus::Completed
+        );
+        assert_eq!(JobStore::open(&database).unwrap().state("copy-unknown").unwrap(), Some(JobState::Completed));
     }
 
     #[test]

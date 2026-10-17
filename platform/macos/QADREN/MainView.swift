@@ -740,6 +740,18 @@ private struct FileManagerPane: View {
                                 .textSelection(.enabled)
                         }
                     }
+                    ForEach(workspace.copyReconciliationJobIDs, id: \.self) { jobID in
+                        HStack(spacing: 8) {
+                            Text("Копирование требует проверки")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                            Button("Проверить операцию") {
+                                workspace.reconcileFileCopy(jobID: jobID, connectionID: selectedConnectionID)
+                            }
+                            .disabled(!selectedConnectionIsAvailable)
+                            Text(jobID).font(.caption.monospaced()).textSelection(.enabled)
+                        }
+                    }
                 }.padding(.horizontal, 18)
                 List(workspace.entries) { entry in
                     HStack {
