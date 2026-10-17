@@ -590,6 +590,7 @@ private struct ScenarioDryRunView: View {
     @State private var hasRequestedPreview = false
     @State private var pendingCreate: ScenarioPlanItem?
     @State private var pendingUpdate: ScenarioPlanItem?
+    @State private var conflictTasks: [ScenarioConflictTask] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -649,13 +650,33 @@ private struct ScenarioDryRunView: View {
                             Button("Заменить файл", role: .destructive) { pendingUpdate = item }
                                 .buttonStyle(.bordered)
                         }
+                        if item.action.kind == "conflict" || item.action.kind == "delete_requires_decision" {
+                            Button("Добавить в очередь конфликтов") { queueConflict(item) }
+                                .buttonStyle(.bordered)
+                        }
                     }
                     .padding(.vertical, 4)
                 }
                 .listStyle(.inset)
             }
+            if !conflictTasks.isEmpty {
+                Divider()
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Альтернативная очередь конфликтов").font(.title2.bold())
+                    Text("Эта очередь независима от обычных переносов. Выберите источник, затем решение. Сохранение решения пока не запускает перенос или удаление.")
+                        .font(.callout).foregroundStyle(.secondary)
+                    ForEach(conflictTasks) { task in
+                        ScenarioConflictTaskView(
+                            scenario: scenario,
+                            task: task,
+                            saveDecision: saveConflictDecision
+                        )
+                    }
+                }
+            }
         }
         .padding(24)
+        .onAppear { loadConflictTasks() }
         .alert("Разрешить загрузку и создание копии?", isPresented: Binding(
             get: { pendingCreate != nil }, set: { if !$0 { pendingCreate = nil } }
         )) {
@@ -689,9 +710,41 @@ private struct ScenarioDryRunView: View {
             plan = try StorageRegistryBridge.dryRunScenario(
                 id: scenario.id, revision: scenario.revision, left: left, right: right
             )
+            loadConflictTasks()
         } catch {
             plan = []
             self.error = "Не удалось прочитать метаданные или построить план: " + error.localizedDescription
+        }
+    }
+
+    private func queueConflict(_ item: ScenarioPlanItem) {
+        let kind = item.action.kind == "conflict" ? "content" : "deletion"
+        do {
+            _ = try StorageRegistryBridge.queueScenarioConflict(
+                scenario: scenario, relativePath: item.relative_path, kind: kind
+            )
+            loadConflictTasks()
+        } catch {
+            self.error = "Не удалось добавить конфликт в отдельную очередь: " + error.localizedDescription
+        }
+    }
+
+    private func loadConflictTasks() {
+        do {
+            conflictTasks = try StorageRegistryBridge.listScenarioConflicts(scenario: scenario)
+        } catch {
+            self.error = "Не удалось прочитать очередь конфликтов: " + error.localizedDescription
+        }
+    }
+
+    private func saveConflictDecision(_ task: ScenarioConflictTask, _ sourceIsLeft: Bool, _ decision: String) {
+        do {
+            try StorageRegistryBridge.selectScenarioConflict(
+                id: task.id, sourceIsLeft: sourceIsLeft, decision: decision
+            )
+            loadConflictTasks()
+        } catch {
+            self.error = "Не удалось сохранить решение конфликта: " + error.localizedDescription
         }
     }
 
@@ -735,6 +788,83 @@ private struct ScenarioDryRunView: View {
         case "conflict": return "конфликт"
         case "needs_verification": return "нужна проверка"
         default: return "без действия"
+        }
+    }
+}
+
+private struct ScenarioConflictTaskView: View {
+    let scenario: ScenarioEntry
+    let task: ScenarioConflictTask
+    let saveDecision: (ScenarioConflictTask, Bool, String) -> Void
+    @State private var sourceIsLeft: Bool?
+
+    init(
+        scenario: ScenarioEntry,
+        task: ScenarioConflictTask,
+        saveDecision: @escaping (ScenarioConflictTask, Bool, String) -> Void
+    ) {
+        self.scenario = scenario
+        self.task = task
+        self.saveDecision = saveDecision
+        _sourceIsLeft = State(initialValue: task.source_is_left)
+    }
+
+    var body: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text(task.relative_path).font(.body.monospaced())
+                    Spacer()
+                    Text(task.kind == "content" ? "конфликт содержимого" : "конфликт удаления")
+                        .font(.caption.weight(.semibold))
+                }
+                Picker("Источник", selection: $sourceIsLeft) {
+                    Text("Выберите источник").tag(Optional<Bool>.none)
+                    Text("Левая сторона: \(scenario.left_root)").tag(Optional(true))
+                    Text("Правая сторона: \(scenario.right_root)").tag(Optional(false))
+                }
+                .pickerStyle(.menu)
+                Text("Сначала явно укажите сторону-источник. Это обязательно и для двустороннего сценария.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if task.kind == "content" {
+                    HStack {
+                        Button("Заменить из источника", role: .destructive) {
+                            save("replace_from_source")
+                        }
+                        Button("Заменить, если новее") { save("replace_if_newer") }
+                        Button("Пропустить перенос") { save("skip_transfer") }
+                    }
+                    .disabled(sourceIsLeft == nil)
+                } else {
+                    HStack {
+                        Button("Удалить как в источнике", role: .destructive) {
+                            save("delete_as_source")
+                        }
+                        Button("Не удалять файл") { save("keep_file") }
+                    }
+                    .disabled(sourceIsLeft == nil)
+                }
+                if let decision = task.decision {
+                    Text("Сохранённое решение: \(decisionTitle(decision))")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private func save(_ decision: String) {
+        guard let sourceIsLeft else { return }
+        saveDecision(task, sourceIsLeft, decision)
+    }
+
+    private func decisionTitle(_ decision: String) -> String {
+        switch decision {
+        case "replace_from_source": "заменить из источника"
+        case "replace_if_newer": "заменить, если новее"
+        case "skip_transfer": "пропустить перенос"
+        case "delete_as_source": "удалить как в источнике"
+        case "keep_file": "не удалять файл"
+        default: decision
         }
     }
 }

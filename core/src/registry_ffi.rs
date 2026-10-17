@@ -84,6 +84,30 @@ fn plan_item_value(item: PlanItem) -> Value {
     })
 }
 
+/// Decode an ABI source selector: `1` is left, `0` is right, and `-1` is not
+/// selected. Values outside this set are rejected.
+fn source_is_left(value: i32) -> Option<Option<bool>> {
+    match value {
+        -1 => Some(None),
+        0 => Some(Some(false)),
+        1 => Some(Some(true)),
+        _ => None,
+    }
+}
+
+fn conflict_task_value(task: crate::registry::ScenarioConflictTask) -> Value {
+    json!({
+        "id": task.id,
+        "scenario_id": task.scenario.scenario_id,
+        "scenario_revision": task.scenario.revision,
+        "relative_path": task.relative_path,
+        "kind": task.kind,
+        "source_is_left": task.source_is_left,
+        "decision": task.decision,
+        "state": task.state,
+    })
+}
+
 fn with_registry<F>(path: *const c_char, action: F) -> *mut c_char
 where
     F: FnOnce(&Registry) -> crate::registry::Result<Value>,
@@ -244,6 +268,96 @@ pub extern "C" fn qadren_scenarios_dry_run(
             .into_iter()
             .map(plan_item_value)
             .collect::<Vec<_>>()))
+    })
+}
+
+/// Add one durable, metadata-only Scenario conflict task. `source_is_left` is
+/// `1` for left, `0` for right, or `-1` when the user has not chosen a source.
+/// This function does not create or advance a Job.
+#[no_mangle]
+pub extern "C" fn qadren_scenario_conflicts_queue(
+    path: *const c_char,
+    scenario_id: *const c_char,
+    revision: u64,
+    relative_path: *const c_char,
+    kind: *const c_char,
+    source_is_left_value: i32,
+) -> *mut c_char {
+    let (Some(scenario_id), Some(relative_path), Some(kind), Some(source_is_left)) = (
+        input(scenario_id),
+        input(relative_path),
+        input(kind),
+        source_is_left(source_is_left_value),
+    ) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    if scenario_id.is_empty() || revision == 0 {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    }
+    let reference = ScenarioReference {
+        scenario_id,
+        revision,
+    };
+    with_registry(path, |db| {
+        Ok(json!({"id": db.queue_conflict_task(
+            &reference,
+            &relative_path,
+            &kind,
+            source_is_left,
+        )?}))
+    })
+}
+
+/// List the durable conflict tasks belonging to one exact Scenario revision.
+/// This function is read-only and never scans an adapter or queries JobStore.
+#[no_mangle]
+pub extern "C" fn qadren_scenario_conflicts_list(
+    path: *const c_char,
+    scenario_id: *const c_char,
+    revision: u64,
+) -> *mut c_char {
+    let Some(scenario_id) = input(scenario_id) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    if scenario_id.is_empty() || revision == 0 {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    }
+    let reference = ScenarioReference {
+        scenario_id,
+        revision,
+    };
+    with_registry(path, |db| {
+        Ok(json!(db
+            .list_conflict_tasks(&reference)?
+            .into_iter()
+            .map(conflict_task_value)
+            .collect::<Vec<_>>()))
+    })
+}
+
+/// Save the user's conflict decision. A source is mandatory: use `1` for
+/// left or `0` for right. The selected decision is only queue metadata; this
+/// function does not execute a transfer or delete a file.
+#[no_mangle]
+pub extern "C" fn qadren_scenario_conflicts_select(
+    path: *const c_char,
+    id: *const c_char,
+    source_is_left_value: i32,
+    decision: *const c_char,
+) -> *mut c_char {
+    let (Some(id), Some(source_is_left), Some(decision)) = (
+        input(id),
+        source_is_left(source_is_left_value),
+        input(decision),
+    ) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    if source_is_left.is_none() {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    }
+    with_registry(path, |db| {
+        db.select_conflict_task(&id, source_is_left, &decision)?;
+        Ok(json!(true))
     })
 }
 
@@ -1040,6 +1154,80 @@ mod tests {
         .unwrap();
         unsafe { qadren_registry_free_string(oversized_pointer) };
         assert_eq!(oversized["error"], "invalid_input");
+        std::fs::remove_file(file).unwrap();
+    }
+
+    #[test]
+    fn conflict_queue_requires_a_source_before_a_decision_through_ffi() {
+        let file = std::env::temp_dir().join(format!(
+            "qadren-conflict-ffi-{}-{}.sqlite3",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let registry = Registry::open(&file).unwrap();
+        let left = registry.add("local_filesystem", "Left").unwrap();
+        let right = registry.add("local_filesystem", "Right").unwrap();
+        let scenario_id = registry
+            .create_scenario("Documents", &left, "/", &right, "/", "bidirectional")
+            .unwrap();
+        drop(registry);
+        let database = CString::new(file.to_str().unwrap()).unwrap();
+        let scenario_id = CString::new(scenario_id).unwrap();
+        let relative_path = CString::new("report.pdf").unwrap();
+        let content = CString::new("content").unwrap();
+        let queued_pointer = qadren_scenario_conflicts_queue(
+            database.as_ptr(),
+            scenario_id.as_ptr(),
+            1,
+            relative_path.as_ptr(),
+            content.as_ptr(),
+            -1,
+        );
+        let queued: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(queued_pointer) }.to_str().unwrap())
+                .unwrap();
+        unsafe { qadren_registry_free_string(queued_pointer) };
+        let task_id = CString::new(queued["data"]["id"].as_str().unwrap()).unwrap();
+
+        let listed_pointer =
+            qadren_scenario_conflicts_list(database.as_ptr(), scenario_id.as_ptr(), 1);
+        let listed: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(listed_pointer) }.to_str().unwrap())
+                .unwrap();
+        unsafe { qadren_registry_free_string(listed_pointer) };
+        assert_eq!(listed["data"][0]["source_is_left"], Value::Null);
+        assert_eq!(listed["data"][0]["state"], "pending");
+
+        let replace = CString::new("replace_from_source").unwrap();
+        let invalid_pointer = qadren_scenario_conflicts_select(
+            database.as_ptr(),
+            task_id.as_ptr(),
+            -1,
+            replace.as_ptr(),
+        );
+        let invalid: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(invalid_pointer) }.to_str().unwrap())
+                .unwrap();
+        unsafe { qadren_registry_free_string(invalid_pointer) };
+        assert_eq!(invalid["error"], "invalid_input");
+
+        let selected_pointer = qadren_scenario_conflicts_select(
+            database.as_ptr(),
+            task_id.as_ptr(),
+            0,
+            replace.as_ptr(),
+        );
+        let selected: Value = serde_json::from_str(
+            unsafe { CStr::from_ptr(selected_pointer) }
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap();
+        unsafe { qadren_registry_free_string(selected_pointer) };
+        assert_eq!(selected["data"], true);
         std::fs::remove_file(file).unwrap();
     }
 

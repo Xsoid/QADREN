@@ -119,6 +119,19 @@ pub struct ScheduleOutboxEntry {
     pub scenario_revision: u64,
 }
 
+/// A user-owned conflict task. It is Registry metadata, not a JobStore Job;
+/// pending conflict work never blocks ordinary Scenario transfers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioConflictTask {
+    pub id: String,
+    pub scenario: ScenarioReference,
+    pub relative_path: String,
+    pub kind: String,
+    pub source_is_left: Option<bool>,
+    pub decision: Option<String>,
+    pub state: String,
+}
+
 pub struct Registry {
     db: Connection,
 }
@@ -141,7 +154,7 @@ impl Registry {
         }
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 9 {
+        if version > 10 {
             return Err(RegistryError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -290,6 +303,30 @@ impl Registry {
                     UNIQUE(schedule_id,occurrence_key)
                  );
                  PRAGMA user_version = 9;
+                 COMMIT;",
+            )?;
+        }
+        if version <= 9 {
+            // Conflict work has an independent durable queue. It stores no
+            // content and has no foreign key to JobStore, so an unresolved
+            // user decision cannot block normal transfer execution.
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE scenario_conflict_tasks (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    scenario_id TEXT NOT NULL REFERENCES scenarios(id) ON DELETE RESTRICT,
+                    scenario_revision INTEGER NOT NULL CHECK(scenario_revision > 0),
+                    relative_path TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK(kind IN ('content','deletion')),
+                    source_is_left INTEGER CHECK(source_is_left IN (0,1)),
+                    decision TEXT CHECK(decision IN (
+                       'replace_from_source','replace_if_newer','skip_transfer',
+                       'delete_as_source','keep_file'
+                    )),
+                    state TEXT NOT NULL CHECK(state IN ('pending','selected','completed','stale')),
+                    UNIQUE(scenario_id,scenario_revision,relative_path,kind)
+                 );
+                 PRAGMA user_version = 10;
                  COMMIT;",
             )?;
         }
@@ -1067,6 +1104,135 @@ impl Registry {
         states
     }
 
+    /// Add or reopen one metadata-only conflict task. This has no adapter or
+    /// JobStore effect and therefore cannot stop the main transfer flow.
+    pub fn queue_conflict_task(
+        &self,
+        scenario: &ScenarioReference,
+        relative_path: &str,
+        kind: &str,
+        source_is_left: Option<bool>,
+    ) -> Result<String> {
+        if !valid_sync_path(relative_path)
+            || !matches!(kind, "content" | "deletion")
+            || scenario.scenario_id.is_empty()
+            || scenario.revision == 0
+        {
+            return Err(RegistryError::InvalidSyncState);
+        }
+        let exists: Option<String> = self
+            .db
+            .query_row(
+                "SELECT scenario_id FROM scenario_revisions WHERE scenario_id=?1 AND revision=?2",
+                params![scenario.scenario_id, scenario.revision as i64],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if exists.is_none() {
+            return Err(RegistryError::NotFound);
+        }
+        let id: String = self
+            .db
+            .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
+        self.db.execute(
+            "INSERT INTO scenario_conflict_tasks(
+                id,scenario_id,scenario_revision,relative_path,kind,source_is_left,decision,state
+             ) VALUES(?1,?2,?3,?4,?5,?6,NULL,'pending')
+             ON CONFLICT(scenario_id,scenario_revision,relative_path,kind) DO UPDATE SET
+                source_is_left=excluded.source_is_left, decision=NULL, state='pending'",
+            params![
+                id,
+                scenario.scenario_id,
+                scenario.revision as i64,
+                relative_path,
+                kind,
+                source_is_left
+            ],
+        )?;
+        self.db
+            .query_row(
+                "SELECT id FROM scenario_conflict_tasks
+                 WHERE scenario_id=?1 AND scenario_revision=?2 AND relative_path=?3 AND kind=?4",
+                params![
+                    scenario.scenario_id,
+                    scenario.revision as i64,
+                    relative_path,
+                    kind
+                ],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn list_conflict_tasks(
+        &self,
+        scenario: &ScenarioReference,
+    ) -> Result<Vec<ScenarioConflictTask>> {
+        let mut statement = self.db.prepare(
+            "SELECT id,scenario_id,scenario_revision,relative_path,kind,source_is_left,decision,state
+             FROM scenario_conflict_tasks WHERE scenario_id=?1 AND scenario_revision=?2
+             ORDER BY state, relative_path, id",
+        )?;
+        let tasks = statement
+            .query_map(
+                params![scenario.scenario_id, scenario.revision as i64],
+                |row| {
+                    Ok(ScenarioConflictTask {
+                        id: row.get(0)?,
+                        scenario: ScenarioReference {
+                            scenario_id: row.get(1)?,
+                            revision: row.get::<_, i64>(2)? as u64,
+                        },
+                        relative_path: row.get(3)?,
+                        kind: row.get(4)?,
+                        source_is_left: row.get(5)?,
+                        decision: row.get(6)?,
+                        state: row.get(7)?,
+                    })
+                },
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(RegistryError::from)?;
+        Ok(tasks)
+    }
+
+    pub fn select_conflict_task(
+        &self,
+        id: &str,
+        source_is_left: Option<bool>,
+        decision: &str,
+    ) -> Result<()> {
+        if id.is_empty() || source_is_left.is_none() {
+            return Err(RegistryError::InvalidSyncState);
+        }
+        let kind: String = self
+            .db
+            .query_row(
+                "SELECT kind FROM scenario_conflict_tasks
+                 WHERE id=?1 AND state IN ('pending','selected')",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(RegistryError::NotFound)?;
+        let valid_decision = match kind.as_str() {
+            "content" => matches!(
+                decision,
+                "replace_from_source" | "replace_if_newer" | "skip_transfer"
+            ),
+            "deletion" => matches!(decision, "delete_as_source" | "keep_file"),
+            _ => false,
+        };
+        if !valid_decision {
+            return Err(RegistryError::InvalidSyncState);
+        }
+        self.changed(self.db.execute(
+            "UPDATE scenario_conflict_tasks SET source_is_left=?1,decision=?2,state='selected'
+             WHERE id=?3 AND state IN ('pending','selected')",
+            params![source_is_left, decision, id],
+        )?)
+    }
+
     /// Compose a deterministic, read-only dry-run from the exact persisted
     /// Scenario revision and its confirmed baseline. Snapshots are supplied by
     /// an already-authorized caller; this method never scans adapters, reads
@@ -1404,6 +1570,91 @@ mod tests {
             revision: 2,
         };
         assert!(db.list_confirmed_file_states(&later).unwrap().is_empty());
+    }
+
+    #[test]
+    fn conflict_tasks_are_an_independent_reopenable_queue() {
+        let db = Registry::in_memory().unwrap();
+        let left = db.add("local_filesystem", "Left").unwrap();
+        let right = db.add("local_filesystem", "Right").unwrap();
+        let scenario_id = db
+            .create_scenario("Documents", &left, "/", &right, "/archive", "bidirectional")
+            .unwrap();
+        let reference = ScenarioReference {
+            scenario_id,
+            revision: 1,
+        };
+
+        let id = db
+            .queue_conflict_task(&reference, "report.pdf", "content", None)
+            .unwrap();
+        assert_eq!(
+            db.list_conflict_tasks(&reference).unwrap(),
+            vec![ScenarioConflictTask {
+                id: id.clone(),
+                scenario: reference.clone(),
+                relative_path: "report.pdf".into(),
+                kind: "content".into(),
+                source_is_left: None,
+                decision: None,
+                state: "pending".into(),
+            }]
+        );
+        assert!(db
+            .list_confirmed_file_states(&reference)
+            .unwrap()
+            .is_empty());
+
+        db.select_conflict_task(&id, Some(false), "replace_from_source")
+            .unwrap();
+        let selected = db.list_conflict_tasks(&reference).unwrap();
+        assert_eq!(selected[0].source_is_left, Some(false));
+        assert_eq!(selected[0].decision.as_deref(), Some("replace_from_source"));
+        assert_eq!(selected[0].state, "selected");
+
+        let reopened = db
+            .queue_conflict_task(&reference, "report.pdf", "content", None)
+            .unwrap();
+        assert_eq!(reopened, id);
+        let reopened_task = db.list_conflict_tasks(&reference).unwrap();
+        assert_eq!(reopened_task[0].source_is_left, None);
+        assert!(reopened_task[0].decision.is_none());
+        assert_eq!(reopened_task[0].state, "pending");
+    }
+
+    #[test]
+    fn conflict_task_selection_requires_a_source_and_matching_decision() {
+        let db = Registry::in_memory().unwrap();
+        let left = db.add("local_filesystem", "Left").unwrap();
+        let right = db.add("local_filesystem", "Right").unwrap();
+        let scenario_id = db
+            .create_scenario("Documents", &left, "/", &right, "/archive", "bidirectional")
+            .unwrap();
+        let reference = ScenarioReference {
+            scenario_id,
+            revision: 1,
+        };
+        let content_id = db
+            .queue_conflict_task(&reference, "report.pdf", "content", None)
+            .unwrap();
+        assert!(matches!(
+            db.select_conflict_task(&content_id, None, "skip_transfer"),
+            Err(RegistryError::InvalidSyncState)
+        ));
+        assert!(matches!(
+            db.select_conflict_task(&content_id, Some(true), "delete_as_source"),
+            Err(RegistryError::InvalidSyncState)
+        ));
+
+        let deletion_id = db
+            .queue_conflict_task(&reference, "removed.txt", "deletion", None)
+            .unwrap();
+        assert!(matches!(
+            db.select_conflict_task(&deletion_id, Some(true), "replace_if_newer"),
+            Err(RegistryError::InvalidSyncState)
+        ));
+        db.select_conflict_task(&deletion_id, Some(true), "keep_file")
+            .unwrap();
     }
 
     #[test]

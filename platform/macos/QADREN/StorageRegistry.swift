@@ -21,6 +21,20 @@ private func scenarioDryRun(
     _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?, _ revision: UInt64,
     _ leftSnapshot: UnsafePointer<CChar>?, _ rightSnapshot: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_scenario_conflicts_queue")
+private func scenarioConflictQueue(
+    _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?, _ revision: UInt64,
+    _ relativePath: UnsafePointer<CChar>?, _ kind: UnsafePointer<CChar>?, _ sourceIsLeft: Int32
+) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_scenario_conflicts_list")
+private func scenarioConflictList(
+    _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?, _ revision: UInt64
+) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_scenario_conflicts_select")
+private func scenarioConflictSelect(
+    _ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ sourceIsLeft: Int32,
+    _ decision: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_local_scenario_metadata_snapshot")
 private func localScenarioMetadataSnapshot(
     _ registry: UnsafePointer<CChar>?, _ connectionID: UnsafePointer<CChar>?, _ root: UnsafePointer<CChar>?
@@ -163,6 +177,16 @@ struct ScenarioPlanItem: Decodable, Identifiable {
     let right: String
     let action: ScenarioPlanAction
     var id: String { relative_path }
+}
+struct ScenarioConflictTask: Decodable, Identifiable {
+    let id: String
+    let scenario_id: String
+    let scenario_revision: UInt64
+    let relative_path: String
+    let kind: String
+    let source_is_left: Bool?
+    let decision: String?
+    let state: String
 }
 private struct NewConnection: Decodable {
     let id: String
@@ -314,6 +338,64 @@ enum StorageRegistryBridge {
                             as: [ScenarioPlanItem].self
                         )
                     }
+                }
+            }
+        }
+    }
+
+    /// Add metadata-only conflict work to the independent Scenario queue.
+    /// It neither creates a Job nor reads or changes file content.
+    static func queueScenarioConflict(
+        scenario: ScenarioEntry, relativePath: String, kind: String,
+        sourceIsLeft: Bool? = nil, databasePath: String? = nil
+    ) throws -> String {
+        let database = try databasePath ?? path
+        let source = sourceIsLeft.map { $0 ? Int32(1) : Int32(0) } ?? -1
+        let result: NewConnection = try database.withCString { database in
+            try scenario.id.withCString { scenarioID in
+                try relativePath.withCString { relativePath in
+                    try kind.withCString { kind in
+                        try unwrap(
+                            scenarioConflictQueue(
+                                database, scenarioID, scenario.revision, relativePath, kind, source
+                            ),
+                            as: NewConnection.self
+                        )
+                    }
+                }
+            }
+        }
+        return result.id
+    }
+
+    /// Read the independent conflict queue for one exact Scenario revision.
+    static func listScenarioConflicts(
+        scenario: ScenarioEntry, databasePath: String? = nil
+    ) throws -> [ScenarioConflictTask] {
+        let database = try databasePath ?? path
+        return try database.withCString { database in
+            try scenario.id.withCString { scenarioID in
+                try unwrap(
+                    scenarioConflictList(database, scenarioID, scenario.revision),
+                    as: [ScenarioConflictTask].self
+                )
+            }
+        }
+    }
+
+    /// Store a user decision in the independent conflict queue. The selected
+    /// source is mandatory. This method does not execute a transfer or delete.
+    static func selectScenarioConflict(
+        id: String, sourceIsLeft: Bool, decision: String, databasePath: String? = nil
+    ) throws {
+        let database = try databasePath ?? path
+        let source: Int32 = sourceIsLeft ? 1 : 0
+        let _: Bool = try database.withCString { database in
+            try id.withCString { id in
+                try decision.withCString { decision in
+                    try unwrap(
+                        scenarioConflictSelect(database, id, source, decision), as: Bool.self
+                    )
                 }
             }
         }

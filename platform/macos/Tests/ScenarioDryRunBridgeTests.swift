@@ -131,6 +131,32 @@ struct ScenarioDryRunBridgeTests {
         check(plan[0].action.from_left == true, "proposal preserves source direction")
         check(!FileManager.default.fileExists(atPath: rightRoot.appendingPathComponent("report.txt").path),
               "dry run does not transfer content")
+        let scenario = ScenarioEntry(
+            id: scenarioID,
+            name: "Swift dry-run bridge",
+            left_connection_id: leftID,
+            left_root: leftRoot.path,
+            right_connection_id: rightID,
+            right_root: rightRoot.path,
+            direction: "bidirectional",
+            enabled: true,
+            revision: 1
+        )
+        let conflictID = try StorageRegistryBridge.queueScenarioConflict(
+            scenario: scenario, relativePath: "report.txt", kind: "content", databasePath: database
+        )
+        var conflicts = try StorageRegistryBridge.listScenarioConflicts(
+            scenario: scenario, databasePath: database
+        )
+        check(conflicts.count == 1, "conflict is recorded in its independent queue")
+        check(conflicts[0].id == conflictID, "queue returns its persistent task identifier")
+        check(conflicts[0].source_is_left == nil, "a conflict has no implicit source")
+        try StorageRegistryBridge.selectScenarioConflict(
+            id: conflictID, sourceIsLeft: false, decision: "skip_transfer", databasePath: database
+        )
+        conflicts = try StorageRegistryBridge.listScenarioConflicts(scenario: scenario, databasePath: database)
+        check(conflicts[0].source_is_left == false, "the selected source is durable")
+        check(conflicts[0].decision == "skip_transfer", "the chosen policy is durable")
         try setConnectionEnabled(database: database, id: leftID, enabled: false)
         do {
             _ = try StorageRegistryBridge.localScenarioSnapshot(
