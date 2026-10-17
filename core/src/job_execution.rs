@@ -104,6 +104,10 @@ pub enum LocalFileCopyReconciliationStatus {
     Existing(JobState),
 }
 
+fn is_local_file_copy_operation(operation_kind: Option<&str>) -> bool {
+    matches!(operation_kind, Some("local_copy_new" | "local_copy_replace"))
+}
+
 #[derive(Debug)]
 pub enum LocalFileCopyError {
     InvalidRequest,
@@ -515,7 +519,21 @@ pub fn run_local_file_copy(
 ) -> Result<LocalFileCopyStatus, LocalFileCopyError> {
     run_local_file_copy_inner(
         database_path, registry_path, source_root, source_connection_id, source_relative,
-        destination_root, destination_connection_id, destination_relative, job_id, consent, None,
+        destination_root, destination_connection_id, destination_relative, job_id, consent, None, false,
+    )
+}
+
+/// Execute one manually confirmed replacement of an existing Local file.
+/// This uses the same JobStore and scoped source-read consent as a new copy.
+#[allow(clippy::too_many_arguments)]
+pub fn run_local_file_replace(
+    database_path: &Path, registry_path: &Path, source_root: &Path,
+    source_connection_id: &str, source_relative: &Path, destination_root: &Path,
+    destination_connection_id: &str, destination_relative: &Path, job_id: &str, consent: bool,
+) -> Result<LocalFileCopyStatus, LocalFileCopyError> {
+    run_local_file_copy_inner(
+        database_path, registry_path, source_root, source_connection_id, source_relative,
+        destination_root, destination_connection_id, destination_relative, job_id, consent, None, true,
     )
 }
 
@@ -560,7 +578,7 @@ pub fn run_local_scenario_file_copy(
     run_local_file_copy_inner(
         database_path, registry_path, Path::new(source_root), source_connection_id, source_relative,
         Path::new(destination_root), destination_connection_id, destination_relative, job_id, consent,
-        Some((scenario_id, scenario_revision, is_left_to_right)),
+        Some((scenario_id, scenario_revision, is_left_to_right)), false,
     )
 }
 
@@ -577,6 +595,7 @@ fn run_local_file_copy_inner(
     job_id: &str,
     consent: bool,
     scenario: Option<(&str, u64, bool)>,
+    replace_existing: bool,
 ) -> Result<LocalFileCopyStatus, LocalFileCopyError> {
     if !valid_job_id(job_id)
         || source_connection_id.is_empty()
@@ -602,8 +621,10 @@ fn run_local_file_copy_inner(
     let source_entry = source.stat(source_relative).map_err(LocalFileCopyError::Local)?;
     if source_entry.is_directory { return Err(LocalFileCopyError::InvalidRequest); }
     match destination.stat(destination_relative) {
+        Ok(entry) if replace_existing && !entry.is_directory => {}
+        Ok(_) if replace_existing => return Err(LocalFileCopyError::InvalidRequest),
         Ok(_) => return Err(LocalFileCopyError::TargetExists),
-        Err(LocalError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(LocalError::Io(error)) if !replace_existing && error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(LocalFileCopyError::Local(error)),
     }
     let source_path = source_relative.to_str().ok_or(LocalFileCopyError::InvalidRequest)?;
@@ -641,8 +662,9 @@ fn run_local_file_copy_inner(
     store.consume_operation_decision(&decision_id, job_id, &scope, now)?;
     store.advance(job_id, JobState::WaitingForDecision, JobState::Running, Confirmation::Confirmed(EvidenceLevel::Requested))?;
     let attempt_id = format!("{job_id}-attempt-1");
+    let operation_kind = if replace_existing { "local_copy_replace" } else { "local_copy_new" };
     store.prepare_bound_attempt_with_root_identity(
-        job_id, &attempt_id, "local_copy_new", destination_connection_id, target_path,
+        job_id, &attempt_id, operation_kind, destination_connection_id, target_path,
         source_entry.size, "00000000000000000000000000000000", &root_identity,
     )?;
     if !enabled_local_connection(registry_path, source_connection_id)
@@ -651,7 +673,12 @@ fn run_local_file_copy_inner(
         store.fail_attempt_before_effect(job_id, &attempt_id)?;
         return Err(LocalFileCopyError::ConnectionUnavailable);
     }
-    match source.copy_file_to_new(source_relative, &destination, destination_relative, ContentReadConsent::GrantedForThisOperation) {
+    let copy_result = if replace_existing {
+        source.copy_file_to_replace(source_relative, &destination, destination_relative, ContentReadConsent::GrantedForThisOperation)
+    } else {
+        source.copy_file_to_new(source_relative, &destination, destination_relative, ContentReadConsent::GrantedForThisOperation)
+    };
+    match copy_result {
         Ok(bytes) if bytes == source_entry.size => {}
         Ok(_) => return Err(LocalFileCopyError::VerificationFailed),
         Err(LocalError::AlreadyExists) => { store.fail_attempt_before_effect(job_id, &attempt_id)?; return Err(LocalFileCopyError::TargetExists); }
@@ -693,7 +720,7 @@ fn run_local_file_copy_inner(
     } else {
         None
     };
-    let receipt = VerifiedReceipt::metadata_verified(&attempt_id, "local_copy_new", destination_connection_id, target_path);
+    let receipt = VerifiedReceipt::metadata_verified(&attempt_id, operation_kind, destination_connection_id, target_path);
     store.complete_attempt_with_scenario_copy_baseline(job_id, &attempt_id, &receipt, baseline.as_ref())?;
     if baseline.is_some() {
         // Completion is already durable. A failed Registry write leaves the
@@ -735,7 +762,7 @@ pub fn reconcile_local_file_copy(
     let matching: Vec<_> = attempts.iter().filter(|attempt| {
         attempt.job_id == job_id
             && attempt.status == "unknown"
-            && attempt.operation_kind.as_deref() == Some("local_copy_new")
+            && is_local_file_copy_operation(attempt.operation_kind.as_deref())
             && attempt.target_connection_id.as_deref() == Some(destination_connection_id)
     }).collect();
     if matching.len() != 1 { return Ok(LocalFileCopyReconciliationStatus::StillUnknown); }
@@ -743,7 +770,10 @@ pub fn reconcile_local_file_copy(
     let Some(expected) = store.expected_metadata(job_id, &attempt.attempt_id)? else {
         return Ok(LocalFileCopyReconciliationStatus::StillUnknown);
     };
-    if expected.operation_kind != "local_copy_new"
+    let Some(operation_kind) = attempt.operation_kind.as_deref() else {
+        return Ok(LocalFileCopyReconciliationStatus::StillUnknown);
+    };
+    if expected.operation_kind != operation_kind
         || expected.target_connection_id != destination_connection_id
         || store.attempt_root_identity(job_id, &attempt.attempt_id)?.as_deref() != Some(root_identity.as_str())
     {
@@ -752,7 +782,7 @@ pub fn reconcile_local_file_copy(
     if !matches!(destination.stat(Path::new(&expected.target_path)), Ok(entry) if !entry.is_directory && entry.size == expected.expected_size) {
         return Ok(LocalFileCopyReconciliationStatus::StillUnknown);
     }
-    let receipt = VerifiedReceipt::metadata_verified(&attempt.attempt_id, "local_copy_new", destination_connection_id, &expected.target_path);
+    let receipt = VerifiedReceipt::metadata_verified(&attempt.attempt_id, operation_kind, destination_connection_id, &expected.target_path);
     store.complete_attempt(job_id, &attempt.attempt_id, &receipt)?;
     Ok(LocalFileCopyReconciliationStatus::Completed)
 }
@@ -781,7 +811,7 @@ pub fn local_file_copy_reconciliation_candidates(
     let mut candidates = Vec::new();
     for attempt in store.unresolved_attempts()? {
         if attempt.status != "unknown"
-            || attempt.operation_kind.as_deref() != Some("local_copy_new")
+            || !is_local_file_copy_operation(attempt.operation_kind.as_deref())
             || attempt.target_connection_id.as_deref() != Some(destination_connection_id)
             || store
                 .attempt_root_identity(&attempt.job_id, &attempt.attempt_id)?
@@ -1286,6 +1316,30 @@ mod tests {
     }
 
     #[test]
+    fn local_file_replace_persists_attempt_and_replaces_existing_file() {
+        let (database, registry_path, source_root, source_connection) = local_fixture("replace");
+        let destination_root = source_root.parent().unwrap().join("replace-destination-root");
+        fs::create_dir(&source_root).unwrap();
+        fs::create_dir(&destination_root).unwrap();
+        fs::write(source_root.join("source.txt"), b"new contents").unwrap();
+        fs::write(destination_root.join("destination.txt"), b"old contents").unwrap();
+        let registry = Registry::open(&registry_path).unwrap();
+        let destination_connection = registry.add("local_filesystem", "Destination Local").unwrap();
+
+        assert_eq!(
+            run_local_file_replace(
+                &database, &registry_path, &source_root, &source_connection, Path::new("source.txt"),
+                &destination_root, &destination_connection, Path::new("destination.txt"), "local-replace-1", true,
+            ).unwrap(),
+            LocalFileCopyStatus::Completed
+        );
+        assert_eq!(fs::read(destination_root.join("destination.txt")).unwrap(), b"new contents");
+        let store = JobStore::open(&database).unwrap();
+        assert_eq!(store.state("local-replace-1").unwrap(), Some(JobState::Completed));
+        assert!(store.unresolved_attempts().unwrap().is_empty());
+    }
+
+    #[test]
     fn local_file_copy_reconciliation_requires_exact_destination_evidence() {
         let (database, registry_path, root, _) = local_fixture("copy-reconcile");
         let destination_root = root.parent().unwrap().join("copy-reconcile-destination");
@@ -1312,6 +1366,36 @@ mod tests {
             LocalFileCopyReconciliationStatus::Completed
         );
         assert_eq!(JobStore::open(&database).unwrap().state("copy-unknown").unwrap(), Some(JobState::Completed));
+    }
+
+    #[test]
+    fn local_file_replace_reconciliation_uses_the_replacement_attempt_kind() {
+        let (database, registry_path, root, _) = local_fixture("replace-reconcile");
+        let destination_root = root.parent().unwrap().join("replace-reconcile-destination");
+        fs::create_dir(&destination_root).unwrap();
+        let registry = Registry::open(&registry_path).unwrap();
+        let connection = registry.add("local_filesystem", "Replacement destination").unwrap();
+        let destination = LocalFilesystem::open(&destination_root).unwrap();
+        let identity = destination.root_identity().unwrap();
+        let root_identity = format!("unix:{}:{}", identity.device, identity.inode);
+        let mut store = JobStore::open(&database).unwrap();
+        store.enqueue("replace-unknown", None).unwrap();
+        store.advance(
+            "replace-unknown", JobState::Queued, JobState::Running,
+            Confirmation::Confirmed(EvidenceLevel::Requested),
+        ).unwrap();
+        store.prepare_bound_attempt_with_root_identity(
+            "replace-unknown", "replace-unknown-attempt", "local_copy_replace", &connection,
+            "replaced.txt", 7, "00000000000000000000000000000000", &root_identity,
+        ).unwrap();
+        drop(store);
+        fs::write(destination_root.join("replaced.txt"), b"payload").unwrap();
+
+        assert_eq!(
+            reconcile_local_file_copy(&database, &registry_path, &destination_root, &connection, "replace-unknown").unwrap(),
+            LocalFileCopyReconciliationStatus::Completed
+        );
+        assert_eq!(JobStore::open(&database).unwrap().state("replace-unknown").unwrap(), Some(JobState::Completed));
     }
 
     #[test]

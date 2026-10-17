@@ -9,12 +9,9 @@ use std::fs::File;
 use std::io;
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
-#[cfg(any(not(unix), test))]
-use std::path::PathBuf;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[cfg(unix)]
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(unix)]
@@ -38,6 +35,19 @@ impl From<io::Error> for LocalError {
     }
 }
 pub type Result<T> = std::result::Result<T, LocalError>;
+
+fn replacement_staging_path(target: &Path) -> Result<PathBuf> {
+    let parent = target.parent().unwrap_or_else(|| Path::new(""));
+    let leaf = target
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or(LocalError::InvalidPath)?;
+    let serial = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    Ok(parent.join(format!(
+        ".qadren-replace-{leaf}-{}-{serial}.stage",
+        std::process::id()
+    )))
+}
 
 /// Caller-provided decision for this exact content-reading operation.
 /// Never infer consent from a successful metadata query or a previous job.
@@ -579,6 +589,36 @@ impl LocalFilesystem {
         {
             let _ = destination;
             Err(LocalError::UnsafeEntry)
+        }
+    }
+
+    /// Copy one regular source file to a new private staging name in the
+    /// destination root, then atomically replace the existing destination.
+    /// A staging or publish error after the content stream starts is UNKNOWN:
+    /// callers must not retry or remove a possible staging artifact blindly.
+    pub fn copy_file_to_replace(
+        &self,
+        from: &Path,
+        destination: &Self,
+        to: &Path,
+        consent: ContentReadConsent,
+    ) -> Result<u64> {
+        Self::relative(from)?;
+        Self::relative(to)?;
+        if consent != ContentReadConsent::GrantedForThisOperation || self.overlaps_root(destination)? {
+            return Err(LocalError::UnsafeEntry);
+        }
+        if matches!(destination.stat(to), Ok(entry) if entry.is_directory) {
+            return Err(LocalError::UnsafeEntry);
+        }
+        let staging = replacement_staging_path(to)?;
+        let bytes = self.copy_file_to_new(from, destination, &staging, consent)?;
+        match destination.rename_file_replace(&staging, to) {
+            Ok(()) => Ok(bytes),
+            Err(LocalError::OutcomeUnknown(error)) => Err(LocalError::OutcomeUnknown(error)),
+            Err(error) => Err(LocalError::OutcomeUnknown(io::Error::other(format!(
+                "replacement publish did not complete safely: {error:?}"
+            )))),
         }
     }
 
@@ -3729,6 +3769,34 @@ mod tests {
             assert!(!root.join("new.bin").exists());
         }
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_to_replace_publishes_staged_source_and_removes_stage() {
+        let source_root = sandbox();
+        let destination_root = sandbox();
+        fs::write(source_root.join("source.bin"), b"new contents").unwrap();
+        fs::write(destination_root.join("destination.bin"), b"old contents").unwrap();
+        let source = LocalFilesystem::open(&source_root).unwrap();
+        let destination = LocalFilesystem::open(&destination_root).unwrap();
+        assert_eq!(
+            source
+                .copy_file_to_replace(
+                    Path::new("source.bin"),
+                    &destination,
+                    Path::new("destination.bin"),
+                    ContentReadConsent::GrantedForThisOperation,
+                )
+                .unwrap(),
+            12
+        );
+        assert_eq!(fs::read(destination_root.join("destination.bin")).unwrap(), b"new contents");
+        assert!(fs::read_dir(&destination_root)
+            .unwrap()
+            .all(|entry| !entry.unwrap().file_name().to_string_lossy().starts_with(".qadren-replace-")));
+        fs::remove_dir_all(source_root).unwrap();
+        fs::remove_dir_all(destination_root).unwrap();
     }
 
     #[test]
