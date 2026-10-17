@@ -583,8 +583,9 @@ pub fn run_local_scenario_file_copy(
 }
 
 /// Execute one explicitly confirmed replacement proposed by an exact Scenario
-/// revision. This is a one-way update only; the immutable Scenario endpoint
-/// binding is checked before the durable replacement attempt is created.
+/// revision. A bidirectional Scenario may use either permitted direction. The
+/// immutable Scenario endpoint binding is checked before the durable
+/// replacement attempt is created.
 #[allow(clippy::too_many_arguments)]
 pub fn run_local_scenario_file_replace(
     database_path: &Path,
@@ -1586,6 +1587,42 @@ mod tests {
         let stored = JobStore::open(&database).unwrap().get("scenario-replace-1").unwrap().unwrap();
         assert_eq!(stored.scenario_id.as_deref(), Some(scenario.as_str()));
         assert_eq!(stored.scenario_revision, Some(1));
+    }
+
+    #[test]
+    fn bidirectional_scenario_replace_accepts_a_right_to_left_update() {
+        let (database, registry_path, left_root, left_connection) = local_fixture("scenario-replace-reverse");
+        let right_root = left_root.parent().unwrap().join("scenario-replace-reverse-right-root");
+        fs::create_dir(&left_root).unwrap();
+        fs::create_dir(&right_root).unwrap();
+        fs::write(left_root.join("report.txt"), b"old report").unwrap();
+        fs::write(right_root.join("report.txt"), b"new report").unwrap();
+        let registry = Registry::open(&registry_path).unwrap();
+        let right_connection = registry.add("local_filesystem", "Scenario Right").unwrap();
+        let scenario = registry.create_scenario(
+            "Bidirectional scenario update", &left_connection, left_root.to_str().unwrap(),
+            &right_connection, right_root.to_str().unwrap(), "bidirectional",
+        ).unwrap();
+
+        assert_eq!(
+            run_local_scenario_file_replace(
+                &database, &registry_path, &scenario, 1, &right_root, &right_connection, Path::new("report.txt"),
+                &left_root, &left_connection, Path::new("report.txt"), "scenario-replace-reverse-1", true,
+            ).unwrap(),
+            LocalFileCopyStatus::Completed
+        );
+        assert_eq!(fs::read(left_root.join("report.txt")).unwrap(), b"new report");
+        let stored = JobStore::open(&database).unwrap().get("scenario-replace-reverse-1").unwrap().unwrap();
+        assert_eq!(stored.scenario_id.as_deref(), Some(scenario.as_str()));
+        assert_eq!(stored.scenario_revision, Some(1));
+        let baseline = Registry::open(&registry_path)
+            .unwrap()
+            .list_confirmed_file_states(&ScenarioReference { scenario_id: scenario, revision: 1 })
+            .unwrap();
+        assert_eq!(baseline.len(), 1);
+        assert_eq!(baseline[0].relative_path, "report.txt");
+        assert_eq!(baseline[0].left.as_ref().unwrap().size, 10);
+        assert_eq!(baseline[0].right.as_ref().unwrap().size, 10);
     }
 
     #[test]
