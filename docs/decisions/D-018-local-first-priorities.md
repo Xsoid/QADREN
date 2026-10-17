@@ -22,7 +22,7 @@ The current local product needs a verified end-to-end operation before remote-pr
 
 Work in `main`. Verify the current code and SHA before each change. Use `VERIFIED` only for behavior checked on a specific SHA. Distinguish `PARTIAL`, `BLOCKED`, and `PARKED` in an evidence record.
 
-Preserve the prohibition on unauthorized download to the primary MacBook, durable attempts, no-overwrite, `UNKNOWN` with read-only reconciliation, scoped consent, and no proprietary content versioning in Release 1. A Local-to-Local file copy may materialize one File Provider source item only after an explicit one-time confirmation. Bind the durable `read_content` decision to the source `connection_id` and relative path. Do not add a File Provider extension or entitlement for this behavior.
+Preserve the prohibition on unauthorized download to the primary MacBook, durable attempts, `UNKNOWN` with read-only reconciliation, scoped consent, and no proprietary content versioning in Release 1. New Local-to-Local copies remain no-overwrite. The owner approved a controlled replacement path for an existing Local destination on 2026-10-17. That path must use a durable attempt, explicit operation scope, destination identity checks where available, and `UNKNOWN` after lost effect proof. It must not add a content archive or a File Provider extension. A Local-to-Local file copy may materialize one File Provider source item only after an explicit one-time confirmation. Bind the durable `read_content` decision to the source `connection_id` and relative path.
 
 ## Consequences
 

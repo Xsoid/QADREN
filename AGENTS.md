@@ -19,7 +19,10 @@
 - Do not download content to the primary MacBook without explicit consent for that operation.
 - Before an external effect, save a durable attempt and check capability, consent, destination state, and no-overwrite.
 - If proof of an effect is lost, use `UNKNOWN` and read-only reconciliation. Do not retry blindly.
-- Keep destructive Local Filesystem operations fail-closed until concurrent-change protection is proven.
+- A Local Filesystem update can replace an existing destination. It must use the
+  approved replacement protocol, a durable attempt, explicit operation scope,
+  and `UNKNOWN` reconciliation. The owner removed the previous Release 1
+  fail-closed block for this operation on 2026-10-17.
 - Do not add content versioning, runtime BackupSet, scenario dependencies, or remote Worker protocol to Release 1.
 
 ## Documentation language
