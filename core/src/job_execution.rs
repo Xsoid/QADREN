@@ -505,6 +505,7 @@ pub fn run_local_directory_create(
 /// written and consumed for this exact source connection and relative path
 /// before the source file is opened. This permits macOS File Provider
 /// materialization only after the user has approved that exact operation.
+#[allow(clippy::too_many_arguments)]
 pub fn run_local_file_copy(
     database_path: &Path,
     registry_path: &Path,

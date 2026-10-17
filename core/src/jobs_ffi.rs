@@ -53,6 +53,9 @@ pub unsafe extern "C" fn qadren_jobs_dispatch_scenario_copy_baselines(
 }
 
 /// Read-only reconciliation for one UNKNOWN Local copy Job.
+///
+/// # Safety
+/// Arguments must be valid, NUL-terminated strings for the duration of call.
 #[no_mangle]
 pub unsafe extern "C" fn qadren_jobs_reconcile_local_file_copy(
     database_path: *const c_char, registry_path: *const c_char,
@@ -424,6 +427,9 @@ pub unsafe extern "C" fn qadren_jobs_run_local_file_replace(
 /// Execute one explicitly confirmed copy bound to an immutable Scenario revision.
 /// The Rust executor rejects roots and connections that are not the direction
 /// stored in that revision.
+///
+/// # Safety
+/// Arguments must be valid, NUL-terminated strings for the duration of call.
 #[no_mangle]
 pub unsafe extern "C" fn qadren_jobs_run_local_scenario_file_copy(
     database_path: *const c_char, registry_path: *const c_char,
