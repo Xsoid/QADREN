@@ -135,6 +135,27 @@ fn matches_conflict_snapshot(
         && entry.object_revision == expected.object_revision
 }
 
+/// Local metadata revisions contain mtime seconds and nanoseconds. This is
+/// only an ordering signal for the same Local Filesystem adapter contract.
+fn local_snapshot_modified_at(version: &ConfirmedFileVersion) -> Option<(i64, u32)> {
+    let mut fields = version.object_revision.as_deref()?.split(':');
+    if fields.next()? != "local" {
+        return None;
+    }
+    let _device = fields.next()?;
+    let _inode = fields.next()?;
+    let seconds = fields.next()?.parse().ok()?;
+    let nanoseconds = fields.next()?.parse().ok()?;
+    Some((seconds, nanoseconds))
+}
+
+fn source_snapshot_is_newer(
+    source: &ConfirmedFileVersion,
+    destination: &ConfirmedFileVersion,
+) -> Option<bool> {
+    Some(local_snapshot_modified_at(source)? > local_snapshot_modified_at(destination)?)
+}
+
 fn enabled_local_connection(registry_path: &Path, connection_id: &str) -> bool {
     let Ok(registry) = Registry::open(registry_path) else {
         return false;
@@ -677,7 +698,10 @@ pub fn run_local_scenario_conflict_replace(
     let task = registry.selected_conflict_task(conflict_id)
         .map_err(|_| LocalFileCopyError::ConflictUnavailable)?
         .ok_or(LocalFileCopyError::ConflictUnavailable)?;
-    if task.kind != "content" || task.decision.as_deref() != Some("replace_from_source") {
+    if task.kind != "content" || !matches!(
+        task.decision.as_deref(),
+        Some("replace_from_source" | "replace_if_newer")
+    ) {
         return Err(LocalFileCopyError::ConflictUnavailable);
     }
     let (Some(source_is_left), Some(left), Some(right)) = (task.source_is_left, task.left.as_ref(), task.right.as_ref()) else {
@@ -715,6 +739,15 @@ pub fn run_local_scenario_conflict_replace(
     {
         registry.mark_conflict_task_stale(conflict_id).map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
         return Err(LocalFileCopyError::ConflictStale);
+    }
+    if task.decision.as_deref() == Some("replace_if_newer") {
+        let Some(source_is_newer) = source_snapshot_is_newer(source_expected, destination_expected) else {
+            return Err(LocalFileCopyError::ConflictUnavailable);
+        };
+        if !source_is_newer {
+            registry.complete_conflict_task(conflict_id).map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
+            return Ok(LocalFileCopyStatus::Completed);
+        }
     }
     let result = run_local_scenario_file_replace_checked(
         database_path, registry_path, &task.scenario.scenario_id, task.scenario.revision,
@@ -1728,6 +1761,35 @@ mod tests {
         ).unwrap();
         registry.select_conflict_task(&task, Some(true), "replace_from_source").unwrap();
         assert_eq!(run_local_scenario_conflict_replace(&database, &registry_path, &task, "conflict-replace-1", true).unwrap(), LocalFileCopyStatus::Completed);
+        assert_eq!(fs::read(destination_root.join("report.txt")).unwrap(), b"new report");
+        assert_eq!(registry.selected_conflict_task(&task).unwrap(), None);
+    }
+
+    #[test]
+    fn selected_conflict_replace_if_newer_uses_local_snapshot_mtime() {
+        let (database, registry_path, source_root, source_connection) = local_fixture("conflict-replace-newer");
+        let destination_root = source_root.parent().unwrap().join("conflict-replace-newer-destination");
+        fs::create_dir(&source_root).unwrap();
+        fs::create_dir(&destination_root).unwrap();
+        fs::write(destination_root.join("report.txt"), b"old report").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        fs::write(source_root.join("report.txt"), b"new report").unwrap();
+        let registry = Registry::open(&registry_path).unwrap();
+        let destination_connection = registry.add("local_filesystem", "Destination").unwrap();
+        let scenario_id = registry.create_scenario(
+            "Conflict", &source_connection, source_root.to_str().unwrap(),
+            &destination_connection, destination_root.to_str().unwrap(), "left_to_right",
+        ).unwrap();
+        let source = LocalFilesystem::open(&source_root).unwrap().stat(Path::new("report.txt")).unwrap();
+        let destination = LocalFilesystem::open(&destination_root).unwrap().stat(Path::new("report.txt")).unwrap();
+        let task = registry.queue_conflict_task(
+            &ScenarioReference { scenario_id, revision: 1 }, "report.txt", "content", None,
+            Some(&ConfirmedFileVersion { object_revision: source.object_revision, size: source.size, checksum_md5: None }),
+            Some(&ConfirmedFileVersion { object_revision: destination.object_revision, size: destination.size, checksum_md5: None }),
+        ).unwrap();
+        registry.select_conflict_task(&task, Some(true), "replace_if_newer").unwrap();
+
+        assert_eq!(run_local_scenario_conflict_replace(&database, &registry_path, &task, "conflict-replace-newer-1", true).unwrap(), LocalFileCopyStatus::Completed);
         assert_eq!(fs::read(destination_root.join("report.txt")).unwrap(), b"new report");
         assert_eq!(registry.selected_conflict_task(&task).unwrap(), None);
     }

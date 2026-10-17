@@ -701,9 +701,16 @@ private struct ScenarioDryRunView: View {
             get: { pendingConflictReplace != nil }, set: { if !$0 { pendingConflictReplace = nil } }
         )) {
             Button("Отмена", role: .cancel) { pendingConflictReplace = nil }
-            Button("Загрузить и заменить", role: .destructive) { executePendingConflictReplace() }
+            Button(
+                pendingConflictReplace?.decision == "replace_if_newer" ? "Проверить и заменить" : "Загрузить и заменить",
+                role: .destructive
+            ) { executePendingConflictReplace() }
         } message: {
-            Text("QADREN ещё раз проверит обе стороны по сохранённому снимку. При изменении задача станет устаревшей, а замена не начнётся.")
+            Text(
+                pendingConflictReplace?.decision == "replace_if_newer"
+                    ? "QADREN ещё раз проверит обе стороны. Он заменит файл только если источник новее. При изменении задача станет устаревшей, а замена не начнётся."
+                    : "QADREN ещё раз проверит обе стороны по сохранённому снимку. При изменении задача станет устаревшей, а замена не начнётся."
+            )
         }
     }
 
@@ -879,8 +886,8 @@ private struct ScenarioConflictTaskView: View {
                     Text("Сохранённое решение: \(decisionTitle(decision))")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                if task.state == "selected" && task.decision == "replace_from_source" {
-                    Button("Выполнить замену из источника", role: .destructive) {
+                if task.state == "selected", task.decision == "replace_from_source" || task.decision == "replace_if_newer" {
+                    Button(task.decision == "replace_if_newer" ? "Выполнить проверку и замену" : "Выполнить замену из источника", role: .destructive) {
                         executeReplace(task)
                     }
                 }
