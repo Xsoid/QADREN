@@ -49,6 +49,8 @@ The Rust core, FFI, and File Manager have `local_copy_replace` for one manually 
 
 For a Scenario `Create`, the source and destination relative paths must be equal and the Job stores the exact Scenario revision. The source and destination local metadata revisions are saved to a JobStore outbox in the same transaction as Job completion. The app delivers pending entries before a Scenario dry-run. Delivery records the revision-bound `FileSyncState` in Registry. Delivery can repeat after a crash. It does not repeat the copy.
 
+For a one-way Scenario `Update`, the planner must propose `update` from the configured source to the unchanged destination. The app requires separate destructive consent. Rust reloads the exact Scenario revision and checks both endpoint roots, both connection IDs, and the permitted direction before it creates a `local_copy_replace` Job. The Job uses the controlled replacement protocol. Two-way execution and conflict execution are not implemented.
+
 ## New adapters
 
 Integrations of new clouds and servers are added independently of the core; the macOS dependency of iCloud is not transferred to all of QADREN.
