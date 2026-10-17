@@ -17,14 +17,17 @@ Release 1 is a local-first macOS product. It includes one Rust JobStore, Local F
 
 ## Current Recorded Local Evidence
 
-The executable baseline is `14bd119`.
+The executable baseline is `4131daf`.
 
 | Check | Result | Evidence scope |
 |---|---|---|
-| `cargo test --manifest-path core/Cargo.toml --lib` | PASS, 266 tests | Rust Core on `14bd119` |
-| `scripts/test-macos-local-workspace.sh` | PASS | SwiftUI to Rust Local file-copy bridge on `14bd119` |
-| `scripts/test-macos-scenario-dry-run.sh` | PASS | SwiftUI Scenario metadata and FFI bridge on `14bd119` |
-| `./script/build_and_run.sh --verify` | PASS | Unsigned local development bundle and running QADREN process on `14bd119` |
+| `cargo clippy --manifest-path core/Cargo.toml --lib -- -D warnings` | PASS | Rust Core lint on `4131daf` |
+| `cargo test --manifest-path core/Cargo.toml --lib` | PASS, 266 tests | Rust Core on `4131daf` |
+| `scripts/test-macos-local-workspace.sh` | PASS | SwiftUI to Rust Local file-copy bridge on `4131daf` |
+| `scripts/test-macos-scenario-dry-run.sh` | PASS | SwiftUI Scenario metadata and FFI bridge on `4131daf` |
+| `./script/build_and_run.sh --verify` | PASS | Unsigned local development bundle and running QADREN process on `4131daf` |
+
+`cargo fmt --manifest-path core/Cargo.toml --check` does not pass on this baseline. It reports existing formatting differences outside the Local Scenario update patch. Resolve or explicitly accept that debt before a Release claim.
 
 ## Current Capability Evidence Matrix
 
