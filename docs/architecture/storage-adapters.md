@@ -45,6 +45,8 @@ For `local_mkdir_new`, JobStore saves the opened root device/inode identity with
 
 For `local_copy_new`, JobStore saves the destination root identity and a durable attempt before the copy. Completion requires a regular destination file with the expected byte count. This is metadata verification, not a content hash proof.
 
+For a Scenario `Create`, the source and destination relative paths must be equal and the Job stores the exact Scenario revision. The source and destination local metadata revisions are saved to a JobStore outbox in the same transaction as Job completion. Delivery records the revision-bound `FileSyncState` in Registry. Delivery can repeat after a crash. It does not repeat the copy.
+
 ## New adapters
 
 Integrations of new clouds and servers are added independently of the core; the macOS dependency of iCloud is not transferred to all of QADREN.

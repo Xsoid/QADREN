@@ -10,13 +10,13 @@ This audit uses source reading, the local Git history, and recorded local comman
 
 | Area | Current implementation | Current boundary |
 |---|---|---|
-| Rust Core, SQLite, and FFI | `model.rs`, `registry.rs`, `jobs.rs`, `jobs_ffi.rs`, `confirmation.rs`, and `policy.rs` provide the shared model. A manual Local-to-Local copy has a durable Job path. | A real File Provider materialization run with a user-selected provider item is not recorded. |
+| Rust Core, SQLite, and FFI | `model.rs`, `registry.rs`, `jobs.rs`, `jobs_ffi.rs`, `confirmation.rs`, and `policy.rs` provide the shared model. Manual and Scenario Local-to-Local copies use durable Jobs. | A real File Provider materialization run with a user-selected provider item is not recorded. |
 | App-owned mock Job | `job_execution.rs` has app-owned no-overwrite create, durable attempt, verification, and recovery tests. | It is a test boundary. Do not present it as user-file transfer. |
-| Local Filesystem | `local_fs.rs`, `local_fs_unix.rs`, `local_fs_ffi.rs`, and `LocalWorkspace.swift` provide metadata operations, no-overwrite file copy, and safety guards. A copy requires an exact durable `read_content` decision before opening the source. | A real File Provider materialization run with a user-selected provider item is not recorded. |
-| Scenario | `scenario_planner.rs`, Registry revisions, `FileSyncState`, dry-run FFI, and the gated local metadata snapshot exist. | No real metadata-snapshot to Job submission, synchronization, recovery, or conflict execution is verified. |
+| Local Filesystem | `local_fs.rs`, `local_fs_unix.rs`, `local_fs_ffi.rs`, and `LocalWorkspace.swift` provide metadata operations, local metadata revisions, no-overwrite file copy, and safety guards. A copy requires an exact durable `read_content` decision before opening the source. | A real File Provider materialization run with a user-selected provider item is not recorded. |
+| Scenario | `scenario_planner.rs`, Registry revisions, `FileSyncState`, dry-run FFI, and the gated local metadata snapshot exist. A user-confirmed `Create` item submits a pinned no-overwrite copy Job. The completion transaction stores a baseline outbox. Delivery writes the revision-bound `FileSyncState` idempotently. | Two-way execution, updates, conflict execution, and UNKNOWN copy reconciliation are not verified. |
 | Scheduler | `scheduler.rs`, `schedule_dispatch.rs`, and dispatch FFI create queued Jobs from durable configuration. | No independent timer, background lifecycle, event debounce, or Scenario execution is verified. |
 | SwiftUI UI | `DesignSystem.swift`, `DashboardLayout.swift`, `QADRENApp.swift`, `MainView.swift`, and `SettingsPanel.swift` provide the native baseline. | Native visual acceptance, complete keyboard accessibility, and removal of legacy mock actions remain incomplete. VoiceOver support is outside the current scope. |
-| Local file manager | File navigation, `mkdir`, copy preview, and a confirmed one-file copy are present. The copy uses Rust JobStore and metadata verification. | Scenario plan items do not yet submit copy Jobs. |
+| Local file manager | File navigation, `mkdir`, copy preview, a confirmed one-file copy, and Scenario `Create` submission are present. Copies use Rust JobStore and metadata verification. | No user-file Scenario run or real File Provider materialization evidence is recorded. |
 | Yandex Disk | `yandex.rs`, `yandex_ffi.rs`, and `YandexConnection.swift` remain in the source tree. | It is post-release work. Do not add API, OAuth, transfer, or live end-to-end work in Release 1. |
 | iCloud | `ICloudAvailability.swift` contains legacy availability metadata. | It is post-release work. Do not add an adapter, entitlement, UI integration, or feasibility test in Release 1. Keep Local File Provider guards. |
 | Background service | Native windows expose `workerStatus`. | An independent service after UI closure is not verified. |
@@ -24,13 +24,13 @@ This audit uses source reading, the local Git history, and recorded local comman
 
 ## Recorded Local Evidence
 
-The executable code baseline is commit `fdfc0bc`.
+The executable code baseline is commit `61436f5`.
 
 | Command | Recorded result | Scope |
 |---|---|---|
-| `cargo test --manifest-path core/Cargo.toml --lib` | PASS, 253 tests | Rust Core on `fdfc0bc` |
-| `scripts/test-macos-local-workspace.sh` | PASS | SwiftUI to Rust Local file-copy bridge on `fdfc0bc` |
-| `bash scripts/build-macos.sh` | PASS | Unsigned macOS development bundle on `fdfc0bc` |
+| `cargo test --manifest-path core/Cargo.toml --lib` | PASS, 254 tests | Rust Core on `61436f5` |
+| `scripts/test-macos-local-workspace.sh` | PASS | SwiftUI to Rust Local file-copy bridge on `61436f5` |
+| `bash scripts/build-macos.sh` | PASS | Unsigned macOS development bundle on `61436f5` |
 
 These checks do not prove a signed release, an independent Worker, or File Provider materialization with a user-selected provider item.
 
@@ -39,8 +39,8 @@ These checks do not prove a signed release, an independent Worker, or File Provi
 1. Reuse the existing native UI and app-owned mock. Do not restart baseline work.
 2. Record an explicit one-time consent before any macOS read that can materialize a File Provider item.
 3. Keep the durable Local-to-Local no-overwrite copy Job as the only content-copy executor.
-4. Connect the local Scenario planner only to that copy Job, with new consent for each source file.
-5. Add independent local scheduling, service lifecycle, and release evidence after the copy path is safe.
+4. Keep the local Scenario `Create` path bound to that copy Job, with new consent for each source file.
+5. Add updates, two-way execution, conflict handling, UNKNOWN reconciliation, independent local scheduling, service lifecycle, and release evidence.
 6. Keep Yandex Disk and iCloud parked until a separate owner decision.
 
 ## Required Evidence Before a Release Claim

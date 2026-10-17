@@ -17,23 +17,23 @@ Release 1 is a local-first macOS product. It includes one Rust JobStore, Local F
 
 ## Current Recorded Local Evidence
 
-The executable baseline is `fdfc0bc`.
+The executable baseline is `61436f5`.
 
 | Check | Result | Evidence scope |
 |---|---|---|
-| `cargo test --manifest-path core/Cargo.toml --lib` | PASS, 253 tests | Rust Core on `fdfc0bc` |
-| `scripts/test-macos-local-workspace.sh` | PASS | SwiftUI to Rust Local file-copy bridge on `fdfc0bc` |
-| `bash scripts/build-macos.sh` | PASS | Unsigned macOS development bundle on `fdfc0bc` |
+| `cargo test --manifest-path core/Cargo.toml --lib` | PASS, 254 tests | Rust Core on `61436f5` |
+| `scripts/test-macos-local-workspace.sh` | PASS | SwiftUI to Rust Local file-copy bridge on `61436f5` |
+| `bash scripts/build-macos.sh` | PASS | Unsigned macOS development bundle on `61436f5` |
 
 ## Current Capability Evidence Matrix
 
 | Capability | Current evidence | Not yet established |
 |---|---|---|
-| Rust model and durable JobStore | Core test suite and the manual Local-to-Local copy path pass on the recorded baseline. | Scenario submission to the copy path. |
+| Rust model and durable JobStore | Core test suite and manual and Scenario Local-to-Local copy paths pass on the recorded baseline. | UNKNOWN copy reconciliation. |
 | App-owned mock operation | No-overwrite, durable-attempt, verification, and recovery tests exist in `job_execution.rs`. | User content transfer. The mock is not a release substitute. |
-| Local Filesystem metadata, `mkdir`, and manual copy | Rust and SwiftUI interfaces provide a confirmed one-file no-overwrite copy through JobStore. | Scenario submission and a real File Provider materialization run. |
+| Local Filesystem metadata, `mkdir`, and copy | Rust and SwiftUI interfaces provide confirmed one-file no-overwrite copy through JobStore. Local metadata revisions support a revision-bound Scenario baseline. | A real File Provider materialization run. |
 | macOS File Provider safety | A copy requires a user-confirmed, exact-scope durable decision before opening the source. | A real File Provider materialization run with a user-selected provider item. |
-| Scenario planning | Dry-run FFI passes. Enabled local connections gate the metadata snapshot. | Snapshot-to-Job submission, one-way and two-way execution, conflict handling, and recovery. |
+| Scenario planning | Dry-run FFI passes. Enabled local connections gate the metadata snapshot. A user-confirmed `Create` item submits a pinned copy Job and writes `FileSyncState` through a durable outbox. | Two-way execution, updates, conflict handling, and recovery. |
 | Scheduler dispatch | Durable schedule dispatch can queue a Job. | Independent timer, app-exit lifecycle, event debounce, and real Scenario execution. |
 | Native UI | Design system, widget canvas, settings, and local file navigation exist. | Full visual acceptance, removal of legacy mock actions, and real-copy interaction. |
 | Distribution | The macOS build script creates an unsigned development bundle. | Signing, notarization, clean install, restart validation, and release package. |

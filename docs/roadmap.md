@@ -17,7 +17,7 @@ Status: current product sequence. This document is not a work log.
 |---|---|
 | **P0 / COMPLETE** | The SwiftUI design system, widget canvas, and monitoring baseline exist. Do not reopen general UI-baseline work. |
 | **P1 / CRITICAL PATH** | The manual Local-to-Local no-overwrite copy path exists through UI → Rust JobStore → Local Filesystem → verification → SQLite → UI. Record a real File Provider materialization run. Preserve scoped consent and `UNKNOWN`. Do not build a second engine. |
-| **P1 / LOCAL PRODUCT** | Connect the existing Scenario dry-run, File Manager navigation, `mkdir` Job, and copy metadata preview to the verified copy Job. Verify one-way and two-way local Scenario execution. |
+| **P1 / LOCAL PRODUCT** | A user-confirmed Scenario `Create` item now uses the verified copy Job and records a revision-bound baseline. Add one-way updates, two-way execution, conflict handling, and UNKNOWN reconciliation. |
 | **P2 / AUTONOMY** | Run real local Scenarios on schedule in one independent Worker after UI exit. Test crash and restart recovery. Produce a verified macOS release. |
 | **POST-RELEASE / PARKED** | Yandex Disk and iCloud require a separate owner decision before reactivation. Preserve existing code, credentials, and Local File Provider guards. Do not add cloud adapter, API, entitlement, or live end-to-end work in Release 1. |
 
@@ -72,6 +72,6 @@ Do not validate preservation only on a happy path. Test connection breaks, API `
 
 ## Currency Rule
 
-Re-verify the current `HEAD` before each patch. The native UI, layout, scheduler-dispatch foundation, File Manager copy path, and Scenario metadata snapshot exist in `main`. Scenario execution, autonomy, real File Provider evidence, and release evidence remain incomplete. See the [current-state audit](development/current-state-audit.md).
+Re-verify the current `HEAD` before each patch. The native UI, layout, scheduler-dispatch foundation, File Manager copy path, Scenario metadata snapshot, and user-confirmed Scenario `Create` path exist in `main`. Updates, two-way execution, conflict handling, UNKNOWN copy reconciliation, autonomy, real File Provider evidence, and release evidence remain incomplete. See the [current-state audit](development/current-state-audit.md).
 
 This roadmap replaces the earlier G0–G6 plan. It preserves reliability contracts: durable attempts, `UNKNOWN`, read-only reconciliation, consent, and no-overwrite. These contracts do not impose a cloud-first order. Verify the current worktree and recorded local evidence before starting work.
