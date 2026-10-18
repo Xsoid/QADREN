@@ -6,29 +6,32 @@ Status: product policy v0.2, implementation of separate mechanisms requires test
 
 QADREN performs synchronization. It **does not store its own previous versions of content** in MVP. It does not guarantee the recovery of overwritten or permanently deleted files. BackupSet, retention, and recovery of historical versions are deferred: [project of future capabilities](../architecture/backup-model.md).
 
-## Human Decision on Residual Risk
+## Risk Classification and User Decisions
 
-QADREN does not promise risk-free synchronization. The user chooses whether to proceed when the consequence is known or can be explained and bounded. Do not indefinitely block a feature to eliminate every theoretical OS, provider, or data-loss possibility.
+QADREN shall not attempt to eliminate every theoretical risk before release. The user decides on **destructive consequences**, while QADREN must execute within a truthful, enforceable scope.
 
-- Present an accurate preview of the **actual selected operation**. State the affected source and destination, operation type, number of files and estimated bytes if known, whether existing content can be replaced or deleted, any potential local download, and whether QADREN can restore the old content.
-- If risk is significant, request an explicit **Proceed / Cancel** choice before the effect. No response, stale consent, blanket terms acceptance, or an old decision is not permission. Make cancel the safe default. Present unresolved conflicts and bulk destructive changes as user decisions, not silent automatic actions.
-- The user can approve a bounded batch based on its exact plan, roots, connections, and revisions. A changed plan or new destructive scope requires fresh consent. A potential QADREN-initiated download onto the main MacBook still needs its own per-source-file explicit `read_content` permission under [local-downloads.md](local-downloads.md).
-- Explain uncertainty honestly. If a native File Provider read **may** materialize content, say so and ask permission. Do not require proof of an impossible negative before permitting a specifically authorized read. On refusal, do not read content.
-- For unattended execution, only act within a previously approved, specific, durable policy and scope. Any new risk that needs a live choice remains `WAITING_FOR_DECISION` until the user responds.
-- Consent authorizes a **known, bounded risk**. It does not authorize writes outside the chosen roots, execution with stale identities, permission bypass, unauthorized download, unbounded side effects, blind retry after `UNKNOWN`, or fabricated verification. If the system cannot enforce operation boundaries, block that operation and explain why.
-- The user accepts the described residual consequence. QADREN remains responsible for showing truthful information, following the approved scope, and distinguishing VERIFIED, LIMITED, and UNKNOWN results. Approval is not a waiver of engineering responsibility.
+- **Ordinary read:** Read a needed file without an extra prompt. macOS may download a File Provider item as a side effect of reading. Do not present this as a risky operation or require per-file `read_content` consent. Do not prefetch unrelated content. See [local-downloads.md](local-downloads.md).
+- **New file without overwrite:** Perform a requested or enabled Scenario operation using the JobStore, without an additional destructive-risk prompt if it stays within the configured scope. Do not silently overwrite an existing file.
+- **Replacement:** Show the actual destination and loss-of-previous-content consequence; ask for confirmation unless a durable, explicit Scenario rule covers the exact destructive scope. A changed scope requires a new choice.
+- **Deletion and mass deletion:** Show the actual files/count and irreversibility. Require a clear human confirmation for bulk deletion (for example, a proposal to remove 150 files), even in an automated Scenario. Do not infer consent from an enabled schedule.
+- **Unknown result after failure:** Automatically reconcile by non-mutating checks without asking the user. Persist a verified outcome when evidence is sufficient; otherwise retain `UNKNOWN`. Never blindly replay a potentially destructive effect.
+- **Unexpectedly broad scope:** If QADREN cannot limit an action to the selected files, tell the user exactly what is and is not controllable. Present the known broader effect and request approval when the effect is destructive. If the actual scope cannot be bounded or made truthful, do not execute it as a selected-file operation.
+
+Consent is not a substitute for the implementation correctly targeting the described objects. Maintain operation/connection/root identity checks, durable attempts, outcome evidence, and permission checks. Explain limitations; do not fabricate `VERIFIED` results or claim that QADREN can restore overwritten content without version backups.
+
+For scheduled or unattended work, carry out ordinary reads and unambiguously safe configured operations automatically. When new destructive consequences appear, save a `WAITING_FOR_DECISION` request and continue unaffected tasks.
 
 ## Security Requirements
 
 - Apply scenario-based conflict and deletion policies; detect mass deletions, ambiguous overwrites, and dangerous discrepancies. Do not allow silent destructive actions.
-- For a known, bounded risk, show the affected operation and request consent in its context. Stop only until a required decision is made or a technical operation boundary cannot be enforced. Mass resolution of similar conflicts and creation of scoped scenario rules are permitted.
+- Ask only for approval of real destructive risks: replacement, deletion, bulk or conflict mutations beyond an approved rule. Do not interrupt ordinary reads. Mass resolution of similar conflicts and creation of scoped scenario rules are permitted.
 - Use the provider trash where it is available; do not claim that it provides a backup history, and do not create a separate trash.
 - Name/size/time metadata **is not proof of byte equality**. Use available remote identifiers, ETag/revisions/server hashes; explicitly indicate when reliable verification is unavailable.
 - Store the last confirmed agreed state of synchronized files. This is a service history for change detection and idempotency, **not an archive of old content**.
 - The executor distinguishes between its own report, write confirmation by the provider, and actually verified integrity. Do not replace UNKNOWN with FAILED or SUCCESS.
-- After a failure, verify the fact of previous execution before repeating a potentially destructive operation.
+- After a failure, automatically check whether the previous effect occurred, using non-mutating reconciliation before considering a possibly destructive retry.
 - When cleaning user history, do not delete information required for incomplete tasks, synchronization control, and action confirmation.
 
 ## Main MacBook Limitations
 
-Follow the [local downloads policy](local-downloads.md): QADREN does not download content to the main MacBook without the explicit consent of a specific operation. No diagnostics or hashing is an exception. Do not interfere with the native operation of iCloud/macOS and other applications.
+Follow the [content-read policy](local-downloads.md): file content needed by a requested/configured operation may be read without a separate prompt, including possible macOS File Provider materialization. This does not permit unrelated automatic mirroring or unsolicited prefetch. Do not interfere with native iCloud/macOS or other applications.
