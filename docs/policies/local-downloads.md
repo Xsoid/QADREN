@@ -12,6 +12,12 @@ Before the request, specify the files/set, source, reason, purpose, expected vol
 
 For one Scenario Local Filesystem file copy or controlled replacement, the Scenario plan can ask the user to allow macOS to materialize the selected source item. The dialog names the materialization risk and states the selected source and destination operation. The Rust JobStore records and consumes one accepted `read_content` decision for the exact source `connection_id` and relative path before it opens the file. A new operation needs a new confirmation. A preview, a metadata read, or a previous confirmation is not consent.
 
+## Native File Provider Uncertainty
+
+QADREN may be unable to prove that a macOS file is resident or that opening it cannot cause File Provider materialization. In that case, describe the possibility as a **potential download**, even if metadata suggests that the file is local. Offer the user a choice to allow that exact content read or cancel. An explicit accepted `read_content` decision permits the attempted read, including possible OS-managed materialization. Lack of a reliable non-hydrating proof is **not, by itself, a release blocker once that risk is disclosed and the required consent is recorded**.
+
+The application must not secretly probe content before that decision. It must still enforce scoped paths and connections, a durable attempt before external effects, and honest UNKNOWN/recovery handling. A refused or missing decision causes no QADREN-initiated content read. A changed source or new operation requires another decision.
+
 ## Allowed Automatic Actions
 
 Retrieval of metadata, lists, sizes, dates, identifiers, and available server hashes **without downloading content**. If the API requires a content download to get information, the basic prohibition applies.
