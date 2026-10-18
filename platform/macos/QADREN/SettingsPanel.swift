@@ -250,9 +250,7 @@ struct SettingsPanelView: View {
     }
 
     private var scenarioEndpoints: [StorageEntry] {
-        var endpoints = connections.entries.filter {
-            $0.enabled && $0.adapter == "local_filesystem"
-        }
+        var endpoints = connections.entries.filter { $0.adapter == "local_filesystem" }
         if !endpoints.contains(where: { $0.adapter == "local_filesystem" }) {
             endpoints.append(StorageEntry(
                 id: "local-computer", adapter: "local_filesystem", name: "Этот Mac",
@@ -549,7 +547,7 @@ private struct ScenariosSettingsView: View {
     }
 
     private var supportedConnections: [StorageEntry] {
-        connections.filter { $0.enabled && $0.adapter == "local_filesystem" }
+        connections.filter { $0.adapter == "local_filesystem" }
     }
 
     private func isLocalScenario(_ scenario: ScenarioEntry) -> Bool {
@@ -1314,6 +1312,10 @@ private struct ScenarioEndpointPicker: View {
     @Binding var root: String
     let chooseFolder: () -> Void
 
+    private var selectedConnection: StorageEntry? {
+        connections.first { $0.id == selection }
+    }
+
     var body: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 14) {
@@ -1338,6 +1340,10 @@ private struct ScenarioEndpointPicker: View {
                 Button("Открыть браузер папок", systemImage: "folder") { chooseFolder() }
                 Text("Файлы не читаются и не передаются при выборе папки.")
                     .font(.caption).foregroundStyle(.secondary)
+                if selectedConnection?.enabled == false {
+                    Text("Подключение выключено. Сценарий можно сохранить, но проверка плана и перенос станут доступны только после включения подключения.")
+                        .font(.caption).foregroundStyle(.orange)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
