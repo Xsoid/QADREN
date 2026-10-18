@@ -17,7 +17,7 @@ Status: current product sequence. This document is not a work log.
 |---|---|
 | **P0 / COMPLETE** | The SwiftUI design system, widget canvas, and monitoring baseline exist. Do not reopen general UI-baseline work. |
 | **P1 / CRITICAL PATH** | The manual Local-to-Local no-overwrite copy path exists through UI → Rust JobStore → Local Filesystem → verification → SQLite → UI. Record a real File Provider materialization run. Preserve scoped consent and `UNKNOWN`. Do not build a second engine. |
-| **P1 / LOCAL PRODUCT** | User-confirmed Scenario `Create` and `Update` items use revision-bound Local Jobs in a permitted Scenario direction. `Create` is no-overwrite. `Update` uses the controlled replacement protocol. Persisted UNKNOWN copies have a root-bound inventory and an explicit read-only check action. Add batch and autonomous multi-item Scenario execution, and conflict handling. |
+| **P1 / LOCAL PRODUCT** | User-confirmed Scenario `Create` and `Update` items use revision-bound Local Jobs in a permitted Scenario direction. `Create` is no-overwrite. `Update` uses the controlled replacement protocol. Persisted UNKNOWN copies have a root-bound inventory and an explicit read-only check action. Batch ordinary actions and conflict handling exist. Autonomous Scenario execution remains open. |
 | **P2 / AUTONOMY** | Run real local Scenarios on schedule in one independent Worker after UI exit. Test crash and restart recovery. Produce a verified macOS release. |
 | **POST-RELEASE / PARKED** | Yandex Disk and iCloud require a separate owner decision before reactivation. Preserve existing code, credentials, and Local File Provider guards. Do not add cloud adapter, API, entitlement, or live end-to-end work in Release 1. |
 
@@ -72,6 +72,6 @@ Do not validate preservation only on a happy path. Test connection breaks, API `
 
 ## Currency Rule
 
-Re-verify the current `HEAD` before each patch. The native UI, layout, scheduler-dispatch foundation, File Manager copy path, Scenario metadata snapshot, user-confirmed Scenario `Create` and `Update` paths in a permitted direction, and persisted UNKNOWN-copy inventory exist in `main`. Batch and autonomous multi-item execution, conflict handling, autonomy, real File Provider evidence, and release evidence remain incomplete. See the [current-state audit](development/current-state-audit.md).
+Re-verify the current `HEAD` before each patch. The native UI, layout, scheduler-dispatch foundation, File Manager copy path, Scenario metadata snapshot, user-confirmed Scenario `Create` and `Update` paths in a permitted direction, persisted UNKNOWN-copy inventory, ordinary-action batches, and the alternative conflict queue exist in `main`. Autonomous Scenario execution, autonomy after UI exit, real File Provider evidence, and release evidence remain incomplete. See the [current-state audit](development/current-state-audit.md).
 
 This roadmap replaces the earlier G0–G6 plan. It preserves reliability contracts: durable attempts, `UNKNOWN`, read-only reconciliation, consent, and no-overwrite for new copies. Controlled replacement has its own pinned-root protocol. These contracts do not impose a cloud-first order. Verify the current worktree and recorded local evidence before starting work.

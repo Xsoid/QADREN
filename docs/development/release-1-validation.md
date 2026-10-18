@@ -17,7 +17,7 @@ Release 1 is a local-first macOS product. It includes one Rust JobStore, Local F
 
 ## Current Recorded Local Evidence
 
-The executable baseline is `f9121b2`.
+The initial recorded executable baseline is `f9121b2`. Later rows record newer checked commits.
 
 | Check | Result | Evidence scope |
 |---|---|---|
@@ -26,6 +26,8 @@ The executable baseline is `f9121b2`.
 | `scripts/test-macos-local-workspace.sh` | PASS | SwiftUI to Rust Local file-copy bridge on `f9121b2` |
 | `scripts/test-macos-scenario-dry-run.sh` | PASS | SwiftUI Scenario metadata, conflict queue, and FFI bridge on `f9121b2` |
 | `./script/build_and_run.sh --verify` | PASS | Unsigned local development bundle and running QADREN process on `f9121b2` |
+| `scripts/test-macos-scenario-dry-run.sh` | PASS | Native Swift/FFI Scenario bridge build on `40bd428` |
+| `./script/build_and_run.sh --verify` | PASS | Unsigned local development bundle and running QADREN process on `40bd428` |
 
 `cargo fmt --manifest-path core/Cargo.toml --check` does not pass on this baseline. It reports existing formatting differences outside the Local Scenario update patch. Resolve or explicitly accept that debt before a Release claim.
 
@@ -37,7 +39,7 @@ The executable baseline is `f9121b2`.
 | App-owned mock operation | No-overwrite, durable-attempt, verification, and recovery tests exist in `job_execution.rs`. | User content transfer. The mock is not a release substitute. |
 | Local Filesystem metadata, `mkdir`, and copy | Rust and SwiftUI interfaces provide confirmed one-file no-overwrite copy through JobStore. Local metadata revisions support a revision-bound Scenario baseline. | A real File Provider materialization run. |
 | macOS File Provider safety | A copy requires a user-confirmed, exact-scope durable decision before opening the source. | A real File Provider materialization run with a user-selected provider item. |
-| Scenario planning and conflict queue | Dry-run FFI passes. Enabled local connections gate the metadata snapshot. User-confirmed `Create` and `Update` items submit pinned Jobs in a permitted direction and write `FileSyncState` through a durable outbox. A revision-bound Registry queue stores both conflict snapshots and a user-selected source and decision. Selected content decisions create a pinned replacement Job only after a second snapshot check. A selected deletion has a separate destructive confirmation, verifies an absent source and current destination snapshot, then creates a pinned delete Job. An interrupted delete is `UNKNOWN`. A mismatch marks the task `stale` without an effect. The queue has no JobStore dependency and does not block ordinary transfers. | Batch and autonomous multi-item execution, delete recovery, and real File Provider delete evidence. |
+| Scenario planning and conflict queue | Dry-run FFI passes. Enabled local connections gate the metadata snapshot. User-confirmed `Create` and `Update` items submit pinned Jobs in a permitted direction and write `FileSyncState` through a durable outbox. A revision-bound Registry queue stores both conflict snapshots and a user-selected source and decision. Selected content decisions create a pinned replacement Job only after a second snapshot check. A selected deletion has a separate destructive confirmation, verifies an absent source and current destination snapshot, then creates a pinned delete Job. An interrupted delete is `UNKNOWN`. A mismatch marks the task `stale` without an effect. The queue has no JobStore dependency and does not block ordinary transfers. A user-confirmed ordinary batch uses the same per-file Jobs, runs away from the SwiftUI main actor, shows progress, and continues after one item fails. | End-to-end batch interaction, autonomous multi-item execution, delete recovery, and real File Provider delete evidence. |
 | Scheduler dispatch | Durable schedule dispatch can queue a Job. | Independent timer, app-exit lifecycle, event debounce, and real Scenario execution. |
 | Native UI | Design system, widget canvas, settings, and local file navigation exist. | Full visual acceptance, removal of legacy mock actions, and real-copy interaction. |
 | Distribution | The macOS build script creates an unsigned development bundle. | Signing, notarization, clean install, restart validation, and release package. |
