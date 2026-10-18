@@ -166,8 +166,14 @@ pub fn rename_file_replace(root: &File, from: &Path, to: &Path) -> Result<()> {
     let source = file_identity(root, from)?;
     let mut source_info = std::mem::MaybeUninit::<libc::stat>::uninit();
     if unsafe {
-        libc::fstatat(source_dir.as_raw_fd(), source_name.as_ptr(), source_info.as_mut_ptr(), libc::AT_SYMLINK_NOFOLLOW)
-    } != 0 {
+        libc::fstatat(
+            source_dir.as_raw_fd(),
+            source_name.as_ptr(),
+            source_info.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
         return Err(LocalError::Io(io::Error::last_os_error()));
     }
     let source_info = unsafe { source_info.assume_init() };
@@ -183,8 +189,14 @@ pub fn rename_file_replace(root: &File, from: &Path, to: &Path) -> Result<()> {
     }
     let mut target_info = std::mem::MaybeUninit::<libc::stat>::uninit();
     if unsafe {
-        libc::fstatat(target_dir.as_raw_fd(), target_name.as_ptr(), target_info.as_mut_ptr(), libc::AT_SYMLINK_NOFOLLOW)
-    } != 0 {
+        libc::fstatat(
+            target_dir.as_raw_fd(),
+            target_name.as_ptr(),
+            target_info.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
         return Err(LocalError::Io(io::Error::last_os_error()));
     }
     let target_info = unsafe { target_info.assume_init() };
@@ -195,11 +207,22 @@ pub fn rename_file_replace(root: &File, from: &Path, to: &Path) -> Result<()> {
     }
     #[cfg(target_os = "linux")]
     let outcome = unsafe {
-        libc::renameat(source_dir.as_raw_fd(), source_name.as_ptr(), target_dir.as_raw_fd(), target_name.as_ptr())
+        libc::renameat(
+            source_dir.as_raw_fd(),
+            source_name.as_ptr(),
+            target_dir.as_raw_fd(),
+            target_name.as_ptr(),
+        )
     };
     #[cfg(target_os = "macos")]
     let outcome = unsafe {
-        libc::renameatx_np(source_dir.as_raw_fd(), source_name.as_ptr(), target_dir.as_raw_fd(), target_name.as_ptr(), 0)
+        libc::renameatx_np(
+            source_dir.as_raw_fd(),
+            source_name.as_ptr(),
+            target_dir.as_raw_fd(),
+            target_name.as_ptr(),
+            0,
+        )
     };
     if outcome != 0 {
         return Err(rename_failure(io::Error::last_os_error()));

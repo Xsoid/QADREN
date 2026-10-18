@@ -105,7 +105,10 @@ pub enum LocalFileCopyReconciliationStatus {
 }
 
 fn is_local_file_copy_operation(operation_kind: Option<&str>) -> bool {
-    matches!(operation_kind, Some("local_copy_new" | "local_copy_replace"))
+    matches!(
+        operation_kind,
+        Some("local_copy_new" | "local_copy_replace")
+    )
 }
 
 #[derive(Debug)]
@@ -192,7 +195,9 @@ impl From<JobStoreError> for LocalDirectoryCreateError {
 }
 
 impl From<JobStoreError> for LocalFileCopyError {
-    fn from(value: JobStoreError) -> Self { Self::Store(value) }
+    fn from(value: JobStoreError) -> Self {
+        Self::Store(value)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -552,8 +557,19 @@ pub fn run_local_file_copy(
     consent: bool,
 ) -> Result<LocalFileCopyStatus, LocalFileCopyError> {
     run_local_file_copy_inner(
-        database_path, registry_path, source_root, source_connection_id, source_relative,
-        destination_root, destination_connection_id, destination_relative, job_id, consent, None, false, None,
+        database_path,
+        registry_path,
+        source_root,
+        source_connection_id,
+        source_relative,
+        destination_root,
+        destination_connection_id,
+        destination_relative,
+        job_id,
+        consent,
+        None,
+        false,
+        None,
     )
 }
 
@@ -561,13 +577,31 @@ pub fn run_local_file_copy(
 /// This uses the same JobStore and scoped source-read consent as a new copy.
 #[allow(clippy::too_many_arguments)]
 pub fn run_local_file_replace(
-    database_path: &Path, registry_path: &Path, source_root: &Path,
-    source_connection_id: &str, source_relative: &Path, destination_root: &Path,
-    destination_connection_id: &str, destination_relative: &Path, job_id: &str, consent: bool,
+    database_path: &Path,
+    registry_path: &Path,
+    source_root: &Path,
+    source_connection_id: &str,
+    source_relative: &Path,
+    destination_root: &Path,
+    destination_connection_id: &str,
+    destination_relative: &Path,
+    job_id: &str,
+    consent: bool,
 ) -> Result<LocalFileCopyStatus, LocalFileCopyError> {
     run_local_file_copy_inner(
-        database_path, registry_path, source_root, source_connection_id, source_relative,
-        destination_root, destination_connection_id, destination_relative, job_id, consent, None, true, None,
+        database_path,
+        registry_path,
+        source_root,
+        source_connection_id,
+        source_relative,
+        destination_root,
+        destination_connection_id,
+        destination_relative,
+        job_id,
+        consent,
+        None,
+        true,
+        None,
     )
 }
 
@@ -590,13 +624,18 @@ pub fn run_local_scenario_file_copy(
     job_id: &str,
     consent: bool,
 ) -> Result<LocalFileCopyStatus, LocalFileCopyError> {
-    let registry = Registry::open(registry_path).map_err(|_| LocalFileCopyError::ScenarioUnavailable)?;
+    let registry =
+        Registry::open(registry_path).map_err(|_| LocalFileCopyError::ScenarioUnavailable)?;
     let scenario = registry
         .get_scenario_revision(scenario_id, scenario_revision)
         .map_err(|_| LocalFileCopyError::ScenarioUnavailable)?
         .ok_or(LocalFileCopyError::ScenarioUnavailable)?;
-    let source_root = source_root.to_str().ok_or(LocalFileCopyError::InvalidRequest)?;
-    let destination_root = destination_root.to_str().ok_or(LocalFileCopyError::InvalidRequest)?;
+    let source_root = source_root
+        .to_str()
+        .ok_or(LocalFileCopyError::InvalidRequest)?;
+    let destination_root = destination_root
+        .to_str()
+        .ok_or(LocalFileCopyError::InvalidRequest)?;
     let is_left_to_right = scenario.left_connection_id == source_connection_id
         && scenario.left_root == source_root
         && scenario.right_connection_id == destination_connection_id
@@ -610,9 +649,19 @@ pub fn run_local_scenario_file_copy(
         return Err(LocalFileCopyError::ScenarioScopeMismatch);
     }
     run_local_file_copy_inner(
-        database_path, registry_path, Path::new(source_root), source_connection_id, source_relative,
-        Path::new(destination_root), destination_connection_id, destination_relative, job_id, consent,
-        Some((scenario_id, scenario_revision, is_left_to_right)), false, None,
+        database_path,
+        registry_path,
+        Path::new(source_root),
+        source_connection_id,
+        source_relative,
+        Path::new(destination_root),
+        destination_connection_id,
+        destination_relative,
+        job_id,
+        consent,
+        Some((scenario_id, scenario_revision, is_left_to_right)),
+        false,
+        None,
     )
 }
 
@@ -636,9 +685,19 @@ pub fn run_local_scenario_file_replace(
     consent: bool,
 ) -> Result<LocalFileCopyStatus, LocalFileCopyError> {
     run_local_scenario_file_replace_checked(
-        database_path, registry_path, scenario_id, scenario_revision, source_root,
-        source_connection_id, source_relative, destination_root, destination_connection_id,
-        destination_relative, job_id, consent, None,
+        database_path,
+        registry_path,
+        scenario_id,
+        scenario_revision,
+        source_root,
+        source_connection_id,
+        source_relative,
+        destination_root,
+        destination_connection_id,
+        destination_relative,
+        job_id,
+        consent,
+        None,
     )
 }
 
@@ -658,13 +717,18 @@ fn run_local_scenario_file_replace_checked(
     consent: bool,
     expected_snapshots: Option<(&ConfirmedFileVersion, &ConfirmedFileVersion)>,
 ) -> Result<LocalFileCopyStatus, LocalFileCopyError> {
-    let registry = Registry::open(registry_path).map_err(|_| LocalFileCopyError::ScenarioUnavailable)?;
+    let registry =
+        Registry::open(registry_path).map_err(|_| LocalFileCopyError::ScenarioUnavailable)?;
     let scenario = registry
         .get_scenario_revision(scenario_id, scenario_revision)
         .map_err(|_| LocalFileCopyError::ScenarioUnavailable)?
         .ok_or(LocalFileCopyError::ScenarioUnavailable)?;
-    let source_root = source_root.to_str().ok_or(LocalFileCopyError::InvalidRequest)?;
-    let destination_root = destination_root.to_str().ok_or(LocalFileCopyError::InvalidRequest)?;
+    let source_root = source_root
+        .to_str()
+        .ok_or(LocalFileCopyError::InvalidRequest)?;
+    let destination_root = destination_root
+        .to_str()
+        .ok_or(LocalFileCopyError::InvalidRequest)?;
     let is_left_to_right = scenario.left_connection_id == source_connection_id
         && scenario.left_root == source_root
         && scenario.right_connection_id == destination_connection_id
@@ -678,9 +742,19 @@ fn run_local_scenario_file_replace_checked(
         return Err(LocalFileCopyError::ScenarioScopeMismatch);
     }
     run_local_file_copy_inner(
-        database_path, registry_path, Path::new(source_root), source_connection_id, source_relative,
-        Path::new(destination_root), destination_connection_id, destination_relative, job_id, consent,
-        Some((scenario_id, scenario_revision, is_left_to_right)), true, expected_snapshots,
+        database_path,
+        registry_path,
+        Path::new(source_root),
+        source_connection_id,
+        source_relative,
+        Path::new(destination_root),
+        destination_connection_id,
+        destination_relative,
+        job_id,
+        consent,
+        Some((scenario_id, scenario_revision, is_left_to_right)),
+        true,
+        expected_snapshots,
     )
 }
 
@@ -694,34 +768,66 @@ pub fn run_local_scenario_conflict_replace(
     job_id: &str,
     consent: bool,
 ) -> Result<LocalFileCopyStatus, LocalFileCopyError> {
-    let registry = Registry::open(registry_path).map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
-    let task = registry.selected_conflict_task(conflict_id)
+    let registry =
+        Registry::open(registry_path).map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
+    let task = registry
+        .selected_conflict_task(conflict_id)
         .map_err(|_| LocalFileCopyError::ConflictUnavailable)?
         .ok_or(LocalFileCopyError::ConflictUnavailable)?;
-    if task.kind != "content" || !matches!(
-        task.decision.as_deref(),
-        Some("replace_from_source" | "replace_if_newer")
-    ) {
+    if task.kind != "content"
+        || !matches!(
+            task.decision.as_deref(),
+            Some("replace_from_source" | "replace_if_newer")
+        )
+    {
         return Err(LocalFileCopyError::ConflictUnavailable);
     }
-    let (Some(source_is_left), Some(left), Some(right)) = (task.source_is_left, task.left.as_ref(), task.right.as_ref()) else {
+    let (Some(source_is_left), Some(left), Some(right)) =
+        (task.source_is_left, task.left.as_ref(), task.right.as_ref())
+    else {
         return Err(LocalFileCopyError::ConflictUnavailable);
     };
-    let scenario = registry.get_scenario_revision(&task.scenario.scenario_id, task.scenario.revision)
+    let scenario = registry
+        .get_scenario_revision(&task.scenario.scenario_id, task.scenario.revision)
         .map_err(|_| LocalFileCopyError::ConflictUnavailable)?
         .ok_or(LocalFileCopyError::ConflictUnavailable)?;
-    let (source_root, source_connection, destination_root, destination_connection, source_expected, destination_expected) = if source_is_left {
-        (&scenario.left_root, &scenario.left_connection_id, &scenario.right_root, &scenario.right_connection_id, left, right)
+    let (
+        source_root,
+        source_connection,
+        destination_root,
+        destination_connection,
+        source_expected,
+        destination_expected,
+    ) = if source_is_left {
+        (
+            &scenario.left_root,
+            &scenario.left_connection_id,
+            &scenario.right_root,
+            &scenario.right_connection_id,
+            left,
+            right,
+        )
     } else {
-        (&scenario.right_root, &scenario.right_connection_id, &scenario.left_root, &scenario.left_connection_id, right, left)
+        (
+            &scenario.right_root,
+            &scenario.right_connection_id,
+            &scenario.left_root,
+            &scenario.left_connection_id,
+            right,
+            left,
+        )
     };
     let path = Path::new(&task.relative_path);
-    let source = LocalFilesystem::open(Path::new(source_root)).map_err(LocalFileCopyError::Local)?;
-    let destination = LocalFilesystem::open(Path::new(destination_root)).map_err(LocalFileCopyError::Local)?;
+    let source =
+        LocalFilesystem::open(Path::new(source_root)).map_err(LocalFileCopyError::Local)?;
+    let destination =
+        LocalFilesystem::open(Path::new(destination_root)).map_err(LocalFileCopyError::Local)?;
     let current_source = match source.stat(path) {
         Ok(entry) => entry,
         Err(LocalError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            registry.mark_conflict_task_stale(conflict_id).map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
+            registry
+                .mark_conflict_task_stale(conflict_id)
+                .map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
             return Err(LocalFileCopyError::ConflictStale);
         }
         Err(error) => return Err(LocalFileCopyError::Local(error)),
@@ -729,7 +835,9 @@ pub fn run_local_scenario_conflict_replace(
     let current_destination = match destination.stat(path) {
         Ok(entry) => entry,
         Err(LocalError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            registry.mark_conflict_task_stale(conflict_id).map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
+            registry
+                .mark_conflict_task_stale(conflict_id)
+                .map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
             return Err(LocalFileCopyError::ConflictStale);
         }
         Err(error) => return Err(LocalFileCopyError::Local(error)),
@@ -737,33 +845,51 @@ pub fn run_local_scenario_conflict_replace(
     if !matches_conflict_snapshot(&current_source, source_expected)
         || !matches_conflict_snapshot(&current_destination, destination_expected)
     {
-        registry.mark_conflict_task_stale(conflict_id).map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
+        registry
+            .mark_conflict_task_stale(conflict_id)
+            .map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
         return Err(LocalFileCopyError::ConflictStale);
     }
     if task.decision.as_deref() == Some("replace_if_newer") {
-        let Some(source_is_newer) = source_snapshot_is_newer(source_expected, destination_expected) else {
+        let Some(source_is_newer) = source_snapshot_is_newer(source_expected, destination_expected)
+        else {
             return Err(LocalFileCopyError::ConflictUnavailable);
         };
         if !source_is_newer {
-            registry.complete_conflict_task(conflict_id).map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
+            registry
+                .complete_conflict_task(conflict_id)
+                .map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
             return Ok(LocalFileCopyStatus::Completed);
         }
     }
     let result = run_local_scenario_file_replace_checked(
-        database_path, registry_path, &task.scenario.scenario_id, task.scenario.revision,
-        Path::new(source_root), source_connection, path,
-        Path::new(destination_root), destination_connection, path, job_id, consent,
+        database_path,
+        registry_path,
+        &task.scenario.scenario_id,
+        task.scenario.revision,
+        Path::new(source_root),
+        source_connection,
+        path,
+        Path::new(destination_root),
+        destination_connection,
+        path,
+        job_id,
+        consent,
         Some((source_expected, destination_expected)),
     );
     let result = match result {
         Err(LocalFileCopyError::ConflictStale) => {
-            registry.mark_conflict_task_stale(conflict_id).map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
+            registry
+                .mark_conflict_task_stale(conflict_id)
+                .map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
             return Err(LocalFileCopyError::ConflictStale);
         }
         result => result?,
     };
     if result == LocalFileCopyStatus::Completed {
-        registry.complete_conflict_task(conflict_id).map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
+        registry
+            .complete_conflict_task(conflict_id)
+            .map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
     }
     Ok(result)
 }
@@ -778,69 +904,161 @@ pub fn run_local_scenario_conflict_delete(
     job_id: &str,
     consent: bool,
 ) -> Result<LocalFileCopyStatus, LocalFileCopyError> {
-    let registry = Registry::open(registry_path).map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
-    let task = registry.selected_conflict_task(conflict_id)
+    let registry =
+        Registry::open(registry_path).map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
+    let task = registry
+        .selected_conflict_task(conflict_id)
         .map_err(|_| LocalFileCopyError::ConflictUnavailable)?
         .ok_or(LocalFileCopyError::ConflictUnavailable)?;
     if task.kind != "deletion" || task.decision.as_deref() != Some("delete_as_source") || !consent {
-        return Err(if consent { LocalFileCopyError::ConflictUnavailable } else { LocalFileCopyError::ConsentRequired });
+        return Err(if consent {
+            LocalFileCopyError::ConflictUnavailable
+        } else {
+            LocalFileCopyError::ConsentRequired
+        });
     }
-    let source_is_left = task.source_is_left.ok_or(LocalFileCopyError::ConflictUnavailable)?;
-    let scenario = registry.get_scenario_revision(&task.scenario.scenario_id, task.scenario.revision)
+    let source_is_left = task
+        .source_is_left
+        .ok_or(LocalFileCopyError::ConflictUnavailable)?;
+    let scenario = registry
+        .get_scenario_revision(&task.scenario.scenario_id, task.scenario.revision)
         .map_err(|_| LocalFileCopyError::ConflictUnavailable)?
         .ok_or(LocalFileCopyError::ConflictUnavailable)?;
-    let (source_root, source_connection, destination_root, destination_connection, source_expected, destination_expected) = if source_is_left {
-        (&scenario.left_root, &scenario.left_connection_id, &scenario.right_root, &scenario.right_connection_id, task.left.as_ref(), task.right.as_ref())
+    let (
+        source_root,
+        source_connection,
+        destination_root,
+        destination_connection,
+        source_expected,
+        destination_expected,
+    ) = if source_is_left {
+        (
+            &scenario.left_root,
+            &scenario.left_connection_id,
+            &scenario.right_root,
+            &scenario.right_connection_id,
+            task.left.as_ref(),
+            task.right.as_ref(),
+        )
     } else {
-        (&scenario.right_root, &scenario.right_connection_id, &scenario.left_root, &scenario.left_connection_id, task.right.as_ref(), task.left.as_ref())
+        (
+            &scenario.right_root,
+            &scenario.right_connection_id,
+            &scenario.left_root,
+            &scenario.left_connection_id,
+            task.right.as_ref(),
+            task.left.as_ref(),
+        )
     };
-    if source_expected.is_some() || destination_expected.is_none()
+    if source_expected.is_some()
+        || destination_expected.is_none()
         || !enabled_local_connection(registry_path, source_connection)
         || !enabled_local_connection(registry_path, destination_connection)
-    { return Err(LocalFileCopyError::ConflictUnavailable); }
-    let source = LocalFilesystem::open(Path::new(source_root)).map_err(LocalFileCopyError::Local)?;
-    let destination = LocalFilesystem::open(Path::new(destination_root)).map_err(LocalFileCopyError::Local)?;
-    if !destination.capabilities().operations.delete { return Err(LocalFileCopyError::CapabilityUnavailable); }
+    {
+        return Err(LocalFileCopyError::ConflictUnavailable);
+    }
+    let source =
+        LocalFilesystem::open(Path::new(source_root)).map_err(LocalFileCopyError::Local)?;
+    let destination =
+        LocalFilesystem::open(Path::new(destination_root)).map_err(LocalFileCopyError::Local)?;
+    if !destination.capabilities().operations.delete {
+        return Err(LocalFileCopyError::CapabilityUnavailable);
+    }
     let path = Path::new(&task.relative_path);
-    if !matches!(source.stat(path), Err(LocalError::Io(ref error)) if error.kind() == std::io::ErrorKind::NotFound) {
-        registry.mark_conflict_task_stale(conflict_id).map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
+    if !matches!(source.stat(path), Err(LocalError::Io(ref error)) if error.kind() == std::io::ErrorKind::NotFound)
+    {
+        registry
+            .mark_conflict_task_stale(conflict_id)
+            .map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
         return Err(LocalFileCopyError::ConflictStale);
     }
     let current = match destination.stat(path) {
         Ok(entry) if matches_conflict_snapshot(&entry, destination_expected.unwrap()) => entry,
         Ok(_) | Err(LocalError::Io(_)) => {
-            registry.mark_conflict_task_stale(conflict_id).map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
+            registry
+                .mark_conflict_task_stale(conflict_id)
+                .map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
             return Err(LocalFileCopyError::ConflictStale);
         }
         Err(error) => return Err(LocalFileCopyError::Local(error)),
     };
     let target_path = path.to_str().ok_or(LocalFileCopyError::InvalidRequest)?;
-    let root_identity = local_root_identity_key(&destination).map_err(|_| LocalFileCopyError::InvalidRequest)?;
+    let root_identity =
+        local_root_identity_key(&destination).map_err(|_| LocalFileCopyError::InvalidRequest)?;
     let mut store = JobStore::open(database_path)?;
-    if let Some(existing) = store.get(job_id)? { return Ok(LocalFileCopyStatus::Existing(existing.state)); }
-    store.enqueue(job_id, Some((&task.scenario.scenario_id, task.scenario.revision)))?;
-    store.advance(job_id, JobState::Queued, JobState::Running, Confirmation::Unknown)?;
-    store.advance(job_id, JobState::Running, JobState::WaitingForDecision, Confirmation::Unknown)?;
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| LocalFileCopyError::InvalidRequest)?.as_secs();
-    let scope = OperationScope { operation: ProtectedOperation::Delete, connection_id: destination_connection.to_owned(), relative_path: target_path.to_owned(), expires_at: now.saturating_add(60) };
+    if let Some(existing) = store.get(job_id)? {
+        return Ok(LocalFileCopyStatus::Existing(existing.state));
+    }
+    store.enqueue(
+        job_id,
+        Some((&task.scenario.scenario_id, task.scenario.revision)),
+    )?;
+    store.advance(
+        job_id,
+        JobState::Queued,
+        JobState::Running,
+        Confirmation::Unknown,
+    )?;
+    store.advance(
+        job_id,
+        JobState::Running,
+        JobState::WaitingForDecision,
+        Confirmation::Unknown,
+    )?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| LocalFileCopyError::InvalidRequest)?
+        .as_secs();
+    let scope = OperationScope {
+        operation: ProtectedOperation::Delete,
+        connection_id: destination_connection.to_owned(),
+        relative_path: target_path.to_owned(),
+        expires_at: now.saturating_add(60),
+    };
     let decision_id = format!("{job_id}-delete");
     store.record_operation_decision(&decision_id, job_id, &scope, Decision::Accepted)?;
     store.consume_operation_decision(&decision_id, job_id, &scope, now)?;
-    store.advance(job_id, JobState::WaitingForDecision, JobState::Running, Confirmation::Confirmed(EvidenceLevel::Requested))?;
+    store.advance(
+        job_id,
+        JobState::WaitingForDecision,
+        JobState::Running,
+        Confirmation::Confirmed(EvidenceLevel::Requested),
+    )?;
     let attempt_id = format!("{job_id}-attempt-1");
-    store.prepare_bound_attempt_with_root_identity(job_id, &attempt_id, "local_delete", destination_connection, target_path, current.size, "00000000000000000000000000000000", &root_identity)?;
+    store.prepare_bound_attempt_with_root_identity(
+        job_id,
+        &attempt_id,
+        "local_delete",
+        destination_connection,
+        target_path,
+        current.size,
+        "00000000000000000000000000000000",
+        &root_identity,
+    )?;
     match destination.delete_file(path) {
         Ok(()) => {}
-        Err(error @ LocalError::OutcomeUnknown(_)) => return Err(LocalFileCopyError::OutcomeUnknown(error)),
-        Err(error) => { store.fail_attempt_before_effect(job_id, &attempt_id)?; return Err(LocalFileCopyError::Local(error)); }
+        Err(error @ LocalError::OutcomeUnknown(_)) => {
+            return Err(LocalFileCopyError::OutcomeUnknown(error))
+        }
+        Err(error) => {
+            store.fail_attempt_before_effect(job_id, &attempt_id)?;
+            return Err(LocalFileCopyError::Local(error));
+        }
     }
-    if !matches!(destination.stat(path), Err(LocalError::Io(ref error)) if error.kind() == std::io::ErrorKind::NotFound) {
+    if !matches!(destination.stat(path), Err(LocalError::Io(ref error)) if error.kind() == std::io::ErrorKind::NotFound)
+    {
         return Err(LocalFileCopyError::VerificationFailed);
     }
-    let receipt = VerifiedReceipt::metadata_verified(&attempt_id, "local_delete", destination_connection, target_path);
+    let receipt = VerifiedReceipt::metadata_verified(
+        &attempt_id,
+        "local_delete",
+        destination_connection,
+        target_path,
+    );
     store.complete_attempt(job_id, &attempt_id, &receipt)?;
-    registry.complete_conflict_task(conflict_id).map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
+    registry
+        .complete_conflict_task(conflict_id)
+        .map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
     Ok(LocalFileCopyStatus::Completed)
 }
 
@@ -869,43 +1087,68 @@ fn run_local_file_copy_inner(
     {
         return Err(LocalFileCopyError::InvalidRequest);
     }
-    if !consent { return Err(LocalFileCopyError::ConsentRequired); }
+    if !consent {
+        return Err(LocalFileCopyError::ConsentRequired);
+    }
     if !enabled_local_connection(registry_path, source_connection_id)
         || !enabled_local_connection(registry_path, destination_connection_id)
-    { return Err(LocalFileCopyError::ConnectionUnavailable); }
+    {
+        return Err(LocalFileCopyError::ConnectionUnavailable);
+    }
     let source = LocalFilesystem::open(source_root).map_err(LocalFileCopyError::Local)?;
     let destination = LocalFilesystem::open(destination_root).map_err(LocalFileCopyError::Local)?;
-    if !source.capabilities().operations.read_content || !destination.capabilities().operations.write_content {
+    if !source.capabilities().operations.read_content
+        || !destination.capabilities().operations.write_content
+    {
         return Err(LocalFileCopyError::CapabilityUnavailable);
     }
-    if source.overlaps_root(&destination).map_err(LocalFileCopyError::Local)? {
+    if source
+        .overlaps_root(&destination)
+        .map_err(LocalFileCopyError::Local)?
+    {
         return Err(LocalFileCopyError::InvalidRequest);
     }
-    let source_entry = source.stat(source_relative).map_err(LocalFileCopyError::Local)?;
-    if source_entry.is_directory { return Err(LocalFileCopyError::InvalidRequest); }
+    let source_entry = source
+        .stat(source_relative)
+        .map_err(LocalFileCopyError::Local)?;
+    if source_entry.is_directory {
+        return Err(LocalFileCopyError::InvalidRequest);
+    }
     let destination_entry = match destination.stat(destination_relative) {
         Ok(entry) if replace_existing && !entry.is_directory => Some(entry),
         Ok(_) if replace_existing => return Err(LocalFileCopyError::InvalidRequest),
         Ok(_) => return Err(LocalFileCopyError::TargetExists),
-        Err(LocalError::Io(error)) if !replace_existing && error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(LocalError::Io(error))
+            if !replace_existing && error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            None
+        }
         Err(error) => return Err(LocalFileCopyError::Local(error)),
     };
     if let Some((source_expected, destination_expected)) = expected_snapshots {
         if !matches_conflict_snapshot(&source_entry, source_expected)
-            || !destination_entry.as_ref().is_some_and(|entry| matches_conflict_snapshot(entry, destination_expected))
+            || !destination_entry
+                .as_ref()
+                .is_some_and(|entry| matches_conflict_snapshot(entry, destination_expected))
         {
             return Err(LocalFileCopyError::ConflictStale);
         }
     }
-    let source_path = source_relative.to_str().ok_or(LocalFileCopyError::InvalidRequest)?;
-    let target_path = destination_relative.to_str().ok_or(LocalFileCopyError::InvalidRequest)?;
+    let source_path = source_relative
+        .to_str()
+        .ok_or(LocalFileCopyError::InvalidRequest)?;
+    let target_path = destination_relative
+        .to_str()
+        .ok_or(LocalFileCopyError::InvalidRequest)?;
     let root_identity = local_root_identity_key(&destination).map_err(|error| match error {
         LocalDirectoryCreateError::Local(error) => LocalFileCopyError::Local(error),
         LocalDirectoryCreateError::Store(error) => LocalFileCopyError::Store(error),
         _ => LocalFileCopyError::InvalidRequest,
     })?;
     let mut store = JobStore::open(database_path)?;
-    if let Some(existing) = store.get(job_id)? { return Ok(LocalFileCopyStatus::Existing(existing.state)); }
+    if let Some(existing) = store.get(job_id)? {
+        return Ok(LocalFileCopyStatus::Existing(existing.state));
+    }
     store.enqueue(job_id, scenario.map(|(id, revision, _)| (id, revision)))?;
     store.advance(
         job_id,
@@ -919,8 +1162,10 @@ fn run_local_file_copy_inner(
         JobState::WaitingForDecision,
         Confirmation::Unknown,
     )?;
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| LocalFileCopyError::InvalidRequest)?.as_secs();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| LocalFileCopyError::InvalidRequest)?
+        .as_secs();
     let scope = OperationScope {
         operation: ProtectedOperation::ReadContent,
         connection_id: source_connection_id.to_owned(),
@@ -930,12 +1175,27 @@ fn run_local_file_copy_inner(
     let decision_id = format!("{job_id}-source-read");
     store.record_operation_decision(&decision_id, job_id, &scope, Decision::Accepted)?;
     store.consume_operation_decision(&decision_id, job_id, &scope, now)?;
-    store.advance(job_id, JobState::WaitingForDecision, JobState::Running, Confirmation::Confirmed(EvidenceLevel::Requested))?;
+    store.advance(
+        job_id,
+        JobState::WaitingForDecision,
+        JobState::Running,
+        Confirmation::Confirmed(EvidenceLevel::Requested),
+    )?;
     let attempt_id = format!("{job_id}-attempt-1");
-    let operation_kind = if replace_existing { "local_copy_replace" } else { "local_copy_new" };
+    let operation_kind = if replace_existing {
+        "local_copy_replace"
+    } else {
+        "local_copy_new"
+    };
     store.prepare_bound_attempt_with_root_identity(
-        job_id, &attempt_id, operation_kind, destination_connection_id, target_path,
-        source_entry.size, "00000000000000000000000000000000", &root_identity,
+        job_id,
+        &attempt_id,
+        operation_kind,
+        destination_connection_id,
+        target_path,
+        source_entry.size,
+        "00000000000000000000000000000000",
+        &root_identity,
     )?;
     if !enabled_local_connection(registry_path, source_connection_id)
         || !enabled_local_connection(registry_path, destination_connection_id)
@@ -944,15 +1204,30 @@ fn run_local_file_copy_inner(
         return Err(LocalFileCopyError::ConnectionUnavailable);
     }
     let copy_result = if replace_existing {
-        source.copy_file_to_replace(source_relative, &destination, destination_relative, ContentReadConsent::GrantedForThisOperation)
+        source.copy_file_to_replace(
+            source_relative,
+            &destination,
+            destination_relative,
+            ContentReadConsent::GrantedForThisOperation,
+        )
     } else {
-        source.copy_file_to_new(source_relative, &destination, destination_relative, ContentReadConsent::GrantedForThisOperation)
+        source.copy_file_to_new(
+            source_relative,
+            &destination,
+            destination_relative,
+            ContentReadConsent::GrantedForThisOperation,
+        )
     };
     match copy_result {
         Ok(bytes) if bytes == source_entry.size => {}
         Ok(_) => return Err(LocalFileCopyError::VerificationFailed),
-        Err(LocalError::AlreadyExists) => { store.fail_attempt_before_effect(job_id, &attempt_id)?; return Err(LocalFileCopyError::TargetExists); }
-        Err(error @ LocalError::OutcomeUnknown(_)) => return Err(LocalFileCopyError::OutcomeUnknown(error)),
+        Err(LocalError::AlreadyExists) => {
+            store.fail_attempt_before_effect(job_id, &attempt_id)?;
+            return Err(LocalFileCopyError::TargetExists);
+        }
+        Err(error @ LocalError::OutcomeUnknown(_)) => {
+            return Err(LocalFileCopyError::OutcomeUnknown(error))
+        }
         Err(error) => return Err(LocalFileCopyError::Local(error)),
     }
     let destination_entry = match destination.stat(destination_relative) {
@@ -960,7 +1235,9 @@ fn run_local_file_copy_inner(
         _ => return Err(LocalFileCopyError::VerificationFailed),
     };
     let baseline = if let Some((scenario_id, scenario_revision, source_is_left)) = scenario {
-        let source_after = source.stat(source_relative).map_err(LocalFileCopyError::Local)?;
+        let source_after = source
+            .stat(source_relative)
+            .map_err(LocalFileCopyError::Local)?;
         if source_after.is_directory
             || source_after.object_revision != source_entry.object_revision
             || source_after.size != source_entry.size
@@ -984,14 +1261,32 @@ fn run_local_file_copy_inner(
                 revision: scenario_revision,
             },
             relative_path: source_path.to_owned(),
-            left: if source_is_left { source_version.clone() } else { destination_version.clone() },
-            right: if source_is_left { destination_version } else { source_version },
+            left: if source_is_left {
+                source_version.clone()
+            } else {
+                destination_version.clone()
+            },
+            right: if source_is_left {
+                destination_version
+            } else {
+                source_version
+            },
         })
     } else {
         None
     };
-    let receipt = VerifiedReceipt::metadata_verified(&attempt_id, operation_kind, destination_connection_id, target_path);
-    store.complete_attempt_with_scenario_copy_baseline(job_id, &attempt_id, &receipt, baseline.as_ref())?;
+    let receipt = VerifiedReceipt::metadata_verified(
+        &attempt_id,
+        operation_kind,
+        destination_connection_id,
+        target_path,
+    );
+    store.complete_attempt_with_scenario_copy_baseline(
+        job_id,
+        &attempt_id,
+        &receipt,
+        baseline.as_ref(),
+    )?;
     if baseline.is_some() {
         // Completion is already durable. A failed Registry write leaves the
         // outbox pending for a later, idempotent local-only delivery.
@@ -1019,7 +1314,9 @@ pub fn reconcile_local_file_copy(
         return Ok(LocalFileCopyReconciliationStatus::StillUnknown);
     }
     let destination = LocalFilesystem::open(destination_root).map_err(LocalFileCopyError::Local)?;
-    let identity = destination.root_identity().map_err(LocalFileCopyError::Local)?;
+    let identity = destination
+        .root_identity()
+        .map_err(LocalFileCopyError::Local)?;
     let root_identity = format!("unix:{}:{}", identity.device, identity.inode);
     let mut store = JobStore::open(database_path)?;
     let Some(job) = store.get(job_id)? else {
@@ -1029,13 +1326,18 @@ pub fn reconcile_local_file_copy(
         return Ok(LocalFileCopyReconciliationStatus::Existing(job.state));
     }
     let attempts = store.unresolved_attempts()?;
-    let matching: Vec<_> = attempts.iter().filter(|attempt| {
-        attempt.job_id == job_id
-            && attempt.status == "unknown"
-            && is_local_file_copy_operation(attempt.operation_kind.as_deref())
-            && attempt.target_connection_id.as_deref() == Some(destination_connection_id)
-    }).collect();
-    if matching.len() != 1 { return Ok(LocalFileCopyReconciliationStatus::StillUnknown); }
+    let matching: Vec<_> = attempts
+        .iter()
+        .filter(|attempt| {
+            attempt.job_id == job_id
+                && attempt.status == "unknown"
+                && is_local_file_copy_operation(attempt.operation_kind.as_deref())
+                && attempt.target_connection_id.as_deref() == Some(destination_connection_id)
+        })
+        .collect();
+    if matching.len() != 1 {
+        return Ok(LocalFileCopyReconciliationStatus::StillUnknown);
+    }
     let attempt = matching[0];
     let Some(expected) = store.expected_metadata(job_id, &attempt.attempt_id)? else {
         return Ok(LocalFileCopyReconciliationStatus::StillUnknown);
@@ -1045,14 +1347,23 @@ pub fn reconcile_local_file_copy(
     };
     if expected.operation_kind != operation_kind
         || expected.target_connection_id != destination_connection_id
-        || store.attempt_root_identity(job_id, &attempt.attempt_id)?.as_deref() != Some(root_identity.as_str())
+        || store
+            .attempt_root_identity(job_id, &attempt.attempt_id)?
+            .as_deref()
+            != Some(root_identity.as_str())
     {
         return Ok(LocalFileCopyReconciliationStatus::StillUnknown);
     }
-    if !matches!(destination.stat(Path::new(&expected.target_path)), Ok(entry) if !entry.is_directory && entry.size == expected.expected_size) {
+    if !matches!(destination.stat(Path::new(&expected.target_path)), Ok(entry) if !entry.is_directory && entry.size == expected.expected_size)
+    {
         return Ok(LocalFileCopyReconciliationStatus::StillUnknown);
     }
-    let receipt = VerifiedReceipt::metadata_verified(&attempt.attempt_id, operation_kind, destination_connection_id, &expected.target_path);
+    let receipt = VerifiedReceipt::metadata_verified(
+        &attempt.attempt_id,
+        operation_kind,
+        destination_connection_id,
+        &expected.target_path,
+    );
     store.complete_attempt(job_id, &attempt.attempt_id, &receipt)?;
     Ok(LocalFileCopyReconciliationStatus::Completed)
 }
@@ -1075,7 +1386,9 @@ pub fn local_file_copy_reconciliation_candidates(
         return Err(LocalFileCopyError::ConnectionUnavailable);
     }
     let destination = LocalFilesystem::open(destination_root).map_err(LocalFileCopyError::Local)?;
-    let identity = destination.root_identity().map_err(LocalFileCopyError::Local)?;
+    let identity = destination
+        .root_identity()
+        .map_err(LocalFileCopyError::Local)?;
     let root_identity = format!("unix:{}:{}", identity.device, identity.inode);
     let store = JobStore::open(database_path)?;
     let mut candidates = Vec::new();
@@ -1555,57 +1868,119 @@ mod tests {
         fs::create_dir(&destination_root).unwrap();
         fs::write(source_root.join("source.txt"), b"copy me").unwrap();
         let registry = Registry::open(&registry_path).unwrap();
-        let destination_connection = registry.add("local_filesystem", "Destination Local").unwrap();
+        let destination_connection = registry
+            .add("local_filesystem", "Destination Local")
+            .unwrap();
 
         assert!(matches!(
             run_local_file_copy(
-                &database, &registry_path, &source_root, &source_connection, Path::new("source.txt"),
-                &destination_root, &destination_connection, Path::new("source.txt"), "local-copy-denied", false,
+                &database,
+                &registry_path,
+                &source_root,
+                &source_connection,
+                Path::new("source.txt"),
+                &destination_root,
+                &destination_connection,
+                Path::new("source.txt"),
+                "local-copy-denied",
+                false,
             ),
             Err(LocalFileCopyError::ConsentRequired)
         ));
         assert!(!database.exists());
         assert_eq!(
             run_local_file_copy(
-                &database, &registry_path, &source_root, &source_connection, Path::new("source.txt"),
-                &destination_root, &destination_connection, Path::new("source.txt"), "local-copy-1", true,
-            ).unwrap(),
+                &database,
+                &registry_path,
+                &source_root,
+                &source_connection,
+                Path::new("source.txt"),
+                &destination_root,
+                &destination_connection,
+                Path::new("source.txt"),
+                "local-copy-1",
+                true,
+            )
+            .unwrap(),
             LocalFileCopyStatus::Completed
         );
-        assert_eq!(fs::read(destination_root.join("source.txt")).unwrap(), b"copy me");
-        assert_eq!(fs::read(source_root.join("source.txt")).unwrap(), b"copy me");
-        assert_eq!(JobStore::open(&database).unwrap().state("local-copy-1").unwrap(), Some(JobState::Completed));
+        assert_eq!(
+            fs::read(destination_root.join("source.txt")).unwrap(),
+            b"copy me"
+        );
+        assert_eq!(
+            fs::read(source_root.join("source.txt")).unwrap(),
+            b"copy me"
+        );
+        assert_eq!(
+            JobStore::open(&database)
+                .unwrap()
+                .state("local-copy-1")
+                .unwrap(),
+            Some(JobState::Completed)
+        );
         assert!(matches!(
             run_local_file_copy(
-                &database, &registry_path, &source_root, &source_connection, Path::new("source.txt"),
-                &destination_root, &destination_connection, Path::new("source.txt"), "local-copy-2", true,
+                &database,
+                &registry_path,
+                &source_root,
+                &source_connection,
+                Path::new("source.txt"),
+                &destination_root,
+                &destination_connection,
+                Path::new("source.txt"),
+                "local-copy-2",
+                true,
             ),
             Err(LocalFileCopyError::TargetExists)
         ));
-        assert_eq!(fs::read(destination_root.join("source.txt")).unwrap(), b"copy me");
+        assert_eq!(
+            fs::read(destination_root.join("source.txt")).unwrap(),
+            b"copy me"
+        );
     }
 
     #[test]
     fn local_file_replace_persists_attempt_and_replaces_existing_file() {
         let (database, registry_path, source_root, source_connection) = local_fixture("replace");
-        let destination_root = source_root.parent().unwrap().join("replace-destination-root");
+        let destination_root = source_root
+            .parent()
+            .unwrap()
+            .join("replace-destination-root");
         fs::create_dir(&source_root).unwrap();
         fs::create_dir(&destination_root).unwrap();
         fs::write(source_root.join("source.txt"), b"new contents").unwrap();
         fs::write(destination_root.join("destination.txt"), b"old contents").unwrap();
         let registry = Registry::open(&registry_path).unwrap();
-        let destination_connection = registry.add("local_filesystem", "Destination Local").unwrap();
+        let destination_connection = registry
+            .add("local_filesystem", "Destination Local")
+            .unwrap();
 
         assert_eq!(
             run_local_file_replace(
-                &database, &registry_path, &source_root, &source_connection, Path::new("source.txt"),
-                &destination_root, &destination_connection, Path::new("destination.txt"), "local-replace-1", true,
-            ).unwrap(),
+                &database,
+                &registry_path,
+                &source_root,
+                &source_connection,
+                Path::new("source.txt"),
+                &destination_root,
+                &destination_connection,
+                Path::new("destination.txt"),
+                "local-replace-1",
+                true,
+            )
+            .unwrap(),
             LocalFileCopyStatus::Completed
         );
-        assert_eq!(fs::read(destination_root.join("destination.txt")).unwrap(), b"new contents");
+        assert_eq!(
+            fs::read(destination_root.join("destination.txt")).unwrap(),
+            b"new contents"
+        );
         let store = JobStore::open(&database).unwrap();
-        assert_eq!(store.state("local-replace-1").unwrap(), Some(JobState::Completed));
+        assert_eq!(
+            store.state("local-replace-1").unwrap(),
+            Some(JobState::Completed)
+        );
         assert!(store.unresolved_attempts().unwrap().is_empty());
     }
 
@@ -1615,27 +1990,54 @@ mod tests {
         let destination_root = root.parent().unwrap().join("copy-reconcile-destination");
         fs::create_dir(&destination_root).unwrap();
         let registry = Registry::open(&registry_path).unwrap();
-        let connection = registry.add("local_filesystem", "Copy destination").unwrap();
+        let connection = registry
+            .add("local_filesystem", "Copy destination")
+            .unwrap();
         let destination = LocalFilesystem::open(&destination_root).unwrap();
         let identity = destination.root_identity().unwrap();
         let root_identity = format!("unix:{}:{}", identity.device, identity.inode);
         let mut store = JobStore::open(&database).unwrap();
         store.enqueue("copy-unknown", None).unwrap();
-        store.advance(
-            "copy-unknown", JobState::Queued, JobState::Running,
-            Confirmation::Confirmed(EvidenceLevel::Requested),
-        ).unwrap();
-        store.prepare_bound_attempt_with_root_identity(
-            "copy-unknown", "copy-unknown-attempt", "local_copy_new", &connection,
-            "copied.txt", 7, "00000000000000000000000000000000", &root_identity,
-        ).unwrap();
+        store
+            .advance(
+                "copy-unknown",
+                JobState::Queued,
+                JobState::Running,
+                Confirmation::Confirmed(EvidenceLevel::Requested),
+            )
+            .unwrap();
+        store
+            .prepare_bound_attempt_with_root_identity(
+                "copy-unknown",
+                "copy-unknown-attempt",
+                "local_copy_new",
+                &connection,
+                "copied.txt",
+                7,
+                "00000000000000000000000000000000",
+                &root_identity,
+            )
+            .unwrap();
         drop(store);
         fs::write(destination_root.join("copied.txt"), b"payload").unwrap();
         assert_eq!(
-            reconcile_local_file_copy(&database, &registry_path, &destination_root, &connection, "copy-unknown").unwrap(),
+            reconcile_local_file_copy(
+                &database,
+                &registry_path,
+                &destination_root,
+                &connection,
+                "copy-unknown"
+            )
+            .unwrap(),
             LocalFileCopyReconciliationStatus::Completed
         );
-        assert_eq!(JobStore::open(&database).unwrap().state("copy-unknown").unwrap(), Some(JobState::Completed));
+        assert_eq!(
+            JobStore::open(&database)
+                .unwrap()
+                .state("copy-unknown")
+                .unwrap(),
+            Some(JobState::Completed)
+        );
     }
 
     #[test]
@@ -1644,89 +2046,172 @@ mod tests {
         let destination_root = root.parent().unwrap().join("replace-reconcile-destination");
         fs::create_dir(&destination_root).unwrap();
         let registry = Registry::open(&registry_path).unwrap();
-        let connection = registry.add("local_filesystem", "Replacement destination").unwrap();
+        let connection = registry
+            .add("local_filesystem", "Replacement destination")
+            .unwrap();
         let destination = LocalFilesystem::open(&destination_root).unwrap();
         let identity = destination.root_identity().unwrap();
         let root_identity = format!("unix:{}:{}", identity.device, identity.inode);
         let mut store = JobStore::open(&database).unwrap();
         store.enqueue("replace-unknown", None).unwrap();
-        store.advance(
-            "replace-unknown", JobState::Queued, JobState::Running,
-            Confirmation::Confirmed(EvidenceLevel::Requested),
-        ).unwrap();
-        store.prepare_bound_attempt_with_root_identity(
-            "replace-unknown", "replace-unknown-attempt", "local_copy_replace", &connection,
-            "replaced.txt", 7, "00000000000000000000000000000000", &root_identity,
-        ).unwrap();
+        store
+            .advance(
+                "replace-unknown",
+                JobState::Queued,
+                JobState::Running,
+                Confirmation::Confirmed(EvidenceLevel::Requested),
+            )
+            .unwrap();
+        store
+            .prepare_bound_attempt_with_root_identity(
+                "replace-unknown",
+                "replace-unknown-attempt",
+                "local_copy_replace",
+                &connection,
+                "replaced.txt",
+                7,
+                "00000000000000000000000000000000",
+                &root_identity,
+            )
+            .unwrap();
         drop(store);
         fs::write(destination_root.join("replaced.txt"), b"payload").unwrap();
 
         assert_eq!(
-            reconcile_local_file_copy(&database, &registry_path, &destination_root, &connection, "replace-unknown").unwrap(),
+            reconcile_local_file_copy(
+                &database,
+                &registry_path,
+                &destination_root,
+                &connection,
+                "replace-unknown"
+            )
+            .unwrap(),
             LocalFileCopyReconciliationStatus::Completed
         );
-        assert_eq!(JobStore::open(&database).unwrap().state("replace-unknown").unwrap(), Some(JobState::Completed));
+        assert_eq!(
+            JobStore::open(&database)
+                .unwrap()
+                .state("replace-unknown")
+                .unwrap(),
+            Some(JobState::Completed)
+        );
     }
 
     #[test]
     fn local_file_copy_reconciliation_inventory_requires_the_bound_destination_root() {
         let (database, registry_path, root, _) = local_fixture("copy-reconcile-inventory");
-        let destination_root = root.parent().unwrap().join("copy-reconcile-inventory-destination");
-        let other_root = root.parent().unwrap().join("copy-reconcile-inventory-other");
+        let destination_root = root
+            .parent()
+            .unwrap()
+            .join("copy-reconcile-inventory-destination");
+        let other_root = root
+            .parent()
+            .unwrap()
+            .join("copy-reconcile-inventory-other");
         fs::create_dir(&destination_root).unwrap();
         fs::create_dir(&other_root).unwrap();
         let registry = Registry::open(&registry_path).unwrap();
-        let connection = registry.add("local_filesystem", "Copy destination").unwrap();
+        let connection = registry
+            .add("local_filesystem", "Copy destination")
+            .unwrap();
         let destination = LocalFilesystem::open(&destination_root).unwrap();
         let identity = destination.root_identity().unwrap();
         let root_identity = format!("unix:{}:{}", identity.device, identity.inode);
         let mut store = JobStore::open(&database).unwrap();
         store.enqueue("copy-inventory-unknown", None).unwrap();
-        store.advance(
-            "copy-inventory-unknown", JobState::Queued, JobState::Running,
-            Confirmation::Confirmed(EvidenceLevel::Requested),
-        ).unwrap();
-        store.prepare_bound_attempt_with_root_identity(
-            "copy-inventory-unknown", "copy-inventory-unknown-attempt", "local_copy_new", &connection,
-            "copied.txt", 7, "00000000000000000000000000000000", &root_identity,
-        ).unwrap();
+        store
+            .advance(
+                "copy-inventory-unknown",
+                JobState::Queued,
+                JobState::Running,
+                Confirmation::Confirmed(EvidenceLevel::Requested),
+            )
+            .unwrap();
+        store
+            .prepare_bound_attempt_with_root_identity(
+                "copy-inventory-unknown",
+                "copy-inventory-unknown-attempt",
+                "local_copy_new",
+                &connection,
+                "copied.txt",
+                7,
+                "00000000000000000000000000000000",
+                &root_identity,
+            )
+            .unwrap();
         drop(store);
 
         assert_eq!(
             local_file_copy_reconciliation_candidates(
-                &database, &registry_path, &destination_root, &connection,
-            ).unwrap(),
+                &database,
+                &registry_path,
+                &destination_root,
+                &connection,
+            )
+            .unwrap(),
             vec![LocalFileCopyReconciliationCandidate {
                 job_id: "copy-inventory-unknown".to_owned(),
             }]
         );
         assert!(local_file_copy_reconciliation_candidates(
-            &database, &registry_path, &other_root, &connection,
-        ).unwrap().is_empty());
+            &database,
+            &registry_path,
+            &other_root,
+            &connection,
+        )
+        .unwrap()
+        .is_empty());
     }
 
     #[test]
     fn scenario_copy_binds_the_exact_revision_and_endpoint_scope() {
         use crate::scenario_planner::{ObservedFile, PlanAction};
-        let (database, registry_path, source_root, source_connection) = local_fixture("scenario-copy");
-        let destination_root = source_root.parent().unwrap().join("scenario-destination-root");
+        let (database, registry_path, source_root, source_connection) =
+            local_fixture("scenario-copy");
+        let destination_root = source_root
+            .parent()
+            .unwrap()
+            .join("scenario-destination-root");
         fs::create_dir(&source_root).unwrap();
         fs::create_dir(&destination_root).unwrap();
         fs::write(source_root.join("source.txt"), b"copy me").unwrap();
         let registry = Registry::open(&registry_path).unwrap();
-        let destination_connection = registry.add("local_filesystem", "Scenario Destination").unwrap();
-        let scenario = registry.create_scenario(
-            "Scenario copy", &source_connection, source_root.to_str().unwrap(),
-            &destination_connection, destination_root.to_str().unwrap(), "left_to_right",
-        ).unwrap();
+        let destination_connection = registry
+            .add("local_filesystem", "Scenario Destination")
+            .unwrap();
+        let scenario = registry
+            .create_scenario(
+                "Scenario copy",
+                &source_connection,
+                source_root.to_str().unwrap(),
+                &destination_connection,
+                destination_root.to_str().unwrap(),
+                "left_to_right",
+            )
+            .unwrap();
         assert_eq!(
             run_local_scenario_file_copy(
-                &database, &registry_path, &scenario, 1, &source_root, &source_connection, Path::new("source.txt"),
-                &destination_root, &destination_connection, Path::new("source.txt"), "scenario-copy-1", true,
-            ).unwrap(),
+                &database,
+                &registry_path,
+                &scenario,
+                1,
+                &source_root,
+                &source_connection,
+                Path::new("source.txt"),
+                &destination_root,
+                &destination_connection,
+                Path::new("source.txt"),
+                "scenario-copy-1",
+                true,
+            )
+            .unwrap(),
             LocalFileCopyStatus::Completed
         );
-        let stored = JobStore::open(&database).unwrap().get("scenario-copy-1").unwrap().unwrap();
+        let stored = JobStore::open(&database)
+            .unwrap()
+            .get("scenario-copy-1")
+            .unwrap()
+            .unwrap();
         assert_eq!(stored.scenario_id.as_deref(), Some(scenario.as_str()));
         assert_eq!(stored.scenario_revision, Some(1));
         let baseline = Registry::open(&registry_path)
@@ -1741,7 +2226,12 @@ mod tests {
         assert_eq!(baseline[0].left.as_ref().unwrap().size, 7);
         assert_eq!(baseline[0].right.as_ref().unwrap().size, 7);
         assert!(baseline[0].left.as_ref().unwrap().object_revision.is_some());
-        assert!(baseline[0].right.as_ref().unwrap().object_revision.is_some());
+        assert!(baseline[0]
+            .right
+            .as_ref()
+            .unwrap()
+            .object_revision
+            .is_some());
         assert!(JobStore::open(&database)
             .unwrap()
             .pending_scenario_copy_baseline_outbox()
@@ -1779,8 +2269,18 @@ mod tests {
         assert_eq!(plan[0].action, PlanAction::NoAction);
         assert!(matches!(
             run_local_scenario_file_copy(
-                &database, &registry_path, &scenario, 1, &destination_root, &source_connection, Path::new("source.txt"),
-                &source_root, &destination_connection, Path::new("other.txt"), "scenario-copy-bad", true,
+                &database,
+                &registry_path,
+                &scenario,
+                1,
+                &destination_root,
+                &source_connection,
+                Path::new("source.txt"),
+                &source_root,
+                &destination_connection,
+                Path::new("other.txt"),
+                "scenario-copy-bad",
+                true,
             ),
             Err(LocalFileCopyError::ScenarioScopeMismatch)
         ));
@@ -1788,63 +2288,144 @@ mod tests {
 
     #[test]
     fn scenario_replace_binds_the_exact_revision_and_replaces_existing_file() {
-        let (database, registry_path, source_root, source_connection) = local_fixture("scenario-replace");
-        let destination_root = source_root.parent().unwrap().join("scenario-replace-destination-root");
+        let (database, registry_path, source_root, source_connection) =
+            local_fixture("scenario-replace");
+        let destination_root = source_root
+            .parent()
+            .unwrap()
+            .join("scenario-replace-destination-root");
         fs::create_dir(&source_root).unwrap();
         fs::create_dir(&destination_root).unwrap();
         fs::write(source_root.join("report.txt"), b"new report").unwrap();
         fs::write(destination_root.join("report.txt"), b"old report").unwrap();
         let registry = Registry::open(&registry_path).unwrap();
-        let destination_connection = registry.add("local_filesystem", "Scenario Destination").unwrap();
-        let scenario = registry.create_scenario(
-            "Scenario update", &source_connection, source_root.to_str().unwrap(),
-            &destination_connection, destination_root.to_str().unwrap(), "left_to_right",
-        ).unwrap();
+        let destination_connection = registry
+            .add("local_filesystem", "Scenario Destination")
+            .unwrap();
+        let scenario = registry
+            .create_scenario(
+                "Scenario update",
+                &source_connection,
+                source_root.to_str().unwrap(),
+                &destination_connection,
+                destination_root.to_str().unwrap(),
+                "left_to_right",
+            )
+            .unwrap();
 
         assert_eq!(
             run_local_scenario_file_replace(
-                &database, &registry_path, &scenario, 1, &source_root, &source_connection, Path::new("report.txt"),
-                &destination_root, &destination_connection, Path::new("report.txt"), "scenario-replace-1", true,
-            ).unwrap(),
+                &database,
+                &registry_path,
+                &scenario,
+                1,
+                &source_root,
+                &source_connection,
+                Path::new("report.txt"),
+                &destination_root,
+                &destination_connection,
+                Path::new("report.txt"),
+                "scenario-replace-1",
+                true,
+            )
+            .unwrap(),
             LocalFileCopyStatus::Completed
         );
-        assert_eq!(fs::read(destination_root.join("report.txt")).unwrap(), b"new report");
-        let stored = JobStore::open(&database).unwrap().get("scenario-replace-1").unwrap().unwrap();
+        assert_eq!(
+            fs::read(destination_root.join("report.txt")).unwrap(),
+            b"new report"
+        );
+        let stored = JobStore::open(&database)
+            .unwrap()
+            .get("scenario-replace-1")
+            .unwrap()
+            .unwrap();
         assert_eq!(stored.scenario_id.as_deref(), Some(scenario.as_str()));
         assert_eq!(stored.scenario_revision, Some(1));
     }
 
     #[test]
     fn selected_conflict_replace_revalidates_snapshots_and_completes_its_task() {
-        let (database, registry_path, source_root, source_connection) = local_fixture("conflict-replace");
-        let destination_root = source_root.parent().unwrap().join("conflict-replace-destination");
+        let (database, registry_path, source_root, source_connection) =
+            local_fixture("conflict-replace");
+        let destination_root = source_root
+            .parent()
+            .unwrap()
+            .join("conflict-replace-destination");
         fs::create_dir(&source_root).unwrap();
         fs::create_dir(&destination_root).unwrap();
         fs::write(source_root.join("report.txt"), b"new report").unwrap();
         fs::write(destination_root.join("report.txt"), b"old report").unwrap();
         let registry = Registry::open(&registry_path).unwrap();
         let destination_connection = registry.add("local_filesystem", "Destination").unwrap();
-        let scenario_id = registry.create_scenario(
-            "Conflict", &source_connection, source_root.to_str().unwrap(),
-            &destination_connection, destination_root.to_str().unwrap(), "left_to_right",
-        ).unwrap();
-        let source = LocalFilesystem::open(&source_root).unwrap().stat(Path::new("report.txt")).unwrap();
-        let destination = LocalFilesystem::open(&destination_root).unwrap().stat(Path::new("report.txt")).unwrap();
-        let task = registry.queue_conflict_task(
-            &ScenarioReference { scenario_id: scenario_id.clone(), revision: 1 }, "report.txt", "content", None,
-            Some(&ConfirmedFileVersion { object_revision: source.object_revision, size: source.size, checksum_md5: None }),
-            Some(&ConfirmedFileVersion { object_revision: destination.object_revision, size: destination.size, checksum_md5: None }),
-        ).unwrap();
-        registry.select_conflict_task(&task, Some(true), "replace_from_source").unwrap();
-        assert_eq!(run_local_scenario_conflict_replace(&database, &registry_path, &task, "conflict-replace-1", true).unwrap(), LocalFileCopyStatus::Completed);
-        assert_eq!(fs::read(destination_root.join("report.txt")).unwrap(), b"new report");
+        let scenario_id = registry
+            .create_scenario(
+                "Conflict",
+                &source_connection,
+                source_root.to_str().unwrap(),
+                &destination_connection,
+                destination_root.to_str().unwrap(),
+                "left_to_right",
+            )
+            .unwrap();
+        let source = LocalFilesystem::open(&source_root)
+            .unwrap()
+            .stat(Path::new("report.txt"))
+            .unwrap();
+        let destination = LocalFilesystem::open(&destination_root)
+            .unwrap()
+            .stat(Path::new("report.txt"))
+            .unwrap();
+        let task = registry
+            .queue_conflict_task(
+                &ScenarioReference {
+                    scenario_id: scenario_id.clone(),
+                    revision: 1,
+                },
+                "report.txt",
+                "content",
+                None,
+                Some(&ConfirmedFileVersion {
+                    object_revision: source.object_revision,
+                    size: source.size,
+                    checksum_md5: None,
+                }),
+                Some(&ConfirmedFileVersion {
+                    object_revision: destination.object_revision,
+                    size: destination.size,
+                    checksum_md5: None,
+                }),
+            )
+            .unwrap();
+        registry
+            .select_conflict_task(&task, Some(true), "replace_from_source")
+            .unwrap();
+        assert_eq!(
+            run_local_scenario_conflict_replace(
+                &database,
+                &registry_path,
+                &task,
+                "conflict-replace-1",
+                true
+            )
+            .unwrap(),
+            LocalFileCopyStatus::Completed
+        );
+        assert_eq!(
+            fs::read(destination_root.join("report.txt")).unwrap(),
+            b"new report"
+        );
         assert_eq!(registry.selected_conflict_task(&task).unwrap(), None);
     }
 
     #[test]
     fn selected_conflict_replace_if_newer_uses_local_snapshot_mtime() {
-        let (database, registry_path, source_root, source_connection) = local_fixture("conflict-replace-newer");
-        let destination_root = source_root.parent().unwrap().join("conflict-replace-newer-destination");
+        let (database, registry_path, source_root, source_connection) =
+            local_fixture("conflict-replace-newer");
+        let destination_root = source_root
+            .parent()
+            .unwrap()
+            .join("conflict-replace-newer-destination");
         fs::create_dir(&source_root).unwrap();
         fs::create_dir(&destination_root).unwrap();
         fs::write(destination_root.join("report.txt"), b"old report").unwrap();
@@ -1852,28 +2433,75 @@ mod tests {
         fs::write(source_root.join("report.txt"), b"new report").unwrap();
         let registry = Registry::open(&registry_path).unwrap();
         let destination_connection = registry.add("local_filesystem", "Destination").unwrap();
-        let scenario_id = registry.create_scenario(
-            "Conflict", &source_connection, source_root.to_str().unwrap(),
-            &destination_connection, destination_root.to_str().unwrap(), "left_to_right",
-        ).unwrap();
-        let source = LocalFilesystem::open(&source_root).unwrap().stat(Path::new("report.txt")).unwrap();
-        let destination = LocalFilesystem::open(&destination_root).unwrap().stat(Path::new("report.txt")).unwrap();
-        let task = registry.queue_conflict_task(
-            &ScenarioReference { scenario_id, revision: 1 }, "report.txt", "content", None,
-            Some(&ConfirmedFileVersion { object_revision: source.object_revision, size: source.size, checksum_md5: None }),
-            Some(&ConfirmedFileVersion { object_revision: destination.object_revision, size: destination.size, checksum_md5: None }),
-        ).unwrap();
-        registry.select_conflict_task(&task, Some(true), "replace_if_newer").unwrap();
+        let scenario_id = registry
+            .create_scenario(
+                "Conflict",
+                &source_connection,
+                source_root.to_str().unwrap(),
+                &destination_connection,
+                destination_root.to_str().unwrap(),
+                "left_to_right",
+            )
+            .unwrap();
+        let source = LocalFilesystem::open(&source_root)
+            .unwrap()
+            .stat(Path::new("report.txt"))
+            .unwrap();
+        let destination = LocalFilesystem::open(&destination_root)
+            .unwrap()
+            .stat(Path::new("report.txt"))
+            .unwrap();
+        let task = registry
+            .queue_conflict_task(
+                &ScenarioReference {
+                    scenario_id,
+                    revision: 1,
+                },
+                "report.txt",
+                "content",
+                None,
+                Some(&ConfirmedFileVersion {
+                    object_revision: source.object_revision,
+                    size: source.size,
+                    checksum_md5: None,
+                }),
+                Some(&ConfirmedFileVersion {
+                    object_revision: destination.object_revision,
+                    size: destination.size,
+                    checksum_md5: None,
+                }),
+            )
+            .unwrap();
+        registry
+            .select_conflict_task(&task, Some(true), "replace_if_newer")
+            .unwrap();
 
-        assert_eq!(run_local_scenario_conflict_replace(&database, &registry_path, &task, "conflict-replace-newer-1", true).unwrap(), LocalFileCopyStatus::Completed);
-        assert_eq!(fs::read(destination_root.join("report.txt")).unwrap(), b"new report");
+        assert_eq!(
+            run_local_scenario_conflict_replace(
+                &database,
+                &registry_path,
+                &task,
+                "conflict-replace-newer-1",
+                true
+            )
+            .unwrap(),
+            LocalFileCopyStatus::Completed
+        );
+        assert_eq!(
+            fs::read(destination_root.join("report.txt")).unwrap(),
+            b"new report"
+        );
         assert_eq!(registry.selected_conflict_task(&task).unwrap(), None);
     }
 
     #[test]
     fn selected_conflict_replace_if_newer_keeps_a_newer_destination_without_a_job() {
-        let (database, registry_path, source_root, source_connection) = local_fixture("conflict-keep-newer-destination");
-        let destination_root = source_root.parent().unwrap().join("conflict-keep-newer-destination-root");
+        let (database, registry_path, source_root, source_connection) =
+            local_fixture("conflict-keep-newer-destination");
+        let destination_root = source_root
+            .parent()
+            .unwrap()
+            .join("conflict-keep-newer-destination-root");
         fs::create_dir(&source_root).unwrap();
         fs::create_dir(&destination_root).unwrap();
         fs::write(source_root.join("report.txt"), b"source report").unwrap();
@@ -1881,113 +2509,293 @@ mod tests {
         fs::write(destination_root.join("report.txt"), b"newer destination").unwrap();
         let registry = Registry::open(&registry_path).unwrap();
         let destination_connection = registry.add("local_filesystem", "Destination").unwrap();
-        let scenario_id = registry.create_scenario(
-            "Conflict", &source_connection, source_root.to_str().unwrap(),
-            &destination_connection, destination_root.to_str().unwrap(), "left_to_right",
-        ).unwrap();
-        let source = LocalFilesystem::open(&source_root).unwrap().stat(Path::new("report.txt")).unwrap();
-        let destination = LocalFilesystem::open(&destination_root).unwrap().stat(Path::new("report.txt")).unwrap();
-        let task = registry.queue_conflict_task(
-            &ScenarioReference { scenario_id, revision: 1 }, "report.txt", "content", None,
-            Some(&ConfirmedFileVersion { object_revision: source.object_revision, size: source.size, checksum_md5: None }),
-            Some(&ConfirmedFileVersion { object_revision: destination.object_revision, size: destination.size, checksum_md5: None }),
-        ).unwrap();
-        registry.select_conflict_task(&task, Some(true), "replace_if_newer").unwrap();
+        let scenario_id = registry
+            .create_scenario(
+                "Conflict",
+                &source_connection,
+                source_root.to_str().unwrap(),
+                &destination_connection,
+                destination_root.to_str().unwrap(),
+                "left_to_right",
+            )
+            .unwrap();
+        let source = LocalFilesystem::open(&source_root)
+            .unwrap()
+            .stat(Path::new("report.txt"))
+            .unwrap();
+        let destination = LocalFilesystem::open(&destination_root)
+            .unwrap()
+            .stat(Path::new("report.txt"))
+            .unwrap();
+        let task = registry
+            .queue_conflict_task(
+                &ScenarioReference {
+                    scenario_id,
+                    revision: 1,
+                },
+                "report.txt",
+                "content",
+                None,
+                Some(&ConfirmedFileVersion {
+                    object_revision: source.object_revision,
+                    size: source.size,
+                    checksum_md5: None,
+                }),
+                Some(&ConfirmedFileVersion {
+                    object_revision: destination.object_revision,
+                    size: destination.size,
+                    checksum_md5: None,
+                }),
+            )
+            .unwrap();
+        registry
+            .select_conflict_task(&task, Some(true), "replace_if_newer")
+            .unwrap();
 
-        assert_eq!(run_local_scenario_conflict_replace(&database, &registry_path, &task, "conflict-keep-newer-destination-1", true).unwrap(), LocalFileCopyStatus::Completed);
-        assert_eq!(fs::read(destination_root.join("report.txt")).unwrap(), b"newer destination");
-        assert_eq!(JobStore::open(&database).unwrap().get("conflict-keep-newer-destination-1").unwrap(), None);
+        assert_eq!(
+            run_local_scenario_conflict_replace(
+                &database,
+                &registry_path,
+                &task,
+                "conflict-keep-newer-destination-1",
+                true
+            )
+            .unwrap(),
+            LocalFileCopyStatus::Completed
+        );
+        assert_eq!(
+            fs::read(destination_root.join("report.txt")).unwrap(),
+            b"newer destination"
+        );
+        assert_eq!(
+            JobStore::open(&database)
+                .unwrap()
+                .get("conflict-keep-newer-destination-1")
+                .unwrap(),
+            None
+        );
         assert_eq!(registry.selected_conflict_task(&task).unwrap(), None);
     }
 
     #[test]
     fn selected_conflict_delete_removes_the_destination_after_confirmation() {
-        let (database, registry_path, left_root, left_connection) = local_fixture("conflict-delete");
+        let (database, registry_path, left_root, left_connection) =
+            local_fixture("conflict-delete");
         let right_root = left_root.parent().unwrap().join("conflict-delete-right");
         fs::create_dir(&left_root).unwrap();
         fs::create_dir(&right_root).unwrap();
         fs::write(right_root.join("report.txt"), b"remove me").unwrap();
         let registry = Registry::open(&registry_path).unwrap();
         let right_connection = registry.add("local_filesystem", "Right").unwrap();
-        let scenario_id = registry.create_scenario(
-            "Conflict", &left_connection, left_root.to_str().unwrap(),
-            &right_connection, right_root.to_str().unwrap(), "left_to_right",
-        ).unwrap();
-        let destination = LocalFilesystem::open(&right_root).unwrap().stat(Path::new("report.txt")).unwrap();
-        let task = registry.queue_conflict_task(
-            &ScenarioReference { scenario_id, revision: 1 }, "report.txt", "deletion", None, None,
-            Some(&ConfirmedFileVersion { object_revision: destination.object_revision, size: destination.size, checksum_md5: None }),
-        ).unwrap();
-        registry.select_conflict_task(&task, Some(true), "delete_as_source").unwrap();
+        let scenario_id = registry
+            .create_scenario(
+                "Conflict",
+                &left_connection,
+                left_root.to_str().unwrap(),
+                &right_connection,
+                right_root.to_str().unwrap(),
+                "left_to_right",
+            )
+            .unwrap();
+        let destination = LocalFilesystem::open(&right_root)
+            .unwrap()
+            .stat(Path::new("report.txt"))
+            .unwrap();
+        let task = registry
+            .queue_conflict_task(
+                &ScenarioReference {
+                    scenario_id,
+                    revision: 1,
+                },
+                "report.txt",
+                "deletion",
+                None,
+                None,
+                Some(&ConfirmedFileVersion {
+                    object_revision: destination.object_revision,
+                    size: destination.size,
+                    checksum_md5: None,
+                }),
+            )
+            .unwrap();
+        registry
+            .select_conflict_task(&task, Some(true), "delete_as_source")
+            .unwrap();
 
-        assert_eq!(run_local_scenario_conflict_delete(&database, &registry_path, &task, "conflict-delete-1", true).unwrap(), LocalFileCopyStatus::Completed);
+        assert_eq!(
+            run_local_scenario_conflict_delete(
+                &database,
+                &registry_path,
+                &task,
+                "conflict-delete-1",
+                true
+            )
+            .unwrap(),
+            LocalFileCopyStatus::Completed
+        );
         assert!(!right_root.join("report.txt").exists());
         assert_eq!(registry.selected_conflict_task(&task).unwrap(), None);
-        assert_eq!(JobStore::open(&database).unwrap().state("conflict-delete-1").unwrap(), Some(JobState::Completed));
+        assert_eq!(
+            JobStore::open(&database)
+                .unwrap()
+                .state("conflict-delete-1")
+                .unwrap(),
+            Some(JobState::Completed)
+        );
     }
 
     #[test]
     fn selected_conflict_replace_marks_task_stale_when_the_destination_changed() {
-        let (database, registry_path, source_root, source_connection) = local_fixture("conflict-replace-stale");
-        let destination_root = source_root.parent().unwrap().join("conflict-replace-stale-destination");
+        let (database, registry_path, source_root, source_connection) =
+            local_fixture("conflict-replace-stale");
+        let destination_root = source_root
+            .parent()
+            .unwrap()
+            .join("conflict-replace-stale-destination");
         fs::create_dir(&source_root).unwrap();
         fs::create_dir(&destination_root).unwrap();
         fs::write(source_root.join("report.txt"), b"source version").unwrap();
         fs::write(destination_root.join("report.txt"), b"queued destination").unwrap();
         let registry = Registry::open(&registry_path).unwrap();
         let destination_connection = registry.add("local_filesystem", "Destination").unwrap();
-        let scenario_id = registry.create_scenario(
-            "Conflict", &source_connection, source_root.to_str().unwrap(),
-            &destination_connection, destination_root.to_str().unwrap(), "left_to_right",
-        ).unwrap();
-        let source = LocalFilesystem::open(&source_root).unwrap().stat(Path::new("report.txt")).unwrap();
-        let destination = LocalFilesystem::open(&destination_root).unwrap().stat(Path::new("report.txt")).unwrap();
-        let task = registry.queue_conflict_task(
-            &ScenarioReference { scenario_id: scenario_id.clone(), revision: 1 }, "report.txt", "content", None,
-            Some(&ConfirmedFileVersion { object_revision: source.object_revision, size: source.size, checksum_md5: None }),
-            Some(&ConfirmedFileVersion { object_revision: destination.object_revision, size: destination.size, checksum_md5: None }),
-        ).unwrap();
-        registry.select_conflict_task(&task, Some(true), "replace_from_source").unwrap();
-        fs::write(destination_root.join("report.txt"), b"changed after dry run").unwrap();
+        let scenario_id = registry
+            .create_scenario(
+                "Conflict",
+                &source_connection,
+                source_root.to_str().unwrap(),
+                &destination_connection,
+                destination_root.to_str().unwrap(),
+                "left_to_right",
+            )
+            .unwrap();
+        let source = LocalFilesystem::open(&source_root)
+            .unwrap()
+            .stat(Path::new("report.txt"))
+            .unwrap();
+        let destination = LocalFilesystem::open(&destination_root)
+            .unwrap()
+            .stat(Path::new("report.txt"))
+            .unwrap();
+        let task = registry
+            .queue_conflict_task(
+                &ScenarioReference {
+                    scenario_id: scenario_id.clone(),
+                    revision: 1,
+                },
+                "report.txt",
+                "content",
+                None,
+                Some(&ConfirmedFileVersion {
+                    object_revision: source.object_revision,
+                    size: source.size,
+                    checksum_md5: None,
+                }),
+                Some(&ConfirmedFileVersion {
+                    object_revision: destination.object_revision,
+                    size: destination.size,
+                    checksum_md5: None,
+                }),
+            )
+            .unwrap();
+        registry
+            .select_conflict_task(&task, Some(true), "replace_from_source")
+            .unwrap();
+        fs::write(
+            destination_root.join("report.txt"),
+            b"changed after dry run",
+        )
+        .unwrap();
 
         assert!(matches!(
-            run_local_scenario_conflict_replace(&database, &registry_path, &task, "conflict-replace-stale-1", true),
+            run_local_scenario_conflict_replace(
+                &database,
+                &registry_path,
+                &task,
+                "conflict-replace-stale-1",
+                true
+            ),
             Err(LocalFileCopyError::ConflictStale)
         ));
-        assert_eq!(fs::read(destination_root.join("report.txt")).unwrap(), b"changed after dry run");
-        let stored = registry.list_conflict_tasks(&ScenarioReference { scenario_id, revision: 1 }).unwrap();
-        assert_eq!(stored.into_iter().find(|entry| entry.id == task).unwrap().state, "stale");
+        assert_eq!(
+            fs::read(destination_root.join("report.txt")).unwrap(),
+            b"changed after dry run"
+        );
+        let stored = registry
+            .list_conflict_tasks(&ScenarioReference {
+                scenario_id,
+                revision: 1,
+            })
+            .unwrap();
+        assert_eq!(
+            stored
+                .into_iter()
+                .find(|entry| entry.id == task)
+                .unwrap()
+                .state,
+            "stale"
+        );
     }
 
     #[test]
     fn bidirectional_scenario_replace_accepts_a_right_to_left_update() {
-        let (database, registry_path, left_root, left_connection) = local_fixture("scenario-replace-reverse");
-        let right_root = left_root.parent().unwrap().join("scenario-replace-reverse-right-root");
+        let (database, registry_path, left_root, left_connection) =
+            local_fixture("scenario-replace-reverse");
+        let right_root = left_root
+            .parent()
+            .unwrap()
+            .join("scenario-replace-reverse-right-root");
         fs::create_dir(&left_root).unwrap();
         fs::create_dir(&right_root).unwrap();
         fs::write(left_root.join("report.txt"), b"old report").unwrap();
         fs::write(right_root.join("report.txt"), b"new report").unwrap();
         let registry = Registry::open(&registry_path).unwrap();
         let right_connection = registry.add("local_filesystem", "Scenario Right").unwrap();
-        let scenario = registry.create_scenario(
-            "Bidirectional scenario update", &left_connection, left_root.to_str().unwrap(),
-            &right_connection, right_root.to_str().unwrap(), "bidirectional",
-        ).unwrap();
+        let scenario = registry
+            .create_scenario(
+                "Bidirectional scenario update",
+                &left_connection,
+                left_root.to_str().unwrap(),
+                &right_connection,
+                right_root.to_str().unwrap(),
+                "bidirectional",
+            )
+            .unwrap();
 
         assert_eq!(
             run_local_scenario_file_replace(
-                &database, &registry_path, &scenario, 1, &right_root, &right_connection, Path::new("report.txt"),
-                &left_root, &left_connection, Path::new("report.txt"), "scenario-replace-reverse-1", true,
-            ).unwrap(),
+                &database,
+                &registry_path,
+                &scenario,
+                1,
+                &right_root,
+                &right_connection,
+                Path::new("report.txt"),
+                &left_root,
+                &left_connection,
+                Path::new("report.txt"),
+                "scenario-replace-reverse-1",
+                true,
+            )
+            .unwrap(),
             LocalFileCopyStatus::Completed
         );
-        assert_eq!(fs::read(left_root.join("report.txt")).unwrap(), b"new report");
-        let stored = JobStore::open(&database).unwrap().get("scenario-replace-reverse-1").unwrap().unwrap();
+        assert_eq!(
+            fs::read(left_root.join("report.txt")).unwrap(),
+            b"new report"
+        );
+        let stored = JobStore::open(&database)
+            .unwrap()
+            .get("scenario-replace-reverse-1")
+            .unwrap()
+            .unwrap();
         assert_eq!(stored.scenario_id.as_deref(), Some(scenario.as_str()));
         assert_eq!(stored.scenario_revision, Some(1));
         let baseline = Registry::open(&registry_path)
             .unwrap()
-            .list_confirmed_file_states(&ScenarioReference { scenario_id: scenario, revision: 1 })
+            .list_confirmed_file_states(&ScenarioReference {
+                scenario_id: scenario,
+                revision: 1,
+            })
             .unwrap();
         assert_eq!(baseline.len(), 1);
         assert_eq!(baseline[0].relative_path, "report.txt");

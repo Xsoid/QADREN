@@ -574,7 +574,9 @@ impl LocalFilesystem {
     ) -> Result<u64> {
         Self::relative(from)?;
         Self::relative(to)?;
-        if consent != ContentReadConsent::GrantedForThisOperation || self.overlaps_root(destination)? {
+        if consent != ContentReadConsent::GrantedForThisOperation
+            || self.overlaps_root(destination)?
+        {
             return Err(LocalError::UnsafeEntry);
         }
         #[cfg(unix)]
@@ -606,7 +608,9 @@ impl LocalFilesystem {
     ) -> Result<u64> {
         Self::relative(from)?;
         Self::relative(to)?;
-        if consent != ContentReadConsent::GrantedForThisOperation || self.overlaps_root(destination)? {
+        if consent != ContentReadConsent::GrantedForThisOperation
+            || self.overlaps_root(destination)?
+        {
             return Err(LocalError::UnsafeEntry);
         }
         if matches!(destination.stat(to), Ok(entry) if entry.is_directory) {
@@ -1432,10 +1436,7 @@ mod tests {
         assert!(capabilities.operations.list_metadata);
         assert!(!capabilities.operations.rename);
         assert_eq!(capabilities.operations.delete, cfg!(unix));
-        assert_eq!(
-            capabilities.operations.read_content,
-            cfg!(unix)
-        );
+        assert_eq!(capabilities.operations.read_content, cfg!(unix));
         assert_eq!(capabilities.operations.write_content, cfg!(unix));
         assert_eq!(capabilities.operations.create_directory, cfg!(unix));
         fs::remove_dir_all(root).unwrap();
@@ -2677,10 +2678,17 @@ mod tests {
             LocalContentResidency::NotDatalessFlagged
         );
         let mut bytes = Vec::new();
-        assert!(matches!(adapter.read_to_writer(path, &mut bytes, ContentReadConsent::Denied), Err(LocalError::UnsafeEntry)));
+        assert!(matches!(
+            adapter.read_to_writer(path, &mut bytes, ContentReadConsent::Denied),
+            Err(LocalError::UnsafeEntry)
+        ));
         assert!(bytes.is_empty());
         adapter
-            .read_to_writer(path, &mut bytes, ContentReadConsent::GrantedForThisOperation)
+            .read_to_writer(
+                path,
+                &mut bytes,
+                ContentReadConsent::GrantedForThisOperation,
+            )
             .unwrap();
         assert_eq!(bytes, b"original");
         assert!(adapter.capabilities().operations.read_content);
@@ -3206,11 +3214,14 @@ mod tests {
             available.allows(platform, RequestedOperation::Rename),
             Err(CapabilityError::UnsupportedOperation)
         );
-        assert_eq!(available.allows(platform, RequestedOperation::Delete), if cfg!(unix) {
-            Ok(())
-        } else {
-            Err(CapabilityError::UnsupportedOperation)
-        });
+        assert_eq!(
+            available.allows(platform, RequestedOperation::Delete),
+            if cfg!(unix) {
+                Ok(())
+            } else {
+                Err(CapabilityError::UnsupportedOperation)
+            }
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3796,10 +3807,15 @@ mod tests {
                 .unwrap(),
             12
         );
-        assert_eq!(fs::read(destination_root.join("destination.bin")).unwrap(), b"new contents");
-        assert!(fs::read_dir(&destination_root)
+        assert_eq!(
+            fs::read(destination_root.join("destination.bin")).unwrap(),
+            b"new contents"
+        );
+        assert!(fs::read_dir(&destination_root).unwrap().all(|entry| !entry
             .unwrap()
-            .all(|entry| !entry.unwrap().file_name().to_string_lossy().starts_with(".qadren-replace-")));
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".qadren-replace-")));
         fs::remove_dir_all(source_root).unwrap();
         fs::remove_dir_all(destination_root).unwrap();
     }
