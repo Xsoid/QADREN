@@ -16,7 +16,7 @@ Status: current product sequence. This document is not a work log.
 | Priority | Product result and gate |
 |---|---|
 | **P0 / COMPLETE** | The SwiftUI design system, widget canvas, and monitoring baseline exist. Do not reopen general UI-baseline work. |
-| **P1 / CRITICAL PATH** | The manual Local-to-Local no-overwrite copy path exists through UI → Rust JobStore → Local Filesystem → verification → SQLite → UI. Verify explicit consent before any potentially hydrating read, including refusal with no content I/O. Record actual File Provider evidence when an accessible native fixture exists; otherwise document the untested residual risk and request informed consent. Preserve `UNKNOWN`. Do not build a second engine. |
+| **P1 / CRITICAL PATH** | The manual Local-to-Local no-overwrite copy path exists through UI → Rust JobStore → Local Filesystem → verification → SQLite → UI. Ordinary reads may transparently hydrate a needed File Provider item with no additional prompt. Test the read path without requiring obsolete `read_content` approval. Record actual File Provider compatibility when a fixture exists; otherwise document remaining test limitations. Preserve `UNKNOWN`. Do not build a second engine. |
 | **P1 / LOCAL PRODUCT** | User-confirmed Scenario `Create` and `Update` items use revision-bound Local Jobs in a permitted Scenario direction. `Create` is no-overwrite. `Update` uses the controlled replacement protocol. Persisted UNKNOWN copies have a root-bound inventory and an explicit read-only check action. Batch ordinary actions and conflict handling exist. Autonomous Scenario execution remains open. |
 | **P2 / AUTONOMY** | Run real local Scenarios on schedule in one independent Worker after UI exit. Test crash and restart recovery. Produce a verified macOS release. |
 | **POST-RELEASE / PARKED** | Yandex Disk and iCloud require a separate owner decision before reactivation. Preserve existing code, credentials, and Local File Provider guards. Do not add cloud adapter, API, entitlement, or live end-to-end work in Release 1. |
@@ -29,19 +29,19 @@ An external work tracker can record discussion and delivery history. It does not
 
 Do not create a parallel specification. When the sequence changes, update the canonical decision and the affected contract documents. Do not remove a safety guarantee or a confirmed function only to reorder work.
 
-**P0 is complete.** Reuse the existing app-owned mock in `job_execution.rs`. The next criterion is validated Scenario execution with enforceable operation boundaries and informed consent for bounded residual risks, not another mock or a demand for zero theoretical risk. Do not mix background-service readiness with interface-component readiness.
+**P0 is complete.** Reuse the existing app-owned mock in `job_execution.rs`. The next criterion is validated Scenario execution with enforceable operation boundaries, automated ordinary reads/recovery and explicit decisions for destructive effects, not another mock or a demand for zero theoretical risk. Do not mix background-service readiness with interface-component readiness.
 
-**Local release gates:** successful build and tests on a fixed SHA; UI without mock metrics; Local Filesystem controller and Local-to-Local Scenario with recovery and consent; working independent service and installation. Cloud adapters are separate post-release scope. Policies in `docs/policies/` remain mandatory.
+**Local release gates:** successful build and tests on a fixed SHA; UI without mock metrics; Local Filesystem controller and Local-to-Local Scenario with automatic reconciliation and destructive-operation consent; working independent service and installation. Cloud adapters are separate post-release scope. Policies in `docs/policies/` remain mandatory.
 
 ## Local Release Acceptance Scenarios P0–P2
 
 - Preserve independent `connection_id` values for local connections. Cloud credential independence remains an invariant for later remote work and does not block the local release.
 - One-way and two-way synchronization detect changes from the last agreed state and signal ambiguous conflicts. An identical name and size do not prove byte equality.
 - Events received during a Job create one subsequent Job. Do not overwrite the old Job state or revision.
-- After restart or power failure, do not start a dangerous operation twice before checking its result.
+- After restart or power failure, automatically reconcile the last uncertain operation with non-mutating checks. Do not start a potentially destructive operation twice without proof.
 - A manual task receives initial priority. An automatic task does not starve indefinitely. A local pause persists after reboot.
-- A preview does not transfer content to the primary MacBook. Content download requires explicit individual consent.
-- Mass deletion and unresolved conflict do not silently destroy data.
+- A metadata-only preview does not need to read content. During an authorized/configured operation, read necessary file content automatically, including macOS File Provider materialization; no extra read-consent prompt. Do not prefetch unrelated files.
+- File replacement asks for confirmation unless explicitly covered by a matching preapproved Scenario rule. Mass deletion and unresolved destructive conflicts must not silently destroy data: show the exact affected scope and ask. Disclose when an operation cannot be limited to selected files.
 - Multiselect and nested-file operations work in the Job tree without double counting. Show progress in bytes and files.
 - Closing the UI does not interrupt the service. Reopening restores windows, panels, navigation, and current states.
 - Do not display unknown quota, ETA, or Worker state as verified success.
@@ -72,6 +72,6 @@ Do not validate preservation only on a happy path. Test connection breaks, API `
 
 ## Currency Rule
 
-Re-verify the current `HEAD` before each patch. The native UI, layout, scheduler-dispatch foundation, Scenario metadata snapshot, user-confirmed Scenario `Create` and `Update` paths in a permitted direction, persisted UNKNOWN-copy inventory, ordinary-action batches, and the alternative conflict queue exist in `main`. Autonomous Scenario execution, autonomy after UI exit, actual File Provider evidence, and release evidence remain incomplete. A native File Provider risk may be disclosed and approved per source file rather than treated as a universal impossibility proof. See the [current-state audit](development/current-state-audit.md).
+Re-verify the current `HEAD` before each patch. The native UI, layout, scheduler-dispatch foundation, Scenario metadata snapshot, user-confirmed Scenario `Create` and `Update` paths in a permitted direction, persisted UNKNOWN-copy inventory, ordinary-action batches, and the alternative conflict queue exist in `main`. Autonomous Scenario execution, autonomy after UI exit, actual File Provider evidence, and release evidence remain incomplete. An ordinary native File Provider read may materialize the needed file without a prompt. Test compatibility where feasible; this is not a zero-hydration proof gate. See the [current-state audit](development/current-state-audit.md).
 
 This roadmap replaces the earlier G0–G6 plan. It preserves reliability contracts: durable attempts, `UNKNOWN`, read-only reconciliation, consent, and no-overwrite for new copies. Controlled replacement has its own pinned-root protocol. These contracts do not impose a cloud-first order. Verify the current worktree and recorded local evidence before starting work.
