@@ -38,12 +38,11 @@ struct MainView: View {
             ToolbarItemGroup(placement: .primaryAction) {
                 Menu {
                     Button("Контрольная панель") { openWindow(id: "monitoring") }
-                    Button("Файловый менеджер") { openWindow(id: "file-manager") }
                     Button("Настройки") { openWindow(id: "scenario-settings") }
                 } label: {
                     Label("Пространство", systemImage: "rectangle.3.group")
                 }
-                if workspace == .monitoring || workspace == .files {
+                if workspace == .monitoring {
                     Button("Новая панель", systemImage: "macwindow.on.rectangle") { openWindow(id: "monitoring") }
                     if workspace == .monitoring {
                         Button(isEditingLayout ? "Готово" : "Компоновка", systemImage: "rectangle.3.group.bubble") {

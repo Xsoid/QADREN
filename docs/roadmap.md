@@ -72,6 +72,6 @@ Do not validate preservation only on a happy path. Test connection breaks, API `
 
 ## Currency Rule
 
-Re-verify the current `HEAD` before each patch. The native UI, layout, scheduler-dispatch foundation, File Manager copy path, Scenario metadata snapshot, user-confirmed Scenario `Create` and `Update` paths in a permitted direction, persisted UNKNOWN-copy inventory, ordinary-action batches, and the alternative conflict queue exist in `main`. Autonomous Scenario execution, autonomy after UI exit, real File Provider evidence, and release evidence remain incomplete. See the [current-state audit](development/current-state-audit.md).
+Re-verify the current `HEAD` before each patch. The native UI, layout, scheduler-dispatch foundation, Scenario metadata snapshot, user-confirmed Scenario `Create` and `Update` paths in a permitted direction, persisted UNKNOWN-copy inventory, ordinary-action batches, and the alternative conflict queue exist in `main`. Autonomous Scenario execution, autonomy after UI exit, real File Provider evidence, and release evidence remain incomplete. See the [current-state audit](development/current-state-audit.md).
 
 This roadmap replaces the earlier G0–G6 plan. It preserves reliability contracts: durable attempts, `UNKNOWN`, read-only reconciliation, consent, and no-overwrite for new copies. Controlled replacement has its own pinned-root protocol. These contracts do not impose a cloud-first order. Verify the current worktree and recorded local evidence before starting work.

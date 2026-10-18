@@ -39,7 +39,7 @@ Suggested SwiftUI type names (`QDTheme`, `QDWidgetFrame`, `QDLayoutStore`) are p
 
 **UI-D — Real data and safety.** Connect active Jobs, connections, events, and Worker state via existing Swift/FFI models with real evidence/freshness. If the API is absent, show an honest `not available`. Commands shall execute only after capability check/Core policy. Use Consent/UNKNOWN/conflict from Rust contracts; no blind retries.
 
-**UI-E — Settings and inspectors.** Settings panel with sections (connection/scenario/schedules/policies/node/UI), deep links from widgets, native forms, and recoverable connection removal. File manager shall be an expanded/separate panel from monitoring, without permanent navigation. Do not implement unfinished operations "for aesthetics."
+**UI-E — Settings and inspectors.** Settings panel with sections (connection/scenario/schedules/policies/node/UI), deep links from widgets, native forms, and recoverable connection removal. The Scenario editor is the only user configuration surface for endpoints and roots. Do not implement unfinished operations "for aesthetics."
 
 **UI-F — Life cycle.** Connect the independent service only after the local execution path is verified. `MenuBarExtra` shall show real state. Closing windows shall not stop the Worker. Implement safe service stop. Verify restart, sleep, crash recovery, and absence of auto-open windows.
 

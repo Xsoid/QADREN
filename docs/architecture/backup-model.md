@@ -10,7 +10,7 @@ QADREN manages the transfer and one-way/two-way synchronization of files between
 
 - **StorageConnection** — an independent adapter instance with its own ID/permissions; it can be a source and a destination.
 - **Scenario** — a named configuration of two endpoints/directories, synchronization direction, filters, deletion and conflict policies, triggers, and an assigned Worker. It has revisions.
-- **Job** — an execution unit with a fixed Scenario revision or a one-time file operation from the file manager; not every Job requires a Scenario.
+- **Job** — an execution unit with a fixed Scenario revision or a one-time internal operation. Release 1 exposes content transfer only from a Scenario plan.
 - **Controller** — owns the configuration, assignments, queues, and general monitoring. **Worker** — the sole executor of a delegated task; it can operate autonomously and manage local execution, but it cannot edit the assigned scenario.
 - **FileSyncState** — service metadata and the last confirmed agreed state of the parties to identify changes, conflicts, and idempotency; **it is not a content archive**. It is linked to a specific Scenario revision and is recorded only after independent confirmation of the result, not after a scan, request, or provider acknowledgement.
 - **ExecutionEvent/Report** — events, provider confirmations, and check results; UNKNOWN is not equal to FAILED.
@@ -50,7 +50,7 @@ QADREN manages the transfer and one-way/two-way synchronization of files between
 - Summary/individual resource widgets; queue; launch timeline with operational actions; tasks, file tree, progress; errors/conflicts; general health indicator. Speed and ETA are available only for the Job, and ETA is shown only when reliable.
 - General panel filters with widget overrides; object selection updates linked widgets; back/forward and breadcrumbs; full paths without abbreviation.
 - Three densities **for each widget**, scale **for each window**, light/dark/automatic themes. Global critical messages are not hidden by contextual filters and do not force windows to open.
-- Two-pane file manager (multi-select, copy/move/rename/delete/mkdir/drag-drop) without content preview and without file search. Operations use general Jobs and do not create permanent Scenarios.
+- The Scenario editor owns endpoints, root folders, direction, filters, and conflict policies. The Scenario plan is the only Release 1 user surface for content transfer.
 - The Job tree supports arbitrary multiple selection of files/directories from different branches and mass actions. It stably preserves selection/scroll during updates; a folder shows bytes **and** the number of files.
 - Synchronization preview — on request, summary+tree, automatically updates, but is not mandatory before every launch. It is built only from allowed metadata snapshots, immutable Scenario revisions, and confirmed FileSyncState; it does not scan adapters itself, does not read content, does not create a Job, and does not change the baseline.
 - Confirmation requests remain in the context of widgets/operations; a global indicator counts them; there is no separate center.

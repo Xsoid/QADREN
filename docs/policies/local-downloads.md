@@ -10,7 +10,7 @@ Before the request, specify the files/set, source, reason, purpose, expected vol
 
 ## Local File Copy Consent
 
-For one Local Filesystem file copy or controlled replacement, the File Manager can ask the user to allow macOS to materialize the selected source item. The dialog names the materialization risk and states the selected source and destination operation. The Rust JobStore records and consumes one accepted `read_content` decision for the exact source `connection_id` and relative path before it opens the file. A new operation needs a new confirmation. A preview, a metadata read, or a previous confirmation is not consent.
+For one Scenario Local Filesystem file copy or controlled replacement, the Scenario plan can ask the user to allow macOS to materialize the selected source item. The dialog names the materialization risk and states the selected source and destination operation. The Rust JobStore records and consumes one accepted `read_content` decision for the exact source `connection_id` and relative path before it opens the file. A new operation needs a new confirmation. A preview, a metadata read, or a previous confirmation is not consent.
 
 ## Allowed Automatic Actions
 
