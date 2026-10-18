@@ -7,7 +7,7 @@
 Release 1 is a local-first product. Build in this order:
 
 1. Keep the existing native SwiftUI baseline.
-2. Establish a consent-first macOS file-read boundary. Warn that a File Provider source may be materialized; do not demand proof that macOS can never hydrate an approved read.
+2. Establish an ordinary macOS content-read path, including transparent File Provider materialization, without a separate read/transfer-hydration prompt. Preserve requested operation scope and durable Job effects.
 3. Deliver one verified Local Filesystem to Local Filesystem no-overwrite copy through the Rust JobStore.
 4. Connect local Scenario synchronization to that verified copy path.
 5. Deliver independent local scheduling, service lifecycle, and macOS release evidence.
@@ -18,21 +18,21 @@ Yandex Disk and iCloud are post-release and parked. Do not add cloud API, OAuth,
 
 The current local product needs a verified end-to-end operation before remote-provider scope. The owner reported Yandex Disk emergency conditions and partial Disk/API availability. iCloud capability needs a separate access and platform decision. Neither provider is a Release 1 dependency.
 
-## Constraints
+## Constraints and Owner Clarification — 2026-10-18
 
-Work in `main`. Verify the current code and SHA before each change. Use `VERIFIED` only for behavior checked on a specific SHA. Distinguish `PARTIAL`, `BLOCKED`, and `PARKED` in an evidence record.
+Work in `main`. Verify the current code and SHA before each change. Use `VERIFIED` only for behavior checked on a specific SHA. Distinguish `PARTIAL`, `BLOCKED`, and `PARKED` in evidence.
 
-Preserve the prohibition on unauthorized download to the primary MacBook, durable attempts, `UNKNOWN` with read-only reconciliation, scoped consent, and no proprietary content versioning in Release 1. New Local-to-Local copies remain no-overwrite. The owner approved a controlled replacement path for an existing Local destination on 2026-10-17. That path must use a durable attempt, explicit operation scope, destination identity checks where available, and `UNKNOWN` after lost effect proof. It must not add a content archive or a File Provider extension. A Local-to-Local file copy may materialize one File Provider source item only after an explicit one-time confirmation. Bind the durable `read_content` decision to the source `connection_id` and relative path.
+**This is the latest product decision and overrides the earlier one-time `read_content` consent policy:**
 
-## Owner Clarification — 2026-10-18: Risk Decisions
+1. **Read automatically:** When an enabled/configured operation needs file content, QADREN reads it without another user question. macOS may transparently download a File Provider item onto the main MacBook. This is not classified as a destructive or risky user action; no dedicated hydration warning or per-file `read_content` decision is needed. Do not prefetch unrelated content or turn this into general cloud mirroring.
+2. **Ask before destructive effects:** Replacement of an existing file is a risk: show the target and ask unless a preapproved, exact, durable Scenario replacement policy covers the effect. Mass deletion (for example 150 files) requires an explicit, clear confirmation of the current proposed set. No silent destructive choices or assumed consent.
+3. **Recheck automatically after failure:** Perform available read-only reconciliation of `UNKNOWN` results on restart/reconnect without prompting. Do not blindly repeat an uncertain write/delete. Retain `UNKNOWN` and report it if evidence remains insufficient.
+4. **Disclose broad effects:** If the executor cannot restrict an action to selected files, disclose the actual known impact and technical limitation. Never imply selection precision it cannot enforce. Obtain approval for a different bounded destructive scope; if impact cannot be bounded or explained truthfully, do not run it as a selected-file operation.
+5. **Keep technical invariants:** Retain durable attempts, supported permissions, exact roots/connections/revisions, truthful evidence, no-overwrite on new files, and single Worker ownership. The user takes responsibility for clearly described destructive consequences; a click cannot excuse execution outside the disclosed scope.
 
-Release 1 follows **informed user control**, not absolute elimination of all possible risk. A known or explainable residual risk is an explicit user decision. Show the exact affected content and action, possible irreversible outcome, uncertainty, and available recovery before confirming. Permit the operation when the user explicitly accepts the bounded scope and runtime guards can enforce it.
+Controlled replacement remains an approved capability path (owner decision 2026-10-17), with durable attempt, exact destination checks where available, and `UNKNOWN` on lost effect proof. The local product has no content-version archive. Yandex and iCloud are still post-release.
 
-Examples: potential File Provider hydration, controlled replacement, and proposed deletions may proceed only with their required specific approval. No autonomous destructive choice may be inferred from the absence of the user. The main MacBook download rule still requires per-operation explicit permission.
-
-Do **not** turn missing evidence of a universally non-hydrating macOS file open into a perpetual release gate. Report it as a possible hydration consequence and get scoped approval. Do **not** relax directory/path isolation, permission gates, durable attempts, no-overwrite new copies, revision and destination checks, single ownership, UNKNOWN read-only recovery, or truthfulness of verification. These are technical integrity rules, not a risk that a generic confirmation can bypass.
-
-Limit verification to supported behavior, credible negative scenarios, and honest documented residual risks. Do not expand Release 1 to solve every conceivable platform edge case. Unenforceable action boundaries remain BLOCKED, because the application cannot describe or contain the effect the user would be approving.
+Do not block release simply because it is impossible to prove a file read will never cause OS-managed materialization; that is an allowed ordinary read. File Provider testing can establish compatibility, but no download consent dialogue is required.
 
 ## Consequences
 
