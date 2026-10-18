@@ -1130,7 +1130,7 @@ private struct ScenarioSchedulesView: View {
                                     .foregroundStyle(.secondary)
                             }
                         }
-                        Text("Это read-only расчёт по сохранённым настройкам. Запуск и подтверждение кандидата пока не реализованы.")
+                        Text("Когда QADREN запущен, локальный таймер ставит наступивший кандидат в существующую очередь Job. Он не читает файлы, не передаёт данные и не заменяет подтверждение операции.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }

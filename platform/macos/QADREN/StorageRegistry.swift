@@ -76,6 +76,11 @@ private func scenarioSchedulesList(
 private func scenarioSchedulesDue(
     _ path: UnsafePointer<CChar>?, _ after: UnsafePointer<CChar>?, _ through: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_scenario_schedules_dispatch")
+private func scenarioSchedulesDispatch(
+    _ registryPath: UnsafePointer<CChar>?, _ jobStorePath: UnsafePointer<CChar>?,
+    _ after: UnsafePointer<CChar>?, _ through: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_scenario_automation_get")
 private func scenarioAutomationGet(
     _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?
@@ -174,6 +179,10 @@ struct ScenarioSnapshotItem: Codable {
     let checksum_md5: String?
 }
 private struct ScenarioBaselineDispatchStatus: Decodable {
+    let dispatched: Int
+}
+private struct ScenarioScheduleDispatchStatus: Decodable {
+    let staged: Int
     let dispatched: Int
 }
 struct ScenarioPlanAction: Decodable {
@@ -545,6 +554,32 @@ enum StorageRegistryBridge {
                 }
             }
         }
+    }
+
+    /// Stage and dispatch due schedule receipts into the existing JobStore.
+    /// This creates only revision-pinned queued Jobs. It does not read adapter
+    /// metadata or content, execute a Scenario, or grant transfer consent.
+    static func dispatchDueScenarioSchedules(
+        after: Date, through: Date, databasePath: String? = nil, jobStorePath: String? = nil
+    ) throws -> (staged: Int, dispatched: Int) {
+        let database = try databasePath ?? path
+        let jobs = try jobStorePath ?? JobInventory.paths().database
+        let formatter = ISO8601DateFormatter()
+        let afterValue = formatter.string(from: after)
+        let throughValue = formatter.string(from: through)
+        let result: ScenarioScheduleDispatchStatus = try database.withCString { database in
+            try jobs.withCString { jobs in
+                try afterValue.withCString { lowerBound in
+                    try throughValue.withCString { upperBound in
+                        try unwrap(
+                            scenarioSchedulesDispatch(database, jobs, lowerBound, upperBound),
+                            as: ScenarioScheduleDispatchStatus.self
+                        )
+                    }
+                }
+            }
+        }
+        return (result.staged, result.dispatched)
     }
 
     static func createScenarioSchedule(

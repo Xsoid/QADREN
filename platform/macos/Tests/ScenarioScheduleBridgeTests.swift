@@ -139,6 +139,20 @@ struct ScenarioScheduleBridgeTests {
         )
         check(repeated == occurrences, "read-only preview does not claim or mutate an occurrence")
 
+        let jobs = root.appendingPathComponent("jobs.sqlite3").path
+        let firstDispatch = try StorageRegistryBridge.dispatchDueScenarioSchedules(
+            after: utc("2026-10-18T00:00:00Z"), through: utc("2026-10-20T00:00:00Z"),
+            databasePath: database, jobStorePath: jobs
+        )
+        check(firstDispatch.staged == 1, "dispatch stages the due schedule receipt")
+        check(firstDispatch.dispatched == 1, "dispatch queues the pinned Job")
+        let repeatedDispatch = try StorageRegistryBridge.dispatchDueScenarioSchedules(
+            after: utc("2026-10-18T00:00:00Z"), through: utc("2026-10-20T00:00:00Z"),
+            databasePath: database, jobStorePath: jobs
+        )
+        check(repeatedDispatch.staged == 0, "repeat dispatch does not claim the schedule twice")
+        check(repeatedDispatch.dispatched == 0, "repeat dispatch does not queue a duplicate Job")
+
         print("Scenario schedule native Swift/FFI bridge tests passed")
     }
 }
