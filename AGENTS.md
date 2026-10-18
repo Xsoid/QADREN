@@ -16,9 +16,10 @@
 - Keep each `StorageConnection` independent. Bind OAuth and Keychain state to `connection_id`.
 - Do not save secrets in SQLite, Git, logs, or HTTP URLs.
 - Remove and Disconnect change only local state. They must not delete provider objects.
-- Do not download content to the primary MacBook without explicit consent for that operation.
-- Before an external effect, save a durable attempt and check capability, consent, destination state, and no-overwrite.
-- If proof of an effect is lost, use `UNKNOWN` and read-only reconciliation. Do not retry blindly.
+- If an operation cannot stay within selected files, disclose its real scope and limitation. Never claim narrow effects when broader files may change.
+- Read needed content silently for an enabled/requested operation, including macOS File Provider materialization. Do not add a separate `read_content` consent prompt or unrelated prefetch.
+- Before a modifying external effect, save a durable attempt; check capabilities, exact operation scope, destination state, no-overwrite for new files, and explicit consent for destructive replacement/deletion where required.
+- When proof of an effect is lost, automatically perform non-mutating reconciliation. Persist a verified outcome if evidence suffices; otherwise keep `UNKNOWN`. Never blindly replay destructive effects.
 - A Local Filesystem update can replace an existing destination. It must use the
   approved replacement protocol, a durable attempt, explicit operation scope,
   and `UNKNOWN` reconciliation. The owner removed the previous Release 1
