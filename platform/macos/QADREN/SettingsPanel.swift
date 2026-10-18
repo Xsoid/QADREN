@@ -1204,46 +1204,53 @@ private struct ScenarioEditorView: View {
     @State private var error: String?
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(alignment: .firstTextBaseline) {
-                Button("Назад", systemImage: "chevron.left", action: cancel)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(scenario == nil ? "Новый сценарий" : "Изменить сценарий").font(.largeTitle.bold())
-                    Text("Изменения создают новую ревизию только для будущих заданий.")
-                        .foregroundStyle(.secondary)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                HStack(alignment: .firstTextBaseline) {
+                    Button("Назад", systemImage: "chevron.left", action: cancel)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(scenario == nil ? "Новый сценарий" : "Изменить сценарий").font(.largeTitle.bold())
+                        Text("Сценарий хранит обе папки, направление и будущие правила обмена.")
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button(scenario == nil ? "Создать сценарий" : "Сохранить изменения", action: save)
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(!canCreate)
                 }
-                Spacer()
-                Button(scenario == nil ? "Создать" : "Сохранить", action: save)
-                    .keyboardShortcut(.defaultAction).disabled(!canCreate)
-            }
-            .padding(24)
-
-            Form {
-                TextField("Название сценария", text: $name)
-                Picker("Тип синхронизации", selection: $direction) {
-                    Text("Односторонняя").tag("left_to_right")
-                    Text("Двусторонняя").tag("bidirectional")
+                GroupBox("Основные параметры") {
+                    VStack(alignment: .leading, spacing: 14) {
+                        TextField("Например, «Документы → Архив»", text: $name)
+                            .textFieldStyle(.roundedBorder)
+                            .accessibilityLabel("Название сценария")
+                        Picker("Направление", selection: $direction) {
+                            Text("В одну сторону").tag("left_to_right")
+                            Text("В обе стороны").tag("bidirectional")
+                        }
+                        .pickerStyle(.segmented)
+                        Text(direction == "bidirectional"
+                            ? "QADREN будет требовать явный выбор источника для конфликтов."
+                            : "Перенос идёт из источника в назначение.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                 }
-                Text("Создание сохранит только конфигурацию и ревизию 1. Запуск, расписания и передача файлов не выполняются.")
+                HStack(alignment: .top, spacing: 16) {
+                    ScenarioEndpointPicker(
+                        role: "Источник", symbol: "arrow.right.circle",
+                        connections: connections, selection: $leftID, root: $leftRoot
+                    )
+                    ScenarioEndpointPicker(
+                        role: "Назначение", symbol: "arrow.left.circle",
+                        connections: connections, selection: $rightID, root: $rightRoot
+                    )
+                }
+                Text("Создание сохраняет только конфигурацию. Передача файлов начинается позднее, только из проверенного плана и после отдельного подтверждения.")
                     .font(.caption).foregroundStyle(.secondary)
+                if let error {
+                    SettingsNotice(text: error, symbol: "exclamationmark.triangle")
+                }
             }
-            .formStyle(.grouped)
-            .padding(.horizontal, 24)
-
-            HStack(spacing: 0) {
-                ScenarioEndpointPicker(
-                    role: "Источник", connections: connections,
-                    selection: $leftID, root: $leftRoot
-                )
-                Divider()
-                ScenarioEndpointPicker(
-                    role: "Назначение", connections: connections,
-                    selection: $rightID, root: $rightRoot
-                )
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .padding(24)
-            if let error { Text(error).font(.caption).foregroundStyle(.red).padding([.horizontal, .bottom], 24) }
         }
         .onAppear {
             if let scenario {
@@ -1274,149 +1281,56 @@ private struct ScenarioEditorView: View {
 
 private struct ScenarioEndpointPicker: View {
     let role: String
+    let symbol: String
     let connections: [StorageEntry]
     @Binding var selection: String
     @Binding var root: String
-    @State private var items: [DiskItem] = []
-    @State private var nextOffset: UInt64?
-    @State private var loading = false
     @State private var error: String?
-    @StateObject private var localWorkspace = LocalWorkspace()
-
-    private var connection: StorageEntry? { connections.first { $0.id == selection } }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(role).font(.headline)
-            Picker(role, selection: $selection) {
-                ForEach(connections) { entry in
-                    Text(entry.name + " · " + adapterTitle(entry.adapter)).tag(entry.id)
-                }
-            }
-            .labelsHidden()
-            .onChange(of: selection) { _ in root = "/"; items = []; nextOffset = nil; error = nil; loadDirectory() }
-            HStack {
-                Text(root).font(.caption.monospaced()).lineLimit(1).help(root)
-                Spacer()
-                if connection?.adapter == "local_filesystem" {
-                    Button("Выбрать папку…") { chooseLocalFolder() }
-                } else {
-                    Button("Обновить", systemImage: "arrow.clockwise") { loadDirectory() }.disabled(loading)
-                }
-            }
-            if connection?.adapter == "local_filesystem" {
-                LocalScenarioFolderBrowser(workspace: localWorkspace, root: $root, choose: chooseLocalFolder)
-            } else if loading {
-                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if let error {
-                SettingsEmptyState(title: "Каталог недоступен", detail: error, symbol: "exclamationmark.triangle")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                List(items) { item in
-                    Button {
-                        guard item.kind == "dir" else { return }
-                        root = item.path
-                        loadDirectory()
-                    } label: {
-                        HStack {
-                            Image(systemName: item.kind == "dir" ? "folder" : "doc")
-                            Text(item.name).lineLimit(1)
-                            Spacer()
-                            if item.kind == "dir" { Image(systemName: "chevron.right").foregroundStyle(.secondary) }
-                        }
+        GroupBox {
+            VStack(alignment: .leading, spacing: 14) {
+                Label(role, systemImage: symbol).font(.headline)
+                Picker("Подключение", selection: $selection) {
+                    ForEach(connections) { entry in
+                        Text(entry.name).tag(entry.id)
                     }
-                    .buttonStyle(.plain).disabled(item.kind != "dir")
                 }
-                .listStyle(.inset)
-                if let nextOffset {
-                    Button("Показать ещё", systemImage: "ellipsis") { loadDirectory(offset: nextOffset) }
-                        .disabled(loading)
-                        .accessibilityHint("Запрашивает следующую страницу метаданных каталога без загрузки содержимого файлов")
+                .pickerStyle(.menu)
+                .onChange(of: selection) { _ in
+                    root = "/"
+                    error = nil
                 }
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Корневая папка").font(.caption).foregroundStyle(.secondary)
+                    Text(root)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                        .lineLimit(2)
+                        .help(root)
+                }
+                Button("Выбрать папку…", systemImage: "folder") { chooseLocalFolder() }
+                Text("Файлы не читаются и не передаются при выборе папки.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let error { Text(error).font(.caption).foregroundStyle(.orange) }
             }
         }
-        .padding(16)
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .task(id: selection) { loadDirectory() }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func chooseLocalFolder() {
         let panel = NSOpenPanel()
-        panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        localWorkspace.selectRoot(url.path)
-        root = url.path
-    }
-    private func loadDirectory(offset: UInt64 = 0) {
-        guard let connection, connection.adapter == "yandex_disk" else { return }
-        guard let token = (try? YandexKeychain.read(connection.id)) ?? nil else {
-            error = "Подключите Яндекс Диск, чтобы просмотреть только метаданные каталогов."; return
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        guard let window = NSApp.keyWindow ?? NSApp.mainWindow else {
+            error = "Не удалось открыть окно выбора папки. Повторите действие из окна Настроек."
+            return
         }
-        if offset == 0 { items = []; nextOffset = nil }
-        loading = true; error = nil
-        let folder = root == "/" ? "disk:/" : root
-        Task.detached {
-            let result = Result { try DiskMetadataBridge.folderPage(accessValue: token, path: folder, offset: offset) }
-            await MainActor.run {
-                loading = false
-                switch result {
-                case .success(let listing):
-                    items = offset == 0 ? listing.items : items + listing.items
-                    let consumed = listing.offset.addingReportingOverflow(UInt64(listing.items.count))
-                    nextOffset = !listing.items.isEmpty && !consumed.overflow && consumed.partialValue < listing.total ? consumed.partialValue : nil
-                case .failure(let failure):
-                    error = failure.localizedDescription
-                }
-            }
-        }
-    }
-    private func adapterTitle(_ adapter: String) -> String { adapter == "yandex_disk" ? "Яндекс Диск" : "Этот Mac" }
-}
-
-private struct LocalScenarioFolderBrowser: View {
-    @ObservedObject var workspace: LocalWorkspace
-    @Binding var root: String
-    let choose: () -> Void
-
-    var body: some View {
-        if workspace.root == nil {
-            VStack(spacing: 8) {
-                Image(systemName: "laptopcomputer").font(.system(size: 28)).foregroundStyle(.secondary)
-                Text("Этот Mac").font(.headline)
-                Text("Выберите локальную папку, затем можно перейти глубже по её структуре.")
-                    .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                Button("Выбрать локальную папку", action: choose)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Button("Вверх", systemImage: "chevron.up") {
-                        workspace.up(); root = workspace.selectedDirectory ?? root
-                    }
-                    .disabled(workspace.relativePath.isEmpty)
-                    Text(workspace.selectedDirectory ?? root).font(.caption.monospaced()).lineLimit(1)
-                    Spacer()
-                    Button("Другая папка…", action: choose)
-                }
-                List(workspace.entries) { entry in
-                    Button {
-                        guard entry.is_directory else { return }
-                        workspace.open(entry)
-                        root = workspace.selectedDirectory ?? root
-                    } label: {
-                        HStack {
-                            Image(systemName: entry.is_directory ? "folder" : "doc")
-                            Text(entry.name)
-                            Spacer()
-                            if entry.is_directory { Image(systemName: "chevron.right").foregroundStyle(.secondary) }
-                        }
-                    }
-                    .buttonStyle(.plain).disabled(!entry.is_directory)
-                }
-                .listStyle(.inset)
-                if let error = workspace.error { Text(error).font(.caption).foregroundStyle(.orange) }
-            }
+        panel.beginSheetModal(for: window) { response in
+            guard response == .OK, let url = panel.url else { return }
+            root = url.path
+            error = nil
         }
     }
 }
