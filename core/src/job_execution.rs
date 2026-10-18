@@ -1795,6 +1795,36 @@ mod tests {
     }
 
     #[test]
+    fn selected_conflict_replace_if_newer_keeps_a_newer_destination_without_a_job() {
+        let (database, registry_path, source_root, source_connection) = local_fixture("conflict-keep-newer-destination");
+        let destination_root = source_root.parent().unwrap().join("conflict-keep-newer-destination-root");
+        fs::create_dir(&source_root).unwrap();
+        fs::create_dir(&destination_root).unwrap();
+        fs::write(source_root.join("report.txt"), b"source report").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        fs::write(destination_root.join("report.txt"), b"newer destination").unwrap();
+        let registry = Registry::open(&registry_path).unwrap();
+        let destination_connection = registry.add("local_filesystem", "Destination").unwrap();
+        let scenario_id = registry.create_scenario(
+            "Conflict", &source_connection, source_root.to_str().unwrap(),
+            &destination_connection, destination_root.to_str().unwrap(), "left_to_right",
+        ).unwrap();
+        let source = LocalFilesystem::open(&source_root).unwrap().stat(Path::new("report.txt")).unwrap();
+        let destination = LocalFilesystem::open(&destination_root).unwrap().stat(Path::new("report.txt")).unwrap();
+        let task = registry.queue_conflict_task(
+            &ScenarioReference { scenario_id, revision: 1 }, "report.txt", "content", None,
+            Some(&ConfirmedFileVersion { object_revision: source.object_revision, size: source.size, checksum_md5: None }),
+            Some(&ConfirmedFileVersion { object_revision: destination.object_revision, size: destination.size, checksum_md5: None }),
+        ).unwrap();
+        registry.select_conflict_task(&task, Some(true), "replace_if_newer").unwrap();
+
+        assert_eq!(run_local_scenario_conflict_replace(&database, &registry_path, &task, "conflict-keep-newer-destination-1", true).unwrap(), LocalFileCopyStatus::Completed);
+        assert_eq!(fs::read(destination_root.join("report.txt")).unwrap(), b"newer destination");
+        assert_eq!(JobStore::open(&database).unwrap().get("conflict-keep-newer-destination-1").unwrap(), None);
+        assert_eq!(registry.selected_conflict_task(&task).unwrap(), None);
+    }
+
+    #[test]
     fn selected_conflict_replace_marks_task_stale_when_the_destination_changed() {
         let (database, registry_path, source_root, source_connection) = local_fixture("conflict-replace-stale");
         let destination_root = source_root.parent().unwrap().join("conflict-replace-stale-destination");
