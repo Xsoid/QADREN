@@ -142,6 +142,9 @@ struct DashboardLayoutTests {
             !QDAccessibilityPresentation.permitsImplicitAnimation(reduceMotion: true),
             "reduce motion disables implicit animation"
         )
+        check(QDStatusKind.needsAction.usesAttentionBorder, "warning widgets use a semantic attention border")
+        check(QDStatusKind.failed.usesAttentionBorder, "failed widgets use a semantic attention border")
+        check(!QDStatusKind.unknown.usesAttentionBorder, "unknown widgets keep neutral chrome and a distinct status marker")
 
         print("Dashboard layout native tests passed")
     }

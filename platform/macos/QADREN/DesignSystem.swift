@@ -206,6 +206,13 @@ enum QDStatusKind: Equatable {
         case .unsupported: "minus.circle"
         }
     }
+
+    /// Warning and failure states must stand out at the widget boundary.
+    /// Other states keep the neutral chrome so that the dashboard does not
+    /// become a field of permanent colored frames.
+    var usesAttentionBorder: Bool {
+        self == .needsAction || self == .failed
+    }
 }
 
 struct QDStatusLabel: View {
@@ -284,12 +291,7 @@ struct QDWidgetFrame<Content: View, Actions: View>: View {
         .overlay {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(
-                    status == .needsAction
-                        ? QDTheme.semanticColor(.needsAction, for: colorScheme)
-                        : QDTheme.widgetStroke(
-                            for: colorScheme,
-                            increasedContrast: increasedContrast
-                        ),
+                    borderColor,
                     lineWidth: QDAccessibilityPresentation.widgetBorderWidth(
                         increasedContrast: increasedContrast
                     )
@@ -302,6 +304,16 @@ struct QDWidgetFrame<Content: View, Actions: View>: View {
         ) { _ in
             increasedContrast = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
         }
+    }
+
+    private var borderColor: Color {
+        if let status, status.usesAttentionBorder {
+            return status.color(for: colorScheme)
+        }
+        return QDTheme.widgetStroke(
+            for: colorScheme,
+            increasedContrast: increasedContrast
+        )
     }
 }
 

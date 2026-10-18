@@ -73,6 +73,21 @@ Do not create empty directories or a separate file for every icon; the actual st
 4. Visual review of screenshots in `dark` and `light` at 1180×760, 900×620, settings 980×700, and 760×560; ensure no overflow or broken layout. Do not count an HTML prototype as a native SwiftUI screenshot.
 5. `Reduce Motion`, `Increase Contrast`, and keyboard navigation; verify focus state, full path tooltips, and disabled features. VoiceOver support is out of scope.
 
+### Visual Development and Skill Use
+
+Use this procedure for each macOS UI patch.
+
+1. Read the matching `docs/design/` contract and inspect the existing SwiftUI implementation. Use Codebase Memory first when it is available.
+2. Use `ui-ux-pro-max` for UX hierarchy, state clarity, layout, contrast, keyboard use, and native-platform review. Its output is advisory. This design system remains the source of truth.
+3. Use `swiftui-expert-skill` for SwiftUI implementation, native macOS layout, state flow, accessibility metadata, and test choices.
+4. Use `design-system` only when a QADREN token or component-state contract needs a structured review. Do not generate CSS or Tailwind files for the native application. Do not use `ui-styling` for SwiftUI runtime code. The installed `design`, `brand`, `banner-design`, and `slides` skills are for separate brand or communication artifacts. They are not part of the macOS application workflow.
+5. Build the app. Capture a real QADREN window with Peekaboo. Keep captures in a temporary directory outside Git. Review the required dark and light sizes, compact layouts, states, long paths, keyboard focus, and displayed-data truthfulness against this document.
+6. Record concrete defects. Implement one bounded improvement. Rebuild and capture the affected state again. Run the applicable native and Core tests.
+
+Use `peekaboo permissions` before the first capture in a session. Prefer a configured Peekaboo MCP tool when Codex exposes it. Otherwise, use the approved Peekaboo CLI. If Peekaboo cannot return a real screenshot, record visual acceptance as `BLOCKED`; an Accessibility tree, an HTML prototype, or a source review does not replace a screenshot.
+
+The minimal native UI skill set is `ui-ux-pro-max` and `swiftui-expert-skill`. `design-system` is conditional. Keep the other installed skills unchanged unless a separate task proves that they are obsolete and have no dependency.
+
 ### Feature and Negative-State Matrix
 
 | Case | Expected |

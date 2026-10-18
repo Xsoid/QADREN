@@ -29,6 +29,11 @@
 
 Write new and changed project documentation, `llms.txt`, and future external work-tracker text in English and ASD-STE100 style. Use short active sentences and exact technical names. Do not claim full ASD-STE100 compliance without an approved-dictionary check. Speak to the owner in Russian. Do not rewrite external work-tracker history unless the owner asks.
 
+## macOS UI work
+
+- Before a SwiftUI change, read the matching contract in `docs/design/` and follow the visual-development and skill-use procedure in `docs/design/implementation.md`.
+- The QADREN design system remains the canonical source. External skills can inspect or implement the existing contract. They must not replace its tokens, components, SwiftUI implementation, or product decisions.
+
 ## AI Docs Hub boundaries
 
 The Hub indexes, routes, verifies, and reviews. It does not define QADREN architecture. It can update only its managed blocks in this file and local project metadata. Do not index secrets, user content, transfer artifacts, or local databases.

@@ -1,0 +1,40 @@
+{
+  "version": 2,
+  "policy": {
+    "canonicalDesignSource": "docs/design/",
+    "primaryNativeSkills": [
+      "ui-ux-pro-max",
+      "swiftui-expert-skill"
+    ],
+    "conditionalNativeSkills": [
+      "design-system"
+    ],
+    "retainedLocalSkillsExcludedFromSwiftUIRuntime": [
+      "ui-styling",
+      "design",
+      "brand",
+      "banner-design",
+      "slides"
+    ]
+  },
+  "skills": {
+    "design-system": {
+      "source": "project-installed",
+      "sourceType": "local",
+      "skillPath": ".agents/skills/design-system/SKILL.md",
+      "computedHash": "655468bb723a6bc9d17fcb09a6a005e10e313d63b879f4d74fb2abdc3041ae3f"
+    },
+    "swiftui-expert-skill": {
+      "source": "AvdLee/SwiftUI-Agent-Skill",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/swiftui-expert-skill/SKILL.md",
+      "computedHash": "3b794f9cb46efb016eafcad2fcedce7127c74d60c50a949619e0bcd2bc38351f"
+    },
+    "ui-ux-pro-max": {
+      "source": "project-installed",
+      "sourceType": "local",
+      "skillPath": ".agents/skills/ui-ux-pro-max/SKILL.md",
+      "computedHash": "e5baf9400d4347e5ed3eb1f6b99cd0b9ba545b8b0e507aabb2b87397bbf73ea1"
+    }
+  }
+}
