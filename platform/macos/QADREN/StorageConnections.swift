@@ -1,6 +1,10 @@
 import Foundation
 import SwiftUI
 
+extension Notification.Name {
+    static let qadrenStorageConnectionsDidChange = Notification.Name("qadren.storage-connections.did-change")
+}
+
 @MainActor
 final class StorageConnections: ObservableObject {
     @Published private(set) var entries: [StorageEntry] = []
@@ -25,17 +29,22 @@ final class StorageConnections: ObservableObject {
         do {
             _ = try StorageRegistryBridge.addYandex(name: "Yandex Disk")
             refresh()
+            publishChange()
         } catch {
             self.error = error.localizedDescription
         }
     }
 
-    func addLocalComputer() {
+    @discardableResult
+    func addLocalComputer() -> String? {
         do {
-            _ = try StorageRegistryBridge.addLocalComputer()
+            let connectionID = try StorageRegistryBridge.addLocalComputer()
             refresh()
+            publishChange()
+            return connectionID
         } catch {
             self.error = error.localizedDescription
+            return nil
         }
     }
 
@@ -43,17 +52,22 @@ final class StorageConnections: ObservableObject {
         do {
             try StorageRegistryBridge.rename(id: id, name: name)
             refresh()
+            publishChange()
         } catch {
             self.error = error.localizedDescription
         }
     }
 
-    func setEnabled(_ id: String, enabled: Bool) {
+    @discardableResult
+    func setEnabled(_ id: String, enabled: Bool) -> Bool {
         do {
             try StorageRegistryBridge.setEnabled(id: id, enabled: enabled)
             refresh()
+            publishChange()
+            return true
         } catch {
             self.error = error.localizedDescription
+            return false
         }
     }
 
@@ -92,6 +106,7 @@ final class StorageConnections: ObservableObject {
                 throw StorageError.operation("Unsupported connection adapter")
             }
             refresh()
+            publishChange()
         } catch {
             // Refresh the listing without discarding the failure message.
             entries = (try? StorageRegistryBridge.list()) ?? entries
@@ -110,6 +125,10 @@ final class StorageConnections: ObservableObject {
         }
     }
 
+    private func publishChange() {
+        NotificationCenter.default.post(name: .qadrenStorageConnectionsDidChange, object: nil)
+    }
+
     /// Copies the existing singleton credential into a new isolated connection.
     /// The legacy credential is deleted ONLY after the new item can be read back.
     /// Repeated invocation after interruption reuses the already copied item.
@@ -125,6 +144,7 @@ final class StorageConnections: ObservableObject {
                     try StorageRegistryBridge.setCredential(id: entry.id)
                     try YandexKeychain.delete("default")
                     refresh()
+                    publishChange()
                     return
                 }
             }
@@ -138,6 +158,7 @@ final class StorageConnections: ObservableObject {
             try StorageRegistryBridge.setCredential(id: id)
             try YandexKeychain.delete("default")
             refresh()
+            publishChange()
         } catch {
             self.error = "Legacy migration incomplete; old token retained: " + error.localizedDescription
             // Never delete legacy token on failure. Safe to retry after restart.

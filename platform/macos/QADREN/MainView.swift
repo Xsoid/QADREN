@@ -101,6 +101,9 @@ struct MainView: View {
             }
             refreshJobs()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .qadrenStorageConnectionsDidChange)) { _ in
+            connections.refresh()
+        }
         .onChange(of: localWorkspace.root) { _ in invalidateLocalCopyPreviewIfNeeded() }
         .onChange(of: localWorkspace.relativePath) { _ in invalidateLocalCopyPreviewIfNeeded() }
         .onChange(of: localWorkspace.selectedNames) { _ in invalidateLocalCopyPreviewIfNeeded() }
@@ -340,12 +343,18 @@ struct MainView: View {
             HStack(spacing: 0) {
                 FileManagerPane(
                     title: "Левая панель", workspace: localWorkspace,
-                    localConnections: localConnections
+                    localConnections: localConnections,
+                    addLocalComputer: connections.addLocalComputer,
+                    setLocalConnectionEnabled: connections.setEnabled,
+                    connectionError: connections.error
                 )
                 Divider()
                 FileManagerPane(
                     title: "Правая панель", workspace: rightLocalWorkspace,
-                    localConnections: localConnections
+                    localConnections: localConnections,
+                    addLocalComputer: connections.addLocalComputer,
+                    setLocalConnectionEnabled: connections.setEnabled,
+                    connectionError: connections.error
                 )
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -447,7 +456,7 @@ struct MainView: View {
     }
 
     private var localConnections: [StorageEntry] {
-        connections.entries.filter { $0.adapter == "local_filesystem" && $0.enabled }
+        connections.entries.filter { $0.adapter == "local_filesystem" }
     }
 
     private func refreshCurrentWorkspace() {
@@ -458,6 +467,7 @@ struct MainView: View {
         case .scenarios:
             connections.refresh()
         case .files:
+            connections.refresh()
             localWorkspace.refresh()
             rightLocalWorkspace.refresh()
         }
@@ -692,6 +702,9 @@ private struct FileManagerPane: View {
     let title: String
     @ObservedObject var workspace: LocalWorkspace
     let localConnections: [StorageEntry]
+    let addLocalComputer: () -> String?
+    let setLocalConnectionEnabled: (String, Bool) -> Bool
+    let connectionError: String?
     @State private var newDirectoryName = ""
     @State private var selectedConnectionID = ""
     var body: some View {
@@ -709,16 +722,15 @@ private struct FileManagerPane: View {
                     workspace.bind(connectionID: connectionID)
                 }
                 Spacer()
-                Button("Выбрать папку") { workspace.chooseRoot(for: selectedConnectionID) }
-                    .disabled(!selectedConnectionIsAvailable)
+                Button(folderButtonTitle) { chooseFolder() }
                 Button("Обновить", systemImage: "arrow.clockwise") { workspace.refresh() }.disabled(workspace.root == nil)
             }
             .padding(.horizontal, 18).padding(.top, 16)
             .onAppear {
-                if selectedConnectionID.isEmpty, let connection = localConnections.first {
-                    selectedConnectionID = connection.id
-                    workspace.bind(connectionID: connection.id)
-                }
+                selectFirstAvailableConnectionIfNeeded()
+            }
+            .onChange(of: localConnections.map(\.id)) { _ in
+                selectFirstAvailableConnectionIfNeeded()
             }
             if let root = workspace.root {
                 VStack(alignment: .leading, spacing: 8) {
@@ -802,11 +814,48 @@ private struct FileManagerPane: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             if let error = workspace.error { Notice(text: error, symbol: "exclamationmark.triangle").padding(12) }
+            if let connectionError { Notice(text: connectionError, symbol: "exclamationmark.triangle").padding(12) }
         }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
     }
 
+    private var folderButtonTitle: String {
+        guard let connection = selectedConnection else {
+            return "Добавить подключение и выбрать папку"
+        }
+        return connection.enabled ? "Выбрать папку" : "Включить и выбрать папку"
+    }
+
+    private var selectedConnection: StorageEntry? {
+        localConnections.first { $0.id == selectedConnectionID }
+    }
+
     private var selectedConnectionIsAvailable: Bool {
-        localConnections.contains { $0.id == selectedConnectionID }
+        selectedConnection?.enabled == true
+    }
+
+    private func selectFirstAvailableConnectionIfNeeded() {
+        guard selectedConnection == nil else { return }
+        guard let connection = localConnections.first(where: \.enabled) ?? localConnections.first else { return }
+        selectedConnectionID = connection.id
+        workspace.bind(connectionID: connection.id)
+    }
+
+    private func chooseFolder() {
+        if selectedConnectionIsAvailable {
+            workspace.chooseRoot(for: selectedConnectionID)
+            return
+        }
+        if let connection = selectedConnection {
+            guard setLocalConnectionEnabled(connection.id, true) else { return }
+            selectedConnectionID = connection.id
+            workspace.bind(connectionID: connection.id)
+            workspace.chooseRoot(for: connection.id)
+            return
+        }
+        guard let connectionID = addLocalComputer() else { return }
+        selectedConnectionID = connectionID
+        workspace.bind(connectionID: connectionID)
+        workspace.chooseRoot(for: connectionID)
     }
 }
 

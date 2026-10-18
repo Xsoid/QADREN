@@ -422,6 +422,7 @@ private struct ParkedYandexConnectionCard: View {
 }
 
 private struct LocalConnectionCard: View {
+    @Environment(\.openWindow) private var openWindow
     let entry: StorageEntry
     let onRemove: () -> Void
     let onRename: (String) -> Void
@@ -444,8 +445,9 @@ private struct LocalConnectionCard: View {
                     .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || name == entry.name)
                 Toggle("Включено", isOn: Binding(get: { entry.enabled }, set: { onSetEnabled($0) }))
             }
-            Text("Корневая папка выбирается в редакторе сценария. До запуска сценария QADREN не передаёт и не удаляет файлы.")
+            Text("Выберите корневую папку в Файловом менеджере. До подтверждённой ручной операции QADREN не передаёт и не удаляет файлы.")
                 .font(.caption).foregroundStyle(.secondary)
+            Button("Открыть файловый менеджер") { openWindow(id: "file-manager") }
             Button("Удалить", role: .destructive) { confirmRemoval = true }
         }
         .confirmationDialog("Удалить локальное подключение QADREN?", isPresented: $confirmRemoval) {
