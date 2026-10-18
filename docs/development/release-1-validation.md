@@ -28,6 +28,10 @@ The initial recorded executable baseline is `f9121b2`. Later rows record newer c
 | `./script/build_and_run.sh --verify` | PASS | Unsigned local development bundle and running QADREN process on `f9121b2` |
 | `scripts/test-macos-scenario-dry-run.sh` | PASS | Native Swift/FFI Scenario bridge build on `40bd428` |
 | `./script/build_and_run.sh --verify` | PASS | Unsigned local development bundle and running QADREN process on `40bd428` |
+| `cargo test --manifest-path core/Cargo.toml --lib` | PASS, 275 tests | Rust Core on `c5f479b` |
+| `scripts/test-macos-scenario-schedules.sh` | PASS | Native schedule dispatch bridge and duplicate dispatch check on `c5f479b` |
+| `scripts/test-macos-scenario-dry-run.sh` | PASS | Native Scenario bridge build on `c5f479b` |
+| `./script/build_and_run.sh --verify` | PASS | Unsigned local development bundle and running QADREN process on `c5f479b` |
 
 `cargo fmt --manifest-path core/Cargo.toml --check` does not pass on this baseline. It reports existing formatting differences outside the Local Scenario update patch. Resolve or explicitly accept that debt before a Release claim.
 
@@ -40,7 +44,7 @@ The initial recorded executable baseline is `f9121b2`. Later rows record newer c
 | Local Filesystem metadata, `mkdir`, and copy | Rust and SwiftUI interfaces provide confirmed one-file no-overwrite copy through JobStore. Local metadata revisions support a revision-bound Scenario baseline. | A real File Provider materialization run. |
 | macOS File Provider safety | A copy requires a user-confirmed, exact-scope durable decision before opening the source. | A real File Provider materialization run with a user-selected provider item. |
 | Scenario planning and conflict queue | Dry-run FFI passes. Enabled local connections gate the metadata snapshot. User-confirmed `Create` and `Update` items submit pinned Jobs in a permitted direction and write `FileSyncState` through a durable outbox. A revision-bound Registry queue stores both conflict snapshots and a user-selected source and decision. Selected content decisions create a pinned replacement Job only after a second snapshot check. A selected deletion has a separate destructive confirmation, verifies an absent source and current destination snapshot, then creates a pinned delete Job. An interrupted delete is `UNKNOWN`. A mismatch marks the task `stale` without an effect. The queue has no JobStore dependency and does not block ordinary transfers. A user-confirmed ordinary batch uses the same per-file Jobs, runs away from the SwiftUI main actor, shows progress, and continues after one item fails. | End-to-end batch interaction, autonomous multi-item execution, delete recovery, and real File Provider delete evidence. |
-| Scheduler dispatch | Durable schedule dispatch can queue a Job. | Independent timer, app-exit lifecycle, event debounce, and real Scenario execution. |
+| Scheduler dispatch | Durable schedule dispatch can queue a Job. The running QADREN process checks due slots once per minute and sends them through the same idempotent dispatch boundary. | Independent service after QADREN quits, event debounce, and real Scenario execution. |
 | Native UI | Design system, widget canvas, settings, and local file navigation exist. | Full visual acceptance, removal of legacy mock actions, and real-copy interaction. |
 | Distribution | The macOS build script creates an unsigned development bundle. | Signing, notarization, clean install, restart validation, and release package. |
 
