@@ -673,7 +673,8 @@ private struct ScenarioDryRunView: View {
                             scenario: scenario,
                             task: task,
                             saveDecision: saveConflictDecision,
-                            executeReplace: { pendingConflictReplace = $0 }
+                            executeReplace: { pendingConflictReplace = $0 },
+                            refreshTask: refreshConflictTask
                         )
                     }
                 }
@@ -771,6 +772,23 @@ private struct ScenarioDryRunView: View {
         }
     }
 
+    private func refreshConflictTask(_ task: ScenarioConflictTask) {
+        guard !leftSnapshot.isEmpty || !rightSnapshot.isEmpty else {
+            error = "Сначала обновите план сценария. Новый снимок нужен для повторного решения конфликта."
+            return
+        }
+        do {
+            _ = try StorageRegistryBridge.queueScenarioConflict(
+                scenario: scenario, relativePath: task.relative_path, kind: task.kind,
+                left: leftSnapshot.first { $0.relative_path == task.relative_path },
+                right: rightSnapshot.first { $0.relative_path == task.relative_path }
+            )
+            loadConflictTasks()
+        } catch {
+            self.error = "Не удалось обновить снимок конфликта: " + error.localizedDescription
+        }
+    }
+
     private func executePendingConflictReplace() {
         guard let task = pendingConflictReplace else { return }
         pendingConflictReplace = nil
@@ -832,18 +850,21 @@ private struct ScenarioConflictTaskView: View {
     let task: ScenarioConflictTask
     let saveDecision: (ScenarioConflictTask, Bool, String) -> Void
     let executeReplace: (ScenarioConflictTask) -> Void
+    let refreshTask: (ScenarioConflictTask) -> Void
     @State private var sourceIsLeft: Bool?
 
     init(
         scenario: ScenarioEntry,
         task: ScenarioConflictTask,
         saveDecision: @escaping (ScenarioConflictTask, Bool, String) -> Void,
-        executeReplace: @escaping (ScenarioConflictTask) -> Void
+        executeReplace: @escaping (ScenarioConflictTask) -> Void,
+        refreshTask: @escaping (ScenarioConflictTask) -> Void
     ) {
         self.scenario = scenario
         self.task = task
         self.saveDecision = saveDecision
         self.executeReplace = executeReplace
+        self.refreshTask = refreshTask
         _sourceIsLeft = State(initialValue: task.source_is_left)
     }
 
@@ -864,6 +885,7 @@ private struct ScenarioConflictTaskView: View {
                 .pickerStyle(.menu)
                 Text("Сначала явно укажите сторону-источник. Это обязательно и для двустороннего сценария.")
                     .font(.caption).foregroundStyle(.secondary)
+                let isEditable = task.state == "pending" || task.state == "selected"
                 if task.kind == "content" {
                     HStack {
                         Button("Заменить из источника", role: .destructive) {
@@ -872,7 +894,7 @@ private struct ScenarioConflictTaskView: View {
                         Button("Заменить, если новее") { save("replace_if_newer") }
                         Button("Пропустить перенос") { save("skip_transfer") }
                     }
-                    .disabled(sourceIsLeft == nil)
+                    .disabled(sourceIsLeft == nil || !isEditable)
                 } else {
                     HStack {
                         Button("Удалить как в источнике", role: .destructive) {
@@ -880,7 +902,7 @@ private struct ScenarioConflictTaskView: View {
                         }
                         Button("Не удалять файл") { save("keep_file") }
                     }
-                    .disabled(sourceIsLeft == nil)
+                    .disabled(sourceIsLeft == nil || !isEditable)
                 }
                 if let decision = task.decision {
                     Text("Сохранённое решение: \(decisionTitle(decision))")
@@ -890,6 +912,11 @@ private struct ScenarioConflictTaskView: View {
                     Button(task.decision == "replace_if_newer" ? "Выполнить проверку и замену" : "Выполнить замену из источника", role: .destructive) {
                         executeReplace(task)
                     }
+                }
+                if task.state == "stale" {
+                    Text("Снимок устарел. Обновите план и создайте новую задачу из текущих метаданных.")
+                        .font(.caption).foregroundStyle(.orange)
+                    Button("Обновить снимок конфликта") { refreshTask(task) }
                 }
             }
         }
