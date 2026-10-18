@@ -39,8 +39,11 @@ The initial recorded executable code baseline is commit `f9121b2`. Later rows re
 | `scripts/test-macos-scenario-schedules.sh` | PASS | Native schedule dispatch bridge and duplicate dispatch check on `c5f479b` |
 | `scripts/test-macos-scenario-dry-run.sh` | PASS | Native Scenario bridge build on `c5f479b` |
 | `./script/build_and_run.sh --verify` | PASS | Unsigned local development bundle and running QADREN process on `c5f479b` |
+| `scripts/test-core.sh` | PASS, 275 tests | Rust format, Clippy, unit, and doc tests on `9a67258` |
+| `scripts/test-macos-storage-removal.sh` | PASS | Native Local connection removal bridge on `9a67258` |
+| `scripts/test-macos-keychain.sh` | PASS | Native Keychain smoke test on `9a67258` |
 
-`cargo fmt --manifest-path core/Cargo.toml --check` does not pass on this baseline. It reports pre-existing formatting differences in Core source files outside the Local Scenario update patch. It does not prove a runtime defect, but Release validation must resolve or explicitly accept it.
+The Rust format gate now passes on `9a67258`. The earlier Core formatting debt is resolved.
 
 These checks do not prove a signed release, an independent Worker, or File Provider materialization with a user-selected provider item.
 

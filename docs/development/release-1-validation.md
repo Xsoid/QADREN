@@ -32,8 +32,20 @@ The initial recorded executable baseline is `f9121b2`. Later rows record newer c
 | `scripts/test-macos-scenario-schedules.sh` | PASS | Native schedule dispatch bridge and duplicate dispatch check on `c5f479b` |
 | `scripts/test-macos-scenario-dry-run.sh` | PASS | Native Scenario bridge build on `c5f479b` |
 | `./script/build_and_run.sh --verify` | PASS | Unsigned local development bundle and running QADREN process on `c5f479b` |
+| `scripts/test-core.sh` | PASS, 275 tests | Rust format, Clippy, unit, and doc tests on `9a67258` |
+| `scripts/test-macos-storage-removal.sh` | PASS | Native Local connection removal bridge on `9a67258` |
+| `scripts/test-macos-keychain.sh` | PASS | Native Keychain smoke test on `9a67258` |
 
-`cargo fmt --manifest-path core/Cargo.toml --check` does not pass on this baseline. It reports existing formatting differences outside the Local Scenario update patch. Resolve or explicitly accept that debt before a Release claim.
+The Rust format gate now passes on `9a67258`. The earlier Core formatting debt is resolved.
+
+## Manual macOS Evidence Required
+
+Run these checks only in disposable folders. They do not authorize cloud adapter work.
+
+1. Create two different Local Filesystem folders. Put a small known file in the source folder. In QADREN, add two Local connections. In File Manager, select the source and destination folders, select the source file, select **Проверить план копирования**, then select **Копировать файл** and confirm. Verify the destination bytes in Finder or Terminal. Quit and reopen QADREN. Verify that the Job remains completed.
+2. Repeat the first check with the same destination name. Verify that ordinary copy is unavailable and that QADREN requires the separate destructive replacement confirmation through **Заменить файл**. If you confirm replacement, verify the new destination bytes. If you cancel, verify that the destination bytes stay unchanged.
+3. If a File Provider item is available in Finder, repeat the first check with one not-yet-local provider file. QADREN must show the exact materialization confirmation before it opens the file. On cancel, verify that no destination file appears. On confirm, record whether macOS materializes the item and whether QADREN completes or reports an error. Do not create an iCloud connection for this check.
+4. Create a weekly Scenario schedule for one minute in the future. Close all QADREN windows without using **Выйти из QADREN**. Wait two minutes, reopen the monitoring window, and verify one queued revision-pinned Job. This check verifies the current app-resident timer only. It does not verify execution or operation after **Выйти из QADREN**.
 
 ## Current Capability Evidence Matrix
 
