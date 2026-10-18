@@ -47,12 +47,16 @@ The Rust format gate now passes on `9a67258`. The earlier Core formatting debt i
 
 These checks do not prove a signed release, an independent Worker, or File Provider materialization with a user-selected provider item.
 
+## Policy / Code Mismatch (2026-10-18)
+
+The source snapshot above records the **implemented** one-time `read_content` decision path as a historical fact, not current product policy. The owner now authorizes silent reads and possible File Provider hydration for content required by a requested/configured operation. Migrate that implementation; keep separate confirmation only for destructive effects. Automatic reconciliation of inconclusive Jobs is required without a new user prompt. No native tests proving these new behaviors have yet been recorded.
+
 ## Active Product Boundaries
 
 1. Reuse the existing native UI and app-owned mock. Do not restart baseline work.
-2. Record an explicit one-time consent before any macOS read that can materialize a File Provider item.
+2. **New approved policy:** read file content required by an active/configured operation without an extra per-file prompt, even if File Provider materializes it. The currently implemented `read_content` decision is legacy behavior and must be changed and tested before describing native runtime as compliant. Do not prefetch unrelated content.
 3. Keep the durable Local-to-Local no-overwrite copy Job as the user-facing content-copy executor. Use controlled replacement only after separate destructive consent and exact Scenario validation.
-4. Keep local Scenario `Create` and `Update` paths bound to their exact Scenario revision, with new consent for each source file.
+4. Keep Scenario `Create` and `Update` paths bound to their exact Scenario revision. Ask before destructive replacement (unless already approved for that precise scope) and always confirm mass-deletion plans. Source reads require no separate consent under the latest owner decision.
 5. Verify end-to-end batch interaction. Add autonomous multi-item Scenario execution, independent local scheduling, service lifecycle, and release evidence. Keep conflict decisions in the alternative Registry queue.
 6. Keep Yandex Disk and iCloud parked until a separate owner decision.
 
@@ -61,8 +65,8 @@ These checks do not prove a signed release, an independent Worker, or File Provi
 - Record the exact SHA and a clean or explicitly described worktree.
 - Run Core, native, adapter, and integration checks that cover the changed behavior.
 - Demonstrate durable attempt creation before each external effect.
-- Demonstrate capability, consent, destination-state, and no-overwrite checks.
-- Demonstrate `UNKNOWN` and read-only reconciliation when effect proof is lost.
+- Demonstrate capability, correct actual scope, destructive-consent checks where applicable, destination-state, and no-overwrite for new files.
+- Demonstrate **automatic** non-mutating reconciliation after an uncertain effect and honest persistent `UNKNOWN` if checks cannot prove the result.
 - Demonstrate restart and concurrent-change safety for destructive local operations.
 - Build, install, restart, and verify the macOS artifact. Record signing and notarization status.
 
