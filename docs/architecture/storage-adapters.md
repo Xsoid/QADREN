@@ -39,7 +39,7 @@ Native File Provider/iCloud placeholder handling remains part of the **local** a
 
 ## Local Filesystem
 
-A standalone, actively developed adapter for local file systems and directories. **Not part of iCloud Documents** and not a method for hidden access to all of iCloud Drive. A Local-to-Local copy may read its selected source and transparently materialize a File Provider file without an additional `read_content` consent dialog. **The current JobStore/Swift implementation still has the legacy consent path; Codex must migrate it** without using a fabricated approval and without relaxing source/target validation. New destinations stay no-overwrite. Uncertain effects are reconciled automatically using non-mutating checks; never blindly retry a mutation.
+A standalone, actively developed adapter for local file systems and directories. **Not part of iCloud Documents** and not a method for hidden access to all of iCloud Drive. A Local-to-Local copy reads its selected source without an additional `read_content` consent dialog and can transparently materialize a File Provider file. The Rust Local Filesystem API has no per-file content-read consent parameter. Source/target validation remains required. New destinations stay no-overwrite. Uncertain effects use non-mutating reconciliation; never blindly retry a mutation.
 
 For `local_mkdir_new`, JobStore saves the opened root device/inode identity with the bound attempt before `mkdir`. Read-only reconciliation completes an UNKNOWN attempt only when the enabled Local connection, operation, relative path, directory type, and root identity all match. A missing legacy binding or a different root remains UNKNOWN. Release 1 does not expose a user interface for manual directory creation or its reconciliation.
 

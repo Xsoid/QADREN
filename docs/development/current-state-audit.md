@@ -54,7 +54,7 @@ The source snapshot above records the **implemented** one-time `read_content` de
 ## Active Product Boundaries
 
 1. Reuse the existing native UI and app-owned mock. Do not restart baseline work.
-2. **New approved policy:** read file content required by an active/configured operation without an extra per-file prompt, even if File Provider materializes it. The currently implemented `read_content` decision is legacy behavior and must be changed and tested before describing native runtime as compliant. Do not prefetch unrelated content.
+2. **Approved policy:** read file content required by an active/configured operation without an extra per-file prompt, even if File Provider materializes it. The Rust Local Filesystem copy path has no `read_content` decision. Do not prefetch unrelated content. Real File Provider compatibility evidence is still pending.
 3. Keep the durable Local-to-Local no-overwrite copy Job as the user-facing content-copy executor. Use controlled replacement only after separate destructive consent and exact Scenario validation.
 4. Keep Scenario `Create` and `Update` paths bound to their exact Scenario revision. Ask before destructive replacement (unless already approved for that precise scope) and always confirm mass-deletion plans. Source reads require no separate consent under the latest owner decision.
 5. Verify end-to-end batch interaction. Add autonomous multi-item Scenario execution, independent local scheduling, service lifecycle, and release evidence. Keep conflict decisions in the alternative Registry queue.

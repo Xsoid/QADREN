@@ -1,6 +1,7 @@
 //! Local filesystem adapter, scoped to one existing canonical directory.
 //! Initial safe slice: metadata and non-overwriting atomic creation only.
-//! macOS content reads require a durable, operation-scoped consent decision.
+//! macOS content reads can materialize the requested File Provider item.
+//! They are ordinary operation work and do not require separate user consent.
 use crate::capabilities::{CapabilityDeclaration, MetadataConfidence, Operations, Platform};
 #[cfg(any(not(unix), test))]
 use std::fs;
@@ -47,14 +48,6 @@ fn replacement_staging_path(target: &Path) -> Result<PathBuf> {
         ".qadren-replace-{leaf}-{}-{serial}.stage",
         std::process::id()
     )))
-}
-
-/// Caller-provided decision for this exact content-reading operation.
-/// Never infer consent from a successful metadata query or a previous job.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ContentReadConsent {
-    Denied,
-    GrantedForThisOperation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -496,18 +489,10 @@ impl LocalFilesystem {
         Ok(entries.into_iter().skip(offset).take(limit).collect())
     }
 
-    /// Stream content only after explicit per-operation authorization.
-    /// On macOS the caller must explain that this can materialize a File Provider item.
-    pub fn read_to_writer<W: io::Write>(
-        &self,
-        path: &Path,
-        output: &mut W,
-        consent: ContentReadConsent,
-    ) -> Result<u64> {
+    /// Stream requested content. On macOS this can materialize the selected
+    /// File Provider item. Callers must not use this to prefetch unrelated content.
+    pub fn read_to_writer<W: io::Write>(&self, path: &Path, output: &mut W) -> Result<u64> {
         Self::relative(path)?;
-        if consent != ContentReadConsent::GrantedForThisOperation {
-            return Err(LocalError::UnsafeEntry);
-        }
         #[cfg(unix)]
         {
             let mut input = secure::open_content(&self.root_fd, path)?;
@@ -531,19 +516,10 @@ impl LocalFilesystem {
     }
 
     /// Copy a local regular file to a new destination without overwriting.
-    /// The caller must persist exact, operation-scoped consent before this
-    /// method: macOS can materialize a File Provider source while it is read.
-    pub fn copy_file_new(
-        &self,
-        from: &Path,
-        to: &Path,
-        consent: ContentReadConsent,
-    ) -> Result<u64> {
+    /// macOS can materialize the selected File Provider source while it is read.
+    pub fn copy_file_new(&self, from: &Path, to: &Path) -> Result<u64> {
         Self::relative(from)?;
         Self::relative(to)?;
-        if consent != ContentReadConsent::GrantedForThisOperation {
-            return Err(LocalError::UnsafeEntry);
-        }
         #[cfg(unix)]
         {
             let mut source = secure::open_content(&self.root_fd, from)?;
@@ -565,18 +541,10 @@ impl LocalFilesystem {
     /// Copy a regular file from this root into a different Local Filesystem
     /// root. Both roots are pinned descriptors. The destination publish is
     /// no-overwrite; a source mutation after publication becomes UNKNOWN.
-    pub fn copy_file_to_new(
-        &self,
-        from: &Path,
-        destination: &Self,
-        to: &Path,
-        consent: ContentReadConsent,
-    ) -> Result<u64> {
+    pub fn copy_file_to_new(&self, from: &Path, destination: &Self, to: &Path) -> Result<u64> {
         Self::relative(from)?;
         Self::relative(to)?;
-        if consent != ContentReadConsent::GrantedForThisOperation
-            || self.overlaps_root(destination)?
-        {
+        if self.overlaps_root(destination)? {
             return Err(LocalError::UnsafeEntry);
         }
         #[cfg(unix)]
@@ -599,25 +567,17 @@ impl LocalFilesystem {
     /// destination root, then atomically replace the existing destination.
     /// A staging or publish error after the content stream starts is UNKNOWN:
     /// callers must not retry or remove a possible staging artifact blindly.
-    pub fn copy_file_to_replace(
-        &self,
-        from: &Path,
-        destination: &Self,
-        to: &Path,
-        consent: ContentReadConsent,
-    ) -> Result<u64> {
+    pub fn copy_file_to_replace(&self, from: &Path, destination: &Self, to: &Path) -> Result<u64> {
         Self::relative(from)?;
         Self::relative(to)?;
-        if consent != ContentReadConsent::GrantedForThisOperation
-            || self.overlaps_root(destination)?
-        {
+        if self.overlaps_root(destination)? {
             return Err(LocalError::UnsafeEntry);
         }
         if matches!(destination.stat(to), Ok(entry) if entry.is_directory) {
             return Err(LocalError::UnsafeEntry);
         }
         let staging = replacement_staging_path(to)?;
-        let bytes = self.copy_file_to_new(from, destination, &staging, consent)?;
+        let bytes = self.copy_file_to_new(from, destination, &staging)?;
         match destination.rename_file_replace(&staging, to) {
             Ok(()) => Ok(bytes),
             Err(LocalError::OutcomeUnknown(error)) => Err(LocalError::OutcomeUnknown(error)),
@@ -634,13 +594,9 @@ impl LocalFilesystem {
         from: &Path,
         to: &Path,
         reserve_bytes: u64,
-        consent: ContentReadConsent,
     ) -> Result<u64> {
         Self::relative(from)?;
         Self::relative(to)?;
-        if consent != ContentReadConsent::GrantedForThisOperation {
-            return Err(LocalError::UnsafeEntry);
-        }
         #[cfg(target_os = "linux")]
         {
             let mut source = secure::open_content(&self.root_fd, from)?;
@@ -665,13 +621,9 @@ impl LocalFilesystem {
         from: &Path,
         to: &Path,
         expected: LocalContentInspection,
-        consent: ContentReadConsent,
     ) -> Result<u64> {
         Self::relative(from)?;
         Self::relative(to)?;
-        if consent != ContentReadConsent::GrantedForThisOperation {
-            return Err(LocalError::UnsafeEntry);
-        }
         #[cfg(target_os = "linux")]
         {
             if !self.revalidate_content_inspection(from, expected)? {
@@ -767,11 +719,10 @@ impl LocalFilesystem {
         from: &Path,
         to: &Path,
         expected: LocalContentInspection,
-        consent: ContentReadConsent,
     ) -> Result<bool> {
         Self::relative(from)?;
         Self::relative(to)?;
-        if from == to || consent != ContentReadConsent::GrantedForThisOperation {
+        if from == to {
             return Err(LocalError::UnsafeEntry);
         }
         #[cfg(target_os = "linux")]
@@ -1954,31 +1905,17 @@ mod tests {
         let root = sandbox();
         fs::write(root.join("source.bin"), b"original").unwrap();
         let adapter = LocalFilesystem::open(&root).unwrap();
-        let consent = ContentReadConsent::GrantedForThisOperation;
-
         assert!(matches!(
-            adapter.copy_file_new(
-                Path::new("../source.bin"),
-                Path::new("escaped.bin"),
-                consent,
-            ),
+            adapter.copy_file_new(Path::new("../source.bin"), Path::new("escaped.bin"),),
             Err(LocalError::InvalidPath)
         ));
         assert!(matches!(
-            adapter.copy_file_new(
-                Path::new("source.bin"),
-                Path::new("../escaped.bin"),
-                consent,
-            ),
+            adapter.copy_file_new(Path::new("source.bin"), Path::new("../escaped.bin"),),
             Err(LocalError::InvalidPath)
         ));
         assert!(!root.join("escaped.bin").exists());
         assert!(matches!(
-            adapter.copy_file_new(
-                Path::new("missing.bin"),
-                Path::new("missing-copy.bin"),
-                consent,
-            ),
+            adapter.copy_file_new(Path::new("missing.bin"), Path::new("missing-copy.bin"),),
             Err(LocalError::Io(_)) | Err(LocalError::UnsafeEntry)
         ));
         assert!(!root.join("missing-copy.bin").exists());
@@ -1988,11 +1925,7 @@ mod tests {
             use std::os::unix::fs::symlink;
             symlink("source.bin", root.join("source-link")).unwrap();
             assert!(matches!(
-                adapter.copy_file_new(
-                    Path::new("source-link"),
-                    Path::new("linked-copy.bin"),
-                    consent,
-                ),
+                adapter.copy_file_new(Path::new("source-link"), Path::new("linked-copy.bin"),),
                 Err(LocalError::Io(_)) | Err(LocalError::UnsafeEntry)
             ));
             assert!(!root.join("linked-copy.bin").exists());
@@ -2032,11 +1965,7 @@ mod tests {
             changed: false,
         };
         assert!(matches!(
-            adapter.read_to_writer(
-                Path::new("source.bin"),
-                &mut output,
-                ContentReadConsent::GrantedForThisOperation,
-            ),
+            adapter.read_to_writer(Path::new("source.bin"), &mut output,),
             Err(LocalError::OutcomeUnknown(_))
         ));
         assert!(output.changed);
@@ -2211,11 +2140,7 @@ mod tests {
         let adapter = LocalFilesystem::open(&root).unwrap();
         let mut writer = PartialWriter { accepted: 0 };
         assert!(matches!(
-            adapter.read_to_writer(
-                Path::new("source.bin"),
-                &mut writer,
-                ContentReadConsent::GrantedForThisOperation
-            ),
+            adapter.read_to_writer(Path::new("source.bin"), &mut writer,),
             Err(LocalError::OutcomeUnknown(_))
         ));
         assert_eq!(writer.accepted, 1);
@@ -2228,21 +2153,19 @@ mod tests {
         fs::write(root.join("origin.bin"), b"original").unwrap();
         fs::write(root.join("occupied.bin"), b"preserved").unwrap();
         let adapter = LocalFilesystem::open(&root).unwrap();
-        assert!(matches!(
-            adapter.copy_file_new_with_reserve(
-                Path::new("origin.bin"),
-                Path::new("untouched.bin"),
-                0,
-                ContentReadConsent::Denied,
-            ),
-            Err(LocalError::UnsafeEntry)
-        ));
-        assert!(!root.join("untouched.bin").exists());
+        let initial = adapter.copy_file_new_with_reserve(
+            Path::new("origin.bin"),
+            Path::new("untouched.bin"),
+            0,
+        );
+        #[cfg(target_os = "linux")]
+        assert!(matches!(initial, Ok(8)));
+        #[cfg(not(target_os = "linux"))]
+        assert!(matches!(initial, Err(LocalError::UnsafeEntry)));
         let result = adapter.copy_file_new_with_reserve(
             Path::new("origin.bin"),
             Path::new("occupied.bin"),
             0,
-            ContentReadConsent::GrantedForThisOperation,
         );
         #[cfg(target_os = "linux")]
         assert!(matches!(result, Err(LocalError::AlreadyExists)));
@@ -2632,31 +2555,16 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_copy_requires_explicit_consent() {
+    fn macos_copy_reads_requested_source_without_consent() {
         let root = sandbox();
         fs::write(root.join("source.bin"), b"original").unwrap();
         let adapter = LocalFilesystem::open(&root).unwrap();
         let from = Path::new("source.bin");
         let to = Path::new("destination.bin");
-        assert!(matches!(
-            adapter.copy_file_new(from, to, ContentReadConsent::Denied),
-            Err(LocalError::UnsafeEntry)
-        ));
-        assert!(!root.join("destination.bin").exists());
-        assert_eq!(
-            adapter
-                .copy_file_new(from, to, ContentReadConsent::GrantedForThisOperation)
-                .unwrap(),
-            8
-        );
+        assert_eq!(adapter.copy_file_new(from, to).unwrap(), 8);
         assert_eq!(fs::read(root.join("destination.bin")).unwrap(), b"original");
         assert!(matches!(
-            adapter.copy_file_new_with_reserve(
-                from,
-                Path::new("reserved.bin"),
-                1024,
-                ContentReadConsent::GrantedForThisOperation
-            ),
+            adapter.copy_file_new_with_reserve(from, Path::new("reserved.bin"), 1024,),
             Err(LocalError::UnsafeEntry)
         ));
         assert!(!root.join("reserved.bin").exists());
@@ -2666,7 +2574,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_content_read_requires_explicit_consent() {
+    fn macos_content_read_needs_no_separate_consent() {
         let root = sandbox();
         fs::write(root.join("source.bin"), b"original").unwrap();
         let adapter = LocalFilesystem::open(&root).unwrap();
@@ -2678,18 +2586,7 @@ mod tests {
             LocalContentResidency::NotDatalessFlagged
         );
         let mut bytes = Vec::new();
-        assert!(matches!(
-            adapter.read_to_writer(path, &mut bytes, ContentReadConsent::Denied),
-            Err(LocalError::UnsafeEntry)
-        ));
-        assert!(bytes.is_empty());
-        adapter
-            .read_to_writer(
-                path,
-                &mut bytes,
-                ContentReadConsent::GrantedForThisOperation,
-            )
-            .unwrap();
+        adapter.read_to_writer(path, &mut bytes).unwrap();
         assert_eq!(bytes, b"original");
         assert!(adapter.capabilities().operations.read_content);
         fs::remove_dir_all(root).unwrap();
@@ -2697,7 +2594,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn local_residency_inspection_does_not_bypass_explicit_content_consent() {
+    fn local_residency_inspection_does_not_prefetch_content() {
         let root = sandbox();
         fs::write(root.join("local.bin"), b"original").unwrap();
         let adapter = LocalFilesystem::open(&root).unwrap();
@@ -2708,11 +2605,7 @@ mod tests {
         let mut output = Vec::new();
         assert_eq!(
             adapter
-                .read_to_writer(
-                    Path::new("local.bin"),
-                    &mut output,
-                    ContentReadConsent::GrantedForThisOperation,
-                )
+                .read_to_writer(Path::new("local.bin"), &mut output)
                 .unwrap(),
             8
         );
@@ -2927,13 +2820,12 @@ mod tests {
         let source = Path::new("source.bin");
         let destination = Path::new("copy.bin");
         let expected = adapter.inspect_content(source).unwrap();
-        let consent = ContentReadConsent::GrantedForThisOperation;
         assert!(!adapter
-            .verify_move_copy_bytes(source, destination, expected, consent)
+            .verify_move_copy_bytes(source, destination, expected)
             .unwrap());
         fs::write(root.join("copy.bin"), b"original").unwrap();
         assert!(adapter
-            .verify_move_copy_bytes(source, destination, expected, consent)
+            .verify_move_copy_bytes(source, destination, expected)
             .unwrap());
         assert_eq!(fs::read(root.join("source.bin")).unwrap(), b"original");
         fs::remove_dir_all(root).unwrap();
@@ -2947,9 +2839,8 @@ mod tests {
         let adapter = LocalFilesystem::open(&root).unwrap();
         let source = Path::new("source.bin");
         let expected = adapter.inspect_content(source).unwrap();
-        let consent = ContentReadConsent::GrantedForThisOperation;
         assert!(matches!(
-            adapter.verify_move_copy_bytes(source, Path::new("copy.bin"), expected, consent),
+            adapter.verify_move_copy_bytes(source, Path::new("copy.bin"), expected),
             Err(LocalError::UnsafeEntry)
         ));
         fs::remove_dir_all(root).unwrap();
@@ -2983,12 +2874,7 @@ mod tests {
         let adapter = LocalFilesystem::open(&root).unwrap();
         let from = Path::new("source.bin");
         let expected = adapter.inspect_content(from).unwrap();
-        let result = adapter.prepare_move_copy_new(
-            from,
-            Path::new("copy.bin"),
-            expected,
-            ContentReadConsent::GrantedForThisOperation,
-        );
+        let result = adapter.prepare_move_copy_new(from, Path::new("copy.bin"), expected);
         assert!(matches!(result, Err(LocalError::UnsafeEntry)));
         assert!(!root.join("copy.bin").exists());
         assert_eq!(fs::read(root.join("alias.bin")).unwrap(), b"original");
@@ -3078,20 +2964,12 @@ mod tests {
         let src = Path::new("src.bin");
         let dst = Path::new("new.bin");
         let expected = adapter.inspect_content(src).unwrap();
-        let consent = ContentReadConsent::GrantedForThisOperation;
-        let copied = adapter
-            .prepare_move_copy_new(src, dst, expected, consent)
-            .unwrap();
+        let copied = adapter.prepare_move_copy_new(src, dst, expected).unwrap();
         assert_eq!(copied, 8);
         assert_eq!(fs::read(root.join("src.bin")).unwrap(), b"original");
         assert_eq!(fs::read(root.join("new.bin")).unwrap(), b"original");
         assert!(matches!(
-            adapter.prepare_move_copy_new(
-                src,
-                dst,
-                expected,
-                ContentReadConsent::GrantedForThisOperation
-            ),
+            adapter.prepare_move_copy_new(src, dst, expected,),
             Err(LocalError::AlreadyExists)
         ));
         fs::remove_dir_all(root).unwrap();
@@ -3099,25 +2977,16 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn move_copy_preparation_rejects_stale_source_and_denied_consent() {
+    fn move_copy_preparation_rejects_stale_source() {
         let root = sandbox();
         fs::write(root.join("src.bin"), b"original").unwrap();
         let adapter = LocalFilesystem::open(&root).unwrap();
         let src = Path::new("src.bin");
         let dst = Path::new("new.bin");
         let expected = adapter.inspect_content(src).unwrap();
-        assert!(matches!(
-            adapter.prepare_move_copy_new(src, dst, expected, ContentReadConsent::Denied),
-            Err(LocalError::UnsafeEntry)
-        ));
         fs::write(root.join("src.bin"), b"replacement").unwrap();
         assert!(matches!(
-            adapter.prepare_move_copy_new(
-                src,
-                dst,
-                expected,
-                ContentReadConsent::GrantedForThisOperation
-            ),
+            adapter.prepare_move_copy_new(src, dst, expected,),
             Err(LocalError::UnsafeEntry)
         ));
         assert!(!root.join("new.bin").exists());
@@ -3136,12 +3005,7 @@ mod tests {
         fs::write(root.join("source.bin"), b"modified").unwrap();
         let actual = adapter.file_identity(source).unwrap();
         assert_eq!(actual, expected.identity);
-        let outcome = adapter.prepare_move_copy_new(
-            source,
-            destination,
-            expected,
-            ContentReadConsent::GrantedForThisOperation,
-        );
+        let outcome = adapter.prepare_move_copy_new(source, destination, expected);
         assert!(matches!(outcome, Err(LocalError::UnsafeEntry)));
         assert!(!root.join("destination.bin").exists());
         assert_eq!(fs::read(root.join("source.bin")).unwrap(), b"modified");
@@ -3150,19 +3014,14 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn move_copy_preparation_fails_closed_on_mac_even_with_consent() {
+    fn move_copy_preparation_fails_closed_on_mac() {
         let root = sandbox();
         fs::write(root.join("src.bin"), b"original").unwrap();
         let adapter = LocalFilesystem::open(&root).unwrap();
         let src = Path::new("src.bin");
         let expected = adapter.inspect_content(src).unwrap();
         assert!(matches!(
-            adapter.prepare_move_copy_new(
-                src,
-                Path::new("new.bin"),
-                expected,
-                ContentReadConsent::GrantedForThisOperation
-            ),
+            adapter.prepare_move_copy_new(src, Path::new("new.bin"), expected,),
             Err(LocalError::UnsafeEntry)
         ));
         assert!(!root.join("new.bin").exists());
@@ -3745,35 +3604,18 @@ mod tests {
     }
 
     #[test]
-    fn copy_requires_consent_and_never_overwrites() {
+    fn copy_reads_requested_source_and_never_overwrites() {
         let root = sandbox();
         fs::write(root.join("source.bin"), b"source").unwrap();
         fs::write(root.join("occupied.bin"), b"occupied").unwrap();
         let adapter = LocalFilesystem::open(&root).unwrap();
-        assert!(matches!(
-            adapter.copy_file_new(
-                Path::new("source.bin"),
-                Path::new("new.bin"),
-                ContentReadConsent::Denied
-            ),
-            Err(LocalError::UnsafeEntry)
-        ));
-        assert!(!root.join("new.bin").exists());
-        let result = adapter.copy_file_new(
-            Path::new("source.bin"),
-            Path::new("occupied.bin"),
-            ContentReadConsent::GrantedForThisOperation,
-        );
+        let result = adapter.copy_file_new(Path::new("source.bin"), Path::new("occupied.bin"));
         #[cfg(unix)]
         assert!(matches!(result, Err(LocalError::AlreadyExists)));
         #[cfg(not(unix))]
         assert!(matches!(result, Err(LocalError::UnsafeEntry)));
         assert_eq!(fs::read(root.join("occupied.bin")).unwrap(), b"occupied");
-        let result = adapter.copy_file_new(
-            Path::new("source.bin"),
-            Path::new("new.bin"),
-            ContentReadConsent::GrantedForThisOperation,
-        );
+        let result = adapter.copy_file_new(Path::new("source.bin"), Path::new("new.bin"));
         #[cfg(unix)]
         {
             assert_eq!(result.unwrap(), 6);
@@ -3802,7 +3644,6 @@ mod tests {
                     Path::new("source.bin"),
                     &destination,
                     Path::new("destination.bin"),
-                    ContentReadConsent::GrantedForThisOperation,
                 )
                 .unwrap(),
             12
@@ -3821,28 +3662,16 @@ mod tests {
     }
 
     #[test]
-    fn content_read_requires_explicit_operation_consent() {
+    fn content_read_opens_only_the_requested_file() {
         let root = sandbox();
         fs::write(root.join("local.txt"), b"private").unwrap();
         let adapter = LocalFilesystem::open(&root).unwrap();
         let mut output = Vec::new();
-        assert!(adapter
-            .read_to_writer(
-                Path::new("local.txt"),
-                &mut output,
-                ContentReadConsent::Denied,
-            )
-            .is_err());
-        assert!(output.is_empty());
         #[cfg(unix)]
         {
             assert_eq!(
                 adapter
-                    .read_to_writer(
-                        Path::new("local.txt"),
-                        &mut output,
-                        ContentReadConsent::GrantedForThisOperation,
-                    )
+                    .read_to_writer(Path::new("local.txt"), &mut output)
                     .unwrap(),
                 7
             );
@@ -3851,11 +3680,7 @@ mod tests {
         #[cfg(not(unix))]
         {
             assert!(adapter
-                .read_to_writer(
-                    Path::new("local.txt"),
-                    &mut output,
-                    ContentReadConsent::GrantedForThisOperation,
-                )
+                .read_to_writer(Path::new("local.txt"), &mut output)
                 .is_err());
             assert!(output.is_empty());
         }

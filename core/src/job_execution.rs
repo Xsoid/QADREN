@@ -2,7 +2,7 @@
 //! It never contacts a provider or reads user/cloud content.
 use crate::confirmation::{Confirmation, EvidenceLevel};
 use crate::jobs::{JobStore, JobStoreError, ScenarioCopyBaselineOutboxEntry};
-use crate::local_fs::{ContentReadConsent, LocalError, LocalFilesystem};
+use crate::local_fs::{LocalError, LocalFilesystem};
 use crate::model::{ConfirmedFileVersion, JobState, ScenarioReference};
 use crate::policy::{Decision, OperationScope, ProtectedOperation};
 use crate::registry::Registry;
@@ -539,10 +539,9 @@ pub fn run_local_directory_create(
     Ok(LocalDirectoryCreateStatus::Completed)
 }
 
-/// Execute one manually confirmed Local-to-Local copy. The confirmation is
-/// written and consumed for this exact source connection and relative path
-/// before the source file is opened. This permits macOS File Provider
-/// materialization only after the user has approved that exact operation.
+/// Execute one Local-to-Local copy to a new destination. Reading content that
+/// is necessary for this requested operation needs no separate consent. macOS
+/// can materialize the selected File Provider item as part of that read.
 #[allow(clippy::too_many_arguments)]
 pub fn run_local_file_copy(
     database_path: &Path,
@@ -554,7 +553,7 @@ pub fn run_local_file_copy(
     destination_connection_id: &str,
     destination_relative: &Path,
     job_id: &str,
-    consent: bool,
+    _consent: bool,
 ) -> Result<LocalFileCopyStatus, LocalFileCopyError> {
     run_local_file_copy_inner(
         database_path,
@@ -566,15 +565,16 @@ pub fn run_local_file_copy(
         destination_connection_id,
         destination_relative,
         job_id,
-        consent,
+        true,
         None,
         false,
         None,
     )
 }
 
-/// Execute one manually confirmed replacement of an existing Local file.
-/// This uses the same JobStore and scoped source-read consent as a new copy.
+/// Execute one explicitly confirmed replacement of an existing Local file.
+/// The confirmation covers replacement only. It does not authorize the
+/// necessary source read.
 #[allow(clippy::too_many_arguments)]
 pub fn run_local_file_replace(
     database_path: &Path,
@@ -605,10 +605,9 @@ pub fn run_local_file_replace(
     )
 }
 
-/// Execute one explicitly confirmed Local-to-Local create proposed by an exact
-/// Scenario revision. The immutable Scenario identity is stored with the Job.
-/// This does not enable automatic content reads: every source still needs its
-/// own confirmation.
+/// Execute one Local-to-Local create proposed by an exact Scenario revision.
+/// The immutable Scenario identity is stored with the Job. Necessary content
+/// reads are ordinary operation work and need no separate confirmation.
 #[allow(clippy::too_many_arguments)]
 pub fn run_local_scenario_file_copy(
     database_path: &Path,
@@ -622,7 +621,7 @@ pub fn run_local_scenario_file_copy(
     destination_connection_id: &str,
     destination_relative: &Path,
     job_id: &str,
-    consent: bool,
+    _consent: bool,
 ) -> Result<LocalFileCopyStatus, LocalFileCopyError> {
     let registry =
         Registry::open(registry_path).map_err(|_| LocalFileCopyError::ScenarioUnavailable)?;
@@ -658,7 +657,7 @@ pub fn run_local_scenario_file_copy(
         destination_connection_id,
         destination_relative,
         job_id,
-        consent,
+        true,
         Some((scenario_id, scenario_revision, is_left_to_right)),
         false,
         None,
@@ -1087,7 +1086,7 @@ fn run_local_file_copy_inner(
     {
         return Err(LocalFileCopyError::InvalidRequest);
     }
-    if !consent {
+    if replace_existing && !consent {
         return Err(LocalFileCopyError::ConsentRequired);
     }
     if !enabled_local_connection(registry_path, source_connection_id)
@@ -1156,31 +1155,6 @@ fn run_local_file_copy_inner(
         JobState::Running,
         Confirmation::Unknown,
     )?;
-    store.advance(
-        job_id,
-        JobState::Running,
-        JobState::WaitingForDecision,
-        Confirmation::Unknown,
-    )?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| LocalFileCopyError::InvalidRequest)?
-        .as_secs();
-    let scope = OperationScope {
-        operation: ProtectedOperation::ReadContent,
-        connection_id: source_connection_id.to_owned(),
-        relative_path: source_path.to_owned(),
-        expires_at: now.saturating_add(60),
-    };
-    let decision_id = format!("{job_id}-source-read");
-    store.record_operation_decision(&decision_id, job_id, &scope, Decision::Accepted)?;
-    store.consume_operation_decision(&decision_id, job_id, &scope, now)?;
-    store.advance(
-        job_id,
-        JobState::WaitingForDecision,
-        JobState::Running,
-        Confirmation::Confirmed(EvidenceLevel::Requested),
-    )?;
     let attempt_id = format!("{job_id}-attempt-1");
     let operation_kind = if replace_existing {
         "local_copy_replace"
@@ -1204,19 +1178,9 @@ fn run_local_file_copy_inner(
         return Err(LocalFileCopyError::ConnectionUnavailable);
     }
     let copy_result = if replace_existing {
-        source.copy_file_to_replace(
-            source_relative,
-            &destination,
-            destination_relative,
-            ContentReadConsent::GrantedForThisOperation,
-        )
+        source.copy_file_to_replace(source_relative, &destination, destination_relative)
     } else {
-        source.copy_file_to_new(
-            source_relative,
-            &destination,
-            destination_relative,
-            ContentReadConsent::GrantedForThisOperation,
-        )
+        source.copy_file_to_new(source_relative, &destination, destination_relative)
     };
     match copy_result {
         Ok(bytes) if bytes == source_entry.size => {}
@@ -1861,7 +1825,7 @@ mod tests {
     }
 
     #[test]
-    fn local_file_copy_persists_consent_and_never_overwrites() {
+    fn local_file_copy_reads_selected_source_without_consent_and_never_overwrites() {
         let (database, registry_path, source_root, source_connection) = local_fixture("copy");
         let destination_root = source_root.parent().unwrap().join("destination-root");
         fs::create_dir(&source_root).unwrap();
@@ -1872,22 +1836,6 @@ mod tests {
             .add("local_filesystem", "Destination Local")
             .unwrap();
 
-        assert!(matches!(
-            run_local_file_copy(
-                &database,
-                &registry_path,
-                &source_root,
-                &source_connection,
-                Path::new("source.txt"),
-                &destination_root,
-                &destination_connection,
-                Path::new("source.txt"),
-                "local-copy-denied",
-                false,
-            ),
-            Err(LocalFileCopyError::ConsentRequired)
-        ));
-        assert!(!database.exists());
         assert_eq!(
             run_local_file_copy(
                 &database,
@@ -1899,7 +1847,7 @@ mod tests {
                 &destination_connection,
                 Path::new("source.txt"),
                 "local-copy-1",
-                true,
+                false,
             )
             .unwrap(),
             LocalFileCopyStatus::Completed
@@ -1955,6 +1903,26 @@ mod tests {
         let destination_connection = registry
             .add("local_filesystem", "Destination Local")
             .unwrap();
+
+        assert!(matches!(
+            run_local_file_replace(
+                &database,
+                &registry_path,
+                &source_root,
+                &source_connection,
+                Path::new("source.txt"),
+                &destination_root,
+                &destination_connection,
+                Path::new("destination.txt"),
+                "local-replace-denied",
+                false,
+            ),
+            Err(LocalFileCopyError::ConsentRequired)
+        ));
+        assert_eq!(
+            fs::read(destination_root.join("destination.txt")).unwrap(),
+            b"old contents"
+        );
 
         assert_eq!(
             run_local_file_replace(
