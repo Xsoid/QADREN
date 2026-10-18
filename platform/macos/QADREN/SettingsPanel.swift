@@ -594,6 +594,7 @@ private struct ScenarioDryRunView: View {
     @State private var leftSnapshot: [ScenarioSnapshotItem] = []
     @State private var rightSnapshot: [ScenarioSnapshotItem] = []
     @State private var pendingConflictReplace: ScenarioConflictTask?
+    @State private var pendingConflictDelete: ScenarioConflictTask?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -674,6 +675,7 @@ private struct ScenarioDryRunView: View {
                             task: task,
                             saveDecision: saveConflictDecision,
                             executeReplace: { pendingConflictReplace = $0 },
+                            executeDelete: { pendingConflictDelete = $0 },
                             refreshTask: refreshConflictTask
                         )
                     }
@@ -712,6 +714,14 @@ private struct ScenarioDryRunView: View {
                     ? "QADREN ещё раз проверит обе стороны. Он заменит файл только если источник новее. При изменении задача станет устаревшей, а замена не начнётся."
                     : "QADREN ещё раз проверит обе стороны по сохранённому снимку. При изменении задача станет устаревшей, а замена не начнётся."
             )
+        }
+        .alert("Удалить файл как в источнике?", isPresented: Binding(
+            get: { pendingConflictDelete != nil }, set: { if !$0 { pendingConflictDelete = nil } }
+        )) {
+            Button("Отмена", role: .cancel) { pendingConflictDelete = nil }
+            Button("Удалить файл", role: .destructive) { executePendingConflictDelete() }
+        } message: {
+            Text("QADREN повторно проверит снимок. Если источник всё ещё не содержит файл, файл на выбранной стороне будет удалён.")
         }
     }
 
@@ -801,6 +811,18 @@ private struct ScenarioDryRunView: View {
         }
     }
 
+    private func executePendingConflictDelete() {
+        guard let task = pendingConflictDelete else { return }
+        pendingConflictDelete = nil
+        do {
+            try StorageRegistryBridge.executeScenarioConflictDelete(id: task.id)
+            loadConflictTasks()
+        } catch {
+            self.error = "Не удалось удалить файл по решению конфликта: " + error.localizedDescription
+            loadConflictTasks()
+        }
+    }
+
     private func executePendingCreate() {
         guard let item = pendingCreate else { return }
         pendingCreate = nil
@@ -850,6 +872,7 @@ private struct ScenarioConflictTaskView: View {
     let task: ScenarioConflictTask
     let saveDecision: (ScenarioConflictTask, Bool, String) -> Void
     let executeReplace: (ScenarioConflictTask) -> Void
+    let executeDelete: (ScenarioConflictTask) -> Void
     let refreshTask: (ScenarioConflictTask) -> Void
     @State private var sourceIsLeft: Bool?
 
@@ -858,12 +881,14 @@ private struct ScenarioConflictTaskView: View {
         task: ScenarioConflictTask,
         saveDecision: @escaping (ScenarioConflictTask, Bool, String) -> Void,
         executeReplace: @escaping (ScenarioConflictTask) -> Void,
+        executeDelete: @escaping (ScenarioConflictTask) -> Void,
         refreshTask: @escaping (ScenarioConflictTask) -> Void
     ) {
         self.scenario = scenario
         self.task = task
         self.saveDecision = saveDecision
         self.executeReplace = executeReplace
+        self.executeDelete = executeDelete
         self.refreshTask = refreshTask
         _sourceIsLeft = State(initialValue: task.source_is_left)
     }
@@ -911,6 +936,11 @@ private struct ScenarioConflictTaskView: View {
                 if task.state == "selected", task.decision == "replace_from_source" || task.decision == "replace_if_newer" {
                     Button(task.decision == "replace_if_newer" ? "Выполнить проверку и замену" : "Выполнить замену из источника", role: .destructive) {
                         executeReplace(task)
+                    }
+                }
+                if task.state == "selected", task.decision == "delete_as_source" {
+                    Button("Подтвердить удаление файла", role: .destructive) {
+                        executeDelete(task)
                     }
                 }
                 if task.state == "stale" {

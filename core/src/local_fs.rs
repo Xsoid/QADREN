@@ -223,6 +223,7 @@ impl LocalFilesystem {
                 write_content: cfg!(unix),
                 streaming: cfg!(unix),
                 create_directory: cfg!(unix),
+                delete: cfg!(unix),
                 ..Operations::default()
             },
             prerequisites_verified: cfg!(unix),
@@ -1201,13 +1202,19 @@ impl LocalFilesystem {
         Err(LocalError::UnsafeEntry)
     }
 
-    /// Deletion is deliberately unavailable on untrusted concurrent paths.
-    /// An inode check followed by unlinkat is not a conditional unlink:
-    /// another process could replace the directory entry between calls.
-    /// Preserve user data until a truly source-bound delete exists.
+    /// Delete one regular file after an explicit operation-specific decision.
+    /// The caller records a durable attempt and handles an uncertain syscall
+    /// result as UNKNOWN rather than retrying the delete.
     pub fn delete_file(&self, path: &Path) -> Result<()> {
         Self::relative(path)?;
-        Err(LocalError::UnsafeEntry)
+        #[cfg(unix)]
+        {
+            secure::delete_file(&self.root_fd, path)
+        }
+        #[cfg(not(unix))]
+        {
+            Err(LocalError::UnsafeEntry)
+        }
     }
 
     /// Creates one child directory; fails closed on unsupported platforms.
@@ -1418,13 +1425,13 @@ mod tests {
     }
 
     #[test]
-    fn local_capabilities_do_not_advertise_unsafe_operations() {
+    fn local_capabilities_advertise_confirmed_delete_only_on_unix() {
         let root = sandbox();
         let adapter = LocalFilesystem::open(&root).unwrap();
         let capabilities = adapter.capabilities();
         assert!(capabilities.operations.list_metadata);
         assert!(!capabilities.operations.rename);
-        assert!(!capabilities.operations.delete);
+        assert_eq!(capabilities.operations.delete, cfg!(unix));
         assert_eq!(
             capabilities.operations.read_content,
             cfg!(unix)
@@ -3156,15 +3163,12 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn delete_file_fails_closed_and_preserves_original() {
+    fn delete_file_removes_a_regular_entry() {
         let root = sandbox();
         fs::write(root.join("file.bin"), b"keep").unwrap();
         let adapter = LocalFilesystem::open(&root).unwrap();
-        assert!(matches!(
-            adapter.delete_file(Path::new("file.bin")),
-            Err(LocalError::UnsafeEntry)
-        ));
-        assert_eq!(fs::read(root.join("file.bin")).unwrap(), b"keep");
+        adapter.delete_file(Path::new("file.bin")).unwrap();
+        assert!(!root.join("file.bin").exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3186,13 +3190,13 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn capabilities_never_advertise_unbound_rename_or_delete() {
+    fn capabilities_keep_rename_unavailable_and_expose_delete_on_unix() {
         use crate::capabilities::{CapabilityError, RequestedOperation};
         let root = sandbox();
         let adapter = LocalFilesystem::open(&root).unwrap();
         let available = adapter.capabilities();
         assert!(!available.operations.rename);
-        assert!(!available.operations.delete);
+        assert_eq!(available.operations.delete, cfg!(unix));
         let platform = if cfg!(target_os = "macos") {
             Platform::MacOS
         } else {
@@ -3202,10 +3206,11 @@ mod tests {
             available.allows(platform, RequestedOperation::Rename),
             Err(CapabilityError::UnsupportedOperation)
         );
-        assert_eq!(
-            available.allows(platform, RequestedOperation::Delete),
+        assert_eq!(available.allows(platform, RequestedOperation::Delete), if cfg!(unix) {
+            Ok(())
+        } else {
             Err(CapabilityError::UnsupportedOperation)
-        );
+        });
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -396,6 +396,41 @@ fn leaf_metadata(directory: &File, leaf: &CStr) -> Result<(bool, u64, Option<Str
     ))
 }
 
+/// Remove one checked regular entry relative to the pinned root. The caller
+/// must persist an attempt first. EINTR is UNKNOWN because the namespace may
+/// already have changed.
+pub fn delete_file(root: &File, target: &Path) -> Result<()> {
+    let (directory, leaf) = parent(root, target)?;
+    let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let status = unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            leaf.as_ptr(),
+            info.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if status != 0 {
+        return Err(LocalError::Io(io::Error::last_os_error()));
+    }
+    let info = unsafe { info.assume_init() };
+    if info.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Err(LocalError::UnsafeEntry);
+    }
+    #[cfg(target_os = "macos")]
+    reject_dataless_mutation(&info)?;
+    let status = unsafe { unlinkat(directory.as_raw_fd(), leaf.as_ptr(), 0) };
+    if status != 0 {
+        let error = io::Error::last_os_error();
+        return if error.kind() == io::ErrorKind::Interrupted {
+            Err(LocalError::OutcomeUnknown(error))
+        } else {
+            Err(LocalError::Io(error))
+        };
+    }
+    Ok(())
+}
+
 /// Inspect an inode relative to the pinned root without opening content.
 pub fn file_identity(root: &File, target: &Path) -> Result<LocalFileIdentity> {
     let (directory, leaf) = parent(root, target)?;

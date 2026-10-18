@@ -539,6 +539,30 @@ pub unsafe extern "C" fn qadren_jobs_run_local_scenario_conflict_replace(
     }
 }
 
+/// Execute one selected conflict deletion after explicit confirmation.
+/// # Safety
+/// Arguments must be valid, NUL-terminated strings for the duration of call.
+#[no_mangle]
+pub unsafe extern "C" fn qadren_jobs_run_local_scenario_conflict_delete(
+    database_path: *const c_char, registry_path: *const c_char,
+    conflict_id: *const c_char, job_id: *const c_char, consent: bool,
+) -> *mut c_char {
+    let (Some(database_path), Some(registry_path), Some(conflict_id), Some(job_id)) = (
+        input(database_path), input(registry_path), input(conflict_id), input(job_id),
+    ) else { return response(json!({"ok":false,"error":"invalid_request"})); };
+    match crate::job_execution::run_local_scenario_conflict_delete(
+        Path::new(database_path), Path::new(registry_path), conflict_id, job_id, consent,
+    ) {
+        Ok(crate::job_execution::LocalFileCopyStatus::Completed) => response(json!({"ok":true,"data":{"status":"completed"}})),
+        Ok(crate::job_execution::LocalFileCopyStatus::Existing(state)) => response(json!({"ok":true,"data":{"status":format!("{:?}", state).to_ascii_lowercase(),"existing":true}})),
+        Err(crate::job_execution::LocalFileCopyError::ConflictStale) => response(json!({"ok":false,"error":"conflict_stale"})),
+        Err(crate::job_execution::LocalFileCopyError::ConflictUnavailable) => response(json!({"ok":false,"error":"conflict_unavailable"})),
+        Err(crate::job_execution::LocalFileCopyError::ConsentRequired) => response(json!({"ok":false,"error":"consent_required"})),
+        Err(crate::job_execution::LocalFileCopyError::OutcomeUnknown(_)) => response(json!({"ok":false,"error":"outcome_unknown"})),
+        Err(_) => response(json!({"ok":false,"error":"conflict_delete_failed"})),
+    }
+}
+
 /// Read-only reconciliation for one UNKNOWN Local Filesystem directory-create
 /// Job. This never starts another mkdir; Rust requires the exact durable root
 /// identity, connection, operation and directory metadata before completion.

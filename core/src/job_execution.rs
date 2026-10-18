@@ -768,6 +768,82 @@ pub fn run_local_scenario_conflict_replace(
     Ok(result)
 }
 
+/// Execute an explicitly confirmed deletion decision from the conflict queue.
+/// The selected source must still be absent and the destination must still
+/// match its saved metadata. An interrupted delete remains UNKNOWN.
+pub fn run_local_scenario_conflict_delete(
+    database_path: &Path,
+    registry_path: &Path,
+    conflict_id: &str,
+    job_id: &str,
+    consent: bool,
+) -> Result<LocalFileCopyStatus, LocalFileCopyError> {
+    let registry = Registry::open(registry_path).map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
+    let task = registry.selected_conflict_task(conflict_id)
+        .map_err(|_| LocalFileCopyError::ConflictUnavailable)?
+        .ok_or(LocalFileCopyError::ConflictUnavailable)?;
+    if task.kind != "deletion" || task.decision.as_deref() != Some("delete_as_source") || !consent {
+        return Err(if consent { LocalFileCopyError::ConflictUnavailable } else { LocalFileCopyError::ConsentRequired });
+    }
+    let source_is_left = task.source_is_left.ok_or(LocalFileCopyError::ConflictUnavailable)?;
+    let scenario = registry.get_scenario_revision(&task.scenario.scenario_id, task.scenario.revision)
+        .map_err(|_| LocalFileCopyError::ConflictUnavailable)?
+        .ok_or(LocalFileCopyError::ConflictUnavailable)?;
+    let (source_root, source_connection, destination_root, destination_connection, source_expected, destination_expected) = if source_is_left {
+        (&scenario.left_root, &scenario.left_connection_id, &scenario.right_root, &scenario.right_connection_id, task.left.as_ref(), task.right.as_ref())
+    } else {
+        (&scenario.right_root, &scenario.right_connection_id, &scenario.left_root, &scenario.left_connection_id, task.right.as_ref(), task.left.as_ref())
+    };
+    if source_expected.is_some() || destination_expected.is_none()
+        || !enabled_local_connection(registry_path, source_connection)
+        || !enabled_local_connection(registry_path, destination_connection)
+    { return Err(LocalFileCopyError::ConflictUnavailable); }
+    let source = LocalFilesystem::open(Path::new(source_root)).map_err(LocalFileCopyError::Local)?;
+    let destination = LocalFilesystem::open(Path::new(destination_root)).map_err(LocalFileCopyError::Local)?;
+    if !destination.capabilities().operations.delete { return Err(LocalFileCopyError::CapabilityUnavailable); }
+    let path = Path::new(&task.relative_path);
+    if !matches!(source.stat(path), Err(LocalError::Io(ref error)) if error.kind() == std::io::ErrorKind::NotFound) {
+        registry.mark_conflict_task_stale(conflict_id).map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
+        return Err(LocalFileCopyError::ConflictStale);
+    }
+    let current = match destination.stat(path) {
+        Ok(entry) if matches_conflict_snapshot(&entry, destination_expected.unwrap()) => entry,
+        Ok(_) | Err(LocalError::Io(_)) => {
+            registry.mark_conflict_task_stale(conflict_id).map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
+            return Err(LocalFileCopyError::ConflictStale);
+        }
+        Err(error) => return Err(LocalFileCopyError::Local(error)),
+    };
+    let target_path = path.to_str().ok_or(LocalFileCopyError::InvalidRequest)?;
+    let root_identity = local_root_identity_key(&destination).map_err(|_| LocalFileCopyError::InvalidRequest)?;
+    let mut store = JobStore::open(database_path)?;
+    if let Some(existing) = store.get(job_id)? { return Ok(LocalFileCopyStatus::Existing(existing.state)); }
+    store.enqueue(job_id, Some((&task.scenario.scenario_id, task.scenario.revision)))?;
+    store.advance(job_id, JobState::Queued, JobState::Running, Confirmation::Unknown)?;
+    store.advance(job_id, JobState::Running, JobState::WaitingForDecision, Confirmation::Unknown)?;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| LocalFileCopyError::InvalidRequest)?.as_secs();
+    let scope = OperationScope { operation: ProtectedOperation::Delete, connection_id: destination_connection.to_owned(), relative_path: target_path.to_owned(), expires_at: now.saturating_add(60) };
+    let decision_id = format!("{job_id}-delete");
+    store.record_operation_decision(&decision_id, job_id, &scope, Decision::Accepted)?;
+    store.consume_operation_decision(&decision_id, job_id, &scope, now)?;
+    store.advance(job_id, JobState::WaitingForDecision, JobState::Running, Confirmation::Confirmed(EvidenceLevel::Requested))?;
+    let attempt_id = format!("{job_id}-attempt-1");
+    store.prepare_bound_attempt_with_root_identity(job_id, &attempt_id, "local_delete", destination_connection, target_path, current.size, "00000000000000000000000000000000", &root_identity)?;
+    match destination.delete_file(path) {
+        Ok(()) => {}
+        Err(error @ LocalError::OutcomeUnknown(_)) => return Err(LocalFileCopyError::OutcomeUnknown(error)),
+        Err(error) => { store.fail_attempt_before_effect(job_id, &attempt_id)?; return Err(LocalFileCopyError::Local(error)); }
+    }
+    if !matches!(destination.stat(path), Err(LocalError::Io(ref error)) if error.kind() == std::io::ErrorKind::NotFound) {
+        return Err(LocalFileCopyError::VerificationFailed);
+    }
+    let receipt = VerifiedReceipt::metadata_verified(&attempt_id, "local_delete", destination_connection, target_path);
+    store.complete_attempt(job_id, &attempt_id, &receipt)?;
+    registry.complete_conflict_task(conflict_id).map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
+    Ok(LocalFileCopyStatus::Completed)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_local_file_copy_inner(
     database_path: &Path,
@@ -1822,6 +1898,32 @@ mod tests {
         assert_eq!(fs::read(destination_root.join("report.txt")).unwrap(), b"newer destination");
         assert_eq!(JobStore::open(&database).unwrap().get("conflict-keep-newer-destination-1").unwrap(), None);
         assert_eq!(registry.selected_conflict_task(&task).unwrap(), None);
+    }
+
+    #[test]
+    fn selected_conflict_delete_removes_the_destination_after_confirmation() {
+        let (database, registry_path, left_root, left_connection) = local_fixture("conflict-delete");
+        let right_root = left_root.parent().unwrap().join("conflict-delete-right");
+        fs::create_dir(&left_root).unwrap();
+        fs::create_dir(&right_root).unwrap();
+        fs::write(right_root.join("report.txt"), b"remove me").unwrap();
+        let registry = Registry::open(&registry_path).unwrap();
+        let right_connection = registry.add("local_filesystem", "Right").unwrap();
+        let scenario_id = registry.create_scenario(
+            "Conflict", &left_connection, left_root.to_str().unwrap(),
+            &right_connection, right_root.to_str().unwrap(), "left_to_right",
+        ).unwrap();
+        let destination = LocalFilesystem::open(&right_root).unwrap().stat(Path::new("report.txt")).unwrap();
+        let task = registry.queue_conflict_task(
+            &ScenarioReference { scenario_id, revision: 1 }, "report.txt", "deletion", None, None,
+            Some(&ConfirmedFileVersion { object_revision: destination.object_revision, size: destination.size, checksum_md5: None }),
+        ).unwrap();
+        registry.select_conflict_task(&task, Some(true), "delete_as_source").unwrap();
+
+        assert_eq!(run_local_scenario_conflict_delete(&database, &registry_path, &task, "conflict-delete-1", true).unwrap(), LocalFileCopyStatus::Completed);
+        assert!(!right_root.join("report.txt").exists());
+        assert_eq!(registry.selected_conflict_task(&task).unwrap(), None);
+        assert_eq!(JobStore::open(&database).unwrap().state("conflict-delete-1").unwrap(), Some(JobState::Completed));
     }
 
     #[test]
