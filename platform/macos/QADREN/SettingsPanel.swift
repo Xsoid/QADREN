@@ -595,6 +595,8 @@ private struct ScenarioDryRunView: View {
     @State private var rightSnapshot: [ScenarioSnapshotItem] = []
     @State private var pendingConflictReplace: ScenarioConflictTask?
     @State private var pendingConflictDelete: ScenarioConflictTask?
+    @State private var pendingBatch: [ScenarioPlanItem] = []
+    @State private var pendingBatchKind: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -634,6 +636,22 @@ private struct ScenarioDryRunView: View {
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
+                let creates = plan.filter { $0.action.kind == "create" }
+                let updates = plan.filter { $0.action.kind == "update" }
+                if !creates.isEmpty || !updates.isEmpty {
+                    HStack {
+                        if !creates.isEmpty {
+                            Button("Создать все: \(creates.count)") {
+                                pendingBatch = creates; pendingBatchKind = "create"
+                            }
+                        }
+                        if !updates.isEmpty {
+                            Button("Заменить все: \(updates.count)", role: .destructive) {
+                                pendingBatch = updates; pendingBatchKind = "update"
+                            }
+                        }
+                    }
+                }
                 List(plan) { item in
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
@@ -722,6 +740,16 @@ private struct ScenarioDryRunView: View {
             Button("Удалить файл", role: .destructive) { executePendingConflictDelete() }
         } message: {
             Text("QADREN повторно проверит снимок. Если источник всё ещё не содержит файл, файл на выбранной стороне будет удалён.")
+        }
+        .alert("Выполнить пакет сценария?", isPresented: Binding(
+            get: { !pendingBatch.isEmpty }, set: { if !$0 { pendingBatch = []; pendingBatchKind = nil } }
+        )) {
+            Button("Отмена", role: .cancel) { pendingBatch = []; pendingBatchKind = nil }
+            Button(pendingBatchKind == "update" ? "Загрузить и заменить" : "Загрузить и создать", role: pendingBatchKind == "update" ? .destructive : nil) {
+                executePendingBatch()
+            }
+        } message: {
+            Text("Будет выполнено: \(pendingBatch.count). Для каждого файла QADREN создаст отдельный Job и повторно проверит его условия. Конфликтные задачи в этот пакет не входят.")
         }
     }
 
@@ -821,6 +849,29 @@ private struct ScenarioDryRunView: View {
             self.error = "Не удалось удалить файл по решению конфликта: " + error.localizedDescription
             loadConflictTasks()
         }
+    }
+
+    private func executePendingBatch() {
+        let items = pendingBatch
+        let kind = pendingBatchKind
+        pendingBatch = []
+        pendingBatchKind = nil
+        var failures: [String] = []
+        for item in items {
+            do {
+                if kind == "create" {
+                    try StorageRegistryBridge.executeScenarioCreate(scenario: scenario, item: item)
+                } else {
+                    try StorageRegistryBridge.executeScenarioUpdate(scenario: scenario, item: item)
+                }
+            } catch {
+                failures.append(item.relative_path)
+            }
+        }
+        if !failures.isEmpty {
+            error = "Не удалось выполнить файлов: \(failures.joined(separator: ", ")). Остальные элементы пакета были обработаны."
+        }
+        loadPlan()
     }
 
     private func executePendingCreate() {
