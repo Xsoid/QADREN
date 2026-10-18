@@ -88,6 +88,20 @@ Use `peekaboo permissions` before the first capture in a session. Prefer a confi
 
 The minimal native UI skill set is `ui-ux-pro-max` and `swiftui-expert-skill`. `design-system` is conditional. Keep the other installed skills unchanged unless a separate task proves that they are obsolete and have no dependency.
 
+### Recorded Visual Audit — 2026-10-18
+
+This audit used real QADREN windows and Peekaboo CLI on commit `32cc794`. The captures are local temporary files. They are not Git artifacts. The accessibility tree was available. Peekaboo MCP tools were not exposed in the Codex session.
+
+| Priority | Finding or validation gap | Evidence | Disposition |
+|---|---|---|---|
+| P1 | A `failed` widget used the neutral frame. This did not meet the warning/error border contract. | `QDWidgetFrame` previously gave an attention border only to `needsAction`. | Fixed in `32cc794`. `failed` and `needsAction` now use their semantic border. `DashboardLayoutTests` checks the rule. |
+| P2 | The macOS settings window did not accept a 760×560 frame during the audit. It stopped at 760×612. | The real 760×612 window had no overflow or clipped text. | This is a test-size coverage gap, not a confirmed layout defect. Re-check 760×560 when the window can use that size. |
+| P2 | Fresh native evidence for keyboard traversal, Reduce Motion, and Increase Contrast was not recorded in this audit. | The visual captures do not prove these interaction states. | Keep this as an acceptance check for the next UI patch. Do not report it as passed from source review. |
+
+The review captured the dashboard in dark 1180×760, dark 900×620, and light 1180×760. It captured Settings in dark and light 980×700 and in light 760×612. The reviewed states had no detected clipping, overflow, permanent dashboard sidebar, fabricated success state, or inconsistent widget grid reflow. No P0 finding was detected.
+
+GitHub Issue review on 2026-10-18 found that Issue #26, the native UI acceptance issue, was closed. Open Issues #15 and #18 through #25 concern Local Filesystem execution, safety, Worker, Scheduler, and release evidence. They do not authorize a second dashboard or a replacement design-system implementation.
+
 ### Feature and Negative-State Matrix
 
 | Case | Expected |
