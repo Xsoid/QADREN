@@ -121,7 +121,12 @@ struct LocalCopyPreviewRequest: Equatable {
         copyReconciliationJobIDs = []
         error = nil
     }
-    func selectRoot(_ path: String, connectionID: String? = nil) {
+    func selectRoot(
+        _ path: String,
+        connectionID: String? = nil,
+        databasePath: String? = nil,
+        registryPath: String? = nil
+    ) {
         if let connectionID { bind(connectionID: connectionID) }
         root = path
         relativePath = ""
@@ -129,6 +134,56 @@ struct LocalCopyPreviewRequest: Equatable {
         reconciliationJobIDs = []
         copyReconciliationJobIDs = []
         refresh()
+        reconcileUnknownJobsAfterReconnect(
+            databasePath: databasePath,
+            registryPath: registryPath
+        )
+    }
+
+    /// Selecting an already configured root is a Local Filesystem reconnect.
+    /// Check only durable UNKNOWN attempts bound to this exact root. The
+    /// bridge can inspect metadata and record already-proven completion, but
+    /// it cannot open file content, repeat an effect, overwrite, or delete.
+    private func reconcileUnknownJobsAfterReconnect(
+        databasePath: String?, registryPath: String?
+    ) {
+        guard let connectionID = boundConnectionID, !connectionID.isEmpty else { return }
+        do {
+            let database = try databasePath ?? JobInventory.paths().database
+            let registry = try registryPath ?? StorageRegistryBridge.databasePath()
+
+            try findDirectoryReconciliations(
+                connectionID: connectionID, databasePath: database, registryPath: registry
+            )
+            for jobID in reconciliationJobIDs {
+                try reconcileDirectoryCreate(
+                    jobID: jobID, connectionID: connectionID,
+                    databasePath: database, registryPath: registry
+                )
+            }
+            try findDirectoryReconciliations(
+                connectionID: connectionID, databasePath: database, registryPath: registry
+            )
+
+            try findFileCopyReconciliations(
+                connectionID: connectionID, databasePath: database, registryPath: registry
+            )
+            for jobID in copyReconciliationJobIDs {
+                try reconcileFileCopy(
+                    jobID: jobID, connectionID: connectionID,
+                    databasePath: database, registryPath: registry
+                )
+            }
+            try findFileCopyReconciliations(
+                connectionID: connectionID, databasePath: database, registryPath: registry
+            )
+
+            if !reconciliationJobIDs.isEmpty || !copyReconciliationJobIDs.isEmpty {
+                error = "Результат операции всё ещё не подтверждён. Повтор не выполнен."
+            }
+        } catch {
+            self.error = "Не удалось проверить неопределённые операции. Они не были повторены."
+        }
     }
     var selectedDirectory: String? {
         guard let root else { return nil }
@@ -369,9 +424,8 @@ struct LocalCopyPreviewRequest: Equatable {
         )
     }
 
-    /// Executes only after the confirmation dialog has explained that macOS can
-    /// materialize the selected File Provider item. Rust persists and consumes
-    /// the one-time decision before opening the source file.
+    /// Executes the selected copy. macOS can materialize the required File
+    /// Provider item without a separate content-read confirmation.
     @discardableResult func copyFile(
         request: LocalCopyPreviewRequest, to destination: LocalWorkspace
     ) throws -> String {
@@ -512,6 +566,27 @@ struct LocalCopyPreviewRequest: Equatable {
         } catch { self.error = error.localizedDescription }
     }
 
+    private func reconcileFileCopy(
+        jobID: String, connectionID: String, databasePath: String, registryPath: String
+    ) throws {
+        guard let root else { return }
+        let pointer = databasePath.withCString { database in registryPath.withCString { registry in root.withCString { root in connectionID.withCString { connection in jobID.withCString { jobID in
+            reconcileLocalFileCopyJob(database, registry, root, connection, jobID)
+        }}}} }
+        guard let pointer else { throw StorageError.operation("Local copy reconciliation unavailable") }
+        defer { localFree(pointer) }
+        let result = try JSONDecoder().decode(LocalJobEnvelope.self, from: Data(String(cString: pointer).utf8))
+        guard result.ok, let data = result.data else {
+            throw StorageError.operation(result.error ?? "Local copy reconciliation failed")
+        }
+        if data.reconciled == true || data.status == "completed" {
+            copyReconciliationJobIDs = []
+            refresh()
+        } else {
+            copyReconciliationJobIDs = [jobID]
+        }
+    }
+
     /// Find only UNKNOWN local-copy Jobs bound to this selected destination
     /// root and connection. This is an inventory request; it does not inspect
     /// files or repeat a copy.
@@ -551,6 +626,36 @@ struct LocalCopyPreviewRequest: Equatable {
         } catch {
             self.error = error.localizedDescription
         }
+    }
+
+    private func findFileCopyReconciliations(
+        connectionID: String, databasePath: String, registryPath: String
+    ) throws {
+        guard let root else { return }
+        guard !connectionID.isEmpty,
+              boundConnectionID == nil || boundConnectionID == connectionID
+        else {
+            throw StorageError.operation("Выберите папку для текущего локального подключения")
+        }
+        let pointer = databasePath.withCString { database in
+            registryPath.withCString { registry in
+                root.withCString { root in
+                    connectionID.withCString { connection in
+                        listLocalFileCopyReconciliations(database, registry, root, connection)
+                    }
+                }
+            }
+        }
+        guard let pointer else { throw StorageError.operation("Local copy reconciliation inventory unavailable") }
+        defer { localFree(pointer) }
+        let result = try JSONDecoder().decode(
+            LocalEnvelope<[LocalReconciliationCandidate]>.self,
+            from: Data(String(cString: pointer).utf8)
+        )
+        guard result.ok, let candidates = result.data else {
+            throw StorageError.operation(result.error ?? "Local copy reconciliation inventory failed")
+        }
+        copyReconciliationJobIDs = candidates.map(\.job_id)
     }
 
     func findDirectoryReconciliations(connectionID: String, databasePath: String, registryPath: String) throws {

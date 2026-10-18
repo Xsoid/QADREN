@@ -18,7 +18,9 @@ struct LocalWorkspaceTests {
         let otherConnection = try StorageRegistryBridge.addLocalComputer(
             name: "Other Local", databasePath: registry
         )
-        workspace.selectRoot(root.path, connectionID: connection)
+        workspace.selectRoot(
+            root.path, connectionID: connection, databasePath: database, registryPath: registry
+        )
         let createdJobID = try workspace.createDirectory(
             named: "created", connectionID: connection, databasePath: database, registryPath: registry
         )
@@ -100,7 +102,9 @@ struct LocalWorkspaceTests {
                 NSLocalizedDescriptionKey: "connection switch retained the previous root state"
             ])
         }
-        workspace.selectRoot(root.path, connectionID: otherConnection)
+        workspace.selectRoot(
+            root.path, connectionID: otherConnection, databasePath: database, registryPath: registry
+        )
         let blocked = try workspace.createDirectory(
             named: "blocked", connectionID: connection, databasePath: database, registryPath: registry
         )
@@ -112,7 +116,9 @@ struct LocalWorkspaceTests {
             ])
         }
 
-        workspace.selectRoot(root.path, connectionID: connection)
+        workspace.selectRoot(
+            root.path, connectionID: connection, databasePath: database, registryPath: registry
+        )
 
         do {
             try workspace.createDirectory(
@@ -132,8 +138,12 @@ struct LocalWorkspaceTests {
         try Data("payload".utf8).write(to: previewSourceRoot.appendingPathComponent("report.txt"))
         let previewSource = LocalWorkspace()
         let previewDestination = LocalWorkspace()
-        previewSource.selectRoot(previewSourceRoot.path, connectionID: connection)
-        previewDestination.selectRoot(previewDestinationRoot.path, connectionID: otherConnection)
+        previewSource.selectRoot(
+            previewSourceRoot.path, connectionID: connection, databasePath: database, registryPath: registry
+        )
+        previewDestination.selectRoot(
+            previewDestinationRoot.path, connectionID: otherConnection, databasePath: database, registryPath: registry
+        )
         previewSource.setSelected("report.txt", isSelected: true)
         guard previewSource.selectedRegularFilePaths == ["report.txt"] else {
             throw NSError(domain: "QADRENTests", code: 13, userInfo: [NSLocalizedDescriptionKey: "preview did not use the selected regular file"])
@@ -177,7 +187,10 @@ struct LocalWorkspaceTests {
         }
         let replacementDestination = root.appendingPathComponent("preview-replacement", isDirectory: true)
         try FileManager.default.createDirectory(at: replacementDestination, withIntermediateDirectories: false)
-        previewDestination.selectRoot(replacementDestination.path, connectionID: otherConnection)
+        previewDestination.selectRoot(
+            replacementDestination.path, connectionID: otherConnection,
+            databasePath: database, registryPath: registry
+        )
         guard !previewRequest.isCurrent(source: previewSource, destination: previewDestination) else {
             throw NSError(domain: "QADRENTests", code: 17, userInfo: [NSLocalizedDescriptionKey: "preview remained valid after destination root changed"])
         }
