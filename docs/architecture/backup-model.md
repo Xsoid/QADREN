@@ -25,7 +25,7 @@ QADREN manages the transfer and one-way/two-way synchronization of files between
 - A disabled Scenario prohibits automatic triggers but allows manual launch. When disabling, the user chooses to: terminate active Jobs or pause safely. When deleting: safe stop and confirmation from the Worker.
 - Scenario changes apply only to future Jobs. Worker reassignment occurs only after confirmation that the previous execution has stopped. Forced removal of a Worker leaves undefined scenarios locked.
 - The Worker saves a local pause across reboots until manual resumption. The Controller can store commands for an offline Worker, but "sent" is not equal to "applied".
-- After a failure, safe operations resume automatically; ambiguous operations require user decision.
+- After a failure, automatically reconcile ambiguous results using non-mutating checks. Mark verified outcomes when supported by evidence, and retain `UNKNOWN` when inconclusive. Do not blindly repeat destructive effects. New destructive choices require human decisions.
 
 ## Adapters
 
@@ -38,8 +38,8 @@ QADREN manages the transfer and one-way/two-way synchronization of files between
 
 ## Security and History
 
-- QADREN **does not initiate the downloading of file content to the main MacBook without prior explicit consent for a specific operation**, including checks and recovery. Metadata is allowed. System iCloud/other applications are not restricted.
-- Deletions/overwrites/mass operations are checked for danger; ambiguities are blocked until resolved; use the provider's trash where available; there is no internal versioning system/trash.
+- QADREN automatically reads file content required by an enabled/requested operation, including possible File Provider materialization on the main MacBook. No separate read or hydration consent is needed. Do not prefetch unrelated files; do not interfere with normal macOS/iCloud operations.
+- Show the affected scope and request approval for replacement or deletion outside an exact preapproved rule. A mass-deletion proposal needs explicit confirmation of the proposed set. If QADREN cannot constrain an operation to selected files, disclose the actual possible broader effect. Use provider trash where available; QADREN has no internal content-versioning system or trash.
 - Result data distinguishes between Worker report, provider confirmation, and actually verified integrity; do not claim a recovery guarantee without a backup version.
 - Job/Event history has a configurable cleanup period, but unfinished states awaiting confirmation, unsent events, and service history necessary for correct synchronization are not deleted.
 
