@@ -564,7 +564,7 @@ private struct ScenariosSettingsView: View {
             return "Сценарий использует Яндекс Диск и отложен до P3. Его запуск, изменение и расписания недоступны; запись сохранена локально."
         }
         return scenario.enabled
-            ? "Можно проверить план только по метаданным. Запуск и передача файлов пока недоступны."
+            ? "Проверьте план по метаданным, затем подтвердите отдельный перенос или пакет обычных действий. Конфликты обрабатываются отдельно."
             : "Автоматические триггеры для этого сценария выключены."
     }
 
@@ -597,6 +597,7 @@ private struct ScenarioDryRunView: View {
     @State private var pendingConflictDelete: ScenarioConflictTask?
     @State private var pendingBatch: [ScenarioPlanItem] = []
     @State private var pendingBatchKind: String?
+    @State private var activeBatch: ScenarioBatchProgress?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -644,12 +645,27 @@ private struct ScenarioDryRunView: View {
                             Button("Создать все: \(creates.count)") {
                                 pendingBatch = creates; pendingBatchKind = "create"
                             }
+                            .disabled(activeBatch != nil)
                         }
                         if !updates.isEmpty {
                             Button("Заменить все: \(updates.count)", role: .destructive) {
                                 pendingBatch = updates; pendingBatchKind = "update"
                             }
+                            .disabled(activeBatch != nil)
                         }
+                    }
+                }
+                if let activeBatch {
+                    GroupBox("Выполнение пакета") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ProgressView(value: Double(activeBatch.completed), total: Double(activeBatch.total))
+                            Text("\(activeBatch.completed) из \(activeBatch.total) · \(activeBatch.currentPath)")
+                                .font(.caption.monospaced())
+                            Text("Обычные переносы продолжаются при ошибке одного файла. Очередь конфликтов работает отдельно.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
                 List(plan) { item in
@@ -667,10 +683,12 @@ private struct ScenarioDryRunView: View {
                         if item.action.kind == "create" {
                             Button("Создать копию") { pendingCreate = item }
                                 .buttonStyle(.bordered)
+                                .disabled(activeBatch != nil)
                         }
                         if item.action.kind == "update" {
                             Button("Заменить файл", role: .destructive) { pendingUpdate = item }
                                 .buttonStyle(.bordered)
+                                .disabled(activeBatch != nil)
                         }
                         if item.action.kind == "conflict" || item.action.kind == "delete_requires_decision" {
                             Button("Добавить в очередь конфликтов") { queueConflict(item) }
@@ -749,7 +767,7 @@ private struct ScenarioDryRunView: View {
                 executePendingBatch()
             }
         } message: {
-            Text("Будет выполнено: \(pendingBatch.count).\n\n\(pendingBatch.map(\\.relative_path).joined(separator: "\n"))\n\nДля каждого файла QADREN создаст отдельный Job и повторно проверит его условия. Конфликтные задачи в этот пакет не входят.")
+            Text("Будет выполнено: \(pendingBatch.count).\n\n\(pendingBatch.map(\.relative_path).joined(separator: "\n"))\n\nДля каждого файла QADREN создаст отдельный Job и повторно проверит его условия. Конфликтные задачи в этот пакет не входят.")
         }
     }
 
@@ -856,22 +874,38 @@ private struct ScenarioDryRunView: View {
         let kind = pendingBatchKind
         pendingBatch = []
         pendingBatchKind = nil
-        var failures: [String] = []
-        for item in items {
-            do {
-                if kind == "create" {
-                    try StorageRegistryBridge.executeScenarioCreate(scenario: scenario, item: item)
-                } else {
-                    try StorageRegistryBridge.executeScenarioUpdate(scenario: scenario, item: item)
+        guard !items.isEmpty, (kind == "create" || kind == "update") else { return }
+        let batchScenario = scenario
+        activeBatch = ScenarioBatchProgress(
+            total: items.count, completed: 0, currentPath: items[0].relative_path
+        )
+        Task.detached(priority: .userInitiated) {
+            var failures: [String] = []
+            for (offset, item) in items.enumerated() {
+                await MainActor.run {
+                    activeBatch = ScenarioBatchProgress(
+                        total: items.count, completed: offset, currentPath: item.relative_path
+                    )
                 }
-            } catch {
-                failures.append(item.relative_path)
+                do {
+                    if kind == "create" {
+                        try StorageRegistryBridge.executeScenarioCreate(scenario: batchScenario, item: item)
+                    } else {
+                        try StorageRegistryBridge.executeScenarioUpdate(scenario: batchScenario, item: item)
+                    }
+                } catch {
+                    failures.append(item.relative_path)
+                }
+            }
+            let finishedFailures = failures
+            await MainActor.run {
+                activeBatch = nil
+                if !finishedFailures.isEmpty {
+                    error = "Не удалось выполнить файлов: \(finishedFailures.joined(separator: ", ")). Остальные элементы пакета были обработаны."
+                }
+                loadPlan()
             }
         }
-        if !failures.isEmpty {
-            error = "Не удалось выполнить файлов: \(failures.joined(separator: ", ")). Остальные элементы пакета были обработаны."
-        }
-        loadPlan()
     }
 
     private func executePendingCreate() {
@@ -916,6 +950,12 @@ private struct ScenarioDryRunView: View {
         default: return "без действия"
         }
     }
+}
+
+private struct ScenarioBatchProgress {
+    let total: Int
+    let completed: Int
+    let currentPath: String
 }
 
 private struct ScenarioConflictTaskView: View {
