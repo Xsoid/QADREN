@@ -749,7 +749,7 @@ private struct ScenarioDryRunView: View {
                 executePendingBatch()
             }
         } message: {
-            Text("Будет выполнено: \(pendingBatch.count). Для каждого файла QADREN создаст отдельный Job и повторно проверит его условия. Конфликтные задачи в этот пакет не входят.")
+            Text("Будет выполнено: \(pendingBatch.count).\n\n\(pendingBatch.map(\\.relative_path).joined(separator: "\n"))\n\nДля каждого файла QADREN создаст отдельный Job и повторно проверит его условия. Конфликтные задачи в этот пакет не входят.")
         }
     }
 
