@@ -1202,6 +1202,7 @@ private struct ScenarioEditorView: View {
     @State private var rightRoot = "/"
     @State private var direction = "left_to_right"
     @State private var error: String?
+    @State private var folderSelection: ScenarioEndpointSide?
 
     var body: some View {
         ScrollView {
@@ -1237,11 +1238,13 @@ private struct ScenarioEditorView: View {
                 HStack(alignment: .top, spacing: 16) {
                     ScenarioEndpointPicker(
                         role: "Источник", symbol: "arrow.right.circle",
-                        connections: connections, selection: $leftID, root: $leftRoot
+                        connections: connections, selection: $leftID, root: $leftRoot,
+                        chooseFolder: { folderSelection = .source }
                     )
                     ScenarioEndpointPicker(
                         role: "Назначение", symbol: "arrow.left.circle",
-                        connections: connections, selection: $rightID, root: $rightRoot
+                        connections: connections, selection: $rightID, root: $rightRoot,
+                        chooseFolder: { folderSelection = .destination }
                     )
                 }
                 Text("Создание сохраняет только конфигурацию. Передача файлов начинается позднее, только из проверенного плана и после отдельного подтверждения.")
@@ -1265,6 +1268,17 @@ private struct ScenarioEditorView: View {
                 rightID = first.id
             }
         }
+        .sheet(item: $folderSelection) { side in
+            ScenarioFolderBrowserSheet(
+                role: side.title,
+                initialRoot: side == .source ? leftRoot : rightRoot
+            ) { selectedRoot in
+                switch side {
+                case .source: leftRoot = selectedRoot
+                case .destination: rightRoot = selectedRoot
+                }
+            }
+        }
     }
 
     private var canCreate: Bool {
@@ -1279,13 +1293,26 @@ private struct ScenarioEditorView: View {
     }
 }
 
+private enum ScenarioEndpointSide: String, Identifiable {
+    case source, destination
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .source: "папка-источник"
+        case .destination: "папка-назначение"
+        }
+    }
+}
+
 private struct ScenarioEndpointPicker: View {
     let role: String
     let symbol: String
     let connections: [StorageEntry]
     @Binding var selection: String
     @Binding var root: String
-    @State private var error: String?
+    let chooseFolder: () -> Void
 
     var body: some View {
         GroupBox {
@@ -1299,7 +1326,6 @@ private struct ScenarioEndpointPicker: View {
                 .pickerStyle(.menu)
                 .onChange(of: selection) { _ in
                     root = "/"
-                    error = nil
                 }
                 VStack(alignment: .leading, spacing: 5) {
                     Text("Корневая папка").font(.caption).foregroundStyle(.secondary)
@@ -1309,29 +1335,93 @@ private struct ScenarioEndpointPicker: View {
                         .lineLimit(2)
                         .help(root)
                 }
-                Button("Выбрать папку…", systemImage: "folder") { chooseLocalFolder() }
+                Button("Открыть браузер папок", systemImage: "folder") { chooseFolder() }
                 Text("Файлы не читаются и не передаются при выборе папки.")
                     .font(.caption).foregroundStyle(.secondary)
-                if let error { Text(error).font(.caption).foregroundStyle(.orange) }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
+}
 
-    private func chooseLocalFolder() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        guard let window = NSApp.keyWindow ?? NSApp.mainWindow else {
-            error = "Не удалось открыть окно выбора папки. Повторите действие из окна Настроек."
-            return
+private struct ScenarioFolderBrowserSheet: View {
+    let role: String
+    let initialRoot: String
+    let select: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var workspace = LocalWorkspace()
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Выберите (role)").font(.title2.bold())
+                    Text("Этот браузер читает только имена, типы и размеры. Файлы не открываются.")
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Отмена", role: .cancel) { dismiss() }
+                Button("Использовать эту папку") {
+                    select(workspace.selectedDirectory ?? initialRoot)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding(20)
+
+            Divider()
+
+            HStack(spacing: 10) {
+                Button("Вверх", systemImage: "chevron.up") { workspace.up() }
+                    .disabled(workspace.relativePath.isEmpty)
+                Text(workspace.selectedDirectory ?? initialRoot)
+                    .font(.callout.monospaced())
+                    .lineLimit(1)
+                    .textSelection(.enabled)
+                Spacer()
+                Text("Выберите текущую папку после перехода в неё.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 20).padding(.vertical, 12)
+
+            List(workspace.entries) { entry in
+                Button {
+                    guard entry.is_directory else { return }
+                    workspace.open(entry)
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: entry.is_directory ? "folder.fill" : "doc")
+                            .foregroundStyle(entry.is_directory ? Color.accentColor : Color.secondary)
+                        Text(entry.name)
+                        Spacer()
+                        if !entry.is_directory {
+                            Text(ByteCountFormatter.string(fromByteCount: Int64(clamping: entry.size), countStyle: .file))
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Image(systemName: "chevron.right").foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(!entry.is_directory)
+            }
+            .listStyle(.inset)
+            .overlay {
+                if workspace.entries.isEmpty && workspace.error == nil {
+                    SettingsEmptyState(
+                        title: "Папка пуста",
+                        detail: "Выберите эту папку или перейдите выше.",
+                        symbol: "folder"
+                    )
+                }
+            }
+            if let error = workspace.error {
+                SettingsNotice(text: error, symbol: "exclamationmark.triangle")
+                    .padding(16)
+            }
         }
-        panel.beginSheetModal(for: window) { response in
-            guard response == .OK, let url = panel.url else { return }
-            root = url.path
-            error = nil
-        }
+        .frame(minWidth: 820, minHeight: 560)
+        .onAppear { workspace.selectRoot(initialRoot) }
     }
 }
 
