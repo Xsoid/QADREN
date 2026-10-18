@@ -56,7 +56,7 @@ Do not create empty directories or a separate file for every icon; the actual st
 
 ## 4. Mandatory Security UX Invariants
 
-- Do not download content to the primary MacBook via QADREN without separate explicit scoped consent. Browse/list/stat/metadata shall not include content.
+- Do not interrupt a configured/requested file read with a download or File Provider hydration confirmation. Such reads may transparently materialize content; do not prefetch unrelated files. Browse/list/stat metadata views remain content-free unless an actual file read is required.
 - The UI shall not confirm verified success without corresponding Rust evidence. UNKNOWN shall not have unconditional retry. Success of a Yandex API request is not unconditional proof of full delivery and integrity.
 - Distinguish storages/jobs with the same display name by actual connection_id/Job ID.
 - Do not delete user files via remove connection. Perform local credential cleanup with recoverability.
@@ -109,13 +109,15 @@ GitHub Issue review on 2026-10-18 found that Issue #26, the native UI acceptance
 | Fresh install, no storage | honest empty state; link to settings, not "all synchronized" |
 | 2 Yandex connections | separate rows/credentials, no mixed quotas |
 | Job running and 1000 queued | lazy list; progress based on real data only; stable scroll/selection |
-| UNKNOWN after crash | separate color/label semantics, read-only inspect + reconciliation |
+| UNKNOWN after crash | automatically attempt read-only reconciliation after restart; show the verified result or a truthful persistent UNKNOWN state if inconclusive, without blind mutation retry |
 | iCloud out of scope | iCloud is absent from the wizard and active actions; no connection buttons, entitlement probes, or fake quotas. If legacy data contains an iCloud connection, display as disabled/unsupported without I/O |
 | Auth revoked / no network | stale timestamp + reason; not green "connected" |
 | Global filter excludes critical job | global attention remains visible |
 | Edit grid, resize, undo, close/open | deterministic layout and persistence, no overlap |
 | Two independent dashboards | independent local layouts, one execution state |
-| Request content preview/download on primary MacBook | explicit scoped consent before QADREN-initiated read |
+| Requested file content read / File Provider hydration | no extra prompt; transparently read only files needed by the selected or configured action |
+| Destructive replacement / mass deletion | show precise destination or file set and require informed confirmation unless a matching approved scenario rule covers replacement; mass deletion always gets an explicit prompt |
+| Operation exceeds selected files | disclose actual possible scope, do not falsely claim selective action; require approval before broader destructive effect |
 | Close all UI while service running | after G5, Worker continues execution; before G5, show honest limitation |
 | System sleeps/timezone changes | UI reflects real schedule; does not calculate DST via surrogates |
 
