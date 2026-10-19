@@ -105,6 +105,7 @@ struct ScenarioDryRunBridgeTests {
         try FileManager.default.createDirectory(at: leftRoot, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: rightRoot, withIntermediateDirectories: true)
         try Data("metadata only".utf8).write(to: leftRoot.appendingPathComponent("report.txt"))
+        try Data("second file".utf8).write(to: leftRoot.appendingPathComponent("notes.txt"))
         let database = temporary.appendingPathComponent("registry.sqlite3").path
         let leftID = try addConnection(database: database, name: "Left")
         let rightID = try addConnection(database: database, name: "Right")
@@ -119,16 +120,19 @@ struct ScenarioDryRunBridgeTests {
         let rightSnapshot = try StorageRegistryBridge.localScenarioSnapshot(
             root: rightRoot.path, connectionID: rightID, databasePath: database
         )
-        check(leftSnapshot.count == 1, "metadata scan returns the source file")
-        check(leftSnapshot[0].relative_path == "report.txt", "snapshot keeps a relative path")
-        check(leftSnapshot[0].checksum_md5 == nil, "snapshot does not hash file content")
+        check(leftSnapshot.count == 2, "metadata scan returns both source files")
+        check(
+            Set(leftSnapshot.map(\.relative_path)) == Set(["notes.txt", "report.txt"]),
+            "snapshot keeps both relative paths"
+        )
+        check(leftSnapshot.allSatisfy { $0.checksum_md5 == nil }, "snapshot does not hash file content")
         let plan = try StorageRegistryBridge.dryRunScenario(
             id: scenarioID, revision: 1, left: leftSnapshot, right: rightSnapshot,
             databasePath: database
         )
-        check(plan.count == 1, "dry run creates exactly one proposal")
-        check(plan[0].action.kind == "create", "source-only file is a create proposal")
-        check(plan[0].action.from_left == true, "proposal preserves source direction")
+        check(plan.count == 2, "dry run creates one proposal for each source file")
+        check(plan.allSatisfy { $0.action.kind == "create" }, "source-only files are create proposals")
+        check(plan.allSatisfy { $0.action.from_left == true }, "proposals preserve source direction")
         check(!FileManager.default.fileExists(atPath: rightRoot.appendingPathComponent("report.txt").path),
               "dry run does not transfer content")
         let scenario = ScenarioEntry(
@@ -143,19 +147,24 @@ struct ScenarioDryRunBridgeTests {
             revision: 1
         )
         let jobs = temporary.appendingPathComponent("jobs.sqlite3").path
-        try StorageRegistryBridge.executeScenarioCreate(
-            scenario: scenario, item: plan[0], registryPath: database, jobsPath: jobs
-        )
-        let copiedData = try Data(contentsOf: rightRoot.appendingPathComponent("report.txt"))
-        check(
-            copiedData == Data("metadata only".utf8),
-            "approved Scenario create copies exactly the planned file"
-        )
+        for item in plan {
+            try StorageRegistryBridge.executeScenarioCreate(
+                scenario: scenario, item: item, registryPath: database, jobsPath: jobs
+            )
+        }
+        let expectedContent = [
+            "notes.txt": Data("second file".utf8),
+            "report.txt": Data("metadata only".utf8),
+        ]
+        for (relativePath, expectedData) in expectedContent {
+            let copiedData = try Data(contentsOf: rightRoot.appendingPathComponent(relativePath))
+            check(copiedData == expectedData, "approved Scenario creates copy exactly \(relativePath)")
+        }
         let createdJobs = try JobInventory.list(databasePath: jobs)
-        check(createdJobs.count == 1, "Scenario create records one durable Job")
-        check(createdJobs[0].state == "completed", "Scenario create records verified completion")
-        check(createdJobs[0].scenario_id == scenarioID, "Job preserves Scenario identity")
-        check(createdJobs[0].scenario_revision == 1, "Job preserves Scenario revision")
+        check(createdJobs.count == 2, "each Scenario create records a durable Job")
+        check(createdJobs.allSatisfy { $0.state == "completed" }, "Scenario creates record verified completion")
+        check(createdJobs.allSatisfy { $0.scenario_id == scenarioID }, "Jobs preserve Scenario identity")
+        check(createdJobs.allSatisfy { $0.scenario_revision == 1 }, "Jobs preserve Scenario revision")
         let updatedRightSnapshot = try StorageRegistryBridge.localScenarioSnapshot(
             root: rightRoot.path, connectionID: rightID, databasePath: database
         )
@@ -163,8 +172,8 @@ struct ScenarioDryRunBridgeTests {
             id: scenarioID, revision: 1, left: leftSnapshot, right: updatedRightSnapshot,
             databasePath: database
         )
-        check(planAfterCopy.count == 1, "post-copy dry run keeps the tracked path")
-        check(planAfterCopy[0].action.kind == "no_action", "baseline prevents a duplicate copy proposal")
+        check(planAfterCopy.count == 2, "post-copy dry run keeps both tracked paths")
+        check(planAfterCopy.allSatisfy { $0.action.kind == "no_action" }, "baseline prevents duplicate copy proposals")
         let conflictID = try StorageRegistryBridge.queueScenarioConflict(
             scenario: scenario, relativePath: "report.txt", kind: "content",
             left: leftSnapshot[0], right: leftSnapshot[0],
