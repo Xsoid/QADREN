@@ -453,29 +453,43 @@ enum StorageRegistryBridge {
         let _: ScenarioJobStatus = try unwrap(pointer, as: ScenarioJobStatus.self)
     }
 
-    /// Submit one `create` proposal after its separate materialization consent.
-    /// The Core validates the exact immutable Scenario revision and endpoint
-    /// direction before it creates the durable copy Job.
+    /// Submit one approved non-destructive `create` proposal. The Core reads
+    /// only the required source and validates the immutable Scenario revision
+    /// and endpoint direction before it creates the durable copy Job.
     static func executeScenarioCreate(
         scenario: ScenarioEntry, item: ScenarioPlanItem
+    ) throws {
+        try executeScenarioCreate(
+            scenario: scenario,
+            item: item,
+            registryPath: try path,
+            jobsPath: try JobInventory.paths().database
+        )
+    }
+
+    /// Test seam for the Rust-owned execution bridge. Production uses the
+    /// app-owned Registry and JobStore paths above.
+    static func executeScenarioCreate(
+        scenario: ScenarioEntry, item: ScenarioPlanItem,
+        registryPath: String, jobsPath: String
     ) throws {
         guard item.action.kind == "create", let fromLeft = item.action.from_left else {
             throw StorageError.operation("План не разрешает создание этого файла")
         }
-        let registry = try path
-        let jobs = try JobInventory.paths().database
         let sourceRoot = fromLeft ? scenario.left_root : scenario.right_root
         let sourceConnection = fromLeft ? scenario.left_connection_id : scenario.right_connection_id
         let destinationRoot = fromLeft ? scenario.right_root : scenario.left_root
         let destinationConnection = fromLeft ? scenario.right_connection_id : scenario.left_connection_id
         let jobID = "scenario-copy-" + UUID().uuidString.lowercased()
-        let pointer = jobs.withCString { jobs in registry.withCString { registry in scenario.id.withCString { scenarioID in
+        let pointer = jobsPath.withCString { jobs in registryPath.withCString { registry in scenario.id.withCString { scenarioID in
             sourceRoot.withCString { sourceRoot in sourceConnection.withCString { sourceConnection in item.relative_path.withCString { sourceRelative in
                 destinationRoot.withCString { destinationRoot in destinationConnection.withCString { destinationConnection in item.relative_path.withCString { destinationRelative in jobID.withCString { jobID in
                     runLocalScenarioCopyJob(jobs, registry, scenarioID, scenario.revision, sourceRoot, sourceConnection, sourceRelative, destinationRoot, destinationConnection, destinationRelative, jobID)
                 }}}}}}}}
         }}
-        let _: ScenarioJobStatus = try unwrap(pointer, as: ScenarioJobStatus.self)
+        let _: ScenarioJobStatus = try unwrap(
+            pointer, as: ScenarioJobStatus.self, databasePath: registryPath
+        )
     }
 
     /// Submit one `update` proposal after separate materialization consent.

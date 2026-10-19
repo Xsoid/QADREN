@@ -138,10 +138,33 @@ struct ScenarioDryRunBridgeTests {
             left_root: leftRoot.path,
             right_connection_id: rightID,
             right_root: rightRoot.path,
-            direction: "bidirectional",
+            direction: "left_to_right",
             enabled: true,
             revision: 1
         )
+        let jobs = temporary.appendingPathComponent("jobs.sqlite3").path
+        try StorageRegistryBridge.executeScenarioCreate(
+            scenario: scenario, item: plan[0], registryPath: database, jobsPath: jobs
+        )
+        let copiedData = try Data(contentsOf: rightRoot.appendingPathComponent("report.txt"))
+        check(
+            copiedData == Data("metadata only".utf8),
+            "approved Scenario create copies exactly the planned file"
+        )
+        let createdJobs = try JobInventory.list(databasePath: jobs)
+        check(createdJobs.count == 1, "Scenario create records one durable Job")
+        check(createdJobs[0].state == "completed", "Scenario create records verified completion")
+        check(createdJobs[0].scenario_id == scenarioID, "Job preserves Scenario identity")
+        check(createdJobs[0].scenario_revision == 1, "Job preserves Scenario revision")
+        let updatedRightSnapshot = try StorageRegistryBridge.localScenarioSnapshot(
+            root: rightRoot.path, connectionID: rightID, databasePath: database
+        )
+        let planAfterCopy = try StorageRegistryBridge.dryRunScenario(
+            id: scenarioID, revision: 1, left: leftSnapshot, right: updatedRightSnapshot,
+            databasePath: database
+        )
+        check(planAfterCopy.count == 1, "post-copy dry run keeps the tracked path")
+        check(planAfterCopy[0].action.kind == "no_action", "baseline prevents a duplicate copy proposal")
         let conflictID = try StorageRegistryBridge.queueScenarioConflict(
             scenario: scenario, relativePath: "report.txt", kind: "content",
             left: leftSnapshot[0], right: leftSnapshot[0],
