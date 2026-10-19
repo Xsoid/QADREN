@@ -158,7 +158,7 @@ impl Registry {
         }
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 11 {
+        if version > 12 {
             return Err(RegistryError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -344,6 +344,22 @@ impl Registry {
                  ALTER TABLE scenario_conflict_tasks ADD COLUMN right_size INTEGER;
                  ALTER TABLE scenario_conflict_tasks ADD COLUMN right_checksum_md5 TEXT;
                  PRAGMA user_version = 11;
+                 COMMIT;",
+            )?;
+        }
+        if version <= 11 {
+            // This records only the stable identity of a child effect that
+            // has already been selected from a live schedule scan. It is not
+            // a durable multi-file execution plan.
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE schedule_child_jobs (
+                    schedule_job_id TEXT NOT NULL REFERENCES schedule_job_outbox(job_id) ON DELETE RESTRICT,
+                    relative_path TEXT NOT NULL,
+                    job_id TEXT NOT NULL UNIQUE,
+                    PRIMARY KEY(schedule_job_id,relative_path)
+                 );
+                 PRAGMA user_version = 12;
                  COMMIT;",
             )?;
         }
@@ -815,6 +831,88 @@ impl Registry {
             }
         }
         Ok(changed == 1)
+    }
+
+    /// Return the immutable Scenario identity for a Job created from a
+    /// schedule receipt. This remains available after dispatch so the Worker
+    /// can distinguish schedule coordinator Jobs from other queued Jobs.
+    pub fn schedule_job_reference(&self, job_id: &str) -> Result<Option<ScenarioReference>> {
+        self.db
+            .query_row(
+                "SELECT scenario_id,scenario_revision FROM schedule_job_outbox WHERE job_id=?1",
+                [job_id],
+                |row| {
+                    Ok(ScenarioReference {
+                        scenario_id: row.get(0)?,
+                        revision: row.get::<_, i64>(1)? as u64,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Reserve the stable ID for one safe child effect. The row contains no
+    /// file content, source metadata, or execution plan. A restart receives
+    /// the same ID and can therefore observe its existing Job instead of
+    /// replaying the effect under another identity.
+    pub fn reserve_schedule_child_job_id(
+        &self,
+        schedule_job_id: &str,
+        relative_path: &str,
+    ) -> Result<String> {
+        if !valid_sync_path(relative_path) {
+            return Err(RegistryError::InvalidSyncState);
+        }
+        let parent_exists: Option<i64> = self
+            .db
+            .query_row(
+                "SELECT 1 FROM schedule_job_outbox WHERE job_id=?1",
+                [schedule_job_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if parent_exists.is_none() {
+            return Err(RegistryError::NotFound);
+        }
+        if let Some(existing) = self
+            .db
+            .query_row(
+                "SELECT job_id FROM schedule_child_jobs WHERE schedule_job_id=?1 AND relative_path=?2",
+                params![schedule_job_id, relative_path],
+                |row| row.get(0),
+            )
+            .optional()?
+        {
+            return Ok(existing);
+        }
+        for _ in 0..4 {
+            let job_id: String = self.db.query_row(
+                "SELECT 'schedule-copy-' || lower(hex(randomblob(16)))",
+                [],
+                |row| row.get(0),
+            )?;
+            let inserted = self.db.execute(
+                "INSERT OR IGNORE INTO schedule_child_jobs(schedule_job_id,relative_path,job_id)
+                 VALUES(?1,?2,?3)",
+                params![schedule_job_id, relative_path, job_id],
+            )?;
+            if inserted == 1 {
+                return Ok(job_id);
+            }
+            if let Some(existing) = self
+                .db
+                .query_row(
+                    "SELECT job_id FROM schedule_child_jobs WHERE schedule_job_id=?1 AND relative_path=?2",
+                    params![schedule_job_id, relative_path],
+                    |row| row.get(0),
+                )
+                .optional()?
+            {
+                return Ok(existing);
+            }
+        }
+        Err(RegistryError::IntegrityFailed)
     }
 
     /// Enable or disable one schedule without changing its already claimed

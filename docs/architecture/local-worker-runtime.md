@@ -90,7 +90,7 @@ does not invent a healthy status from a process launch attempt.
 
 `qadren-worker` currently acquires the private lock, opens the existing
 Registry and JobStore, stages due schedule receipts, dispatches their pinned
-Jobs, and serves `status`, `poll`, controlled `stop`, `execute_create`,
+Jobs, scans the pinned Local Filesystem roots at run time, and serves `status`, `poll`, controlled `stop`, `execute_create`,
 `execute_replace`, `execute_conflict_replace`, `execute_conflict_delete`,
 `set_scenario_paused`, and `select_conflict_decision`
 over the private socket. The Scenario commands accept one exact
@@ -107,11 +107,17 @@ The macOS bundle includes the executable and the `SMAppService` LaunchAgent
 definition. `QADRENApp` requests registration and reports the system
 registration state without treating it as a health check.
 
-The current foundation does not execute a queued schedule Scenario Job. A
-schedule Job stores its Scenario identity and revision, not a durable
-multi-file execution plan. Do not treat `execute_create` as autonomous
-multi-file schedule execution. The production Swift Scenario `Create` and
-native-confirmed `Update` paths send their exact scope to the Worker and do not
+Each schedule Job remains a coordinator receipt that stores a Scenario identity
+and revision, not a durable multi-file execution plan. At execution time the
+Worker reads only Local Filesystem metadata, composes the existing conservative
+plan, and creates one durable child Job for each safe no-overwrite `Create`.
+An `Update`, deletion, content conflict, or an unavailable metadata proof does
+not change a destination. The Worker saves a durable conflict task and leaves
+the coordinator Job `WAITING_FOR_DECISION` where it has complete observed
+snapshots. A scan or local operation failure marks the coordinator Job failed.
+An UNKNOWN child effect leaves the coordinator UNKNOWN. The Worker does not
+blindly replay it. The production Swift Scenario `Create` and native-confirmed
+`Update` paths send their exact scope to the Worker and do not
 fall back to in-process FFI. If the private socket is unavailable before a
 request is accepted, the UI reports the failure and does not write a file.
 Native-confirmed conflict replacement and deletion also use the Worker. Scenario

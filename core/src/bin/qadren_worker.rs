@@ -4,13 +4,17 @@
 //! private Unix socket is intentionally local-only. It does not expose a
 //! network or remote-Worker protocol.
 
+use qadren_core::confirmation::{Confirmation, EvidenceLevel};
 use qadren_core::job_execution::{
     run_local_scenario_conflict_delete, run_local_scenario_conflict_replace,
     run_local_scenario_file_copy, run_local_scenario_file_replace, LocalFileCopyError,
     LocalFileCopyStatus,
 };
 use qadren_core::jobs::JobStore;
+use qadren_core::local_fs::LocalFilesystem;
+use qadren_core::model::{ConfirmedFileVersion, JobState, ScenarioReference};
 use qadren_core::registry::Registry;
+use qadren_core::scenario_planner::{ObservedFile, PlanAction};
 use qadren_core::schedule_dispatch::dispatch_pending_schedule_jobs;
 use serde::{Deserialize, Serialize};
 use std::env;
@@ -24,6 +28,7 @@ use std::time::{Duration, SystemTime};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(60);
 const POLL_OVERLAP: Duration = Duration::from_secs(90);
+const MAX_SCHEDULE_SCAN_ENTRIES: usize = 10_000;
 
 #[derive(Debug)]
 struct WorkerPaths {
@@ -140,7 +145,278 @@ fn dispatch_due(paths: &WorkerPaths) -> Result<(usize, usize), String> {
     let mut jobs = JobStore::open(&paths.jobs).map_err(|_| "job_store_unavailable".to_string())?;
     let dispatched = dispatch_pending_schedule_jobs(&registry, &mut jobs)
         .map_err(|_| "schedule_dispatch_unavailable".to_string())?;
+    drop(jobs);
+    execute_queued_schedule_jobs(paths, &registry)?;
     Ok((staged, dispatched))
+}
+
+fn observed_files(root: &Path) -> Result<Vec<ObservedFile>, String> {
+    let filesystem =
+        LocalFilesystem::open(root).map_err(|_| "schedule_root_unavailable".to_string())?;
+    filesystem
+        .list_tree(Path::new(""), MAX_SCHEDULE_SCAN_ENTRIES)
+        .map_err(|_| "schedule_scan_unavailable".to_string())
+        .map(|entries| {
+            entries
+                .into_iter()
+                .filter(|(_, entry)| !entry.is_directory)
+                .map(|(path, entry)| ObservedFile {
+                    relative_path: path.to_string_lossy().into_owned(),
+                    object_revision: entry.object_revision,
+                    size: entry.size,
+                    checksum_md5: None,
+                })
+                .collect()
+        })
+}
+
+fn enabled_local_connection(registry: &Registry, connection_id: &str) -> Result<(), String> {
+    let enabled = registry
+        .list()
+        .map_err(|_| "schedule_registry_unavailable".to_string())?
+        .into_iter()
+        .any(|connection| {
+            connection.id == connection_id
+                && connection.enabled
+                && connection.adapter == "local_filesystem"
+        });
+    if enabled {
+        Ok(())
+    } else {
+        Err("schedule_local_connection_unavailable".to_string())
+    }
+}
+
+fn observed_version(files: &[ObservedFile], relative_path: &str) -> Option<ConfirmedFileVersion> {
+    files
+        .iter()
+        .find(|file| file.relative_path == relative_path)
+        .map(|file| ConfirmedFileVersion {
+            object_revision: file.object_revision.clone(),
+            size: file.size,
+            checksum_md5: file.checksum_md5.clone(),
+        })
+}
+
+fn finish_schedule_job(jobs: &mut JobStore, job_id: &str, next: JobState) -> Result<(), String> {
+    jobs.advance(
+        job_id,
+        JobState::Queued,
+        JobState::Running,
+        Confirmation::Unknown,
+    )
+    .map_err(|_| "schedule_job_state_unavailable".to_string())?;
+    jobs.advance(
+        job_id,
+        JobState::Running,
+        next,
+        if next == JobState::Completed {
+            Confirmation::Confirmed(EvidenceLevel::ProviderAcknowledged)
+        } else {
+            Confirmation::Unknown
+        },
+    )
+    .map_err(|_| "schedule_job_state_unavailable".to_string())
+}
+
+/// Execute each queued schedule coordinator once. It scans only metadata at
+/// run time. A new destination is copied through the existing durable Create
+/// executor. Replacements, deletions, and conflicting metadata become durable
+/// conflict tasks and require a later explicit UI decision.
+fn execute_queued_schedule_jobs(paths: &WorkerPaths, registry: &Registry) -> Result<(), String> {
+    let queued = JobStore::open(&paths.jobs)
+        .map_err(|_| "job_store_unavailable".to_string())?
+        .list_jobs()
+        .map_err(|_| "job_store_unavailable".to_string())?
+        .into_iter()
+        .filter(|job| job.state == JobState::Queued);
+    for job in queued {
+        let Some(reference) = registry
+            .schedule_job_reference(&job.id)
+            .map_err(|_| "schedule_registry_unavailable".to_string())?
+        else {
+            continue;
+        };
+        if job.scenario_id.as_deref() != Some(reference.scenario_id.as_str())
+            || job.scenario_revision != Some(reference.revision)
+        {
+            return Err("schedule_job_identity_mismatch".to_string());
+        }
+        let result = execute_schedule_job(paths, registry, &reference, &job.id);
+        let mut jobs =
+            JobStore::open(&paths.jobs).map_err(|_| "job_store_unavailable".to_string())?;
+        match result {
+            Ok(waiting_for_decision) => finish_schedule_job(
+                &mut jobs,
+                &job.id,
+                if waiting_for_decision {
+                    JobState::WaitingForDecision
+                } else {
+                    JobState::Completed
+                },
+            )?,
+            Err(error) if error == "schedule_outcome_unknown" => {
+                finish_schedule_job(&mut jobs, &job.id, JobState::Unknown)?
+            }
+            Err(_) => finish_schedule_job(&mut jobs, &job.id, JobState::Failed)?,
+        }
+    }
+    Ok(())
+}
+
+fn execute_schedule_job(
+    paths: &WorkerPaths,
+    registry: &Registry,
+    reference: &ScenarioReference,
+    schedule_job_id: &str,
+) -> Result<bool, String> {
+    let scenario = registry
+        .get_scenario_revision(&reference.scenario_id, reference.revision)
+        .map_err(|_| "schedule_scenario_unavailable".to_string())?
+        .ok_or_else(|| "schedule_scenario_unavailable".to_string())?;
+    enabled_local_connection(registry, &scenario.left_connection_id)?;
+    enabled_local_connection(registry, &scenario.right_connection_id)?;
+    let left = observed_files(Path::new(&scenario.left_root))?;
+    let right = observed_files(Path::new(&scenario.right_root))?;
+    let plan = registry
+        .plan_scenario_dry_run(reference, &left, &right)
+        .map_err(|_| "schedule_plan_unavailable".to_string())?;
+    let mut waiting_for_decision = false;
+    for item in plan {
+        match item.action {
+            PlanAction::NoAction => {}
+            PlanAction::Create { from_left } => {
+                let (source_root, source_connection, destination_root, destination_connection) =
+                    if from_left {
+                        (
+                            &scenario.left_root,
+                            &scenario.left_connection_id,
+                            &scenario.right_root,
+                            &scenario.right_connection_id,
+                        )
+                    } else {
+                        (
+                            &scenario.right_root,
+                            &scenario.right_connection_id,
+                            &scenario.left_root,
+                            &scenario.left_connection_id,
+                        )
+                    };
+                let status = run_local_scenario_file_copy(
+                    &paths.jobs,
+                    &paths.registry,
+                    &reference.scenario_id,
+                    reference.revision,
+                    Path::new(source_root),
+                    source_connection,
+                    Path::new(&item.relative_path),
+                    Path::new(destination_root),
+                    destination_connection,
+                    Path::new(&item.relative_path),
+                    &registry
+                        .reserve_schedule_child_job_id(schedule_job_id, &item.relative_path)
+                        .map_err(|_| "schedule_child_identity_unavailable".to_string())?,
+                );
+                match status {
+                    Ok(
+                        LocalFileCopyStatus::Completed
+                        | LocalFileCopyStatus::Existing(JobState::Completed),
+                    ) => {}
+                    Ok(LocalFileCopyStatus::Existing(_)) => {
+                        return Err("schedule_child_not_completed".to_string())
+                    }
+                    Err(LocalFileCopyError::OutcomeUnknown(_)) => {
+                        return Err("schedule_outcome_unknown".to_string())
+                    }
+                    Err(LocalFileCopyError::TargetExists) => {
+                        let source = observed_version(
+                            if from_left { &left } else { &right },
+                            &item.relative_path,
+                        );
+                        let destination = observed_version(
+                            if from_left { &right } else { &left },
+                            &item.relative_path,
+                        );
+                        if let (Some(source), Some(destination)) = (source, destination) {
+                            registry
+                                .queue_conflict_task(
+                                    reference,
+                                    &item.relative_path,
+                                    "content",
+                                    Some(from_left),
+                                    Some(&if from_left {
+                                        source.clone()
+                                    } else {
+                                        destination.clone()
+                                    }),
+                                    Some(&if from_left { destination } else { source }),
+                                )
+                                .map_err(|_| "schedule_conflict_unavailable".to_string())?;
+                            waiting_for_decision = true;
+                        } else {
+                            return Err("schedule_plan_stale".to_string());
+                        }
+                    }
+                    Err(_) => {
+                        return Err("schedule_create_unavailable".to_string());
+                    }
+                }
+            }
+            PlanAction::Update { from_left } => {
+                let left_version = observed_version(&left, &item.relative_path)
+                    .ok_or_else(|| "schedule_conflict_unavailable".to_string())?;
+                let right_version = observed_version(&right, &item.relative_path)
+                    .ok_or_else(|| "schedule_conflict_unavailable".to_string())?;
+                registry
+                    .queue_conflict_task(
+                        reference,
+                        &item.relative_path,
+                        "content",
+                        Some(from_left),
+                        Some(&left_version),
+                        Some(&right_version),
+                    )
+                    .map_err(|_| "schedule_conflict_unavailable".to_string())?;
+                waiting_for_decision = true;
+            }
+            PlanAction::Conflict { .. } => {
+                let left_version = observed_version(&left, &item.relative_path)
+                    .ok_or_else(|| "schedule_conflict_unavailable".to_string())?;
+                let right_version = observed_version(&right, &item.relative_path)
+                    .ok_or_else(|| "schedule_conflict_unavailable".to_string())?;
+                registry
+                    .queue_conflict_task(
+                        reference,
+                        &item.relative_path,
+                        "content",
+                        None,
+                        Some(&left_version),
+                        Some(&right_version),
+                    )
+                    .map_err(|_| "schedule_conflict_unavailable".to_string())?;
+                waiting_for_decision = true;
+            }
+            PlanAction::DeleteRequiresDecision { .. } => {
+                let left_version = observed_version(&left, &item.relative_path);
+                let right_version = observed_version(&right, &item.relative_path);
+                registry
+                    .queue_conflict_task(
+                        reference,
+                        &item.relative_path,
+                        "deletion",
+                        None,
+                        left_version.as_ref(),
+                        right_version.as_ref(),
+                    )
+                    .map_err(|_| "schedule_conflict_unavailable".to_string())?;
+                waiting_for_decision = true;
+            }
+            PlanAction::NeedsVerification { .. } => {
+                return Err("schedule_metadata_needs_verification".to_string())
+            }
+        }
+    }
+    Ok(waiting_for_decision)
 }
 
 fn remove_stale_socket(socket: &Path) -> Result<(), String> {
@@ -650,7 +926,10 @@ mod tests {
     #[test]
     fn one_poll_stages_and_dispatches_a_due_scenario_job() {
         let root = root("poll");
-        fs::create_dir_all(&root).unwrap();
+        let left_root = root.join("left");
+        let right_root = root.join("right");
+        fs::create_dir_all(&left_root).unwrap();
+        fs::create_dir_all(&right_root).unwrap();
         let paths = WorkerPaths {
             socket: root.join("worker.sock"),
             registry: root.join("registry.sqlite3"),
@@ -660,7 +939,14 @@ mod tests {
         let left = registry.add("local_filesystem", "Left").unwrap();
         let right = registry.add("local_filesystem", "Right").unwrap();
         let scenario = registry
-            .create_scenario("Documents", &left, "/", &right, "/archive", "left_to_right")
+            .create_scenario(
+                "Documents",
+                &left,
+                left_root.to_str().unwrap(),
+                &right,
+                right_root.to_str().unwrap(),
+                "left_to_right",
+            )
             .unwrap();
         let current = now();
         registry
@@ -682,6 +968,92 @@ mod tests {
                 .len(),
             1
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scheduled_run_scans_roots_copies_new_files_and_queues_existing_file_updates() {
+        let root = root("scheduled-execution");
+        let left_root = root.join("left");
+        let right_root = root.join("right");
+        fs::create_dir_all(&left_root).unwrap();
+        fs::create_dir_all(&right_root).unwrap();
+        fs::write(left_root.join("report.txt"), b"first version").unwrap();
+        let paths = WorkerPaths {
+            socket: root.join("worker.sock"),
+            registry: root.join("registry.sqlite3"),
+            jobs: root.join("jobs.sqlite3"),
+        };
+        let registry = Registry::open(&paths.registry).unwrap();
+        let left = registry.add("local_filesystem", "Left").unwrap();
+        let right = registry.add("local_filesystem", "Right").unwrap();
+        let scenario = registry
+            .create_scenario(
+                "Scheduled",
+                &left,
+                left_root.to_str().unwrap(),
+                &right,
+                right_root.to_str().unwrap(),
+                "left_to_right",
+            )
+            .unwrap();
+        let current = now();
+        registry
+            .create_scenario_schedule(
+                &scenario,
+                "UTC",
+                current.weekday().num_days_from_monday() as u8,
+                current.hour() as u8,
+                current.minute() as u8,
+            )
+            .unwrap();
+        drop(registry);
+
+        assert_eq!(dispatch_due(&paths).unwrap(), (1, 1));
+        assert_eq!(
+            fs::read(right_root.join("report.txt")).unwrap(),
+            b"first version"
+        );
+        let first_jobs = JobStore::open(&paths.jobs).unwrap().list_jobs().unwrap();
+        assert_eq!(first_jobs.len(), 2);
+        assert!(first_jobs
+            .iter()
+            .any(|job| job.id.starts_with("schedule-") && job.state == JobState::Completed));
+        assert!(first_jobs
+            .iter()
+            .any(|job| job.id.starts_with("schedule-copy-") && job.state == JobState::Completed));
+
+        fs::write(left_root.join("report.txt"), b"second version").unwrap();
+        let registry = Registry::open(&paths.registry).unwrap();
+        registry
+            .create_scenario_schedule(
+                &scenario,
+                "UTC",
+                current.weekday().num_days_from_monday() as u8,
+                current.hour() as u8,
+                current.minute() as u8,
+            )
+            .unwrap();
+        drop(registry);
+        assert_eq!(dispatch_due(&paths).unwrap(), (1, 1));
+        assert_eq!(
+            fs::read(right_root.join("report.txt")).unwrap(),
+            b"first version"
+        );
+        let registry = Registry::open(&paths.registry).unwrap();
+        let conflicts = registry
+            .list_conflict_tasks(&ScenarioReference {
+                scenario_id: scenario,
+                revision: 1,
+            })
+            .unwrap();
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].kind, "content");
+        assert_eq!(conflicts[0].state, "pending");
+        let jobs = JobStore::open(&paths.jobs).unwrap().list_jobs().unwrap();
+        assert!(jobs
+            .iter()
+            .any(|job| job.state == JobState::WaitingForDecision));
         fs::remove_dir_all(root).unwrap();
     }
 
