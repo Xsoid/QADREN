@@ -91,7 +91,8 @@ does not invent a healthy status from a process launch attempt.
 `qadren-worker` currently acquires the private lock, opens the existing
 Registry and JobStore, stages due schedule receipts, dispatches their pinned
 Jobs, and serves `status`, `poll`, controlled `stop`, `execute_create`,
-`execute_replace`, `execute_conflict_replace`, and `execute_conflict_delete`
+`execute_replace`, `execute_conflict_replace`, `execute_conflict_delete`,
+`set_scenario_paused`, and `select_conflict_decision`
 over the private socket. The Scenario commands accept one exact
 Scenario revision, connection IDs, roots, relative source and destination
 paths, and Job ID. `execute_create` uses the existing Rust no-overwrite
@@ -113,8 +114,9 @@ multi-file schedule execution. The production Swift Scenario `Create` and
 native-confirmed `Update` paths send their exact scope to the Worker and do not
 fall back to in-process FFI. If the private socket is unavailable before a
 request is accepted, the UI reports the failure and does not write a file.
-Native-confirmed conflict replacement and deletion also use the Worker. Pause,
-resume, decision, and Job status commands still use Swift-to-Rust FFI. Therefore this increment does not yet establish the Issue
+Native-confirmed conflict replacement and deletion also use the Worker. Scenario
+pause and conflict-decision persistence also use the Worker. Mock-only
+pause/resume and read-only Job status remain FFI test and inventory paths. Therefore this increment does not yet establish the Issue
 #23 single-mutation-owner acceptance or the UI-quit execution acceptance.
 
 This foundation does not prove a signed release bundle, service approval,

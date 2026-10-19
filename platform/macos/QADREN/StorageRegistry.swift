@@ -425,6 +425,13 @@ enum StorageRegistryBridge {
     static func selectScenarioConflict(
         id: String, sourceIsLeft: Bool, decision: String, databasePath: String? = nil
     ) throws {
+        if databasePath == nil {
+            try WorkerIPC.updateRegistryControl(WorkerRegistryControlRequest(
+                command: "select_conflict_decision", scenario_id: nil, locally_paused: nil,
+                conflict_id: id, source_is_left: sourceIsLeft, decision: decision
+            ))
+            return
+        }
         let database = try databasePath ?? path
         let source: Int32 = sourceIsLeft ? 1 : 0
         let _: Bool = try database.withCString { database in
@@ -607,6 +614,13 @@ enum StorageRegistryBridge {
     static func setScenarioLocallyPaused(
         scenarioID: String, paused: Bool, databasePath: String? = nil
     ) throws {
+        if databasePath == nil {
+            try WorkerIPC.updateRegistryControl(WorkerRegistryControlRequest(
+                command: "set_scenario_paused", scenario_id: scenarioID, locally_paused: paused,
+                conflict_id: nil, source_is_left: nil, decision: nil
+            ))
+            return
+        }
         let database = try databasePath ?? path
         let _: Bool = try database.withCString { db in
             try scenarioID.withCString { id in

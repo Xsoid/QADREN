@@ -105,6 +105,12 @@ struct Request {
     conflict_id: Option<String>,
     #[serde(default)]
     destructive_consent: Option<bool>,
+    #[serde(default)]
+    locally_paused: Option<bool>,
+    #[serde(default)]
+    source_is_left: Option<bool>,
+    #[serde(default)]
+    decision: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -299,6 +305,39 @@ fn execute_conflict(
     }
 }
 
+fn update_registry_control(
+    paths: &WorkerPaths,
+    request: &Request,
+) -> Result<&'static str, &'static str> {
+    let registry = Registry::open(&paths.registry).map_err(|_| "registry_unavailable")?;
+    match request.command.as_str() {
+        "set_scenario_paused" => {
+            let (Some(id), Some(paused)) = (request.scenario_id.as_deref(), request.locally_paused)
+            else {
+                return Err("invalid_request");
+            };
+            registry
+                .set_scenario_locally_paused(id, paused)
+                .map_err(|_| "scenario_unavailable")?;
+            Ok("updated")
+        }
+        "select_conflict_decision" => {
+            let (Some(id), Some(source_is_left), Some(decision)) = (
+                request.conflict_id.as_deref(),
+                request.source_is_left,
+                request.decision.as_deref(),
+            ) else {
+                return Err("invalid_request");
+            };
+            registry
+                .select_conflict_task(id, Some(source_is_left), decision)
+                .map_err(|_| "conflict_unavailable")?;
+            Ok("updated")
+        }
+        _ => Err("unsupported_command"),
+    }
+}
+
 fn respond(stream: &mut UnixStream, response: &Response<'_>) {
     if let Ok(json) = serde_json::to_string(response) {
         let _ = writeln!(stream, "{json}");
@@ -436,6 +475,28 @@ fn handle_client(mut stream: UnixStream, paths: &WorkerPaths, stop: &mut bool) {
                 },
             ),
         },
+        "set_scenario_paused" | "select_conflict_decision" => {
+            match update_registry_control(paths, &request) {
+                Ok(status) => respond(
+                    &mut stream,
+                    &Response {
+                        ok: true,
+                        status,
+                        staged: None,
+                        dispatched: None,
+                    },
+                ),
+                Err(status) => respond(
+                    &mut stream,
+                    &Response {
+                        ok: false,
+                        status,
+                        staged: None,
+                        dispatched: None,
+                    },
+                ),
+            }
+        }
         "stop" => {
             *stop = true;
             respond(
@@ -840,7 +901,7 @@ mod tests {
         let conflict = registry
             .queue_conflict_task(
                 &ScenarioReference {
-                    scenario_id: scenario,
+                    scenario_id: scenario.clone(),
                     revision: 1,
                 },
                 "report.txt",
@@ -871,6 +932,9 @@ mod tests {
             replacement_consent: None,
             conflict_id: Some(conflict.clone()),
             destructive_consent: Some(false),
+            locally_paused: None,
+            source_is_left: None,
+            decision: None,
         };
         assert_eq!(
             execute_conflict(&paths, &declined, true),
@@ -890,6 +954,83 @@ mod tests {
                 .state("worker-conflict-delete-confirmed")
                 .unwrap(),
             Some(JobState::Completed)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn registry_control_updates_pause_and_selected_conflict_decision() {
+        let root = root("registry-control");
+        let paths = WorkerPaths {
+            socket: root.join("worker.sock"),
+            registry: root.join("registry.sqlite3"),
+            jobs: root.join("jobs.sqlite3"),
+        };
+        let registry = Registry::open(&paths.registry).unwrap();
+        let left = registry.add("local_filesystem", "Left").unwrap();
+        let right = registry.add("local_filesystem", "Right").unwrap();
+        let scenario = registry
+            .create_scenario("Control", &left, "/left", &right, "/right", "left_to_right")
+            .unwrap();
+        let pause = Request {
+            command: "set_scenario_paused".into(),
+            scenario_id: Some(scenario.clone()),
+            locally_paused: Some(true),
+            scenario_revision: None,
+            source_root: None,
+            source_connection_id: None,
+            source_relative_path: None,
+            destination_root: None,
+            destination_connection_id: None,
+            destination_relative_path: None,
+            job_id: None,
+            replacement_consent: None,
+            conflict_id: None,
+            destructive_consent: None,
+            source_is_left: None,
+            decision: None,
+        };
+        assert_eq!(update_registry_control(&paths, &pause), Ok("updated"));
+        assert!(
+            registry
+                .scenario_automation_snapshot(&scenario)
+                .unwrap()
+                .locally_paused
+        );
+        let conflict = registry
+            .queue_conflict_task(
+                &ScenarioReference {
+                    scenario_id: scenario.clone(),
+                    revision: 1,
+                },
+                "report.txt",
+                "deletion",
+                None,
+                None,
+                Some(&ConfirmedFileVersion {
+                    object_revision: None,
+                    size: 1,
+                    checksum_md5: None,
+                }),
+            )
+            .unwrap();
+        let decision = Request {
+            command: "select_conflict_decision".into(),
+            conflict_id: Some(conflict.clone()),
+            source_is_left: Some(true),
+            decision: Some("keep_file".into()),
+            ..pause
+        };
+        assert_eq!(update_registry_control(&paths, &decision), Ok("updated"));
+        assert_eq!(
+            registry
+                .list_conflict_tasks(&ScenarioReference {
+                    scenario_id: scenario,
+                    revision: 1
+                })
+                .unwrap()[0]
+                .state,
+            "completed"
         );
         fs::remove_dir_all(root).unwrap();
     }

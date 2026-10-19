@@ -35,6 +35,15 @@ struct WorkerConflictRequest: Encodable {
     let destructive_consent: Bool
 }
 
+struct WorkerRegistryControlRequest: Encodable {
+    let command: String
+    let scenario_id: String?
+    let locally_paused: Bool?
+    let conflict_id: String?
+    let source_is_left: Bool?
+    let decision: String?
+}
+
 enum WorkerIPCError: Error, LocalizedError {
     case unavailable
     case invalidResponse
@@ -97,6 +106,14 @@ enum WorkerIPC {
             throw WorkerIPCError.invalidResponse
         }
         return response.status
+    }
+
+    static func updateRegistryControl(_ request: WorkerRegistryControlRequest) throws {
+        let payload = try JSONEncoder().encode(request) + Data([0x0a])
+        let response = try send(payload, socketPath: defaultSocketPath())
+        guard response.ok, response.status == "updated" else {
+            throw response.ok ? WorkerIPCError.invalidResponse : WorkerIPCError.rejected(response.status)
+        }
     }
 
     private static func send(_ payload: Data, socketPath: String) throws -> Response {
