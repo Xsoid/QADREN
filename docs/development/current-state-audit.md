@@ -1,6 +1,6 @@
 # QADREN Current-State Audit
 
-**Snapshot date:** 2026-10-18. This document describes the current code and recorded local evidence. It is not a task tracker or a release claim.
+**Snapshot date:** 2026-10-19. This document describes the current code and recorded local evidence. It is not a task tracker or a release claim.
 
 ## Source and Verification Boundary
 
@@ -22,6 +22,23 @@ This audit uses source reading, the local Git history, and recorded local comman
 | Background service | Native windows expose `workerStatus`. | An independent service after UI closure is not verified. |
 | Distribution | `scripts/build-macos.sh` produces an unsigned development bundle. | Signing, notarization, clean installation, restart validation, and release packaging remain incomplete. |
 
+## Native Scenario Execution Coverage
+
+`platform/macos/Tests/ScenarioDryRunBridgeTests.swift` uses UUID-scoped disposable Local Filesystem roots. It calls the production Swift-to-Rust FFI bridge. It does not automate Settings UI controls or use a File Provider item.
+
+| Flow | Recorded native evidence | Current boundary |
+|---|---|---|
+| One-way Create and multiple items | Two source-only files produce two pinned `Create` Jobs. Exact destination bytes, completed Jobs, Scenario revision, and no-action follow-up plan are checked. | This is bridge evidence. It does not prove the detached Settings batch progress UI. |
+| Baseline and one-way Update | Completed Creates have already delivered their idempotent `FileSyncState` baselines. A later source-only change produces `Update`. A declined replacement creates no Job or file effect. A confirmed replacement records one completed Job. | The native alert interaction is not automated. |
+| Alternative content replacement | A selected conflict with current metadata rejects a declined replacement. A confirmed replacement changes only the selected destination, records one Job, and keeps a completed conflict record. | The Settings conflict presentation is not automated. |
+| Alternative deletion | A selected absent-source deletion rejects a declined delete. A confirmed delete removes only the selected destination and records one completed Job. | Mass-deletion presentation is not covered. |
+| Two-way Create and Update | A right-only file creates a `from_left=false` proposal. A later right-only change creates a right-to-left `Update`. The Rust bridge validates the permitted bidirectional endpoint direction. | The fixture covers one file per direction. |
+| Concurrent two-way changes | Two changed endpoints produce `conflict`. The dry run creates no Job and changes no file. | The fixture does not automate a later user decision for this planned conflict. |
+| Negative bridge gates | An unavailable Scenario revision creates no Job or destination file. A disabled Local connection blocks a metadata snapshot before a scan. | Case and Unicode collision evidence is in Core tests, not this native fixture. |
+| UNKNOWN, cancellation, and restart | Core tests cover durable UNKNOWN, cancellation state limits, and read-only reconciliation. | Native Scenario bridge restart, cancellation, and Settings reopen evidence are not recorded. |
+
+The recorded native Scenario fixture passed on `6e596e5`. Run it again on the exact release candidate. Do not treat this matrix as proof of Worker autonomy, File Provider compatibility, or a signed release.
+
 ## Recorded Local Evidence
 
 The initial recorded executable code baseline is commit `f9121b2`. Later rows record newer checked commits.
@@ -42,6 +59,9 @@ The initial recorded executable code baseline is commit `f9121b2`. Later rows re
 | `scripts/test-core.sh` | PASS, 275 tests | Rust format, Clippy, unit, and doc tests on `9a67258` |
 | `scripts/test-macos-storage-removal.sh` | PASS | Native Local connection removal bridge on `9a67258` |
 | `scripts/test-macos-keychain.sh` | PASS | Native Keychain smoke test on `9a67258` |
+| `scripts/test-macos-scenario-dry-run.sh` | PASS | Native one-way/two-way Scenario Create and Update, conflict replacement/delete, stale revision, disabled connection, and concurrent conflict on `6e596e5` |
+| `scripts/test-core.sh` | PASS, 275 tests | Rust Core on `6e596e5` |
+| `scripts/build-macos.sh` | PASS | Unsigned local macOS development bundle on `6e596e5` |
 
 The Rust format gate now passes on `9a67258`. The earlier Core formatting debt is resolved.
 
