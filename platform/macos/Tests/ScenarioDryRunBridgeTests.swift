@@ -253,6 +253,56 @@ struct ScenarioDryRunBridgeTests {
             conflictsAfterReplacement.first { $0.id == replacementConflictID }?.state == "completed",
             "confirmed conflict replacement records completed conflict work"
         )
+        try FileManager.default.removeItem(at: leftRoot.appendingPathComponent("notes.txt"))
+        let deletionLeftSnapshot = try StorageRegistryBridge.localScenarioSnapshot(
+            root: leftRoot.path, connectionID: leftID, databasePath: database
+        )
+        let deletionRightSnapshot = try StorageRegistryBridge.localScenarioSnapshot(
+            root: rightRoot.path, connectionID: rightID, databasePath: database
+        )
+        let deletionConflictID = try StorageRegistryBridge.queueScenarioConflict(
+            scenario: scenario, relativePath: "notes.txt", kind: "deletion",
+            left: nil, right: deletionRightSnapshot.first { $0.relative_path == "notes.txt" },
+            databasePath: database
+        )
+        check(
+            !deletionLeftSnapshot.contains { $0.relative_path == "notes.txt" },
+            "deletion conflict records the selected source as absent"
+        )
+        try StorageRegistryBridge.selectScenarioConflict(
+            id: deletionConflictID, sourceIsLeft: true, decision: "delete_as_source", databasePath: database
+        )
+        do {
+            try StorageRegistryBridge.executeScenarioConflictDelete(
+                id: deletionConflictID, registryPath: database, jobsPath: jobs, consent: false
+            )
+            fatalError("unconfirmed conflict deletion removed a file")
+        } catch {
+            // The deletion remains blocked until the explicit confirmation.
+        }
+        check(
+            FileManager.default.fileExists(atPath: rightRoot.appendingPathComponent("notes.txt").path),
+            "unconfirmed conflict deletion preserves the destination"
+        )
+        let jobsAfterDeclinedDeletion = try JobInventory.list(databasePath: jobs)
+        check(jobsAfterDeclinedDeletion.count == 3, "unconfirmed conflict deletion creates no Job")
+        try StorageRegistryBridge.executeScenarioConflictDelete(
+            id: deletionConflictID, registryPath: database, jobsPath: jobs, consent: true
+        )
+        check(
+            !FileManager.default.fileExists(atPath: rightRoot.appendingPathComponent("notes.txt").path),
+            "confirmed conflict deletion removes the selected destination"
+        )
+        let jobsAfterDeletion = try JobInventory.list(databasePath: jobs)
+        check(jobsAfterDeletion.count == 4, "confirmed conflict deletion records one Job")
+        check(jobsAfterDeletion.last?.state == "completed", "confirmed conflict deletion is verified")
+        let conflictsAfterDeletion = try StorageRegistryBridge.listScenarioConflicts(
+            scenario: scenario, databasePath: database
+        )
+        check(
+            conflictsAfterDeletion.first { $0.id == deletionConflictID }?.state == "completed",
+            "confirmed conflict deletion records completed conflict work"
+        )
         let conflictID = try StorageRegistryBridge.queueScenarioConflict(
             scenario: scenario, relativePath: "report.txt", kind: "content",
             left: leftSnapshot[0], right: leftSnapshot[0],
@@ -261,15 +311,16 @@ struct ScenarioDryRunBridgeTests {
         var conflicts = try StorageRegistryBridge.listScenarioConflicts(
             scenario: scenario, databasePath: database
         )
-        check(conflicts.count == 1, "conflict is recorded in its independent queue")
-        check(conflicts[0].id == conflictID, "queue returns its persistent task identifier")
-        check(conflicts[0].source_is_left == nil, "a conflict has no implicit source")
+        let queuedConflict = conflicts.first { $0.id == conflictID }
+        check(queuedConflict != nil, "conflict is recorded in its independent queue")
+        check(queuedConflict?.source_is_left == nil, "a conflict has no implicit source")
         try StorageRegistryBridge.selectScenarioConflict(
             id: conflictID, sourceIsLeft: false, decision: "skip_transfer", databasePath: database
         )
         conflicts = try StorageRegistryBridge.listScenarioConflicts(scenario: scenario, databasePath: database)
-        check(conflicts[0].source_is_left == false, "the selected source is durable")
-        check(conflicts[0].decision == "skip_transfer", "the chosen policy is durable")
+        let selectedConflict = conflicts.first { $0.id == conflictID }
+        check(selectedConflict?.source_is_left == false, "the selected source is durable")
+        check(selectedConflict?.decision == "skip_transfer", "the chosen policy is durable")
         try setConnectionEnabled(database: database, id: leftID, enabled: false)
         do {
             _ = try StorageRegistryBridge.localScenarioSnapshot(

@@ -452,15 +452,25 @@ enum StorageRegistryBridge {
     }
 
     static func executeScenarioConflictDelete(id: String) throws {
-        let registry = try path
-        let jobs = try JobInventory.paths().database
+        try executeScenarioConflictDelete(
+            id: id, registryPath: try path, jobsPath: try JobInventory.paths().database, consent: true
+        )
+    }
+
+    /// Test seam for an explicitly confirmed destructive conflict deletion.
+    /// Production always passes `true` only after the native confirmation alert.
+    static func executeScenarioConflictDelete(
+        id: String, registryPath: String, jobsPath: String, consent: Bool
+    ) throws {
         let jobID = "scenario-conflict-delete-" + UUID().uuidString.lowercased()
-        let pointer = jobs.withCString { jobs in registry.withCString { registry in
+        let pointer = jobsPath.withCString { jobs in registryPath.withCString { registry in
             id.withCString { id in jobID.withCString { jobID in
-                runLocalScenarioConflictDeleteJob(jobs, registry, id, jobID, true)
+                runLocalScenarioConflictDeleteJob(jobs, registry, id, jobID, consent)
             }}
         }}
-        let _: ScenarioJobStatus = try unwrap(pointer, as: ScenarioJobStatus.self)
+        let _: ScenarioJobStatus = try unwrap(
+            pointer, as: ScenarioJobStatus.self, databasePath: registryPath
+        )
     }
 
     /// Submit one approved non-destructive `create` proposal. The Core reads
