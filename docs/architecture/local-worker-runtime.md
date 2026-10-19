@@ -2,9 +2,10 @@
 
 Status: **accepted implementation contract for Issue #23**. The current
 foundation implements the bundled process, private socket, exclusive start,
-schedule dispatch, and controlled stop. It does not yet migrate all Job
-execution or UI commands. This document defines the Release 1 local process
-boundary. It does not define remote Worker transport or node delegation.
+schedule dispatch, controlled stop, and one pinned Scenario `Create` command.
+It does not yet migrate all Job execution or UI commands. This document
+defines the Release 1 local process boundary. It does not define remote Worker
+transport or node delegation.
 
 ## Decision
 
@@ -23,8 +24,10 @@ bundle is not release evidence for `launchd` registration or restart.
 
 The Worker listens only on a Unix domain socket below the QADREN Application
 Support directory. The directory and socket use the current macOS user account
-and mode `0700` or stricter. The protocol has no TCP listener, HTTP endpoint,
-remote discovery, cloud credential transport, or cross-user access.
+and mode `0700` or stricter. The Worker rejects a socket directory that is a
+symlink, is not a directory, or permits group or other access. The protocol has
+no TCP listener, HTTP endpoint, remote discovery, cloud credential transport,
+or cross-user access.
 
 Each request has one versioned command and one JSON result. The UI reconnects
 after a socket or Worker restart. It must treat a lost response after a
@@ -87,16 +90,23 @@ does not invent a healthy status from a process launch attempt.
 
 `qadren-worker` currently acquires the private lock, opens the existing
 Registry and JobStore, stages due schedule receipts, dispatches their pinned
-Jobs, and serves `status`, `poll`, and controlled `stop` over the private
-socket. The macOS bundle includes the executable and the `SMAppService`
-LaunchAgent definition. `QADRENApp` requests registration and reports the
-system registration state without treating it as a health check.
+Jobs, and serves `status`, `poll`, controlled `stop`, and `execute_create` over
+the private socket. `execute_create` accepts one exact Scenario revision,
+connection IDs, roots, relative source and destination paths, and Job ID. It
+uses the existing Rust no-overwrite Scenario Create executor. That executor
+saves the durable Job and attempt before it writes the selected destination.
+The macOS bundle includes the executable and the `SMAppService` LaunchAgent
+definition. `QADRENApp` requests registration and reports the system
+registration state without treating it as a health check.
 
-The current foundation does not execute the queued Scenario Job. It does not
-yet route UI copy, replacement, deletion, pause, resume, decision, or Job
-status commands through the socket. The existing Swift-to-Rust FFI still owns
-those paths. Therefore this increment does not yet establish the Issue #23
-single-mutation-owner acceptance or the UI-quit execution acceptance.
+The current foundation does not execute a queued schedule Scenario Job. A
+schedule Job stores its Scenario identity and revision, not a durable
+multi-file execution plan. Do not treat `execute_create` as autonomous
+multi-file schedule execution. It does not yet route UI copy, replacement,
+deletion, pause, resume, decision, or Job status commands through the socket.
+The existing Swift-to-Rust FFI still owns those paths. Therefore this increment
+does not yet establish the Issue #23 single-mutation-owner acceptance or the
+UI-quit execution acceptance.
 
 This foundation does not prove a signed release bundle, service approval,
 File Provider behavior, resource consumption, sleep/wake handling, or remote

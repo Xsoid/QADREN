@@ -4,6 +4,9 @@
 //! private Unix socket is intentionally local-only. It does not expose a
 //! network or remote-Worker protocol.
 
+use qadren_core::job_execution::{
+    run_local_scenario_file_copy, LocalFileCopyError, LocalFileCopyStatus,
+};
 use qadren_core::jobs::JobStore;
 use qadren_core::registry::Registry;
 use qadren_core::schedule_dispatch::dispatch_pending_schedule_jobs;
@@ -37,10 +40,21 @@ impl WorkerLock {
         let parent = socket
             .parent()
             .ok_or_else(|| "worker_socket_parent_missing".to_string())?;
+        let parent_existed = parent.exists();
         fs::create_dir_all(parent)
             .map_err(|_| "worker_socket_directory_unavailable".to_string())?;
-        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+        if !parent_existed {
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+                .map_err(|_| "worker_socket_directory_unavailable".to_string())?;
+        }
+        let parent_metadata = fs::symlink_metadata(parent)
             .map_err(|_| "worker_socket_directory_unavailable".to_string())?;
+        if !parent_metadata.file_type().is_dir()
+            || parent_metadata.file_type().is_symlink()
+            || parent_metadata.permissions().mode() & 0o077 != 0
+        {
+            return Err("worker_socket_directory_unsafe".to_string());
+        }
         let lock_path = parent.join("worker.lock");
         let file = OpenOptions::new()
             .create(true)
@@ -65,6 +79,24 @@ impl WorkerLock {
 #[derive(Debug, Deserialize)]
 struct Request {
     command: String,
+    #[serde(default)]
+    scenario_id: Option<String>,
+    #[serde(default)]
+    scenario_revision: Option<u64>,
+    #[serde(default)]
+    source_root: Option<String>,
+    #[serde(default)]
+    source_connection_id: Option<String>,
+    #[serde(default)]
+    source_relative_path: Option<String>,
+    #[serde(default)]
+    destination_root: Option<String>,
+    #[serde(default)]
+    destination_connection_id: Option<String>,
+    #[serde(default)]
+    destination_relative_path: Option<String>,
+    #[serde(default)]
+    job_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -105,6 +137,60 @@ fn remove_stale_socket(socket: &Path) -> Result<(), String> {
         Ok(_) => Err("worker_socket_path_unsafe".to_string()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(_) => Err("worker_socket_unavailable".to_string()),
+    }
+}
+
+fn execute_create(paths: &WorkerPaths, request: &Request) -> Result<&'static str, &'static str> {
+    let (
+        Some(scenario_id),
+        Some(scenario_revision),
+        Some(source_root),
+        Some(source_connection_id),
+        Some(source_relative_path),
+        Some(destination_root),
+        Some(destination_connection_id),
+        Some(destination_relative_path),
+        Some(job_id),
+    ) = (
+        request.scenario_id.as_deref(),
+        request.scenario_revision,
+        request.source_root.as_deref(),
+        request.source_connection_id.as_deref(),
+        request.source_relative_path.as_deref(),
+        request.destination_root.as_deref(),
+        request.destination_connection_id.as_deref(),
+        request.destination_relative_path.as_deref(),
+        request.job_id.as_deref(),
+    )
+    else {
+        return Err("invalid_request");
+    };
+    match run_local_scenario_file_copy(
+        &paths.jobs,
+        &paths.registry,
+        scenario_id,
+        scenario_revision,
+        Path::new(source_root),
+        source_connection_id,
+        Path::new(source_relative_path),
+        Path::new(destination_root),
+        destination_connection_id,
+        Path::new(destination_relative_path),
+        job_id,
+    ) {
+        Ok(LocalFileCopyStatus::Completed) => Ok("completed"),
+        Ok(LocalFileCopyStatus::Existing(_)) => Ok("existing"),
+        Err(LocalFileCopyError::TargetExists) => Err("target_exists"),
+        Err(LocalFileCopyError::ConnectionUnavailable) => Err("local_connection_unavailable"),
+        Err(LocalFileCopyError::ScenarioUnavailable) => Err("scenario_unavailable"),
+        Err(LocalFileCopyError::ScenarioScopeMismatch) => Err("scenario_scope_mismatch"),
+        Err(LocalFileCopyError::CapabilityUnavailable) => Err("local_capability_unavailable"),
+        Err(LocalFileCopyError::VerificationFailed) => Err("verification_failed"),
+        Err(LocalFileCopyError::OutcomeUnknown(_)) => Err("outcome_unknown"),
+        Err(LocalFileCopyError::InvalidRequest) => Err("invalid_request"),
+        Err(LocalFileCopyError::Local(_)) => Err("local_operation_failed"),
+        Err(LocalFileCopyError::Store(_)) => Err("job_store_unavailable"),
+        Err(_) => Err("scenario_create_unavailable"),
     }
 }
 
@@ -160,6 +246,26 @@ fn handle_client(mut stream: UnixStream, paths: &WorkerPaths, stop: &mut bool) {
                 &Response {
                     ok: false,
                     status: &status,
+                    staged: None,
+                    dispatched: None,
+                },
+            ),
+        },
+        "execute_create" => match execute_create(paths, &request) {
+            Ok(status) => respond(
+                &mut stream,
+                &Response {
+                    ok: true,
+                    status,
+                    staged: None,
+                    dispatched: None,
+                },
+            ),
+            Err(status) => respond(
+                &mut stream,
+                &Response {
+                    ok: false,
+                    status,
                     staged: None,
                     dispatched: None,
                 },
@@ -285,13 +391,19 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn root(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "qadren-worker-{name}-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ))
+        let path = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join(format!(
+                "qadren-worker-{name}-{}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        fs::create_dir_all(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        path
     }
 
     #[test]
@@ -391,5 +503,81 @@ mod tests {
         );
         assert_eq!(fs::read(&socket).unwrap(), b"not a socket");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn private_socket_executes_one_pinned_no_overwrite_scenario_create() {
+        let root = root("scenario-create");
+        let source_root = root.join("source");
+        let destination_root = root.join("destination");
+        let socket_directory = std::env::temp_dir().join(format!(
+            "qw-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&socket_directory).unwrap();
+        fs::set_permissions(&socket_directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = socket_directory.join("worker.sock");
+        fs::create_dir_all(&source_root).unwrap();
+        fs::create_dir_all(&destination_root).unwrap();
+        fs::write(source_root.join("report.txt"), b"worker content").unwrap();
+        let paths = WorkerPaths {
+            socket,
+            registry: root.join("registry.sqlite3"),
+            jobs: root.join("jobs.sqlite3"),
+        };
+        let registry = Registry::open(&paths.registry).unwrap();
+        let left = registry.add("local_filesystem", "Left").unwrap();
+        let right = registry.add("local_filesystem", "Right").unwrap();
+        let scenario = registry
+            .create_scenario(
+                "Documents",
+                &left,
+                source_root.to_str().unwrap(),
+                &right,
+                destination_root.to_str().unwrap(),
+                "left_to_right",
+            )
+            .unwrap();
+        drop(registry);
+        let socket = paths.socket.clone();
+        let handle = thread::spawn(move || run(paths, false));
+        for _ in 0..100 {
+            if socket.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let request = serde_json::json!({
+            "command":"execute_create",
+            "scenario_id":scenario,
+            "scenario_revision":1,
+            "source_root":source_root,
+            "source_connection_id":left,
+            "source_relative_path":"report.txt",
+            "destination_root":destination_root,
+            "destination_connection_id":right,
+            "destination_relative_path":"report.txt",
+            "job_id":"worker-scenario-create"
+        });
+        let mut stream = UnixStream::connect(&socket).unwrap();
+        writeln!(stream, "{request}").unwrap();
+        let mut response = String::new();
+        BufReader::new(stream).read_line(&mut response).unwrap();
+        assert!(
+            response.contains(r#""status":"completed"#),
+            "unexpected Worker response: {response}"
+        );
+        assert_eq!(
+            fs::read(destination_root.join("report.txt")).unwrap(),
+            b"worker content"
+        );
+        let mut stop = UnixStream::connect(&socket).unwrap();
+        writeln!(stop, r#"{{"command":"stop"}}"#).unwrap();
+        assert!(handle.join().unwrap().is_ok());
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(socket_directory).unwrap();
     }
 }
