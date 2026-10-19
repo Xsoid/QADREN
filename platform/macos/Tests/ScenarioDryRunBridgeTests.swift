@@ -419,6 +419,56 @@ struct ScenarioDryRunBridgeTests {
         check(jobsAfterTwoWayCreate.count == 6, "two-way Scenario create records one Job")
         check(jobsAfterTwoWayCreate.last?.scenario_id == twoWayScenarioID, "two-way Job preserves Scenario identity")
         check(jobsAfterTwoWayCreate.last?.state == "completed", "two-way Scenario create is verified")
+        try Data("from right updated".utf8).write(to: twoWayRightRoot.appendingPathComponent("right-only.txt"))
+        let twoWayUpdatedLeftSnapshot = try StorageRegistryBridge.localScenarioSnapshot(
+            root: twoWayLeftRoot.path, connectionID: leftID, databasePath: database
+        )
+        let twoWayUpdatedRightSnapshot = try StorageRegistryBridge.localScenarioSnapshot(
+            root: twoWayRightRoot.path, connectionID: rightID, databasePath: database
+        )
+        let twoWayUpdatePlan = try StorageRegistryBridge.dryRunScenario(
+            id: twoWayScenarioID, revision: 1,
+            left: twoWayUpdatedLeftSnapshot, right: twoWayUpdatedRightSnapshot,
+            databasePath: database
+        )
+        guard let twoWayUpdate = twoWayUpdatePlan.first(where: { $0.relative_path == "right-only.txt" }) else {
+            fatalError("right-side change did not keep right-only.txt in the two-way Scenario plan")
+        }
+        check(twoWayUpdate.action.kind == "update", "right-side two-way change is an update proposal")
+        check(twoWayUpdate.action.from_left == false, "two-way update preserves right-to-left direction")
+        do {
+            try StorageRegistryBridge.executeScenarioUpdate(
+                scenario: twoWayScenario, item: twoWayUpdate,
+                registryPath: database, jobsPath: jobs, consent: false
+            )
+            fatalError("unconfirmed two-way Scenario update replaced a file")
+        } catch {
+            // The replacement remains blocked until the explicit confirmation.
+        }
+        let twoWayDestinationAfterDeclinedUpdate = try Data(
+            contentsOf: twoWayLeftRoot.appendingPathComponent("right-only.txt")
+        )
+        check(
+            twoWayDestinationAfterDeclinedUpdate == Data("from right".utf8),
+            "unconfirmed two-way Scenario update preserves the left destination"
+        )
+        let jobsAfterDeclinedTwoWayUpdate = try JobInventory.list(databasePath: jobs)
+        check(jobsAfterDeclinedTwoWayUpdate.count == 6, "unconfirmed two-way Scenario update creates no Job")
+        try StorageRegistryBridge.executeScenarioUpdate(
+            scenario: twoWayScenario, item: twoWayUpdate,
+            registryPath: database, jobsPath: jobs, consent: true
+        )
+        let twoWayDestinationAfterConfirmedUpdate = try Data(
+            contentsOf: twoWayLeftRoot.appendingPathComponent("right-only.txt")
+        )
+        check(
+            twoWayDestinationAfterConfirmedUpdate == Data("from right updated".utf8),
+            "confirmed two-way Scenario update replaces the left destination"
+        )
+        let jobsAfterTwoWayUpdate = try JobInventory.list(databasePath: jobs)
+        check(jobsAfterTwoWayUpdate.count == 7, "confirmed two-way Scenario update records one Job")
+        check(jobsAfterTwoWayUpdate.last?.scenario_id == twoWayScenarioID, "two-way update preserves Scenario identity")
+        check(jobsAfterTwoWayUpdate.last?.state == "completed", "two-way Scenario update is verified")
         try setConnectionEnabled(database: database, id: leftID, enabled: false)
         do {
             _ = try StorageRegistryBridge.localScenarioSnapshot(
