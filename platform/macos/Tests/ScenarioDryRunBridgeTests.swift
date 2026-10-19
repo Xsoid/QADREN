@@ -147,6 +147,31 @@ struct ScenarioDryRunBridgeTests {
             revision: 1
         )
         let jobs = temporary.appendingPathComponent("jobs.sqlite3").path
+        let staleScenario = ScenarioEntry(
+            id: scenarioID,
+            name: scenario.name,
+            left_connection_id: leftID,
+            left_root: leftRoot.path,
+            right_connection_id: rightID,
+            right_root: rightRoot.path,
+            direction: "left_to_right",
+            enabled: true,
+            revision: 2
+        )
+        do {
+            try StorageRegistryBridge.executeScenarioCreate(
+                scenario: staleScenario, item: plan[0], registryPath: database, jobsPath: jobs
+            )
+            fatalError("stale Scenario revision executed a create")
+        } catch {
+            // Rust rejects an unavailable immutable revision before it creates a Job.
+        }
+        check(
+            !FileManager.default.fileExists(atPath: rightRoot.appendingPathComponent(plan[0].relative_path).path),
+            "stale Scenario revision does not write a destination file"
+        )
+        let jobsAfterStaleRevision = try JobInventory.list(databasePath: jobs)
+        check(jobsAfterStaleRevision.isEmpty, "stale Scenario revision creates no Job")
         for item in plan {
             try StorageRegistryBridge.executeScenarioCreate(
                 scenario: scenario, item: item, registryPath: database, jobsPath: jobs
