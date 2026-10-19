@@ -331,14 +331,23 @@ enum StorageRegistryBridge {
     /// Deliver durable Scenario-copy baselines before a dry-run reads them.
     /// This has no adapter effect and never repeats a file copy.
     static func dispatchPendingScenarioCopyBaselines() throws {
-        let registry = try path
-        let jobs = try JobInventory.paths().database
-        let pointer = jobs.withCString { jobs in
-            registry.withCString { registry in
+        _ = try dispatchPendingScenarioCopyBaselines(
+            registryPath: try path, jobsPath: try JobInventory.paths().database
+        )
+    }
+
+    /// Test seam for the idempotent JobStore-to-Registry baseline hand-off.
+    static func dispatchPendingScenarioCopyBaselines(
+        registryPath: String, jobsPath: String
+    ) throws -> Int {
+        let pointer = jobsPath.withCString { jobs in
+            registryPath.withCString { registry in
                 dispatchScenarioCopyBaselines(jobs, registry)
             }
         }
-        let _: ScenarioBaselineDispatchStatus = try unwrap(pointer, as: ScenarioBaselineDispatchStatus.self)
+        return try unwrap(
+            pointer, as: ScenarioBaselineDispatchStatus.self, databasePath: registryPath
+        ).dispatched
     }
 
     /// Produce a read-only plan for the exact stored Scenario revision from
@@ -512,28 +521,43 @@ enum StorageRegistryBridge {
         )
     }
 
-    /// Submit one `update` proposal after separate materialization consent.
+    /// Submit one `update` proposal after explicit replacement confirmation.
     /// Rust binds the replacement to this immutable Scenario revision.
     static func executeScenarioUpdate(
         scenario: ScenarioEntry, item: ScenarioPlanItem
     ) throws {
+        try executeScenarioUpdate(
+            scenario: scenario,
+            item: item,
+            registryPath: try path,
+            jobsPath: try JobInventory.paths().database,
+            consent: true
+        )
+    }
+
+    /// Test seam for a destructive Scenario update. Production passes `true`
+    /// only after the native replacement confirmation alert.
+    static func executeScenarioUpdate(
+        scenario: ScenarioEntry, item: ScenarioPlanItem,
+        registryPath: String, jobsPath: String, consent: Bool
+    ) throws {
         guard item.action.kind == "update", let fromLeft = item.action.from_left else {
             throw StorageError.operation("План не разрешает обновление этого файла")
         }
-        let registry = try path
-        let jobs = try JobInventory.paths().database
         let sourceRoot = fromLeft ? scenario.left_root : scenario.right_root
         let sourceConnection = fromLeft ? scenario.left_connection_id : scenario.right_connection_id
         let destinationRoot = fromLeft ? scenario.right_root : scenario.left_root
         let destinationConnection = fromLeft ? scenario.right_connection_id : scenario.left_connection_id
         let jobID = "scenario-replace-" + UUID().uuidString.lowercased()
-        let pointer = jobs.withCString { jobs in registry.withCString { registry in scenario.id.withCString { scenarioID in
+        let pointer = jobsPath.withCString { jobs in registryPath.withCString { registry in scenario.id.withCString { scenarioID in
             sourceRoot.withCString { sourceRoot in sourceConnection.withCString { sourceConnection in item.relative_path.withCString { sourceRelative in
                 destinationRoot.withCString { destinationRoot in destinationConnection.withCString { destinationConnection in item.relative_path.withCString { destinationRelative in jobID.withCString { jobID in
-                    runLocalScenarioReplaceJob(jobs, registry, scenarioID, scenario.revision, sourceRoot, sourceConnection, sourceRelative, destinationRoot, destinationConnection, destinationRelative, jobID, true)
+                    runLocalScenarioReplaceJob(jobs, registry, scenarioID, scenario.revision, sourceRoot, sourceConnection, sourceRelative, destinationRoot, destinationConnection, destinationRelative, jobID, consent)
                 }}}}}}}}
         }}
-        let _: ScenarioJobStatus = try unwrap(pointer, as: ScenarioJobStatus.self)
+        let _: ScenarioJobStatus = try unwrap(
+            pointer, as: ScenarioJobStatus.self, databasePath: registryPath
+        )
     }
 
     static func listScenarioSchedules(scenarioID: String) throws -> [ScenarioScheduleEntry] {

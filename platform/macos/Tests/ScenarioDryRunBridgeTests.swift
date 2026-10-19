@@ -199,6 +199,56 @@ struct ScenarioDryRunBridgeTests {
         )
         check(planAfterCopy.count == 2, "post-copy dry run keeps both tracked paths")
         check(planAfterCopy.allSatisfy { $0.action.kind == "no_action" }, "baseline prevents duplicate copy proposals")
+        let dispatchedBaselines = try StorageRegistryBridge.dispatchPendingScenarioCopyBaselines(
+            registryPath: database, jobsPath: jobs
+        )
+        check(dispatchedBaselines == 0, "completed Scenario creates already dispatched both durable baselines")
+        try Data("updated report".utf8).write(to: leftRoot.appendingPathComponent("report.txt"))
+        let updateLeftSnapshot = try StorageRegistryBridge.localScenarioSnapshot(
+            root: leftRoot.path, connectionID: leftID, databasePath: database
+        )
+        let updateRightSnapshot = try StorageRegistryBridge.localScenarioSnapshot(
+            root: rightRoot.path, connectionID: rightID, databasePath: database
+        )
+        let updatePlan = try StorageRegistryBridge.dryRunScenario(
+            id: scenarioID, revision: 1, left: updateLeftSnapshot, right: updateRightSnapshot,
+            databasePath: database
+        )
+        guard let reportUpdate = updatePlan.first(where: { $0.relative_path == "report.txt" }) else {
+            fatalError("source-only change did not keep report.txt in the Scenario plan")
+        }
+        check(reportUpdate.action.kind == "update", "changed source file is an update proposal")
+        check(reportUpdate.action.from_left == true, "update proposal preserves source direction")
+        do {
+            try StorageRegistryBridge.executeScenarioUpdate(
+                scenario: scenario, item: reportUpdate, registryPath: database, jobsPath: jobs, consent: false
+            )
+            fatalError("unconfirmed Scenario update replaced a file")
+        } catch {
+            // The replacement remains blocked until the explicit confirmation.
+        }
+        let destinationAfterDeclinedUpdate = try Data(
+            contentsOf: rightRoot.appendingPathComponent("report.txt")
+        )
+        check(
+            destinationAfterDeclinedUpdate == Data("metadata only".utf8),
+            "unconfirmed Scenario update preserves the destination"
+        )
+        let jobsAfterDeclinedUpdate = try JobInventory.list(databasePath: jobs)
+        check(jobsAfterDeclinedUpdate.count == 2, "unconfirmed Scenario update creates no Job")
+        try StorageRegistryBridge.executeScenarioUpdate(
+            scenario: scenario, item: reportUpdate, registryPath: database, jobsPath: jobs, consent: true
+        )
+        let destinationAfterConfirmedUpdate = try Data(
+            contentsOf: rightRoot.appendingPathComponent("report.txt")
+        )
+        check(
+            destinationAfterConfirmedUpdate == Data("updated report".utf8),
+            "confirmed Scenario update replaces the destination"
+        )
+        let jobsAfterUpdate = try JobInventory.list(databasePath: jobs)
+        check(jobsAfterUpdate.count == 3, "confirmed Scenario update records one Job")
+        check(jobsAfterUpdate.last?.state == "completed", "confirmed Scenario update is verified")
         try Data("left replacement".utf8).write(to: leftRoot.appendingPathComponent("report.txt"))
         try Data("right original".utf8).write(to: rightRoot.appendingPathComponent("report.txt"))
         let replacementLeftSnapshot = try StorageRegistryBridge.localScenarioSnapshot(
@@ -232,7 +282,7 @@ struct ScenarioDryRunBridgeTests {
             "unconfirmed conflict replacement preserves the destination"
         )
         let jobsAfterDeclinedReplacement = try JobInventory.list(databasePath: jobs)
-        check(jobsAfterDeclinedReplacement.count == 2, "unconfirmed conflict replacement creates no Job")
+        check(jobsAfterDeclinedReplacement.count == 3, "unconfirmed conflict replacement creates no Job")
         try StorageRegistryBridge.executeScenarioConflictReplace(
             id: replacementConflictID, registryPath: database, jobsPath: jobs, consent: true
         )
@@ -244,7 +294,7 @@ struct ScenarioDryRunBridgeTests {
             "confirmed conflict replacement copies the selected source"
         )
         let jobsAfterReplacement = try JobInventory.list(databasePath: jobs)
-        check(jobsAfterReplacement.count == 3, "confirmed conflict replacement records one Job")
+        check(jobsAfterReplacement.count == 4, "confirmed conflict replacement records one Job")
         check(jobsAfterReplacement.last?.state == "completed", "confirmed conflict replacement is verified")
         let conflictsAfterReplacement = try StorageRegistryBridge.listScenarioConflicts(
             scenario: scenario, databasePath: database
@@ -285,7 +335,7 @@ struct ScenarioDryRunBridgeTests {
             "unconfirmed conflict deletion preserves the destination"
         )
         let jobsAfterDeclinedDeletion = try JobInventory.list(databasePath: jobs)
-        check(jobsAfterDeclinedDeletion.count == 3, "unconfirmed conflict deletion creates no Job")
+        check(jobsAfterDeclinedDeletion.count == 4, "unconfirmed conflict deletion creates no Job")
         try StorageRegistryBridge.executeScenarioConflictDelete(
             id: deletionConflictID, registryPath: database, jobsPath: jobs, consent: true
         )
@@ -294,7 +344,7 @@ struct ScenarioDryRunBridgeTests {
             "confirmed conflict deletion removes the selected destination"
         )
         let jobsAfterDeletion = try JobInventory.list(databasePath: jobs)
-        check(jobsAfterDeletion.count == 4, "confirmed conflict deletion records one Job")
+        check(jobsAfterDeletion.count == 5, "confirmed conflict deletion records one Job")
         check(jobsAfterDeletion.last?.state == "completed", "confirmed conflict deletion is verified")
         let conflictsAfterDeletion = try StorageRegistryBridge.listScenarioConflicts(
             scenario: scenario, databasePath: database
