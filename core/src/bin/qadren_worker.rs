@@ -5,7 +5,8 @@
 //! network or remote-Worker protocol.
 
 use qadren_core::job_execution::{
-    run_local_scenario_file_copy, LocalFileCopyError, LocalFileCopyStatus,
+    run_local_scenario_file_copy, run_local_scenario_file_replace, LocalFileCopyError,
+    LocalFileCopyStatus,
 };
 use qadren_core::jobs::JobStore;
 use qadren_core::registry::Registry;
@@ -97,6 +98,8 @@ struct Request {
     destination_relative_path: Option<String>,
     #[serde(default)]
     job_id: Option<String>,
+    #[serde(default)]
+    replacement_consent: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -194,6 +197,62 @@ fn execute_create(paths: &WorkerPaths, request: &Request) -> Result<&'static str
     }
 }
 
+fn execute_replace(paths: &WorkerPaths, request: &Request) -> Result<&'static str, &'static str> {
+    let (
+        Some(scenario_id),
+        Some(scenario_revision),
+        Some(source_root),
+        Some(source_connection_id),
+        Some(source_relative_path),
+        Some(destination_root),
+        Some(destination_connection_id),
+        Some(destination_relative_path),
+        Some(job_id),
+    ) = (
+        request.scenario_id.as_deref(),
+        request.scenario_revision,
+        request.source_root.as_deref(),
+        request.source_connection_id.as_deref(),
+        request.source_relative_path.as_deref(),
+        request.destination_root.as_deref(),
+        request.destination_connection_id.as_deref(),
+        request.destination_relative_path.as_deref(),
+        request.job_id.as_deref(),
+    )
+    else {
+        return Err("invalid_request");
+    };
+    match run_local_scenario_file_replace(
+        &paths.jobs,
+        &paths.registry,
+        scenario_id,
+        scenario_revision,
+        Path::new(source_root),
+        source_connection_id,
+        Path::new(source_relative_path),
+        Path::new(destination_root),
+        destination_connection_id,
+        Path::new(destination_relative_path),
+        job_id,
+        request.replacement_consent.unwrap_or(false),
+    ) {
+        Ok(LocalFileCopyStatus::Completed) => Ok("completed"),
+        Ok(LocalFileCopyStatus::Existing(_)) => Ok("existing"),
+        Err(LocalFileCopyError::ConsentRequired) => Err("consent_required"),
+        Err(LocalFileCopyError::TargetExists) => Err("target_exists"),
+        Err(LocalFileCopyError::ConnectionUnavailable) => Err("local_connection_unavailable"),
+        Err(LocalFileCopyError::ScenarioUnavailable) => Err("scenario_unavailable"),
+        Err(LocalFileCopyError::ScenarioScopeMismatch) => Err("scenario_scope_mismatch"),
+        Err(LocalFileCopyError::CapabilityUnavailable) => Err("local_capability_unavailable"),
+        Err(LocalFileCopyError::VerificationFailed) => Err("verification_failed"),
+        Err(LocalFileCopyError::OutcomeUnknown(_)) => Err("outcome_unknown"),
+        Err(LocalFileCopyError::InvalidRequest) => Err("invalid_request"),
+        Err(LocalFileCopyError::Local(_)) => Err("local_operation_failed"),
+        Err(LocalFileCopyError::Store(_)) => Err("job_store_unavailable"),
+        Err(_) => Err("scenario_replace_unavailable"),
+    }
+}
+
 fn respond(stream: &mut UnixStream, response: &Response<'_>) {
     if let Ok(json) = serde_json::to_string(response) {
         let _ = writeln!(stream, "{json}");
@@ -252,6 +311,26 @@ fn handle_client(mut stream: UnixStream, paths: &WorkerPaths, stop: &mut bool) {
             ),
         },
         "execute_create" => match execute_create(paths, &request) {
+            Ok(status) => respond(
+                &mut stream,
+                &Response {
+                    ok: true,
+                    status,
+                    staged: None,
+                    dispatched: None,
+                },
+            ),
+            Err(status) => respond(
+                &mut stream,
+                &Response {
+                    ok: false,
+                    status,
+                    staged: None,
+                    dispatched: None,
+                },
+            ),
+        },
+        "execute_replace" => match execute_replace(paths, &request) {
             Ok(status) => respond(
                 &mut stream,
                 &Response {
@@ -506,7 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn private_socket_executes_one_pinned_no_overwrite_scenario_create() {
+    fn private_socket_executes_pinned_scenario_create_and_confirmed_replace() {
         let root = root("scenario-create");
         let source_root = root.join("source");
         let destination_root = root.join("destination");
@@ -573,6 +652,65 @@ mod tests {
         assert_eq!(
             fs::read(destination_root.join("report.txt")).unwrap(),
             b"worker content"
+        );
+        fs::write(source_root.join("report.txt"), b"replacement content").unwrap();
+        let declined_replace = serde_json::json!({
+            "command":"execute_replace",
+            "scenario_id":scenario,
+            "scenario_revision":1,
+            "source_root":source_root,
+            "source_connection_id":left,
+            "source_relative_path":"report.txt",
+            "destination_root":destination_root,
+            "destination_connection_id":right,
+            "destination_relative_path":"report.txt",
+            "job_id":"worker-scenario-replace-declined",
+            "replacement_consent":false
+        });
+        let mut stream = UnixStream::connect(&socket).unwrap();
+        writeln!(stream, "{declined_replace}").unwrap();
+        response.clear();
+        BufReader::new(stream).read_line(&mut response).unwrap();
+        assert!(
+            response.contains(r#""status":"consent_required""#),
+            "unexpected declined replacement response: {response}"
+        );
+        assert_eq!(
+            fs::read(destination_root.join("report.txt")).unwrap(),
+            b"worker content"
+        );
+        let confirmed_replace = serde_json::json!({
+            "command":"execute_replace",
+            "scenario_id":scenario,
+            "scenario_revision":1,
+            "source_root":source_root,
+            "source_connection_id":left,
+            "source_relative_path":"report.txt",
+            "destination_root":destination_root,
+            "destination_connection_id":right,
+            "destination_relative_path":"report.txt",
+            "job_id":"worker-scenario-replace-confirmed",
+            "replacement_consent":true
+        });
+        let mut stream = UnixStream::connect(&socket).unwrap();
+        writeln!(stream, "{confirmed_replace}").unwrap();
+        response.clear();
+        BufReader::new(stream).read_line(&mut response).unwrap();
+        assert!(
+            response.contains(r#""status":"completed""#),
+            "unexpected confirmed replacement response: {response}"
+        );
+        assert_eq!(
+            fs::read(destination_root.join("report.txt")).unwrap(),
+            b"replacement content"
+        );
+        assert_eq!(
+            JobStore::open(&root.join("jobs.sqlite3"))
+                .unwrap()
+                .list_jobs()
+                .unwrap()
+                .len(),
+            2
         );
         let mut stop = UnixStream::connect(&socket).unwrap();
         writeln!(stop, r#"{{"command":"stop"}}"#).unwrap();

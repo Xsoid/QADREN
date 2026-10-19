@@ -534,13 +534,8 @@ enum StorageRegistryBridge {
     static func executeScenarioUpdate(
         scenario: ScenarioEntry, item: ScenarioPlanItem
     ) throws {
-        try executeScenarioUpdate(
-            scenario: scenario,
-            item: item,
-            registryPath: try path,
-            jobsPath: try JobInventory.paths().database,
-            consent: true
-        )
+        let request = try scenarioReplaceRequest(scenario: scenario, item: item, consent: true)
+        _ = try WorkerIPC.executeScenarioReplace(request)
     }
 
     /// Test seam for a destructive Scenario update. Production passes `true`
@@ -549,22 +544,35 @@ enum StorageRegistryBridge {
         scenario: ScenarioEntry, item: ScenarioPlanItem,
         registryPath: String, jobsPath: String, consent: Bool
     ) throws {
-        guard item.action.kind == "update", let fromLeft = item.action.from_left else {
-            throw StorageError.operation("План не разрешает обновление этого файла")
-        }
-        let sourceRoot = fromLeft ? scenario.left_root : scenario.right_root
-        let sourceConnection = fromLeft ? scenario.left_connection_id : scenario.right_connection_id
-        let destinationRoot = fromLeft ? scenario.right_root : scenario.left_root
-        let destinationConnection = fromLeft ? scenario.right_connection_id : scenario.left_connection_id
-        let jobID = "scenario-replace-" + UUID().uuidString.lowercased()
+        let request = try scenarioReplaceRequest(scenario: scenario, item: item, consent: consent)
         let pointer = jobsPath.withCString { jobs in registryPath.withCString { registry in scenario.id.withCString { scenarioID in
-            sourceRoot.withCString { sourceRoot in sourceConnection.withCString { sourceConnection in item.relative_path.withCString { sourceRelative in
-                destinationRoot.withCString { destinationRoot in destinationConnection.withCString { destinationConnection in item.relative_path.withCString { destinationRelative in jobID.withCString { jobID in
-                    runLocalScenarioReplaceJob(jobs, registry, scenarioID, scenario.revision, sourceRoot, sourceConnection, sourceRelative, destinationRoot, destinationConnection, destinationRelative, jobID, consent)
+            request.source_root.withCString { sourceRoot in request.source_connection_id.withCString { sourceConnection in request.source_relative_path.withCString { sourceRelative in
+                request.destination_root.withCString { destinationRoot in request.destination_connection_id.withCString { destinationConnection in request.destination_relative_path.withCString { destinationRelative in request.job_id.withCString { jobID in
+                    runLocalScenarioReplaceJob(jobs, registry, scenarioID, scenario.revision, sourceRoot, sourceConnection, sourceRelative, destinationRoot, destinationConnection, destinationRelative, jobID, request.replacement_consent)
                 }}}}}}}}
         }}
         let _: ScenarioJobStatus = try unwrap(
             pointer, as: ScenarioJobStatus.self, databasePath: registryPath
+        )
+    }
+
+    private static func scenarioReplaceRequest(
+        scenario: ScenarioEntry, item: ScenarioPlanItem, consent: Bool
+    ) throws -> WorkerScenarioReplaceRequest {
+        guard item.action.kind == "update", let fromLeft = item.action.from_left else {
+            throw StorageError.operation("План не разрешает обновление этого файла")
+        }
+        return WorkerScenarioReplaceRequest(
+            scenario_id: scenario.id,
+            scenario_revision: scenario.revision,
+            source_root: fromLeft ? scenario.left_root : scenario.right_root,
+            source_connection_id: fromLeft ? scenario.left_connection_id : scenario.right_connection_id,
+            source_relative_path: item.relative_path,
+            destination_root: fromLeft ? scenario.right_root : scenario.left_root,
+            destination_connection_id: fromLeft ? scenario.right_connection_id : scenario.left_connection_id,
+            destination_relative_path: item.relative_path,
+            job_id: "scenario-replace-" + UUID().uuidString.lowercased(),
+            replacement_consent: consent
         )
     }
 

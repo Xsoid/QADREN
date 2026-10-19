@@ -1,5 +1,5 @@
 #!/bin/bash
-# Compile and run the native Swift-to-Worker Scenario Create bridge test.
+# Compile and run the native Swift-to-Worker Scenario Create and Update bridge test.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"

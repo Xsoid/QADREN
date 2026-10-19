@@ -148,6 +148,54 @@ struct WorkerIPCBridgeTests {
         check(stored.count == 1, "Worker IPC creates one durable Job")
         check(stored.first?.scenario_id == scenario, "Worker IPC Job binds the Scenario identity")
         check(stored.first?.state == "completed", "Worker IPC Job is verified complete")
+
+        try Data("Worker IPC replacement".utf8).write(to: sourceRoot.appendingPathComponent("report.txt"))
+        let declinedReplacement = WorkerScenarioReplaceRequest(
+            scenario_id: scenario,
+            scenario_revision: 1,
+            source_root: sourceRoot.path,
+            source_connection_id: left,
+            source_relative_path: "report.txt",
+            destination_root: destinationRoot.path,
+            destination_connection_id: right,
+            destination_relative_path: "report.txt",
+            job_id: "swift-worker-ipc-replace-declined",
+            replacement_consent: false
+        )
+        do {
+            _ = try WorkerIPC.executeScenarioReplace(declinedReplacement, socketPath: socket)
+            fatalError("Worker replaced a file without native confirmation")
+        } catch WorkerIPCError.rejected("consent_required") {
+            let unchangedBytes = try Data(contentsOf: destinationRoot.appendingPathComponent("report.txt"))
+            check(
+                unchangedBytes == Data("Worker IPC content".utf8),
+                "declined Worker replacement keeps the destination bytes"
+            )
+        }
+
+        let confirmedReplacement = WorkerScenarioReplaceRequest(
+            scenario_id: scenario,
+            scenario_revision: 1,
+            source_root: sourceRoot.path,
+            source_connection_id: left,
+            source_relative_path: "report.txt",
+            destination_root: destinationRoot.path,
+            destination_connection_id: right,
+            destination_relative_path: "report.txt",
+            job_id: "swift-worker-ipc-replace-confirmed",
+            replacement_consent: true
+        )
+        let replacementStatus = try WorkerIPC.executeScenarioReplace(confirmedReplacement, socketPath: socket)
+        check(replacementStatus == "completed", "Worker returns completed Scenario Update status")
+        let replacedBytes = try Data(contentsOf: destinationRoot.appendingPathComponent("report.txt"))
+        check(
+            replacedBytes == Data("Worker IPC replacement".utf8),
+            "confirmed Worker replacement changes the exact destination bytes"
+        )
+        let replaced = try JobInventory.list(databasePath: jobs)
+        check(replaced.count == 2, "confirmed Worker replacement creates one additional durable Job")
+        check(replaced.allSatisfy { $0.scenario_id == scenario && $0.state == "completed" },
+              "Worker replacement Job stays revision-bound and verified complete")
         print("Worker IPC native bridge tests passed")
     }
 }
