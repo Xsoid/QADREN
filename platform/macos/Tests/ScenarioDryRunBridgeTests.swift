@@ -59,7 +59,8 @@ private func addConnection(database: String, name: String) throws -> String {
 }
 
 private func createScenario(
-    database: String, leftID: String, leftRoot: String, rightID: String, rightRoot: String
+    database: String, leftID: String, leftRoot: String, rightID: String, rightRoot: String,
+    direction: String = "left_to_right"
 ) throws -> String {
     try database.withCString { db in
         try "Swift dry-run bridge".withCString { name in
@@ -67,7 +68,7 @@ private func createScenario(
                 try leftRoot.withCString { leftRoot in
                     try rightID.withCString { right in
                         try rightRoot.withCString { rightRoot in
-                            try "left_to_right".withCString { direction in
+                            try direction.withCString { direction in
                                 try decode(
                                     scenarioCreateForTest(
                                         db, name, left, leftRoot, right, rightRoot, direction
@@ -371,6 +372,53 @@ struct ScenarioDryRunBridgeTests {
         let selectedConflict = conflicts.first { $0.id == conflictID }
         check(selectedConflict?.source_is_left == false, "the selected source is durable")
         check(selectedConflict?.decision == "skip_transfer", "the chosen policy is durable")
+        let twoWayLeftRoot = temporary.appendingPathComponent("two-way-left", isDirectory: true)
+        let twoWayRightRoot = temporary.appendingPathComponent("two-way-right", isDirectory: true)
+        try FileManager.default.createDirectory(at: twoWayLeftRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: twoWayRightRoot, withIntermediateDirectories: true)
+        try Data("from right".utf8).write(to: twoWayRightRoot.appendingPathComponent("right-only.txt"))
+        let twoWayScenarioID = try createScenario(
+            database: database, leftID: leftID, leftRoot: twoWayLeftRoot.path,
+            rightID: rightID, rightRoot: twoWayRightRoot.path, direction: "bidirectional"
+        )
+        let twoWayLeftSnapshot = try StorageRegistryBridge.localScenarioSnapshot(
+            root: twoWayLeftRoot.path, connectionID: leftID, databasePath: database
+        )
+        let twoWayRightSnapshot = try StorageRegistryBridge.localScenarioSnapshot(
+            root: twoWayRightRoot.path, connectionID: rightID, databasePath: database
+        )
+        let twoWayPlan = try StorageRegistryBridge.dryRunScenario(
+            id: twoWayScenarioID, revision: 1, left: twoWayLeftSnapshot, right: twoWayRightSnapshot,
+            databasePath: database
+        )
+        check(twoWayPlan.count == 1, "two-way dry run creates one right-only proposal")
+        check(twoWayPlan[0].action.kind == "create", "right-only two-way file is a create proposal")
+        check(twoWayPlan[0].action.from_left == false, "two-way proposal preserves right-to-left direction")
+        let twoWayScenario = ScenarioEntry(
+            id: twoWayScenarioID,
+            name: "Swift two-way bridge",
+            left_connection_id: leftID,
+            left_root: twoWayLeftRoot.path,
+            right_connection_id: rightID,
+            right_root: twoWayRightRoot.path,
+            direction: "bidirectional",
+            enabled: true,
+            revision: 1
+        )
+        try StorageRegistryBridge.executeScenarioCreate(
+            scenario: twoWayScenario, item: twoWayPlan[0], registryPath: database, jobsPath: jobs
+        )
+        let twoWayCopiedData = try Data(
+            contentsOf: twoWayLeftRoot.appendingPathComponent("right-only.txt")
+        )
+        check(
+            twoWayCopiedData == Data("from right".utf8),
+            "two-way Scenario create copies the selected right source to the left root"
+        )
+        let jobsAfterTwoWayCreate = try JobInventory.list(databasePath: jobs)
+        check(jobsAfterTwoWayCreate.count == 6, "two-way Scenario create records one Job")
+        check(jobsAfterTwoWayCreate.last?.scenario_id == twoWayScenarioID, "two-way Job preserves Scenario identity")
+        check(jobsAfterTwoWayCreate.last?.state == "completed", "two-way Scenario create is verified")
         try setConnectionEnabled(database: database, id: leftID, enabled: false)
         do {
             _ = try StorageRegistryBridge.localScenarioSnapshot(
