@@ -199,6 +199,60 @@ struct ScenarioDryRunBridgeTests {
         )
         check(planAfterCopy.count == 2, "post-copy dry run keeps both tracked paths")
         check(planAfterCopy.allSatisfy { $0.action.kind == "no_action" }, "baseline prevents duplicate copy proposals")
+        try Data("left replacement".utf8).write(to: leftRoot.appendingPathComponent("report.txt"))
+        try Data("right original".utf8).write(to: rightRoot.appendingPathComponent("report.txt"))
+        let replacementLeftSnapshot = try StorageRegistryBridge.localScenarioSnapshot(
+            root: leftRoot.path, connectionID: leftID, databasePath: database
+        )
+        let replacementRightSnapshot = try StorageRegistryBridge.localScenarioSnapshot(
+            root: rightRoot.path, connectionID: rightID, databasePath: database
+        )
+        let replacementConflictID = try StorageRegistryBridge.queueScenarioConflict(
+            scenario: scenario, relativePath: "report.txt", kind: "content",
+            left: replacementLeftSnapshot.first { $0.relative_path == "report.txt" },
+            right: replacementRightSnapshot.first { $0.relative_path == "report.txt" },
+            databasePath: database
+        )
+        try StorageRegistryBridge.selectScenarioConflict(
+            id: replacementConflictID, sourceIsLeft: true, decision: "replace_from_source", databasePath: database
+        )
+        do {
+            try StorageRegistryBridge.executeScenarioConflictReplace(
+                id: replacementConflictID, registryPath: database, jobsPath: jobs, consent: false
+            )
+            fatalError("unconfirmed conflict replacement wrote a file")
+        } catch {
+            // The replacement remains blocked until the explicit confirmation.
+        }
+        let destinationAfterDeclinedReplacement = try Data(
+            contentsOf: rightRoot.appendingPathComponent("report.txt")
+        )
+        check(
+            destinationAfterDeclinedReplacement == Data("right original".utf8),
+            "unconfirmed conflict replacement preserves the destination"
+        )
+        let jobsAfterDeclinedReplacement = try JobInventory.list(databasePath: jobs)
+        check(jobsAfterDeclinedReplacement.count == 2, "unconfirmed conflict replacement creates no Job")
+        try StorageRegistryBridge.executeScenarioConflictReplace(
+            id: replacementConflictID, registryPath: database, jobsPath: jobs, consent: true
+        )
+        let destinationAfterConfirmedReplacement = try Data(
+            contentsOf: rightRoot.appendingPathComponent("report.txt")
+        )
+        check(
+            destinationAfterConfirmedReplacement == Data("left replacement".utf8),
+            "confirmed conflict replacement copies the selected source"
+        )
+        let jobsAfterReplacement = try JobInventory.list(databasePath: jobs)
+        check(jobsAfterReplacement.count == 3, "confirmed conflict replacement records one Job")
+        check(jobsAfterReplacement.last?.state == "completed", "confirmed conflict replacement is verified")
+        let conflictsAfterReplacement = try StorageRegistryBridge.listScenarioConflicts(
+            scenario: scenario, databasePath: database
+        )
+        check(
+            conflictsAfterReplacement.first { $0.id == replacementConflictID }?.state == "completed",
+            "confirmed conflict replacement records completed conflict work"
+        )
         let conflictID = try StorageRegistryBridge.queueScenarioConflict(
             scenario: scenario, relativePath: "report.txt", kind: "content",
             left: leftSnapshot[0], right: leftSnapshot[0],

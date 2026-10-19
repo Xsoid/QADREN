@@ -430,15 +430,25 @@ enum StorageRegistryBridge {
     }
 
     static func executeScenarioConflictReplace(id: String) throws {
-        let registry = try path
-        let jobs = try JobInventory.paths().database
+        try executeScenarioConflictReplace(
+            id: id, registryPath: try path, jobsPath: try JobInventory.paths().database, consent: true
+        )
+    }
+
+    /// Test seam for an explicitly confirmed destructive conflict replacement.
+    /// Production always passes `true` only after the native confirmation alert.
+    static func executeScenarioConflictReplace(
+        id: String, registryPath: String, jobsPath: String, consent: Bool
+    ) throws {
         let jobID = "scenario-conflict-replace-" + UUID().uuidString.lowercased()
-        let pointer = jobs.withCString { jobs in registry.withCString { registry in
+        let pointer = jobsPath.withCString { jobs in registryPath.withCString { registry in
             id.withCString { id in jobID.withCString { jobID in
-                runLocalScenarioConflictReplaceJob(jobs, registry, id, jobID, true)
+                runLocalScenarioConflictReplaceJob(jobs, registry, id, jobID, consent)
             }}
         }}
-        let _: ScenarioJobStatus = try unwrap(pointer, as: ScenarioJobStatus.self)
+        let _: ScenarioJobStatus = try unwrap(
+            pointer, as: ScenarioJobStatus.self, databasePath: registryPath
+        )
     }
 
     static func executeScenarioConflictDelete(id: String) throws {
