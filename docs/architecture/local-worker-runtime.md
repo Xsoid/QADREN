@@ -122,6 +122,13 @@ File Provider behavior, resource consumption, sleep/wake handling, or remote
 Worker support. Those require the remaining Issue #23 native fixture and the
 Issue #24 measurements.
 
+The native IPC fixture starts the Worker separately, starts a disposable native
+controller process that submits one Scenario Create, and waits for that
+controller to exit. The fixture then submits and verifies a confirmed
+replacement through the still-running Worker. This proves controller-process
+exit does not stop the direct development Worker. It does not prove a signed
+`SMAppService` registration or a full SwiftUI Quit lifecycle.
+
 ## Rationale
 
 The application-resident timer in `QADRENApp.swift` stops when the process

@@ -69,6 +69,10 @@ private func createScenario(
 @main
 struct WorkerIPCBridgeTests {
     static func main() throws {
+        if CommandLine.arguments.dropFirst().first == "--create-controller" {
+            try runCreateController(arguments: Array(CommandLine.arguments.dropFirst(2)))
+            return
+        }
         guard CommandLine.arguments.count == 2 else {
             throw StorageError.operation("worker executable path is required")
         }
@@ -137,8 +141,15 @@ struct WorkerIPCBridgeTests {
         }
         check(FileManager.default.fileExists(atPath: socket), "Worker socket is available")
 
-        let status = try WorkerIPC.executeScenarioCreate(request, socketPath: socket)
-        check(status == "completed", "Worker returns completed Scenario Create status")
+        let controller = Process()
+        controller.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+        controller.arguments = [
+            "--create-controller", socket, scenario, sourceRoot.path, left,
+            destinationRoot.path, right
+        ]
+        try controller.run()
+        controller.waitUntilExit()
+        check(controller.terminationStatus == 0, "independent controller submits Scenario Create")
         let destinationBytes = try Data(contentsOf: destinationRoot.appendingPathComponent("report.txt"))
         check(
             destinationBytes == Data("Worker IPC content".utf8),
@@ -197,5 +208,19 @@ struct WorkerIPCBridgeTests {
         check(replaced.allSatisfy { $0.scenario_id == scenario && $0.state == "completed" },
               "Worker replacement Job stays revision-bound and verified complete")
         print("Worker IPC native bridge tests passed")
+    }
+
+    private static func runCreateController(arguments: [String]) throws {
+        guard arguments.count == 6 else { throw StorageError.operation("invalid controller arguments") }
+        let status = try WorkerIPC.executeScenarioCreate(
+            WorkerScenarioCreateRequest(
+                scenario_id: arguments[1], scenario_revision: 1,
+                source_root: arguments[2], source_connection_id: arguments[3],
+                source_relative_path: "report.txt", destination_root: arguments[4],
+                destination_connection_id: arguments[5], destination_relative_path: "report.txt",
+                job_id: "swift-worker-ipc-create"
+            ), socketPath: arguments[0]
+        )
+        guard status == "completed" else { throw StorageError.operation("controller did not create Job") }
     }
 }
