@@ -102,11 +102,13 @@ registration state without treating it as a health check.
 The current foundation does not execute a queued schedule Scenario Job. A
 schedule Job stores its Scenario identity and revision, not a durable
 multi-file execution plan. Do not treat `execute_create` as autonomous
-multi-file schedule execution. It does not yet route UI copy, replacement,
-deletion, pause, resume, decision, or Job status commands through the socket.
-The existing Swift-to-Rust FFI still owns those paths. Therefore this increment
-does not yet establish the Issue #23 single-mutation-owner acceptance or the
-UI-quit execution acceptance.
+multi-file schedule execution. The production Swift Scenario `Create` path
+sends its exact scope to the Worker and does not fall back to in-process FFI.
+If the private socket is unavailable, the UI reports the failure and does not
+write a file. Replacement, deletion, pause, resume, decision, and Job status
+commands still use Swift-to-Rust FFI. Therefore this increment does not yet
+establish the Issue #23 single-mutation-owner acceptance or the UI-quit
+execution acceptance.
 
 This foundation does not prove a signed release bundle, service approval,
 File Provider behavior, resource consumption, sleep/wake handling, or remote

@@ -488,12 +488,8 @@ enum StorageRegistryBridge {
     static func executeScenarioCreate(
         scenario: ScenarioEntry, item: ScenarioPlanItem
     ) throws {
-        try executeScenarioCreate(
-            scenario: scenario,
-            item: item,
-            registryPath: try path,
-            jobsPath: try JobInventory.paths().database
-        )
+        let request = try scenarioCreateRequest(scenario: scenario, item: item)
+        _ = try WorkerIPC.executeScenarioCreate(request)
     }
 
     /// Test seam for the Rust-owned execution bridge. Production uses the
@@ -502,22 +498,34 @@ enum StorageRegistryBridge {
         scenario: ScenarioEntry, item: ScenarioPlanItem,
         registryPath: String, jobsPath: String
     ) throws {
-        guard item.action.kind == "create", let fromLeft = item.action.from_left else {
-            throw StorageError.operation("План не разрешает создание этого файла")
-        }
-        let sourceRoot = fromLeft ? scenario.left_root : scenario.right_root
-        let sourceConnection = fromLeft ? scenario.left_connection_id : scenario.right_connection_id
-        let destinationRoot = fromLeft ? scenario.right_root : scenario.left_root
-        let destinationConnection = fromLeft ? scenario.right_connection_id : scenario.left_connection_id
-        let jobID = "scenario-copy-" + UUID().uuidString.lowercased()
+        let request = try scenarioCreateRequest(scenario: scenario, item: item)
         let pointer = jobsPath.withCString { jobs in registryPath.withCString { registry in scenario.id.withCString { scenarioID in
-            sourceRoot.withCString { sourceRoot in sourceConnection.withCString { sourceConnection in item.relative_path.withCString { sourceRelative in
-                destinationRoot.withCString { destinationRoot in destinationConnection.withCString { destinationConnection in item.relative_path.withCString { destinationRelative in jobID.withCString { jobID in
+            request.source_root.withCString { sourceRoot in request.source_connection_id.withCString { sourceConnection in request.source_relative_path.withCString { sourceRelative in
+                request.destination_root.withCString { destinationRoot in request.destination_connection_id.withCString { destinationConnection in request.destination_relative_path.withCString { destinationRelative in request.job_id.withCString { jobID in
                     runLocalScenarioCopyJob(jobs, registry, scenarioID, scenario.revision, sourceRoot, sourceConnection, sourceRelative, destinationRoot, destinationConnection, destinationRelative, jobID)
                 }}}}}}}}
         }}
         let _: ScenarioJobStatus = try unwrap(
             pointer, as: ScenarioJobStatus.self, databasePath: registryPath
+        )
+    }
+
+    private static func scenarioCreateRequest(
+        scenario: ScenarioEntry, item: ScenarioPlanItem
+    ) throws -> WorkerScenarioCreateRequest {
+        guard item.action.kind == "create", let fromLeft = item.action.from_left else {
+            throw StorageError.operation("План не разрешает создание этого файла")
+        }
+        return WorkerScenarioCreateRequest(
+            scenario_id: scenario.id,
+            scenario_revision: scenario.revision,
+            source_root: fromLeft ? scenario.left_root : scenario.right_root,
+            source_connection_id: fromLeft ? scenario.left_connection_id : scenario.right_connection_id,
+            source_relative_path: item.relative_path,
+            destination_root: fromLeft ? scenario.right_root : scenario.left_root,
+            destination_connection_id: fromLeft ? scenario.right_connection_id : scenario.left_connection_id,
+            destination_relative_path: item.relative_path,
+            job_id: "scenario-copy-" + UUID().uuidString.lowercased()
         )
     }
 
