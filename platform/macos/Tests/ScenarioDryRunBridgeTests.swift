@@ -469,6 +469,33 @@ struct ScenarioDryRunBridgeTests {
         check(jobsAfterTwoWayUpdate.count == 7, "confirmed two-way Scenario update records one Job")
         check(jobsAfterTwoWayUpdate.last?.scenario_id == twoWayScenarioID, "two-way update preserves Scenario identity")
         check(jobsAfterTwoWayUpdate.last?.state == "completed", "two-way Scenario update is verified")
+        try Data("left divergent".utf8).write(to: twoWayLeftRoot.appendingPathComponent("right-only.txt"))
+        try Data("right divergent".utf8).write(to: twoWayRightRoot.appendingPathComponent("right-only.txt"))
+        let concurrentLeftSnapshot = try StorageRegistryBridge.localScenarioSnapshot(
+            root: twoWayLeftRoot.path, connectionID: leftID, databasePath: database
+        )
+        let concurrentRightSnapshot = try StorageRegistryBridge.localScenarioSnapshot(
+            root: twoWayRightRoot.path, connectionID: rightID, databasePath: database
+        )
+        let concurrentPlan = try StorageRegistryBridge.dryRunScenario(
+            id: twoWayScenarioID, revision: 1,
+            left: concurrentLeftSnapshot, right: concurrentRightSnapshot,
+            databasePath: database
+        )
+        guard let concurrentItem = concurrentPlan.first(where: { $0.relative_path == "right-only.txt" }) else {
+            fatalError("concurrent two-way change did not keep right-only.txt in the Scenario plan")
+        }
+        check(concurrentItem.action.kind == "conflict", "concurrent two-way changes are not an update proposal")
+        let jobsAfterConcurrentDryRun = try JobInventory.list(databasePath: jobs)
+        check(jobsAfterConcurrentDryRun.count == 7, "concurrent dry run creates no Job")
+        let leftAfterConcurrentDryRun = try Data(
+            contentsOf: twoWayLeftRoot.appendingPathComponent("right-only.txt")
+        )
+        let rightAfterConcurrentDryRun = try Data(
+            contentsOf: twoWayRightRoot.appendingPathComponent("right-only.txt")
+        )
+        check(leftAfterConcurrentDryRun == Data("left divergent".utf8), "concurrent dry run preserves the left file")
+        check(rightAfterConcurrentDryRun == Data("right divergent".utf8), "concurrent dry run preserves the right file")
         try setConnectionEnabled(database: database, id: leftID, enabled: false)
         do {
             _ = try StorageRegistryBridge.localScenarioSnapshot(
