@@ -355,9 +355,8 @@ pub unsafe extern "C" fn qadren_jobs_run_local_directory_create(
     }
 }
 
-/// Execute one explicitly confirmed Local-to-Local file copy. The caller must
-/// pass `consent=true` only after a user approved possible File Provider
-/// materialization for this exact source file.
+/// Execute one requested Local-to-Local file copy. Reading its selected source
+/// can materialize a File Provider item and needs no separate confirmation.
 ///
 /// # Safety
 /// Arguments must be valid, NUL-terminated strings for the duration of call.
@@ -372,7 +371,6 @@ pub unsafe extern "C" fn qadren_jobs_run_local_file_copy(
     destination_connection_id: *const c_char,
     destination_relative: *const c_char,
     job_id: *const c_char,
-    consent: bool,
 ) -> *mut c_char {
     let (
         Some(database_path),
@@ -408,7 +406,6 @@ pub unsafe extern "C" fn qadren_jobs_run_local_file_copy(
         destination_connection_id,
         Path::new(destination_relative),
         job_id,
-        consent,
     ) {
         Ok(crate::job_execution::LocalFileCopyStatus::Completed) => {
             response(json!({"ok":true,"data":{"status":"completed"}}))
@@ -416,8 +413,10 @@ pub unsafe extern "C" fn qadren_jobs_run_local_file_copy(
         Ok(crate::job_execution::LocalFileCopyStatus::Existing(state)) => response(
             json!({"ok":true,"data":{"status":format!("{:?}", state).to_ascii_lowercase(),"existing":true}}),
         ),
+        // `run_local_file_copy` has no consent gate. Keep this exhaustive arm
+        // fail-closed if a future regression returns the shared error variant.
         Err(crate::job_execution::LocalFileCopyError::ConsentRequired) => {
-            response(json!({"ok":false,"error":"consent_required"}))
+            response(json!({"ok":false,"error":"local_operation_failed"}))
         }
         Err(crate::job_execution::LocalFileCopyError::TargetExists) => {
             response(json!({"ok":false,"error":"target_exists"}))
@@ -459,8 +458,7 @@ pub unsafe extern "C" fn qadren_jobs_run_local_file_copy(
 }
 
 /// Execute one explicitly confirmed replacement of an existing Local file.
-/// The caller must pass `consent=true` only after a user approved possible File
-/// Provider materialization for this exact source file.
+/// The consent covers destructive replacement, not the required source read.
 ///
 /// # Safety
 /// Arguments must be valid, NUL-terminated strings for the duration of call.
@@ -580,7 +578,6 @@ pub unsafe extern "C" fn qadren_jobs_run_local_scenario_file_copy(
     destination_connection_id: *const c_char,
     destination_relative: *const c_char,
     job_id: *const c_char,
-    consent: bool,
 ) -> *mut c_char {
     let (
         Some(database_path),
@@ -620,7 +617,6 @@ pub unsafe extern "C" fn qadren_jobs_run_local_scenario_file_copy(
         destination_connection_id,
         Path::new(destination_relative),
         job_id,
-        consent,
     ) {
         Ok(crate::job_execution::LocalFileCopyStatus::Completed) => {
             response(json!({"ok":true,"data":{"status":"completed"}}))
@@ -628,8 +624,10 @@ pub unsafe extern "C" fn qadren_jobs_run_local_scenario_file_copy(
         Ok(crate::job_execution::LocalFileCopyStatus::Existing(state)) => response(
             json!({"ok":true,"data":{"status":format!("{:?}", state).to_ascii_lowercase(),"existing":true}}),
         ),
+        // Scenario create-copy has no consent gate. Keep this exhaustive arm
+        // fail-closed if a future regression returns the shared error variant.
         Err(crate::job_execution::LocalFileCopyError::ConsentRequired) => {
-            response(json!({"ok":false,"error":"consent_required"}))
+            response(json!({"ok":false,"error":"local_operation_failed"}))
         }
         Err(crate::job_execution::LocalFileCopyError::TargetExists) => {
             response(json!({"ok":false,"error":"target_exists"}))

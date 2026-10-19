@@ -45,7 +45,7 @@ private func runLocalScenarioCopyJob(
     _ jobs: UnsafePointer<CChar>?, _ registry: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?, _ revision: UInt64,
     _ sourceRoot: UnsafePointer<CChar>?, _ sourceConnection: UnsafePointer<CChar>?, _ sourceRelative: UnsafePointer<CChar>?,
     _ destinationRoot: UnsafePointer<CChar>?, _ destinationConnection: UnsafePointer<CChar>?, _ destinationRelative: UnsafePointer<CChar>?,
-    _ jobID: UnsafePointer<CChar>?, _ consent: Bool
+    _ jobID: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_jobs_run_local_scenario_file_replace")
 private func runLocalScenarioReplaceJob(
@@ -472,7 +472,7 @@ enum StorageRegistryBridge {
         let pointer = jobs.withCString { jobs in registry.withCString { registry in scenario.id.withCString { scenarioID in
             sourceRoot.withCString { sourceRoot in sourceConnection.withCString { sourceConnection in item.relative_path.withCString { sourceRelative in
                 destinationRoot.withCString { destinationRoot in destinationConnection.withCString { destinationConnection in item.relative_path.withCString { destinationRelative in jobID.withCString { jobID in
-                    runLocalScenarioCopyJob(jobs, registry, scenarioID, scenario.revision, sourceRoot, sourceConnection, sourceRelative, destinationRoot, destinationConnection, destinationRelative, jobID, true)
+                    runLocalScenarioCopyJob(jobs, registry, scenarioID, scenario.revision, sourceRoot, sourceConnection, sourceRelative, destinationRoot, destinationConnection, destinationRelative, jobID)
                 }}}}}}}}
         }}
         let _: ScenarioJobStatus = try unwrap(pointer, as: ScenarioJobStatus.self)

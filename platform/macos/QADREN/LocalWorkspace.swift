@@ -31,7 +31,7 @@ private func runLocalFileCopyJob(
     _ database: UnsafePointer<CChar>?, _ registry: UnsafePointer<CChar>?,
     _ sourceRoot: UnsafePointer<CChar>?, _ sourceConnection: UnsafePointer<CChar>?, _ sourceRelative: UnsafePointer<CChar>?,
     _ destinationRoot: UnsafePointer<CChar>?, _ destinationConnection: UnsafePointer<CChar>?, _ destinationRelative: UnsafePointer<CChar>?,
-    _ jobID: UnsafePointer<CChar>?, _ consent: Bool
+    _ jobID: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_jobs_run_local_file_replace")
 private func runLocalFileReplaceJob(
@@ -456,7 +456,7 @@ struct LocalCopyPreviewRequest: Equatable {
                                 request.destinationConnectionID.withCString { destinationConnection in
                                     request.destinationRelativePath.withCString { destinationRelative in
                                         jobID.withCString { identifier in
-                                            runLocalFileCopyJob(database, registry, sourceRoot, sourceConnection, sourceRelative, destinationRoot, destinationConnection, destinationRelative, identifier, true)
+                                            runLocalFileCopyJob(database, registry, sourceRoot, sourceConnection, sourceRelative, destinationRoot, destinationConnection, destinationRelative, identifier)
                                         }
                                     }
                                 }

@@ -553,7 +553,6 @@ pub fn run_local_file_copy(
     destination_connection_id: &str,
     destination_relative: &Path,
     job_id: &str,
-    _consent: bool,
 ) -> Result<LocalFileCopyStatus, LocalFileCopyError> {
     run_local_file_copy_inner(
         database_path,
@@ -621,7 +620,6 @@ pub fn run_local_scenario_file_copy(
     destination_connection_id: &str,
     destination_relative: &Path,
     job_id: &str,
-    _consent: bool,
 ) -> Result<LocalFileCopyStatus, LocalFileCopyError> {
     let registry =
         Registry::open(registry_path).map_err(|_| LocalFileCopyError::ScenarioUnavailable)?;
@@ -1847,7 +1845,6 @@ mod tests {
                 &destination_connection,
                 Path::new("source.txt"),
                 "local-copy-1",
-                false,
             )
             .unwrap(),
             LocalFileCopyStatus::Completed
@@ -1878,7 +1875,6 @@ mod tests {
                 &destination_connection,
                 Path::new("source.txt"),
                 "local-copy-2",
-                true,
             ),
             Err(LocalFileCopyError::TargetExists)
         ));
@@ -2170,7 +2166,6 @@ mod tests {
                 &destination_connection,
                 Path::new("source.txt"),
                 "scenario-copy-1",
-                true,
             )
             .unwrap(),
             LocalFileCopyStatus::Completed
@@ -2248,7 +2243,6 @@ mod tests {
                 &destination_connection,
                 Path::new("other.txt"),
                 "scenario-copy-bad",
-                true,
             ),
             Err(LocalFileCopyError::ScenarioScopeMismatch)
         ));
