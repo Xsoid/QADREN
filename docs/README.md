@@ -16,6 +16,7 @@ The product specification is v0.2 (2026-10-09). Documents about BackupSet and co
 | [Architecture overview](architecture/overview.md) | Goals, components, and boundaries |
 | [Scenario and execution model](architecture/backup-model.md) | Current execution model |
 | [Nodes](architecture/nodes-and-delegation.md) | Controller, Worker, and delegation |
+| [Local Worker runtime](architecture/local-worker-runtime.md) | Release 1 process lifecycle, local IPC, ownership, and recovery |
 | [Storage adapters](architecture/storage-adapters.md) | Yandex Disk, Local Filesystem, and future iCloud status |
 | [Local downloads](policies/local-downloads.md) | Consent rule for content downloads to the primary MacBook |
 | [Data safety](policies/data-safety.md) | Copy proof, deletion, and recovery limits |

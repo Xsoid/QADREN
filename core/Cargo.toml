@@ -9,6 +9,10 @@ publish = false
 name = "qadren_core"
 crate-type = ["staticlib", "rlib"]
 
+[[bin]]
+name = "qadren-worker"
+path = "src/bin/qadren_worker.rs"
+
 [features]
 # Builds narrow test fixtures for native macOS acceptance. The production app
 # never enables this feature.

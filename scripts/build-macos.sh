@@ -18,11 +18,15 @@ esac
 # Apply one minimum deployment target to Rust, bundled C dependencies (SQLite) and Swift.
 export MACOSX_DEPLOYMENT_TARGET=13.0
 cargo build --release --manifest-path core/Cargo.toml --target "$TARGET"
+cargo build --release --manifest-path core/Cargo.toml --target "$TARGET" --bin qadren-worker
 APP="$ROOT/dist/QADREN.app"
 mkdir -p "$APP/Contents/MacOS"
 mkdir -p "$APP/Contents/Resources"
+mkdir -p "$APP/Contents/Library/LaunchAgents"
 cp platform/macos/Info.plist "$APP/Contents/Info.plist"
 cp assets/qadren-logo.png "$APP/Contents/Resources/qadren-logo.png"
+cp "$ROOT/core/target/$TARGET/release/qadren-worker" "$APP/Contents/Resources/qadren-worker"
+cp platform/macos/LaunchAgents/dev.qadren.worker.plist "$APP/Contents/Library/LaunchAgents/dev.qadren.worker.plist"
 # Embed public OAuth Client ID from an untracked local build config.
 CONFIG="$ROOT/config/oauth.local.env"
 if [[ -f "$CONFIG" ]]; then
@@ -45,7 +49,7 @@ fi
 plutil -lint "$APP/Contents/Info.plist"
 
 xcrun swiftc -O -target "$ARCH-apple-macos13.0" \
-  -framework SwiftUI -framework AppKit -framework Foundation \
+  -framework SwiftUI -framework AppKit -framework Foundation -framework ServiceManagement \
   platform/macos/QADREN/*.swift \
   "$ROOT/core/target/$TARGET/release/libqadren_core.a" \
   -o "$APP/Contents/MacOS/QADREN"
