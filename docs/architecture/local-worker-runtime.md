@@ -90,13 +90,18 @@ does not invent a healthy status from a process launch attempt.
 
 `qadren-worker` currently acquires the private lock, opens the existing
 Registry and JobStore, stages due schedule receipts, dispatches their pinned
-Jobs, and serves `status`, `poll`, controlled `stop`, `execute_create`, and
-`execute_replace` over the private socket. These commands accept one exact
+Jobs, and serves `status`, `poll`, controlled `stop`, `execute_create`,
+`execute_replace`, `execute_conflict_replace`, and `execute_conflict_delete`
+over the private socket. The Scenario commands accept one exact
 Scenario revision, connection IDs, roots, relative source and destination
 paths, and Job ID. `execute_create` uses the existing Rust no-overwrite
 Scenario Create executor. `execute_replace` uses the existing Rust controlled
 replacement executor and requires explicit replacement consent. Both executors
 save the durable Job and attempt before they write the selected destination.
+The conflict commands accept only a conflict ID, Job ID, and destructive
+consent. Rust reloads the selected durable conflict task, its Scenario revision,
+and its saved snapshots. It rejects missing consent, stale snapshots, and an
+unselected task before it changes a file.
 The macOS bundle includes the executable and the `SMAppService` LaunchAgent
 definition. `QADRENApp` requests registration and reports the system
 registration state without treating it as a health check.
@@ -108,8 +113,8 @@ multi-file schedule execution. The production Swift Scenario `Create` and
 native-confirmed `Update` paths send their exact scope to the Worker and do not
 fall back to in-process FFI. If the private socket is unavailable before a
 request is accepted, the UI reports the failure and does not write a file.
-Deletion, pause, resume, decision, and Job status commands still use
-Swift-to-Rust FFI. Therefore this increment does not yet establish the Issue
+Native-confirmed conflict replacement and deletion also use the Worker. Pause,
+resume, decision, and Job status commands still use Swift-to-Rust FFI. Therefore this increment does not yet establish the Issue
 #23 single-mutation-owner acceptance or the UI-quit execution acceptance.
 
 This foundation does not prove a signed release bundle, service approval,

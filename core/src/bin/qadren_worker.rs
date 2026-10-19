@@ -5,6 +5,7 @@
 //! network or remote-Worker protocol.
 
 use qadren_core::job_execution::{
+    run_local_scenario_conflict_delete, run_local_scenario_conflict_replace,
     run_local_scenario_file_copy, run_local_scenario_file_replace, LocalFileCopyError,
     LocalFileCopyStatus,
 };
@@ -100,6 +101,10 @@ struct Request {
     job_id: Option<String>,
     #[serde(default)]
     replacement_consent: Option<bool>,
+    #[serde(default)]
+    conflict_id: Option<String>,
+    #[serde(default)]
+    destructive_consent: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -253,6 +258,47 @@ fn execute_replace(paths: &WorkerPaths, request: &Request) -> Result<&'static st
     }
 }
 
+fn execute_conflict(
+    paths: &WorkerPaths,
+    request: &Request,
+    delete: bool,
+) -> Result<&'static str, &'static str> {
+    let (Some(conflict_id), Some(job_id)) =
+        (request.conflict_id.as_deref(), request.job_id.as_deref())
+    else {
+        return Err("invalid_request");
+    };
+    let result = if delete {
+        run_local_scenario_conflict_delete(
+            &paths.jobs,
+            &paths.registry,
+            conflict_id,
+            job_id,
+            request.destructive_consent.unwrap_or(false),
+        )
+    } else {
+        run_local_scenario_conflict_replace(
+            &paths.jobs,
+            &paths.registry,
+            conflict_id,
+            job_id,
+            request.destructive_consent.unwrap_or(false),
+        )
+    };
+    match result {
+        Ok(LocalFileCopyStatus::Completed) => Ok("completed"),
+        Ok(LocalFileCopyStatus::Existing(_)) => Ok("existing"),
+        Err(LocalFileCopyError::ConsentRequired) => Err("consent_required"),
+        Err(LocalFileCopyError::ConflictStale) => Err("conflict_stale"),
+        Err(LocalFileCopyError::ConflictUnavailable) => Err("conflict_unavailable"),
+        Err(LocalFileCopyError::CapabilityUnavailable) => Err("local_capability_unavailable"),
+        Err(LocalFileCopyError::OutcomeUnknown(_)) => Err("outcome_unknown"),
+        Err(LocalFileCopyError::Store(_)) => Err("job_store_unavailable"),
+        Err(LocalFileCopyError::Local(_)) => Err("local_operation_failed"),
+        Err(_) => Err("conflict_operation_failed"),
+    }
+}
+
 fn respond(stream: &mut UnixStream, response: &Response<'_>) {
     if let Ok(json) = serde_json::to_string(response) {
         let _ = writeln!(stream, "{json}");
@@ -331,6 +377,46 @@ fn handle_client(mut stream: UnixStream, paths: &WorkerPaths, stop: &mut bool) {
             ),
         },
         "execute_replace" => match execute_replace(paths, &request) {
+            Ok(status) => respond(
+                &mut stream,
+                &Response {
+                    ok: true,
+                    status,
+                    staged: None,
+                    dispatched: None,
+                },
+            ),
+            Err(status) => respond(
+                &mut stream,
+                &Response {
+                    ok: false,
+                    status,
+                    staged: None,
+                    dispatched: None,
+                },
+            ),
+        },
+        "execute_conflict_replace" => match execute_conflict(paths, &request, false) {
+            Ok(status) => respond(
+                &mut stream,
+                &Response {
+                    ok: true,
+                    status,
+                    staged: None,
+                    dispatched: None,
+                },
+            ),
+            Err(status) => respond(
+                &mut stream,
+                &Response {
+                    ok: false,
+                    status,
+                    staged: None,
+                    dispatched: None,
+                },
+            ),
+        },
+        "execute_conflict_delete" => match execute_conflict(paths, &request, true) {
             Ok(status) => respond(
                 &mut stream,
                 &Response {
@@ -467,6 +553,8 @@ fn main() {
 mod tests {
     use super::*;
     use chrono::{Datelike, Timelike};
+    use qadren_core::local_fs::LocalFilesystem;
+    use qadren_core::model::{ConfirmedFileVersion, JobState, ScenarioReference};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn root(name: &str) -> PathBuf {
@@ -717,5 +805,92 @@ mod tests {
         assert!(handle.join().unwrap().is_ok());
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(socket_directory).unwrap();
+    }
+
+    #[test]
+    fn conflict_delete_requires_consent_and_uses_the_selected_snapshot() {
+        let root = root("conflict-delete");
+        let source_root = root.join("source");
+        let destination_root = root.join("destination");
+        fs::create_dir(&source_root).unwrap();
+        fs::create_dir(&destination_root).unwrap();
+        fs::write(destination_root.join("report.txt"), b"remove me").unwrap();
+        let paths = WorkerPaths {
+            socket: root.join("worker.sock"),
+            registry: root.join("registry.sqlite3"),
+            jobs: root.join("jobs.sqlite3"),
+        };
+        let registry = Registry::open(&paths.registry).unwrap();
+        let left = registry.add("local_filesystem", "Left").unwrap();
+        let right = registry.add("local_filesystem", "Right").unwrap();
+        let scenario = registry
+            .create_scenario(
+                "Conflict",
+                &left,
+                source_root.to_str().unwrap(),
+                &right,
+                destination_root.to_str().unwrap(),
+                "left_to_right",
+            )
+            .unwrap();
+        let destination = LocalFilesystem::open(&destination_root)
+            .unwrap()
+            .stat(Path::new("report.txt"))
+            .unwrap();
+        let conflict = registry
+            .queue_conflict_task(
+                &ScenarioReference {
+                    scenario_id: scenario,
+                    revision: 1,
+                },
+                "report.txt",
+                "deletion",
+                None,
+                None,
+                Some(&ConfirmedFileVersion {
+                    object_revision: destination.object_revision,
+                    size: destination.size,
+                    checksum_md5: None,
+                }),
+            )
+            .unwrap();
+        registry
+            .select_conflict_task(&conflict, Some(true), "delete_as_source")
+            .unwrap();
+        let declined = Request {
+            command: "execute_conflict_delete".into(),
+            scenario_id: None,
+            scenario_revision: None,
+            source_root: None,
+            source_connection_id: None,
+            source_relative_path: None,
+            destination_root: None,
+            destination_connection_id: None,
+            destination_relative_path: None,
+            job_id: Some("worker-conflict-delete-declined".into()),
+            replacement_consent: None,
+            conflict_id: Some(conflict.clone()),
+            destructive_consent: Some(false),
+        };
+        assert_eq!(
+            execute_conflict(&paths, &declined, true),
+            Err("consent_required")
+        );
+        assert!(destination_root.join("report.txt").exists());
+        let confirmed = Request {
+            job_id: Some("worker-conflict-delete-confirmed".into()),
+            destructive_consent: Some(true),
+            ..declined
+        };
+        assert_eq!(execute_conflict(&paths, &confirmed, true), Ok("completed"));
+        assert!(!destination_root.join("report.txt").exists());
+        assert_eq!(
+            JobStore::open(&paths.jobs)
+                .unwrap()
+                .state("worker-conflict-delete-confirmed")
+                .unwrap(),
+            Some(JobState::Completed)
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }

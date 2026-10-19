@@ -439,8 +439,12 @@ enum StorageRegistryBridge {
     }
 
     static func executeScenarioConflictReplace(id: String) throws {
-        try executeScenarioConflictReplace(
-            id: id, registryPath: try path, jobsPath: try JobInventory.paths().database, consent: true
+        _ = try WorkerIPC.executeConflict(
+            WorkerConflictRequest(
+                command: "execute_conflict_replace", conflict_id: id,
+                job_id: "scenario-conflict-replace-" + UUID().uuidString.lowercased(),
+                destructive_consent: true
+            )
         )
     }
 
@@ -461,8 +465,12 @@ enum StorageRegistryBridge {
     }
 
     static func executeScenarioConflictDelete(id: String) throws {
-        try executeScenarioConflictDelete(
-            id: id, registryPath: try path, jobsPath: try JobInventory.paths().database, consent: true
+        _ = try WorkerIPC.executeConflict(
+            WorkerConflictRequest(
+                command: "execute_conflict_delete", conflict_id: id,
+                job_id: "scenario-conflict-delete-" + UUID().uuidString.lowercased(),
+                destructive_consent: true
+            )
         )
     }
 
