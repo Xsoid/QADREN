@@ -793,7 +793,11 @@ private struct ScenarioDryRunView: View {
             Button("Отмена", role: .cancel) { pendingConflictDelete = nil }
             Button("Удалить файл", role: .destructive) { executePendingConflictDelete() }
         } message: {
-            Text("QADREN повторно проверит снимок. Если источник всё ещё не содержит файл, файл на выбранной стороне будет удалён.")
+            Text(
+                "QADREN повторно проверит снимок. Если источник всё ещё не содержит файл, "
+                    + "будет удалён только \(deleteConflictDestinationDescription). "
+                    + "Другие файлы не изменятся."
+            )
         }
         .alert("Выполнить пакет сценария?", isPresented: Binding(
             get: { !pendingBatch.isEmpty }, set: { if !$0 { pendingBatch = []; pendingBatchKind = nil } }
@@ -903,6 +907,14 @@ private struct ScenarioDryRunView: View {
             self.error = "Не удалось удалить файл по решению конфликта: " + error.localizedDescription
             loadConflictTasks()
         }
+    }
+
+    private var deleteConflictDestinationDescription: String {
+        guard let task = pendingConflictDelete, let sourceIsLeft = task.source_is_left else {
+            return "выбранный файл"
+        }
+        let root = sourceIsLeft ? scenario.right_root : scenario.left_root
+        return root.hasSuffix("/") ? root + task.relative_path : root + "/" + task.relative_path
     }
 
     private func executePendingBatch() {
@@ -1123,12 +1135,31 @@ private struct ScenarioDryRunView: View {
     }
 }
 
-private struct ScenarioBatchProgress {
+private struct ScenarioBatchProgress: Identifiable {
     let total: Int
     let processed: Int
     let failures: Int
     let currentPath: String
     let cancellationRequested: Bool
+    let receiptID: String?
+
+    init(
+        total: Int,
+        processed: Int,
+        failures: Int,
+        currentPath: String,
+        cancellationRequested: Bool,
+        receiptID: String? = nil
+    ) {
+        self.total = total
+        self.processed = processed
+        self.failures = failures
+        self.currentPath = currentPath
+        self.cancellationRequested = cancellationRequested
+        self.receiptID = receiptID
+    }
+
+    var id: String { receiptID ?? currentPath }
 }
 
 private struct ScenarioConflictTaskView: View {

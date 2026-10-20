@@ -13,11 +13,12 @@ if rg -q 'Разрешить загрузку и создание копии|З�
 fi
 rg -q 'Button\("Создать копию"\) \{ executeCreate\(item\) \}' \
   platform/macos/QADREN/SettingsPanel.swift
-rg -q 'Button\("Создать все: \\(creates.count\\)"\) \{' \
+rg -Fq 'Button("Создать все: \(creates.count)") {' \
   platform/macos/QADREN/SettingsPanel.swift
 rg -q 'resumePendingCreateBatches\(\)' platform/macos/QADREN/SettingsPanel.swift
 rg -q 'pendingScenarioCreateBatches\(scenario: scenario\)' \
   platform/macos/QADREN/SettingsPanel.swift
+rg -q 'deleteConflictDestinationDescription' platform/macos/QADREN/SettingsPanel.swift
 
 for cmd in cargo xcrun mktemp; do
   command -v "$cmd" >/dev/null || { echo "Missing test tool: $cmd" >&2; exit 1; }
