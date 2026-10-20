@@ -28,6 +28,18 @@ struct WorkerScenarioReplaceRequest: Encodable {
     let replacement_consent: Bool
 }
 
+struct WorkerManualCopyRequest: Encodable {
+    let command: String
+    let source_root: String
+    let source_connection_id: String
+    let source_relative_path: String
+    let destination_root: String
+    let destination_connection_id: String
+    let destination_relative_path: String
+    let job_id: String
+    let replacement_consent: Bool?
+}
+
 struct WorkerConflictRequest: Encodable {
     let command: String
     let conflict_id: String
@@ -88,6 +100,18 @@ enum WorkerIPC {
 
     static func executeScenarioReplace(
         _ request: WorkerScenarioReplaceRequest, socketPath: String? = nil
+    ) throws -> String {
+        let payload = try JSONEncoder().encode(request) + Data([0x0a])
+        let response = try send(payload, socketPath: socketPath ?? defaultSocketPath())
+        guard response.ok else { throw WorkerIPCError.rejected(response.status) }
+        guard ["completed", "existing"].contains(response.status) else {
+            throw WorkerIPCError.invalidResponse
+        }
+        return response.status
+    }
+
+    static func executeManualCopy(
+        _ request: WorkerManualCopyRequest, socketPath: String? = nil
     ) throws -> String {
         let payload = try JSONEncoder().encode(request) + Data([0x0a])
         let response = try send(payload, socketPath: socketPath ?? defaultSocketPath())

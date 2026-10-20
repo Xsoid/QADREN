@@ -207,6 +207,32 @@ struct WorkerIPCBridgeTests {
         check(replaced.count == 2, "confirmed Worker replacement creates one additional durable Job")
         check(replaced.allSatisfy { $0.scenario_id == scenario && $0.state == "completed" },
               "Worker replacement Job stays revision-bound and verified complete")
+
+        try Data("Manual Worker copy".utf8).write(to: sourceRoot.appendingPathComponent("manual.txt"))
+        let manualCreate = try WorkerIPC.executeManualCopy(WorkerManualCopyRequest(
+            command: "execute_manual_copy", source_root: sourceRoot.path,
+            source_connection_id: left, source_relative_path: "manual.txt",
+            destination_root: destinationRoot.path, destination_connection_id: right,
+            destination_relative_path: "manual.txt", job_id: "swift-worker-ipc-manual-create",
+            replacement_consent: nil
+        ), socketPath: socket)
+        check(manualCreate == "completed", "Worker returns completed manual Create status")
+        let manualCreatedBytes = try Data(contentsOf: destinationRoot.appendingPathComponent("manual.txt"))
+        check(manualCreatedBytes == Data("Manual Worker copy".utf8),
+              "Worker manual Create writes the exact requested destination bytes")
+
+        try Data("Manual Worker replacement".utf8).write(to: sourceRoot.appendingPathComponent("manual.txt"))
+        let manualReplace = try WorkerIPC.executeManualCopy(WorkerManualCopyRequest(
+            command: "execute_manual_replace", source_root: sourceRoot.path,
+            source_connection_id: left, source_relative_path: "manual.txt",
+            destination_root: destinationRoot.path, destination_connection_id: right,
+            destination_relative_path: "manual.txt", job_id: "swift-worker-ipc-manual-replace",
+            replacement_consent: true
+        ), socketPath: socket)
+        check(manualReplace == "completed", "Worker returns completed manual Replace status")
+        let manualReplacedBytes = try Data(contentsOf: destinationRoot.appendingPathComponent("manual.txt"))
+        check(manualReplacedBytes == Data("Manual Worker replacement".utf8),
+              "Worker manual Replace writes the exact requested destination bytes")
         print("Worker IPC native bridge tests passed")
     }
 

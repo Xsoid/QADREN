@@ -6,10 +6,10 @@
 
 use qadren_core::confirmation::{Confirmation, EvidenceLevel};
 use qadren_core::job_execution::{
-    reconcile_local_file_copy, run_local_scenario_conflict_delete,
-    run_local_scenario_conflict_replace, run_local_scenario_file_copy,
-    run_local_scenario_file_replace, LocalFileCopyError, LocalFileCopyReconciliationStatus,
-    LocalFileCopyStatus,
+    reconcile_local_file_copy, run_local_file_copy, run_local_file_replace,
+    run_local_scenario_conflict_delete, run_local_scenario_conflict_replace,
+    run_local_scenario_file_copy, run_local_scenario_file_replace, LocalFileCopyError,
+    LocalFileCopyReconciliationStatus, LocalFileCopyStatus,
 };
 use qadren_core::jobs::JobStore;
 use qadren_core::local_fs::LocalFilesystem;
@@ -607,6 +607,73 @@ fn execute_replace(paths: &WorkerPaths, request: &Request) -> Result<&'static st
     }
 }
 
+fn execute_manual_copy(
+    paths: &WorkerPaths,
+    request: &Request,
+    replace: bool,
+) -> Result<&'static str, &'static str> {
+    let (
+        Some(source_root),
+        Some(source_connection_id),
+        Some(source_relative_path),
+        Some(destination_root),
+        Some(destination_connection_id),
+        Some(destination_relative_path),
+        Some(job_id),
+    ) = (
+        request.source_root.as_deref(),
+        request.source_connection_id.as_deref(),
+        request.source_relative_path.as_deref(),
+        request.destination_root.as_deref(),
+        request.destination_connection_id.as_deref(),
+        request.destination_relative_path.as_deref(),
+        request.job_id.as_deref(),
+    )
+    else {
+        return Err("invalid_request");
+    };
+    let result = if replace {
+        run_local_file_replace(
+            &paths.jobs,
+            &paths.registry,
+            Path::new(source_root),
+            source_connection_id,
+            Path::new(source_relative_path),
+            Path::new(destination_root),
+            destination_connection_id,
+            Path::new(destination_relative_path),
+            job_id,
+            request.replacement_consent.unwrap_or(false),
+        )
+    } else {
+        run_local_file_copy(
+            &paths.jobs,
+            &paths.registry,
+            Path::new(source_root),
+            source_connection_id,
+            Path::new(source_relative_path),
+            Path::new(destination_root),
+            destination_connection_id,
+            Path::new(destination_relative_path),
+            job_id,
+        )
+    };
+    match result {
+        Ok(LocalFileCopyStatus::Completed) => Ok("completed"),
+        Ok(LocalFileCopyStatus::Existing(_)) => Ok("existing"),
+        Err(LocalFileCopyError::ConsentRequired) => Err("consent_required"),
+        Err(LocalFileCopyError::TargetExists) => Err("target_exists"),
+        Err(LocalFileCopyError::ConnectionUnavailable) => Err("local_connection_unavailable"),
+        Err(LocalFileCopyError::CapabilityUnavailable) => Err("local_capability_unavailable"),
+        Err(LocalFileCopyError::VerificationFailed) => Err("verification_failed"),
+        Err(LocalFileCopyError::OutcomeUnknown(_)) => Err("outcome_unknown"),
+        Err(LocalFileCopyError::InvalidRequest) => Err("invalid_request"),
+        Err(LocalFileCopyError::Local(_)) => Err("local_operation_failed"),
+        Err(LocalFileCopyError::Store(_)) => Err("job_store_unavailable"),
+        Err(_) => Err("manual_copy_unavailable"),
+    }
+}
+
 fn execute_conflict(
     paths: &WorkerPaths,
     request: &Request,
@@ -778,6 +845,29 @@ fn handle_client(mut stream: UnixStream, paths: &WorkerPaths, stop: &mut bool) {
                 },
             ),
         },
+        "execute_manual_copy" | "execute_manual_replace" => {
+            match execute_manual_copy(paths, &request, request.command == "execute_manual_replace")
+            {
+                Ok(status) => respond(
+                    &mut stream,
+                    &Response {
+                        ok: true,
+                        status,
+                        staged: None,
+                        dispatched: None,
+                    },
+                ),
+                Err(status) => respond(
+                    &mut stream,
+                    &Response {
+                        ok: false,
+                        status,
+                        staged: None,
+                        dispatched: None,
+                    },
+                ),
+            }
+        }
         "execute_conflict_replace" => match execute_conflict(paths, &request, false) {
             Ok(status) => respond(
                 &mut stream,

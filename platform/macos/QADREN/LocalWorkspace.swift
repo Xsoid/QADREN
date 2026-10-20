@@ -429,12 +429,28 @@ struct LocalCopyPreviewRequest: Equatable {
     @discardableResult func copyFile(
         request: LocalCopyPreviewRequest, to destination: LocalWorkspace
     ) throws -> String {
-        try copyFile(
-            request: request,
-            to: destination,
-            databasePath: try JobInventory.paths().database,
-            registryPath: try StorageRegistryBridge.databasePath()
-        )
+        guard request.isCurrent(source: self, destination: destination) else {
+            throw StorageError.operation("План копирования устарел. Проверьте его ещё раз.")
+        }
+        let jobID = "local-copy-" + UUID().uuidString.lowercased()
+        do {
+            _ = try WorkerIPC.executeManualCopy(WorkerManualCopyRequest(
+                command: "execute_manual_copy", source_root: request.sourceRoot,
+                source_connection_id: request.sourceConnectionID, source_relative_path: request.sourceRelativePath,
+                destination_root: request.destinationRoot, destination_connection_id: request.destinationConnectionID,
+                destination_relative_path: request.destinationRelativePath, job_id: jobID,
+                replacement_consent: nil
+            ))
+        } catch WorkerIPCError.rejected("outcome_unknown") {
+            destination.copyReconciliationJobIDs = [jobID]
+            throw StorageError.operation("Результат копирования не подтверждён. Проверьте файлы до повторной попытки.")
+        } catch WorkerIPCError.rejected("target_exists") {
+            throw StorageError.operation("Файл с таким именем уже есть в папке назначения.")
+        }
+        error = nil
+        refresh()
+        destination.refresh()
+        return jobID
     }
 
     /// Test seam for the native bridge. Production obtains the app-owned paths
@@ -490,12 +506,26 @@ struct LocalCopyPreviewRequest: Equatable {
     @discardableResult func replaceFile(
         request: LocalCopyPreviewRequest, to destination: LocalWorkspace
     ) throws -> String {
-        try replaceFile(
-            request: request,
-            to: destination,
-            databasePath: try JobInventory.paths().database,
-            registryPath: try StorageRegistryBridge.databasePath()
-        )
+        guard request.isCurrent(source: self, destination: destination) else {
+            throw StorageError.operation("План замены устарел. Проверьте его ещё раз.")
+        }
+        let jobID = "local-replace-" + UUID().uuidString.lowercased()
+        do {
+            _ = try WorkerIPC.executeManualCopy(WorkerManualCopyRequest(
+                command: "execute_manual_replace", source_root: request.sourceRoot,
+                source_connection_id: request.sourceConnectionID, source_relative_path: request.sourceRelativePath,
+                destination_root: request.destinationRoot, destination_connection_id: request.destinationConnectionID,
+                destination_relative_path: request.destinationRelativePath, job_id: jobID,
+                replacement_consent: true
+            ))
+        } catch WorkerIPCError.rejected("outcome_unknown") {
+            destination.copyReconciliationJobIDs = [jobID]
+            throw StorageError.operation("Результат замены не подтверждён. Проверьте файлы до повторной попытки.")
+        }
+        error = nil
+        refresh()
+        destination.refresh()
+        return jobID
     }
 
     /// Test seam for the controlled replacement bridge.
