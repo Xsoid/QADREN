@@ -597,6 +597,7 @@ private struct ScenarioDryRunView: View {
     @State private var pendingBatchKind: String?
     @State private var activeBatch: ScenarioBatchProgress?
     @State private var batchTask: Task<Void, Never>?
+    @State private var batchProgressTask: Task<Void, Never>?
     @State private var workerOwnedCreateBatch = false
 
     var body: some View {
@@ -660,7 +661,7 @@ private struct ScenarioDryRunView: View {
                         VStack(alignment: .leading, spacing: 8) {
                             ProgressView(value: Double(activeBatch.processed), total: Double(activeBatch.total))
                             Text(workerOwnedCreateBatch
-                                ? "Подтверждённый пакет передан Local Worker. Результаты появятся в списке Job."
+                                ? "Подтверждено \(activeBatch.processed) из \(activeBatch.total) · Local Worker выполняет пакет."
                                 : "Обработано \(activeBatch.processed) из \(activeBatch.total) · \(activeBatch.currentPath)")
                                 .font(.caption.monospaced())
                             if activeBatch.failures > 0 {
@@ -737,6 +738,10 @@ private struct ScenarioDryRunView: View {
         }
         .padding(24)
         .onAppear { loadConflictTasks() }
+        .onDisappear {
+            batchProgressTask?.cancel()
+            batchProgressTask = nil
+        }
         .alert("Разрешить загрузку и создание копии?", isPresented: Binding(
             get: { pendingCreate != nil }, set: { if !$0 { pendingCreate = nil } }
         )) {
@@ -910,6 +915,23 @@ private struct ScenarioDryRunView: View {
                 self.error = "Не удалось подтвердить пакет: \(error.localizedDescription)"
                 return
             }
+            batchProgressTask = Task {
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(200))
+                    guard let receipt = try? StorageRegistryBridge.scenarioCreateBatch(id: receiptID) else {
+                        continue
+                    }
+                    let completed = receipt.children.filter { $0.state == "completed" }.count
+                    let failures = receipt.children.filter { $0.state != "pending" && $0.state != "completed" }.count
+                    activeBatch = ScenarioBatchProgress(
+                        total: receipt.children.count, processed: completed, failures: failures,
+                        currentPath: receipt.children.first { $0.state == "pending" }?.relative_path
+                            ?? receipt.children.last?.relative_path ?? "",
+                        cancellationRequested: false
+                    )
+                    if receipt.children.allSatisfy({ $0.state != "pending" }) { return }
+                }
+            }
             batchTask = Task.detached(priority: .userInitiated) {
                 do {
                     _ = try WorkerIPC.executeScenarioCreateBatch(receiptID: receiptID)
@@ -931,11 +953,20 @@ private struct ScenarioDryRunView: View {
                     }
                 } catch {
                     let message = error.localizedDescription
+                    let receipt = try? StorageRegistryBridge.scenarioCreateBatch(id: receiptID)
                     await MainActor.run {
-                        self.error = "Пакет подтверждён Worker. Он сохранит результаты и продолжит незавершённые файлы после перезапуска: \(message)"
+                        let failedPaths = receipt?.children
+                            .filter { $0.state != "completed" }
+                            .map(\.relative_path)
+                            .joined(separator: ", ") ?? ""
+                        self.error = failedPaths.isEmpty
+                            ? "Worker не подтвердил завершение пакета: \(message)"
+                            : "Worker зафиксировал незавершённые элементы пакета: \(failedPaths). Они не будут автоматически повторены."
                     }
                 }
                 await MainActor.run {
+                    batchProgressTask?.cancel()
+                    batchProgressTask = nil
                     activeBatch = nil
                     batchTask = nil
                     workerOwnedCreateBatch = false
