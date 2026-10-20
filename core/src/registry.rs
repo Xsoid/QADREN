@@ -1091,6 +1091,34 @@ impl Registry {
         result
     }
 
+    /// Load unfinished Create batches for one exact Scenario revision. This is
+    /// read-only. It lets a controller reconnect to durable Worker progress
+    /// without submitting a second effect.
+    pub fn pending_scenario_create_batches(
+        &self,
+        scenario: &ScenarioReference,
+    ) -> Result<Vec<ScenarioCreateBatchReceipt>> {
+        let mut statement = self.db.prepare(
+            "SELECT DISTINCT b.id
+             FROM scenario_create_batches b
+             JOIN scenario_create_batch_children c ON c.batch_id=b.id
+             WHERE b.scenario_id=?1 AND b.scenario_revision=?2 AND c.state='pending'
+             ORDER BY b.id",
+        )?;
+        let ids = statement
+            .query_map(
+                params![scenario.scenario_id, scenario.revision as i64],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        ids.into_iter()
+            .map(|id| {
+                self.scenario_create_batch(&id)?
+                    .ok_or(RegistryError::NotFound)
+            })
+            .collect()
+    }
+
     /// Persist the authoritative Worker outcome for a selected batch child.
     pub fn set_scenario_create_batch_child_state(
         &self,
@@ -2194,6 +2222,28 @@ mod tests {
             Some(receipt.clone())
         );
         assert_eq!(db.scenario_create_batch("missing").unwrap(), None);
+        assert_eq!(
+            db.pending_scenario_create_batches(&receipt.scenario)
+                .unwrap()
+                .iter()
+                .map(|batch| batch.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![receipt.id.as_str()]
+        );
+        db.set_scenario_create_batch_child_state(&receipt.id, "a.txt", "completed")
+            .unwrap();
+        assert_eq!(
+            db.pending_scenario_create_batches(&receipt.scenario)
+                .unwrap()
+                .len(),
+            1
+        );
+        db.set_scenario_create_batch_child_state(&receipt.id, "b.txt", "unknown")
+            .unwrap();
+        assert!(db
+            .pending_scenario_create_batches(&receipt.scenario)
+            .unwrap()
+            .is_empty());
         assert!(matches!(
             db.create_scenario_create_batch(
                 &receipt.scenario,

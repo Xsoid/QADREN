@@ -597,6 +597,7 @@ private struct ScenarioDryRunView: View {
     @State private var activeBatch: ScenarioBatchProgress?
     @State private var batchTask: Task<Void, Never>?
     @State private var batchProgressTask: Task<Void, Never>?
+    @State private var resumedCreateBatches: [ScenarioBatchProgress] = []
     @State private var workerOwnedCreateBatch = false
 
     var body: some View {
@@ -645,13 +646,13 @@ private struct ScenarioDryRunView: View {
                             Button("Создать все: \(creates.count)") {
                                 executeCreateBatch(creates)
                             }
-                            .disabled(activeBatch != nil)
+                            .disabled(activeBatch != nil || !resumedCreateBatches.isEmpty)
                         }
                         if !updates.isEmpty {
                             Button("Заменить все: \(updates.count)", role: .destructive) {
                                 pendingBatch = updates; pendingBatchKind = "update"
                             }
-                            .disabled(activeBatch != nil)
+                            .disabled(activeBatch != nil || !resumedCreateBatches.isEmpty)
                         }
                     }
                 }
@@ -685,6 +686,25 @@ private struct ScenarioDryRunView: View {
                         .accessibilityLabel("Выполнение пакета сценария")
                     }
                 }
+                if !resumedCreateBatches.isEmpty {
+                    GroupBox("Выполнение пакета") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Local Worker продолжает подтверждённые пакеты после закрытия Settings.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            ForEach(resumedCreateBatches) { batch in
+                                VStack(alignment: .leading, spacing: 4) {
+                                    ProgressView(value: Double(batch.processed), total: Double(batch.total))
+                                    Text("Подтверждено \(batch.processed) из \(batch.total) · \(batch.currentPath)")
+                                        .font(.caption.monospaced())
+                                }
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityElement(children: .contain)
+                        .accessibilityLabel("Восстановленное выполнение пакета сценария")
+                    }
+                }
                 List(plan) { item in
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
@@ -700,12 +720,12 @@ private struct ScenarioDryRunView: View {
                         if item.action.kind == "create" {
                             Button("Создать копию") { executeCreate(item) }
                                 .buttonStyle(.bordered)
-                                .disabled(activeBatch != nil)
+                                .disabled(activeBatch != nil || !resumedCreateBatches.isEmpty)
                         }
                         if item.action.kind == "update" {
                             Button("Заменить файл", role: .destructive) { pendingUpdate = item }
                                 .buttonStyle(.bordered)
-                                .disabled(activeBatch != nil)
+                                .disabled(activeBatch != nil || !resumedCreateBatches.isEmpty)
                         }
                         if item.action.kind == "conflict" || item.action.kind == "delete_requires_decision" {
                             Button("Добавить в очередь конфликтов") { queueConflict(item) }
@@ -736,7 +756,10 @@ private struct ScenarioDryRunView: View {
             }
         }
         .padding(24)
-        .onAppear { loadConflictTasks() }
+        .onAppear {
+            loadConflictTasks()
+            resumePendingCreateBatches()
+        }
         .onDisappear {
             batchProgressTask?.cancel()
             batchProgressTask = nil
@@ -1021,6 +1044,34 @@ private struct ScenarioDryRunView: View {
         executePendingBatch()
     }
 
+    private func resumePendingCreateBatches() {
+        batchProgressTask?.cancel()
+        batchProgressTask = Task {
+            while !Task.isCancelled {
+                let receipts = (try? StorageRegistryBridge.pendingScenarioCreateBatches(scenario: scenario)) ?? []
+                resumedCreateBatches = receipts.map { receipt in
+                    let completed = receipt.children.filter { $0.state == "completed" }.count
+                    let failures = receipt.children.filter { $0.state != "pending" && $0.state != "completed" }.count
+                    return ScenarioBatchProgress(
+                        total: receipt.children.count,
+                        processed: completed,
+                        failures: failures,
+                        currentPath: receipt.children.first { $0.state == "pending" }?.relative_path
+                            ?? receipt.children.last?.relative_path ?? "",
+                        cancellationRequested: false,
+                        receiptID: receipt.id
+                    )
+                }
+                if resumedCreateBatches.isEmpty {
+                    batchProgressTask = nil
+                    loadPlan()
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+        }
+    }
+
     private func cancelActiveBatch() {
         guard let activeBatch else { return }
         batchTask?.cancel()
@@ -1030,9 +1081,7 @@ private struct ScenarioDryRunView: View {
         )
     }
 
-    private func executePendingCreate() {
-        guard let item = pendingCreate else { return }
-        pendingCreate = nil
+    private func executeCreate(_ item: ScenarioPlanItem) {
         do {
             try StorageRegistryBridge.executeScenarioCreate(scenario: scenario, item: item)
             loadPlan()

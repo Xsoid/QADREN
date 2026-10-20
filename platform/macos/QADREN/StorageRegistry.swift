@@ -25,6 +25,10 @@ private func scenarioCreateBatchFFI(
 private func scenarioCreateBatchGet(
     _ path: UnsafePointer<CChar>?, _ batchID: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_scenario_pending_create_batches")
+private func pendingScenarioCreateBatchesFFI(
+    _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?, _ revision: UInt64
+) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_scenarios_dry_run")
 private func scenarioDryRun(
     _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?, _ revision: UInt64,
@@ -553,6 +557,19 @@ enum StorageRegistryBridge {
         return try database.withCString { path in
             try id.withCString { id in
                 try unwrap(scenarioCreateBatchGet(path, id), as: ScenarioCreateBatchReceipt.self, databasePath: database)
+            }
+        }
+    }
+
+    static func pendingScenarioCreateBatches(scenario: ScenarioEntry) throws -> [ScenarioCreateBatchReceipt] {
+        let database = try path
+        return try database.withCString { path in
+            try scenario.id.withCString { id in
+                try unwrap(
+                    pendingScenarioCreateBatchesFFI(path, id, scenario.revision),
+                    as: [ScenarioCreateBatchReceipt].self,
+                    databasePath: database
+                )
             }
         }
     }

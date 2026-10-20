@@ -288,6 +288,34 @@ pub extern "C" fn qadren_scenario_create_batch_get(
     }
 }
 
+/// Return unfinished durable Create batches for one exact Scenario revision.
+/// This is read-only and does not submit work to the Worker.
+#[no_mangle]
+pub extern "C" fn qadren_scenario_pending_create_batches(
+    path: *const c_char,
+    scenario_id: *const c_char,
+    revision: u64,
+) -> *mut c_char {
+    let (Some(path), Some(scenario_id)) = (input(path), input(scenario_id)) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    match Registry::open(Path::new(&path)).and_then(|db| {
+        db.pending_scenario_create_batches(&ScenarioReference {
+            scenario_id,
+            revision,
+        })
+    }) {
+        Ok(receipts) => output(json!({
+            "ok":true,
+            "data":receipts.into_iter().map(|receipt| json!({
+                "id":receipt.id,
+                "children":receipt.children,
+            })).collect::<Vec<_>>(),
+        })),
+        Err(_) => output(json!({"ok":false,"error":"registry_error"})),
+    }
+}
+
 /// Compose a metadata-only dry run for one exact persisted Scenario revision.
 /// Both snapshots are caller-supplied JSON arrays; this function never scans
 /// adapters, reads content, creates a Job, advances FileSyncState, or records
@@ -894,17 +922,27 @@ mod tests {
         let receipt = registry
             .create_scenario_create_batch(
                 &ScenarioReference {
-                    scenario_id: scenario,
+                    scenario_id: scenario.clone(),
                     revision: 1,
                 },
                 &[("report.txt".into(), true)],
             )
             .unwrap();
+        drop(registry);
+        let path = CString::new(file.to_str().unwrap()).unwrap();
+        let scenario_id = CString::new(scenario.clone()).unwrap();
+        let pointer =
+            qadren_scenario_pending_create_batches(path.as_ptr(), scenario_id.as_ptr(), 1);
+        let response: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(pointer) }.to_str().unwrap()).unwrap();
+        unsafe { qadren_registry_free_string(pointer) };
+        assert_eq!(response["data"][0]["id"], receipt.id);
+
+        let registry = Registry::open(&file).unwrap();
         registry
             .set_scenario_create_batch_child_state(&receipt.id, "report.txt", "completed")
             .unwrap();
         drop(registry);
-        let path = CString::new(file.to_str().unwrap()).unwrap();
         let id = CString::new(receipt.id).unwrap();
         let pointer = qadren_scenario_create_batch_get(path.as_ptr(), id.as_ptr());
         let response: Value =
@@ -915,6 +953,12 @@ mod tests {
             "report.txt"
         );
         assert_eq!(response["data"]["children"][0]["state"], "completed");
+        let pointer =
+            qadren_scenario_pending_create_batches(path.as_ptr(), scenario_id.as_ptr(), 1);
+        let response: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(pointer) }.to_str().unwrap()).unwrap();
+        unsafe { qadren_registry_free_string(pointer) };
+        assert!(response["data"].as_array().unwrap().is_empty());
         std::fs::remove_file(file).unwrap();
     }
 
