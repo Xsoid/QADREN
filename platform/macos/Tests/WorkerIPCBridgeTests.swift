@@ -227,6 +227,8 @@ struct WorkerIPCBridgeTests {
             job_id: "swift-worker-ipc-manual-create", replacement_consent: nil
         ), socketPath: socket)
         check(reconciledCompletedCopy == "completed", "Worker reports an already completed manual copy as completed")
+        let reconnectStatus = try WorkerIPC.reconcileLocalReconnect(root: destinationRoot.path, connectionID: right, socketPath: socket)
+        check(reconnectStatus == "completed", "Worker completes reconnect reconciliation without an FFI controller")
 
         try Data("Manual Worker replacement".utf8).write(to: sourceRoot.appendingPathComponent("manual.txt"))
         let manualReplace = try WorkerIPC.executeManualCopy(WorkerManualCopyRequest(

@@ -6,6 +6,7 @@
 
 use qadren_core::confirmation::{Confirmation, EvidenceLevel};
 use qadren_core::job_execution::{
+    local_directory_reconciliation_candidates, local_file_copy_reconciliation_candidates,
     reconcile_local_directory_create, reconcile_local_file_copy, run_local_directory_create,
     run_local_file_copy, run_local_file_replace, run_local_scenario_conflict_delete,
     run_local_scenario_conflict_replace, run_local_scenario_file_copy,
@@ -757,6 +758,56 @@ fn reconcile_manual(
     }
 }
 
+fn reconcile_reconnect(
+    paths: &WorkerPaths,
+    request: &Request,
+) -> Result<&'static str, &'static str> {
+    let (Some(root), Some(connection)) = (
+        request.source_root.as_deref(),
+        request.source_connection_id.as_deref(),
+    ) else {
+        return Err("invalid_request");
+    };
+    let root = Path::new(root);
+    let directories =
+        local_directory_reconciliation_candidates(&paths.jobs, &paths.registry, root, connection)
+            .map_err(|_| "reconciliation_unavailable")?;
+    for candidate in directories {
+        let _ = reconcile_local_directory_create(
+            &paths.jobs,
+            &paths.registry,
+            root,
+            connection,
+            &candidate.job_id,
+        );
+    }
+    let copies =
+        local_file_copy_reconciliation_candidates(&paths.jobs, &paths.registry, root, connection)
+            .map_err(|_| "reconciliation_unavailable")?;
+    for candidate in copies {
+        let _ = reconcile_local_file_copy(
+            &paths.jobs,
+            &paths.registry,
+            root,
+            connection,
+            &candidate.job_id,
+        );
+    }
+    let remaining_directories =
+        local_directory_reconciliation_candidates(&paths.jobs, &paths.registry, root, connection)
+            .map_err(|_| "reconciliation_unavailable")?;
+    let remaining_copies =
+        local_file_copy_reconciliation_candidates(&paths.jobs, &paths.registry, root, connection)
+            .map_err(|_| "reconciliation_unavailable")?;
+    Ok(
+        if remaining_directories.is_empty() && remaining_copies.is_empty() {
+            "completed"
+        } else {
+            "unknown"
+        },
+    )
+}
+
 fn execute_conflict(
     paths: &WorkerPaths,
     request: &Request,
@@ -993,6 +1044,26 @@ fn handle_client(mut stream: UnixStream, paths: &WorkerPaths, stop: &mut bool) {
                 ),
             }
         }
+        "reconcile_local_reconnect" => match reconcile_reconnect(paths, &request) {
+            Ok(status) => respond(
+                &mut stream,
+                &Response {
+                    ok: true,
+                    status,
+                    staged: None,
+                    dispatched: None,
+                },
+            ),
+            Err(status) => respond(
+                &mut stream,
+                &Response {
+                    ok: false,
+                    status,
+                    staged: None,
+                    dispatched: None,
+                },
+            ),
+        },
         "execute_conflict_replace" => match execute_conflict(paths, &request, false) {
             Ok(status) => respond(
                 &mut stream,

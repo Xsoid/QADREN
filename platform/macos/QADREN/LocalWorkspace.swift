@@ -149,6 +149,15 @@ struct LocalCopyPreviewRequest: Equatable {
     ) {
         guard let connectionID = boundConnectionID, !connectionID.isEmpty else { return }
         do {
+            if databasePath == nil && registryPath == nil {
+                guard let root else { return }
+                let status = try WorkerIPC.reconcileLocalReconnect(root: root, connectionID: connectionID)
+                reconciliationJobIDs = []
+                copyReconciliationJobIDs = []
+                error = status == "completed" ? nil : "Результат операции всё ещё не подтверждён. Повтор не выполнен."
+                refresh()
+                return
+            }
             let database = try databasePath ?? JobInventory.paths().database
             let registry = try registryPath ?? StorageRegistryBridge.databasePath()
 

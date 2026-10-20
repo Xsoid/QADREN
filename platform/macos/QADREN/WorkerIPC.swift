@@ -137,6 +137,10 @@ enum WorkerIPC {
         return response.status
     }
 
+    static func reconcileLocalReconnect(root: String, connectionID: String, socketPath: String? = nil) throws -> String {
+        try reconcileManual(WorkerManualCopyRequest(command: "reconcile_local_reconnect", source_root: root, source_connection_id: connectionID, source_relative_path: "", destination_root: "", destination_connection_id: "", destination_relative_path: "", job_id: "reconnect-reconciliation", replacement_consent: nil), socketPath: socketPath)
+    }
+
     static func executeConflict(_ request: WorkerConflictRequest, socketPath: String? = nil) throws -> String {
         let payload = try JSONEncoder().encode(request) + Data([0x0a])
         let response = try send(payload, socketPath: socketPath ?? defaultSocketPath())
