@@ -39,6 +39,7 @@ struct MainView: View {
                 Menu {
                     Button("Контрольная панель") { openWindow(id: "monitoring") }
                     Button("Настройки") { openWindow(id: "scenario-settings") }
+                    Button("Файловый менеджер") { openWindow(id: "file-manager") }
                 } label: {
                     Label("Пространство", systemImage: "rectangle.3.group")
                 }
@@ -337,7 +338,7 @@ struct MainView: View {
 
     private var filesWorkspace: some View {
         VStack(spacing: 0) {
-            WorkspaceHeader(title: "Файловый менеджер", subtitle: "Две локальные панели метаданных") { EmptyView() }
+            WorkspaceHeader(title: "Файловый менеджер", subtitle: "Две локальные панели только для чтения") { EmptyView() }
                 .padding(.horizontal, 28).padding(.vertical, 18)
             HStack(spacing: 0) {
                 FileManagerPane(
@@ -357,39 +358,7 @@ struct MainView: View {
                 )
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            HStack(spacing: 10) {
-                Button("Проверить план копирования") {
-                    previewSelectedLocalCopy()
-                }
-                .disabled(localWorkspace.selectedRegularFilePaths.count != 1 || localWorkspace.root == nil || rightLocalWorkspace.root == nil)
-                Button("Копировать файл") {
-                    isLocalCopyConfirmationPresented = true
-                }
-                .disabled(localCopyPreview == nil || localCopyPreview?.destination_exists == true || localCopyPreviewRequest?.isCurrent(source: localWorkspace, destination: rightLocalWorkspace) != true)
-                Button("Заменить файл", role: .destructive) {
-                    isLocalReplaceConfirmationPresented = true
-                }
-                .disabled(localCopyPreview == nil || localCopyPreview?.destination_exists != true || localCopyPreviewRequest?.isCurrent(source: localWorkspace, destination: rightLocalWorkspace) != true)
-                Text("Только метаданные; файл и Job не создаются.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
-            .padding(.horizontal, 16)
-            if let preview = localCopyPreview,
-               let request = localCopyPreviewRequest,
-               request.isCurrent(source: localWorkspace, destination: rightLocalWorkspace) {
-                Notice(
-                    text: copyPreviewText(preview),
-                    symbol: preview.destination_exists ? "exclamationmark.triangle" : "doc.text.magnifyingglass"
-                )
-                .padding(.horizontal, 16)
-            }
-            if let localCopyPreviewError {
-                Notice(text: localCopyPreviewError, symbol: "exclamationmark.triangle")
-                    .padding(.horizontal, 16)
-            }
-            Notice(text: "Создание папок, копирование и контролируемая замена файлов идут только через Rust JobStore. Каждая операция требует отдельного подтверждения загрузки исходного файла; перемещение, переименование и удаление выключены.", symbol: "shield")
+            Notice(text: "Экран читает только имена, типы и размеры. Создание каталогов и передача файлов доступны только через Сценарии.", symbol: "eye")
                 .padding(16)
         }
     }
@@ -704,7 +673,6 @@ private struct FileManagerPane: View {
     let addLocalComputer: () -> String?
     let setLocalConnectionEnabled: (String, Bool) -> Bool
     let connectionError: String?
-    @State private var newDirectoryName = ""
     @State private var selectedConnectionID = ""
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -739,57 +707,6 @@ private struct FileManagerPane: View {
                         Text(workspace.relativePath.isEmpty ? "/" : "/" + workspace.relativePath).font(.caption.monospaced()).textSelection(.enabled)
                         Spacer()
                         if !workspace.selectedNames.isEmpty { Text("Выбрано: \(workspace.selectedNames.count)").font(.caption).foregroundStyle(.secondary) }
-                    }
-                    HStack(spacing: 8) {
-                        TextField("Имя новой папки", text: $newDirectoryName)
-                        Button("Создать папку") {
-                            workspace.createDirectory(
-                                named: newDirectoryName,
-                                connectionID: selectedConnectionID
-                            )
-                            newDirectoryName = ""
-                        }
-                        .disabled(
-                            !selectedConnectionIsAvailable
-                                || newDirectoryName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        )
-                    }
-                    Button("Показать неопределённые операции") {
-                        workspace.findDirectoryReconciliations(connectionID: selectedConnectionID)
-                    }
-                    .disabled(!selectedConnectionIsAvailable)
-                    Button("Показать неопределённые копирования") {
-                        workspace.findFileCopyReconciliations(connectionID: selectedConnectionID)
-                    }
-                    .disabled(!selectedConnectionIsAvailable)
-                    ForEach(workspace.reconciliationJobIDs, id: \.self) { jobID in
-                        HStack(spacing: 8) {
-                            Text("Создание папки требует проверки")
-                                .font(.caption)
-                                .foregroundStyle(.orange)
-                            Button("Проверить операцию") {
-                                workspace.reconcileDirectoryCreate(
-                                    jobID: jobID,
-                                    connectionID: selectedConnectionID
-                                )
-                            }
-                            .disabled(!selectedConnectionIsAvailable)
-                            Text(jobID)
-                                .font(.caption.monospaced())
-                                .textSelection(.enabled)
-                        }
-                    }
-                    ForEach(workspace.copyReconciliationJobIDs, id: \.self) { jobID in
-                        HStack(spacing: 8) {
-                            Text("Копирование требует проверки")
-                                .font(.caption)
-                                .foregroundStyle(.orange)
-                            Button("Проверить операцию") {
-                                workspace.reconcileFileCopy(jobID: jobID, connectionID: selectedConnectionID)
-                            }
-                            .disabled(!selectedConnectionIsAvailable)
-                            Text(jobID).font(.caption.monospaced()).textSelection(.enabled)
-                        }
                     }
                 }.padding(.horizontal, 18)
                 List(workspace.entries) { entry in
