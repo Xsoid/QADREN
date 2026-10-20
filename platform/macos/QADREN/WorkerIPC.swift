@@ -122,6 +122,12 @@ enum WorkerIPC {
         return response.status
     }
 
+    static func executeManualDirectoryCreate(
+        _ request: WorkerManualCopyRequest, socketPath: String? = nil
+    ) throws -> String {
+        try executeManualCopy(request, socketPath: socketPath)
+    }
+
     static func executeConflict(_ request: WorkerConflictRequest, socketPath: String? = nil) throws -> String {
         let payload = try JSONEncoder().encode(request) + Data([0x0a])
         let response = try send(payload, socketPath: socketPath ?? defaultSocketPath())

@@ -233,6 +233,16 @@ struct WorkerIPCBridgeTests {
         let manualReplacedBytes = try Data(contentsOf: destinationRoot.appendingPathComponent("manual.txt"))
         check(manualReplacedBytes == Data("Manual Worker replacement".utf8),
               "Worker manual Replace writes the exact requested destination bytes")
+        let mkdirStatus = try WorkerIPC.executeManualDirectoryCreate(WorkerManualCopyRequest(
+            command: "execute_manual_mkdir", source_root: destinationRoot.path,
+            source_connection_id: right, source_relative_path: "worker-folder",
+            destination_root: "", destination_connection_id: "", destination_relative_path: "",
+            job_id: "swift-worker-ipc-manual-mkdir", replacement_consent: nil
+        ), socketPath: socket)
+        check(mkdirStatus == "completed", "Worker returns completed manual mkdir status")
+        var mkdirIsDirectory: ObjCBool = false
+        check(FileManager.default.fileExists(atPath: destinationRoot.appendingPathComponent("worker-folder").path, isDirectory: &mkdirIsDirectory) && mkdirIsDirectory.boolValue,
+              "Worker manual mkdir creates the exact requested directory")
         print("Worker IPC native bridge tests passed")
     }
 

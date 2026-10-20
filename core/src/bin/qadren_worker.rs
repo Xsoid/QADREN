@@ -6,10 +6,11 @@
 
 use qadren_core::confirmation::{Confirmation, EvidenceLevel};
 use qadren_core::job_execution::{
-    reconcile_local_file_copy, run_local_file_copy, run_local_file_replace,
-    run_local_scenario_conflict_delete, run_local_scenario_conflict_replace,
-    run_local_scenario_file_copy, run_local_scenario_file_replace, LocalFileCopyError,
-    LocalFileCopyReconciliationStatus, LocalFileCopyStatus,
+    reconcile_local_file_copy, run_local_directory_create, run_local_file_copy,
+    run_local_file_replace, run_local_scenario_conflict_delete,
+    run_local_scenario_conflict_replace, run_local_scenario_file_copy,
+    run_local_scenario_file_replace, LocalFileCopyError, LocalFileCopyReconciliationStatus,
+    LocalFileCopyStatus,
 };
 use qadren_core::jobs::JobStore;
 use qadren_core::local_fs::LocalFilesystem;
@@ -674,6 +675,43 @@ fn execute_manual_copy(
     }
 }
 
+fn execute_manual_mkdir(
+    paths: &WorkerPaths,
+    request: &Request,
+) -> Result<&'static str, &'static str> {
+    let (Some(root), Some(connection), Some(relative), Some(job_id)) = (
+        request.source_root.as_deref(),
+        request.source_connection_id.as_deref(),
+        request.source_relative_path.as_deref(),
+        request.job_id.as_deref(),
+    ) else {
+        return Err("invalid_request");
+    };
+    match run_local_directory_create(
+        &paths.jobs,
+        &paths.registry,
+        Path::new(root),
+        connection,
+        Path::new(relative),
+        job_id,
+    ) {
+        Ok(_) => Ok("completed"),
+        Err(qadren_core::job_execution::LocalDirectoryCreateError::TargetExists) => {
+            Err("target_exists")
+        }
+        Err(qadren_core::job_execution::LocalDirectoryCreateError::ConnectionUnavailable) => {
+            Err("local_connection_unavailable")
+        }
+        Err(qadren_core::job_execution::LocalDirectoryCreateError::CapabilityUnavailable) => {
+            Err("local_capability_unavailable")
+        }
+        Err(qadren_core::job_execution::LocalDirectoryCreateError::OutcomeUnknown(_)) => {
+            Err("outcome_unknown")
+        }
+        Err(_) => Err("manual_mkdir_unavailable"),
+    }
+}
+
 fn execute_conflict(
     paths: &WorkerPaths,
     request: &Request,
@@ -868,6 +906,26 @@ fn handle_client(mut stream: UnixStream, paths: &WorkerPaths, stop: &mut bool) {
                 ),
             }
         }
+        "execute_manual_mkdir" => match execute_manual_mkdir(paths, &request) {
+            Ok(status) => respond(
+                &mut stream,
+                &Response {
+                    ok: true,
+                    status,
+                    staged: None,
+                    dispatched: None,
+                },
+            ),
+            Err(status) => respond(
+                &mut stream,
+                &Response {
+                    ok: false,
+                    status,
+                    staged: None,
+                    dispatched: None,
+                },
+            ),
+        },
         "execute_conflict_replace" => match execute_conflict(paths, &request, false) {
             Ok(status) => respond(
                 &mut stream,

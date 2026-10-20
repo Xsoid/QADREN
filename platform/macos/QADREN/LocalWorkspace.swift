@@ -231,12 +231,31 @@ struct LocalCopyPreviewRequest: Equatable {
     /// Rust owns the Job attempt, no-overwrite mkdir and final verification.
     @discardableResult func createDirectory(named name: String, connectionID: String) -> String? {
         do {
-            return try createDirectory(
-                named: name,
-                connectionID: connectionID,
-                databasePath: JobInventory.paths().database,
-                registryPath: StorageRegistryBridge.databasePath()
-            )
+            guard let root else { return nil }
+            guard !connectionID.isEmpty else {
+                error = "Выберите активное локальное подключение"
+                return nil
+            }
+            guard boundConnectionID == nil || boundConnectionID == connectionID else {
+                error = "Выберите папку для текущего локального подключения"
+                return nil
+            }
+            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, !trimmed.contains("/") else {
+                error = "Имя папки не должно быть пустым или содержать /"
+                return nil
+            }
+            let target = relativePath.isEmpty ? trimmed : relativePath + "/" + trimmed
+            let jobID = "local-mkdir-" + UUID().uuidString.lowercased()
+            do {
+                _ = try WorkerIPC.executeManualDirectoryCreate(WorkerManualCopyRequest(command: "execute_manual_mkdir", source_root: root, source_connection_id: connectionID, source_relative_path: target, destination_root: "", destination_connection_id: "", destination_relative_path: "", job_id: jobID, replacement_consent: nil))
+            } catch WorkerIPCError.rejected("outcome_unknown") {
+                reconciliationJobIDs = [jobID]
+                throw StorageError.operation("Результат создания папки не подтверждён. Проверьте операцию до повторной попытки.")
+            }
+            error = nil
+            refresh()
+            return jobID
         } catch {
             self.error = error.localizedDescription
             return nil
