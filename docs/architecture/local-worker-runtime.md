@@ -9,8 +9,8 @@ transport or node delegation.
 
 ## Decision
 
-Release 1 uses one bundled `QADRENWorker` executable. macOS `launchd` starts
-and restarts this executable for the signed application bundle. The Worker is
+Release 1 uses one bundled `QADRENWorker` executable. A signed distribution
+can use macOS `launchd` to start and restart this executable. The Worker is
 the only process that opens a mutable `JobStore`, stages scheduled work, or
 executes a Job. The SwiftUI application is a local controller and status
 reader.
@@ -131,8 +131,9 @@ pause/resume and read-only Job status remain FFI test and inventory paths. There
 
 This foundation does not prove a signed release bundle, service approval,
 File Provider behavior, resource consumption, sleep/wake handling, or remote
-Worker support. Those require the remaining Issue #23 native fixture and the
-Issue #24 measurements.
+Worker support. Signing and service approval are distribution acceptance work.
+They are not a Release 1 Worker ownership requirement by owner decision on
+2026-10-20. Issue #24 owns the resource measurements.
 
 The native IPC fixture starts the Worker separately, starts a disposable native
 controller process that submits one Scenario Create, and waits for that
@@ -143,7 +144,7 @@ exit does not stop the direct development Worker. It does not prove a signed
 
 `scripts/test-macos-worker-bundle.sh` builds the developer bundle and verifies
 the bundled executable and LaunchAgent contract. It does not register the
-service. Only a signed installed bundle can provide that evidence.
+service. A signed installed bundle can provide that distribution evidence.
 
 ## Rationale
 
