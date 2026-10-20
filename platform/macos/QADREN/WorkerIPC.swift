@@ -128,6 +128,15 @@ enum WorkerIPC {
         try executeManualCopy(request, socketPath: socketPath)
     }
 
+    static func reconcileManual(_ request: WorkerManualCopyRequest, socketPath: String? = nil) throws -> String {
+        let payload = try JSONEncoder().encode(request) + Data([0x0a])
+        let response = try send(payload, socketPath: socketPath ?? defaultSocketPath())
+        guard response.ok, ["completed", "unknown"].contains(response.status) else {
+            throw response.ok ? WorkerIPCError.invalidResponse : WorkerIPCError.rejected(response.status)
+        }
+        return response.status
+    }
+
     static func executeConflict(_ request: WorkerConflictRequest, socketPath: String? = nil) throws -> String {
         let payload = try JSONEncoder().encode(request) + Data([0x0a])
         let response = try send(payload, socketPath: socketPath ?? defaultSocketPath())

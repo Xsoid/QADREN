@@ -220,6 +220,13 @@ struct WorkerIPCBridgeTests {
         let manualCreatedBytes = try Data(contentsOf: destinationRoot.appendingPathComponent("manual.txt"))
         check(manualCreatedBytes == Data("Manual Worker copy".utf8),
               "Worker manual Create writes the exact requested destination bytes")
+        let reconciledCompletedCopy = try WorkerIPC.reconcileManual(WorkerManualCopyRequest(
+            command: "reconcile_manual_copy", source_root: destinationRoot.path,
+            source_connection_id: right, source_relative_path: "", destination_root: "",
+            destination_connection_id: "", destination_relative_path: "",
+            job_id: "swift-worker-ipc-manual-create", replacement_consent: nil
+        ), socketPath: socket)
+        check(reconciledCompletedCopy == "completed", "Worker reports an already completed manual copy as completed")
 
         try Data("Manual Worker replacement".utf8).write(to: sourceRoot.appendingPathComponent("manual.txt"))
         let manualReplace = try WorkerIPC.executeManualCopy(WorkerManualCopyRequest(

@@ -6,8 +6,8 @@
 
 use qadren_core::confirmation::{Confirmation, EvidenceLevel};
 use qadren_core::job_execution::{
-    reconcile_local_file_copy, run_local_directory_create, run_local_file_copy,
-    run_local_file_replace, run_local_scenario_conflict_delete,
+    reconcile_local_directory_create, reconcile_local_file_copy, run_local_directory_create,
+    run_local_file_copy, run_local_file_replace, run_local_scenario_conflict_delete,
     run_local_scenario_conflict_replace, run_local_scenario_file_copy,
     run_local_scenario_file_replace, LocalFileCopyError, LocalFileCopyReconciliationStatus,
     LocalFileCopyStatus,
@@ -712,6 +712,51 @@ fn execute_manual_mkdir(
     }
 }
 
+fn reconcile_manual(
+    paths: &WorkerPaths,
+    request: &Request,
+    directory: bool,
+) -> Result<&'static str, &'static str> {
+    let (Some(root), Some(connection), Some(job_id)) = (
+        request.source_root.as_deref(),
+        request.source_connection_id.as_deref(),
+        request.job_id.as_deref(),
+    ) else {
+        return Err("invalid_request");
+    };
+    if directory {
+        match reconcile_local_directory_create(
+            &paths.jobs,
+            &paths.registry,
+            Path::new(root),
+            connection,
+            job_id,
+        ) {
+            Ok(qadren_core::job_execution::LocalDirectoryReconciliationStatus::Completed)
+            | Ok(qadren_core::job_execution::LocalDirectoryReconciliationStatus::Existing(
+                JobState::Completed,
+            )) => Ok("completed"),
+            Ok(_) => Ok("unknown"),
+            Err(_) => Err("reconciliation_unavailable"),
+        }
+    } else {
+        match reconcile_local_file_copy(
+            &paths.jobs,
+            &paths.registry,
+            Path::new(root),
+            connection,
+            job_id,
+        ) {
+            Ok(LocalFileCopyReconciliationStatus::Completed)
+            | Ok(LocalFileCopyReconciliationStatus::Existing(JobState::Completed)) => {
+                Ok("completed")
+            }
+            Ok(_) => Ok("unknown"),
+            Err(_) => Err("reconciliation_unavailable"),
+        }
+    }
+}
+
 fn execute_conflict(
     paths: &WorkerPaths,
     request: &Request,
@@ -926,6 +971,28 @@ fn handle_client(mut stream: UnixStream, paths: &WorkerPaths, stop: &mut bool) {
                 },
             ),
         },
+        "reconcile_manual_mkdir" | "reconcile_manual_copy" => {
+            match reconcile_manual(paths, &request, request.command == "reconcile_manual_mkdir") {
+                Ok(status) => respond(
+                    &mut stream,
+                    &Response {
+                        ok: true,
+                        status,
+                        staged: None,
+                        dispatched: None,
+                    },
+                ),
+                Err(status) => respond(
+                    &mut stream,
+                    &Response {
+                        ok: false,
+                        status,
+                        staged: None,
+                        dispatched: None,
+                    },
+                ),
+            }
+        }
         "execute_conflict_replace" => match execute_conflict(paths, &request, false) {
             Ok(status) => respond(
                 &mut stream,

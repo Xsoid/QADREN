@@ -321,12 +321,10 @@ struct LocalCopyPreviewRequest: Equatable {
     /// create a directory, repeat a request, or read file contents.
     func reconcileDirectoryCreate(jobID: String, connectionID: String) {
         do {
-            try reconcileDirectoryCreate(
-                jobID: jobID,
-                connectionID: connectionID,
-                databasePath: JobInventory.paths().database,
-                registryPath: StorageRegistryBridge.databasePath()
-            )
+            guard let root else { return }
+            let status = try WorkerIPC.reconcileManual(WorkerManualCopyRequest(command: "reconcile_manual_mkdir", source_root: root, source_connection_id: connectionID, source_relative_path: "", destination_root: "", destination_connection_id: "", destination_relative_path: "", job_id: jobID, replacement_consent: nil))
+            if status == "completed" { reconciliationJobIDs = []; error = nil; refresh() }
+            else { reconciliationJobIDs = [jobID]; error = "Результат операции всё ещё не подтверждён. Повтор не выполнен." }
         } catch {
             self.error = error.localizedDescription
         }
@@ -595,16 +593,8 @@ struct LocalCopyPreviewRequest: Equatable {
     func reconcileFileCopy(jobID: String, connectionID: String) {
         guard let root else { return }
         do {
-            let database = try JobInventory.paths().database
-            let registry = try StorageRegistryBridge.databasePath()
-            let pointer = database.withCString { database in registry.withCString { registry in root.withCString { root in connectionID.withCString { connection in jobID.withCString { jobID in
-                reconcileLocalFileCopyJob(database, registry, root, connection, jobID)
-            }}}} }
-            guard let pointer else { throw StorageError.operation("Local copy reconciliation unavailable") }
-            defer { localFree(pointer) }
-            let result = try JSONDecoder().decode(LocalJobEnvelope.self, from: Data(String(cString: pointer).utf8))
-            guard result.ok, let data = result.data else { throw StorageError.operation(result.error ?? "Local copy reconciliation failed") }
-            if data.reconciled == true || data.status == "completed" {
+            let status = try WorkerIPC.reconcileManual(WorkerManualCopyRequest(command: "reconcile_manual_copy", source_root: root, source_connection_id: connectionID, source_relative_path: "", destination_root: "", destination_connection_id: "", destination_relative_path: "", job_id: jobID, replacement_consent: nil))
+            if status == "completed" {
                 copyReconciliationJobIDs = []
                 error = nil
                 refresh()
