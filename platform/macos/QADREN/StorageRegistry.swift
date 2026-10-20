@@ -561,8 +561,10 @@ enum StorageRegistryBridge {
         }
     }
 
-    static func pendingScenarioCreateBatches(scenario: ScenarioEntry) throws -> [ScenarioCreateBatchReceipt] {
-        let database = try path
+    static func pendingScenarioCreateBatches(
+        scenario: ScenarioEntry, databasePath: String? = nil
+    ) throws -> [ScenarioCreateBatchReceipt] {
+        let database = try databasePath ?? path
         return try database.withCString { path in
             try scenario.id.withCString { id in
                 try unwrap(

@@ -182,8 +182,35 @@ struct WorkerIPCBridgeTests {
             database: registry, scenario: batchScenario,
             items: #"[{"relative_path":"first.txt","source_is_left":true},{"relative_path":"second.txt","source_is_left":true}]"#
         )
+        let reopenedBatchScenario = ScenarioEntry(
+            id: batchScenario,
+            name: "Worker IPC batch",
+            left_connection_id: left,
+            left_root: batchSource.path,
+            right_connection_id: right,
+            right_root: batchDestination.path,
+            direction: "left_to_right",
+            enabled: true,
+            revision: 1
+        )
+        let pendingAfterControllerReopen = try StorageRegistryBridge.pendingScenarioCreateBatches(
+            scenario: reopenedBatchScenario, databasePath: registry
+        )
+        check(pendingAfterControllerReopen.count == 1, "reopened controller finds its pending Create batch")
+        check(pendingAfterControllerReopen[0].id == batchID, "reopened controller reads the exact receipt")
+        check(
+            pendingAfterControllerReopen[0].children.allSatisfy { $0.state == "pending" },
+            "reopened controller reports only durable pending children"
+        )
         let batchStatus = try WorkerIPC.executeScenarioCreateBatch(receiptID: batchID, socketPath: socket)
         check(batchStatus == "completed", "Worker accepts a confirmed Create batch receipt")
+        let pendingAfterTerminalOutcome = try StorageRegistryBridge.pendingScenarioCreateBatches(
+            scenario: reopenedBatchScenario, databasePath: registry
+        )
+        check(
+            pendingAfterTerminalOutcome.isEmpty,
+            "terminal batch is not restored as pending work"
+        )
         let firstBatchBytes = try Data(contentsOf: batchDestination.appendingPathComponent("first.txt"))
         let secondBatchBytes = try Data(contentsOf: batchDestination.appendingPathComponent("second.txt"))
         check(
