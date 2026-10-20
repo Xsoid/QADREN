@@ -36,7 +36,7 @@ Priority from first to last: (1) blocking consent/conflict/UNKNOWN and errors; (
 - Click on conflict/needs consent → context panel with consequences and a resolution. The interface is read-only and the action is disabled until the real Core Policy is available.
 - Click on Scenario → brief information and status of current jobs; the "Configure Scenario" button opens settings for a specific ID.
 - Global filter popover → connection/scenario/worker. Selecting an event sets a shared context only for widgets subscribed to it. Each widget has a local "Override" + "Return to Shared".
-- The "+ Widget" button is available only in layout mode; the catalog is a temporary drawer/popover and closes after adding a widget or exiting. In monitoring mode, top actions are only Filter, Layout, Window, and current health.
+- In monitoring mode, top actions are only Filter, Layout, Window, and current health.
 
 ## 5. Behavior during risks
 

@@ -37,82 +37,34 @@ enum MonitoringWidgetDensity: String, CaseIterable, Codable, Identifiable {
     }
 }
 
-/// Canvas sizing changes the adaptive grid's reflow threshold for one panel.
-/// It deliberately does not scale the app chrome or a widget's content density.
-enum MonitoringGridScale: String, CaseIterable, Codable, Identifiable {
-    case compact
-    case regular
-    case spacious
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .compact: "Компактная"
-        case .regular: "Обычная"
-        case .spacious: "Просторная"
-        }
-    }
-
-    var minimumWidth: Double {
-        switch self {
-        case .compact: 230
-        case .regular: 270
-        case .spacious: 360
-        }
-    }
-}
-
 struct MonitoringWidgetLayout: Codable, Identifiable, Equatable {
     let kind: MonitoringWidgetKind
-    var isVisible: Bool
     var density: MonitoringWidgetDensity
 
     var id: MonitoringWidgetKind { kind }
 
     init(
         kind: MonitoringWidgetKind,
-        isVisible: Bool,
         density: MonitoringWidgetDensity = .regular
     ) {
         self.kind = kind
-        self.isVisible = isVisible
         self.density = density
     }
 
     private enum CodingKeys: String, CodingKey {
         case kind
-        case isVisible
         case density
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         kind = try container.decode(MonitoringWidgetKind.self, forKey: .kind)
-        isVisible = try container.decode(Bool.self, forKey: .isVisible)
         density = try container.decodeIfPresent(MonitoringWidgetDensity.self, forKey: .density) ?? .regular
     }
 }
 
 private struct MonitoringLayoutState: Codable, Equatable {
     var widgets: [MonitoringWidgetLayout]
-    var gridScale: MonitoringGridScale
-
-    init(widgets: [MonitoringWidgetLayout], gridScale: MonitoringGridScale = .regular) {
-        self.widgets = widgets
-        self.gridScale = gridScale
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case widgets
-        case gridScale
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        widgets = try container.decode([MonitoringWidgetLayout].self, forKey: .widgets)
-        gridScale = try container.decodeIfPresent(MonitoringGridScale.self, forKey: .gridScale) ?? .regular
-    }
 }
 
 /// Local-only presentation state for one monitoring window. It never owns Jobs,
@@ -121,9 +73,8 @@ private struct MonitoringLayoutState: Codable, Equatable {
 @MainActor
 final class DashboardLayoutStore: ObservableObject {
     @Published private(set) var widgets = MonitoringWidgetKind.allCases.map {
-        MonitoringWidgetLayout(kind: $0, isVisible: true)
+        MonitoringWidgetLayout(kind: $0)
     }
-    @Published private(set) var gridScale: MonitoringGridScale = .regular
     /// A saved layout can be unreadable after an interrupted preference write or
     /// an incompatible manual edit. The original bytes are intentionally kept;
     /// this flag lets the UI explain why the safe default is on screen.
@@ -143,14 +94,6 @@ final class DashboardLayoutStore: ObservableObject {
         "qadren.monitoring.layout." + panelID
     }
 
-    var visibleWidgets: [MonitoringWidgetLayout] {
-        widgets.filter(\.isVisible)
-    }
-
-    var hiddenWidgets: [MonitoringWidgetLayout] {
-        widgets.filter { !$0.isVisible }
-    }
-
     var canUndo: Bool { !undoStack.isEmpty }
 
     var canRedo: Bool { !redoStack.isEmpty }
@@ -163,7 +106,6 @@ final class DashboardLayoutStore: ObservableObject {
         let key = Self.storageKey(for: panelID)
         guard let data = defaults.data(forKey: key) else {
             widgets = defaultWidgets
-            gridScale = .regular
             return
         }
         if let decoded = try? JSONDecoder().decode(MonitoringLayoutState.self, from: data),
@@ -171,14 +113,7 @@ final class DashboardLayoutStore: ObservableObject {
             restore(decoded)
             return
         }
-        if let legacyWidgets = try? JSONDecoder().decode([MonitoringWidgetLayout].self, from: data),
-           isValid(legacyWidgets) {
-            widgets = legacyWidgets
-            gridScale = .regular
-            return
-        }
         widgets = defaultWidgets
-        gridScale = .regular
         recoveredFromInvalidLayout = true
     }
 
@@ -191,33 +126,11 @@ final class DashboardLayoutStore: ObservableObject {
         save()
     }
 
-    func setVisible(_ kind: MonitoringWidgetKind, isVisible: Bool) {
-        guard let index = widgets.firstIndex(where: { $0.kind == kind }) else { return }
-        guard widgets[index].isVisible != isVisible else { return }
-        recordUndoState()
-        widgets[index].isVisible = isVisible
-        save()
-    }
-
     func setDensity(_ kind: MonitoringWidgetKind, density: MonitoringWidgetDensity) {
         guard let index = widgets.firstIndex(where: { $0.kind == kind }) else { return }
         guard widgets[index].density != density else { return }
         recordUndoState()
         widgets[index].density = density
-        save()
-    }
-
-    func setGridScale(_ gridScale: MonitoringGridScale) {
-        guard self.gridScale != gridScale else { return }
-        recordUndoState()
-        self.gridScale = gridScale
-        save()
-    }
-
-    func reset() {
-        guard currentState != defaultState else { return }
-        recordUndoState()
-        restore(defaultState)
         save()
     }
 
@@ -236,15 +149,11 @@ final class DashboardLayoutStore: ObservableObject {
     }
 
     private var defaultWidgets: [MonitoringWidgetLayout] {
-        MonitoringWidgetKind.allCases.map { MonitoringWidgetLayout(kind: $0, isVisible: true) }
-    }
-
-    private var defaultState: MonitoringLayoutState {
-        MonitoringLayoutState(widgets: defaultWidgets)
+        MonitoringWidgetKind.allCases.map { MonitoringWidgetLayout(kind: $0) }
     }
 
     private var currentState: MonitoringLayoutState {
-        MonitoringLayoutState(widgets: widgets, gridScale: gridScale)
+        MonitoringLayoutState(widgets: widgets)
     }
 
     private func isValid(_ candidate: [MonitoringWidgetLayout]) -> Bool {
@@ -268,6 +177,5 @@ final class DashboardLayoutStore: ObservableObject {
 
     private func restore(_ state: MonitoringLayoutState) {
         widgets = state.widgets
-        gridScale = state.gridScale
     }
 }

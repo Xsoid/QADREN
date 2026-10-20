@@ -60,33 +60,6 @@ struct MainView: View {
                         .disabled(!isEditingLayout || !dashboardLayout.canRedo)
                         .keyboardShortcut("z", modifiers: [.command, .shift])
                         .help("Вернуть отменённое изменение компоновки")
-                        Menu("Добавить виджет", systemImage: "plus.rectangle.on.rectangle") {
-                            ForEach(dashboardLayout.hiddenWidgets) { widget in
-                                Button(widget.kind.title) {
-                                    dashboardLayout.setVisible(widget.kind, isVisible: true)
-                                }
-                            }
-                            if dashboardLayout.hiddenWidgets.isEmpty {
-                                Text("Все стандартные виджеты уже на панели")
-                            }
-                            Divider()
-                            Button("Сбросить компоновку") { dashboardLayout.reset() }
-                        }
-                        .disabled(!isEditingLayout)
-                        Menu("Размер сетки", systemImage: "rectangle.grid.1x2") {
-                            ForEach(MonitoringGridScale.allCases) { scale in
-                                Button {
-                                    dashboardLayout.setGridScale(scale)
-                                } label: {
-                                    if dashboardLayout.gridScale == scale {
-                                        Label(scale.title, systemImage: "checkmark")
-                                    } else {
-                                        Text(scale.title)
-                                    }
-                                }
-                            }
-                        }
-                        .disabled(!isEditingLayout)
                     }
                 }
             }
@@ -147,21 +120,12 @@ struct MainView: View {
                     .accessibilityElement(children: .combine)
                 }
 
-                if dashboardLayout.visibleWidgets.isEmpty {
-                    QDEmptyState(
-                        title: "На панели нет виджетов",
-                        detail: "Откройте режим компоновки, чтобы вернуть скрытые виджеты или сбросить раскладку.",
-                        symbol: "rectangle.3.group"
-                    )
-                    .padding(12)
-                } else {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: CGFloat(dashboardLayout.gridScale.minimumWidth)), spacing: 10)], spacing: 10) {
-                        ForEach(dashboardLayout.visibleWidgets) { widget in
-                            monitoringWidget(widget)
-                        }
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 270), spacing: 10)], spacing: 10) {
+                    ForEach(dashboardLayout.widgets) { widget in
+                        monitoringWidget(widget)
                     }
-                    .padding(12)
                 }
+                .padding(12)
 
                 HStack(spacing: 8) {
                     QDStatusLabel(kind: workerStatusKind, text: "Worker: \(workerStatus)")
@@ -295,11 +259,6 @@ struct MainView: View {
             .disabled(dashboardLayout.widgets.last?.kind == widget.kind)
             .labelStyle(.iconOnly)
             .help("Переместить позже")
-            Button("Скрыть виджет", systemImage: "eye.slash") {
-                dashboardLayout.setVisible(widget.kind, isVisible: false)
-            }
-            .labelStyle(.iconOnly)
-            .help("Скрыть виджет")
             Menu("Плотность виджета", systemImage: "rectangle.3.group") {
                 ForEach(MonitoringWidgetDensity.allCases) { density in
                     Button {

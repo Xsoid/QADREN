@@ -45,9 +45,9 @@ Example for the queue: 2×2 — active/waiting/unknown (counters), 4×3 — seve
 
 **Observation** (default): widgets are locked; actions are available within them; no drag handles; zoom/filter context and details work without transitions.
 
-**Layout** (explicitly enabled in toolbar): a grid line, drag handle, resize anchor, `+ Widget` button, and `Done` button appear. Only in this mode does the catalog drawer/popover open with search **by widget types**, not search for user files. Auto-save every valid change; Undo/Redo (Cmd-Z/Shift-Cmd-Z); optional layout recovery, but not without warning upon layout loss. Deleting a widget does not delete jobs, scenarios, connections, or their history.
+**Layout** (explicitly enabled in toolbar): move controls, density choices, and `Done` appear. Auto-save every valid change; Undo/Redo (Cmd-Z/Shift-Cmd-Z); optional layout recovery, but not without warning upon layout loss. These changes do not delete jobs, scenarios, connections, or their history.
 
-Order: select → drag / resize → snap + safe reflow → validate bounds/type-uniqueness → persist view state. If save errors occur, show a message and the previous layout; do not report success. The catalog shows only supported widgets; for future types, show status "unavailable" with a reason.
+Order: select → move → choose density → validate bounds/type-uniqueness → persist view state. If save errors occur, show a message and the previous layout; do not report success. Future widget types remain unavailable until an approved product decision adds them.
 
 ## 6. Contextual Links
 

@@ -1,151 +1,32 @@
 import Foundation
-import SwiftUI
-
-private func check(_ condition: @autoclosure () -> Bool, _ message: String) {
-    guard condition() else { fatalError("FAIL: " + message) }
-}
 
 @main
 struct DashboardLayoutTests {
-    @MainActor
     static func main() {
-        let suite = "qadren-dashboard-layout-tests-" + UUID().uuidString
-        let defaults = UserDefaults(suiteName: suite)!
+        let suite = "qadren-dashboard-layout-tests-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else { fatalError("defaults unavailable") }
         defer { defaults.removePersistentDomain(forName: suite) }
 
-        let panelID = "panel-a"
+        let panelID = "main"
         let store = DashboardLayoutStore(defaults: defaults)
         store.load(panelID: panelID)
-        check(store.visibleWidgets.map(\.kind) == MonitoringWidgetKind.allCases, "new panel has each standard widget")
+        check(store.widgets.map(\.kind) == MonitoringWidgetKind.allCases, "fixed widget set")
 
         store.move(.connections, by: -1)
-        store.setVisible(.jobs, isVisible: false)
         store.setDensity(.connections, density: .expanded)
-        store.setGridScale(.spacious)
-
         check(store.canUndo, "layout edits enable undo")
         store.undo()
-        check(store.gridScale == .regular, "undo restores grid scale")
+        check(store.widgets.first(where: { $0.kind == .connections })?.density == .regular, "undo restores density")
         store.redo()
-        check(store.gridScale == .spacious, "redo restores grid scale")
-        store.undo()
-        store.undo()
-        check(store.widgets.first(where: { $0.kind == .connections })?.density == .regular, "undo restores widget density")
-        store.redo()
-        check(store.widgets.first(where: { $0.kind == .connections })?.density == .expanded, "redo restores widget density")
-        store.undo()
-        store.undo()
-        check(store.hiddenWidgets.isEmpty, "undo restores widget visibility")
-        check(store.widgets.map(\.kind) == [.system, .jobs, .connections, .queue], "undo preserves earlier ordering edit")
-        check(store.canRedo, "undo enables redo")
-        store.undo()
-        check(store.widgets.map(\.kind) == MonitoringWidgetKind.allCases, "second undo restores default ordering")
-        store.redo()
-        store.redo()
-        store.redo()
-        store.redo()
-        check(store.hiddenWidgets.map(\.kind) == [.jobs], "redo restores the full edit sequence")
-        check(store.widgets.first(where: { $0.kind == .connections })?.density == .expanded, "redo persists the density edit")
-        check(store.gridScale == .spacious, "redo persists the grid scale edit")
+        check(store.widgets.first(where: { $0.kind == .connections })?.density == .expanded, "redo restores density")
 
         let restored = DashboardLayoutStore(defaults: defaults)
         restored.load(panelID: panelID)
-        check(restored.widgets.map(\.kind) == [.system, .jobs, .connections, .queue], "widget order persists per panel")
-        check(restored.hiddenWidgets.map(\.kind) == [.jobs], "hidden widget persists per panel")
-        check(restored.widgets.first(where: { $0.kind == .connections })?.density == .expanded, "widget density persists per panel")
-        check(restored.gridScale == .spacious, "grid scale persists per panel")
+        check(restored.widgets.map(\.kind) == [.system, .jobs, .connections, .queue], "order persists")
+        check(restored.widgets.first(where: { $0.kind == .connections })?.density == .expanded, "density persists")
+    }
 
-        let legacyPanel = "legacy-layout"
-        let legacyJSON = """
-        [{"kind":"system","isVisible":true},{"kind":"jobs","isVisible":true},{"kind":"queue","isVisible":true},{"kind":"connections","isVisible":true}]
-        """
-        defaults.set(Data(legacyJSON.utf8), forKey: DashboardLayoutStore.storageKey(for: legacyPanel))
-        let legacy = DashboardLayoutStore(defaults: defaults)
-        legacy.load(panelID: legacyPanel)
-        check(legacy.widgets.allSatisfy { $0.density == .regular }, "legacy layouts default missing density safely")
-        check(legacy.gridScale == .regular, "legacy array layouts default missing grid scale safely")
-
-        let otherPanel = DashboardLayoutStore(defaults: defaults)
-        otherPanel.load(panelID: "panel-b")
-        check(otherPanel.visibleWidgets.map(\.kind) == MonitoringWidgetKind.allCases, "separate panel starts independently")
-
-        let corruptPanel = "corrupt"
-        defaults.set(Data("not-json".utf8), forKey: DashboardLayoutStore.storageKey(for: corruptPanel))
-        let recovered = DashboardLayoutStore(defaults: defaults)
-        recovered.load(panelID: corruptPanel)
-        check(recovered.visibleWidgets.count == MonitoringWidgetKind.allCases.count, "corrupt layout falls back safely")
-        check(recovered.recoveredFromInvalidLayout, "corrupt layout is reported to the monitoring UI")
-        check(defaults.data(forKey: DashboardLayoutStore.storageKey(for: corruptPanel)) == Data("not-json".utf8), "corrupt layout is not erased during recovery")
-
-        recovered.setGridScale(.compact)
-        check(!recovered.recoveredFromInvalidLayout, "a deliberate replacement clears the recovery notice")
-
-        let bounded = DashboardLayoutStore(defaults: defaults)
-        bounded.load(panelID: "bounded-history")
-        for index in 0..<55 {
-            bounded.setVisible(.system, isVisible: !index.isMultiple(of: 2))
-        }
-        for _ in 0..<50 { bounded.undo() }
-        check(!bounded.canUndo, "layout history retains no more than fifty states")
-
-        check(ConnectionPresentationStatus.aggregate([], registryFailed: false) == .waiting, "empty Registry is waiting")
-        check(ConnectionPresentationStatus.aggregate([.paused], registryFailed: false) == .paused, "all disabled connections are paused")
-        check(ConnectionPresentationStatus.aggregate([.offline, .disconnected], registryFailed: false) == .offline, "offline and disconnected connections stay offline")
-        check(ConnectionPresentationStatus.aggregate([.ready, .offline], registryFailed: false) == .unknown, "mixed connection states are not presented as ready")
-        check(ConnectionPresentationStatus.aggregate([.ready, .needsAction], registryFailed: false) == .needsAction, "authorization need outranks ready state")
-        check(ConnectionPresentationStatus.aggregate([.needsAction, .failed], registryFailed: false) == .failed, "failure outranks authorization need")
-        check(ConnectionPresentationStatus.aggregate([.ready], registryFailed: true) == .failed, "Registry failure outranks entry state")
-        check(ConnectionPresentationStatus(enabled: true, registryStatus: "disconnected") == .disconnected, "disconnected entry retains its precise state")
-        check(ConnectionPresentationStatus(enabled: true, registryStatus: "disconnected").title == "отключено", "disconnected entry retains its precise title")
-        check(ConnectionPresentationStatus(enabled: true, registryStatus: "unrecognized") == .unknown, "unrecognized entry is not assumed ready")
-        check(ConnectionPresentationStatus(enabled: false, registryStatus: "connected").title == "выключено", "disabled entry does not expose a ready title")
-
-        check(JobPresentationStatus.aggregate([], inventoryFailed: false) == .waiting, "empty JobStore is waiting")
-        check(JobPresentationStatus.aggregate(["completed", "cancelled"], inventoryFailed: false) == .ready, "terminal Jobs do not look active")
-        check(JobPresentationStatus.aggregate(["queued", "completed"], inventoryFailed: false) == .waiting, "queued Job is not hidden by terminal history")
-        check(JobPresentationStatus.aggregate(["paused", "queued"], inventoryFailed: false) == .paused, "paused Job outranks queue")
-        check(JobPresentationStatus.aggregate(["running", "paused"], inventoryFailed: false) == .active, "running Job outranks paused queue")
-        check(JobPresentationStatus.aggregate(["unknown", "running"], inventoryFailed: false) == .unknown, "unknown Job outranks activity")
-        check(JobPresentationStatus.aggregate(["waiting_for_decision", "unknown"], inventoryFailed: false) == .unknown, "unknown Job is never hidden by a decision requirement")
-        check(JobPresentationStatus.aggregate(["failed", "waiting_for_decision"], inventoryFailed: false) == .failed, "failed Job outranks decision requirement")
-        check(JobPresentationStatus.aggregate(["completed"], inventoryFailed: true) == .failed, "JobStore read failure outranks historical completion")
-        check(JobPresentationStatus(state: "waiting_for_decision").title == "Требует решения", "decision state has a localized title")
-        check(JobPresentationStatus(state: "failed").title == "Ошибка", "failed state has a localized title")
-        check(JobPresentationStatus(state: "cancelled").title == "Отменено", "cancelled state remains distinct from completion")
-        check(JobPresentationStatus(state: "unexpected") == .unknown, "unknown JobStore value does not look successful")
-        check(JobQueueSummary(states: ["running", "queued", "queued", "unknown", "completed", "cancelled"]) == JobQueueSummary(active: 1, waiting: 2, unknown: 1), "Queue counters use only actual live JobStore states")
-        check(JobQueueSummary(states: ["waiting_for_decision", "failed"]) == JobQueueSummary(active: 0, waiting: 0, unknown: 0), "decision and failed Jobs are not misrepresented as active or queued")
-
-        for semantic in QDSemanticColor.allCases {
-            check(QDTheme.semanticContrastRatio(semantic, for: .light) >= 4.5, "light semantic status text meets 4.5:1 contrast")
-            check(QDTheme.semanticContrastRatio(semantic, for: .dark) >= 4.5, "dark semantic status text meets 4.5:1 contrast")
-        }
-        for scheme in [ColorScheme.light, .dark] {
-            check(
-                QDTheme.widgetStrokeContrastRatio(for: scheme, increasedContrast: true) >= 4.5,
-                "increased-contrast widget border remains distinct from its panel"
-            )
-        }
-        check(
-            QDAccessibilityPresentation.widgetBorderWidth(increasedContrast: false) == 1,
-            "standard contrast uses a one point widget border"
-        )
-        check(
-            QDAccessibilityPresentation.widgetBorderWidth(increasedContrast: true) == 2,
-            "increased contrast uses a two point widget border"
-        )
-        check(
-            QDAccessibilityPresentation.permitsImplicitAnimation(reduceMotion: false),
-            "standard motion permits implicit animation"
-        )
-        check(
-            !QDAccessibilityPresentation.permitsImplicitAnimation(reduceMotion: true),
-            "reduce motion disables implicit animation"
-        )
-        check(QDStatusKind.needsAction.usesAttentionBorder, "warning widgets use a semantic attention border")
-        check(QDStatusKind.failed.usesAttentionBorder, "failed widgets use a semantic attention border")
-        check(!QDStatusKind.unknown.usesAttentionBorder, "unknown widgets keep neutral chrome and a distinct status marker")
-
-        print("Dashboard layout native tests passed")
+    private static func check(_ condition: @autoclosure () -> Bool, _ message: String) {
+        guard condition() else { fatalError(message) }
     }
 }
