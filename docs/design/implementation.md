@@ -24,7 +24,7 @@ The UI shall not invent data pipelines, second queues, runtime history, or regis
 | `platform/macos/QADREN/MainView.swift` | composition root | gradually move tokens/components/widgets; do not leave "dashboard/jobs/files" switch as the primary UX |
 | `StorageConnections.swift` + `YandexConnection.swift` | actual connection metadata + OAuth | adapt to Settings and Connection widget; do not rewrite Keychain/Registry |
 | `JobInventory.swift` | read-only durable Job data + supported commands | do not replace mock-job with successful live transfer |
-| `LocalWorkspace.swift` | local folder metadata and selection | choose scenario roots in settings only; do not open file content or add a separate file workspace |
+| `LocalWorkspace.swift` | local folder metadata and selection | choose Scenario roots in Settings and browse metadata in the separate read-only file window; do not open file content or add a copy action to that window |
 | Rust `jobs.rs`, `jobs_ffi.rs`, `model.rs`, `scenario_planner.rs`, `confirmation.rs` | source of truth | ViewModels subscribe to commands and durable state; Swift does not calculate policy and job outcomes |
 
 Suggested SwiftUI type names (`QDTheme`, `QDWidgetFrame`, `QDLayoutStore`) are provided as decomposition directions; if existing types are suitable, **reuse** them.

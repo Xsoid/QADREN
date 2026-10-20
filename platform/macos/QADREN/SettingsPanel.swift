@@ -586,7 +586,6 @@ private struct ScenarioDryRunView: View {
     @State private var isLoading = false
     @State private var error: String?
     @State private var hasRequestedPreview = false
-    @State private var pendingCreate: ScenarioPlanItem?
     @State private var pendingUpdate: ScenarioPlanItem?
     @State private var conflictTasks: [ScenarioConflictTask] = []
     @State private var leftSnapshot: [ScenarioSnapshotItem] = []
@@ -644,7 +643,7 @@ private struct ScenarioDryRunView: View {
                     HStack {
                         if !creates.isEmpty {
                             Button("Создать все: \(creates.count)") {
-                                pendingBatch = creates; pendingBatchKind = "create"
+                                executeCreateBatch(creates)
                             }
                             .disabled(activeBatch != nil)
                         }
@@ -699,7 +698,7 @@ private struct ScenarioDryRunView: View {
                             Text(reason).font(.caption).foregroundStyle(.orange)
                         }
                         if item.action.kind == "create" {
-                            Button("Создать копию") { pendingCreate = item }
+                            Button("Создать копию") { executeCreate(item) }
                                 .buttonStyle(.bordered)
                                 .disabled(activeBatch != nil)
                         }
@@ -742,14 +741,6 @@ private struct ScenarioDryRunView: View {
             batchProgressTask?.cancel()
             batchProgressTask = nil
         }
-        .alert("Разрешить загрузку и создание копии?", isPresented: Binding(
-            get: { pendingCreate != nil }, set: { if !$0 { pendingCreate = nil } }
-        )) {
-            Button("Отмена", role: .cancel) { pendingCreate = nil }
-            Button("Загрузить и создать") { executePendingCreate() }
-        } message: {
-            Text("macOS может скачать исходный файл из File Provider на этот Mac. QADREN создаст только этот файл, не заменит файл назначения и сохранит Job с точной ревизией сценария.")
-        }
         .alert("Разрешить загрузку и замену файла?", isPresented: Binding(
             get: { pendingUpdate != nil }, set: { if !$0 { pendingUpdate = nil } }
         )) {
@@ -785,7 +776,7 @@ private struct ScenarioDryRunView: View {
             get: { !pendingBatch.isEmpty }, set: { if !$0 { pendingBatch = []; pendingBatchKind = nil } }
         )) {
             Button("Отмена", role: .cancel) { pendingBatch = []; pendingBatchKind = nil }
-            Button(pendingBatchKind == "update" ? "Загрузить и заменить" : "Загрузить и создать", role: pendingBatchKind == "update" ? .destructive : nil) {
+            Button("Заменить файлы", role: .destructive) {
                 executePendingBatch()
             }
         } message: {
@@ -1021,6 +1012,13 @@ private struct ScenarioDryRunView: View {
                 loadPlan()
             }
         }
+    }
+
+    private func executeCreateBatch(_ items: [ScenarioPlanItem]) {
+        guard !items.isEmpty else { return }
+        pendingBatch = items
+        pendingBatchKind = "create"
+        executePendingBatch()
     }
 
     private func cancelActiveBatch() {

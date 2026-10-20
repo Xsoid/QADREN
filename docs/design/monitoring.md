@@ -4,7 +4,7 @@
 
 The main window is a **working canvas of widgets**. The user configures this canvas one time and then monitors it without transitions between sections. It is NOT separate pages for "Overview/Queue/Files/History" and it does NOT have a permanent Sidebar.
 
-Existing entry points in `QADRENApp.swift`: one `Window("Контрольная панель", id: "monitoring")` and MenuBarExtra → "Monitoring Panel". Opening the entry point activates that one monitoring window.
+Existing entry points in `QADRENApp.swift`: one `Window("Контрольная панель", id: "monitoring")`, one Settings window, and a separate read-only file-manager window. The menu can open each window. The file manager has two Local Filesystem metadata panes. It does not own a copy queue or a file-modification action.
 
 ## 2. Three horizontal zones
 

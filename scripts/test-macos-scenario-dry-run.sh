@@ -4,6 +4,18 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# A selected Scenario Create is already the user's command. Ordinary source
+# reads, including File Provider materialization, must not add a second prompt.
+if rg -q 'Разрешить загрузку и создание копии|Загрузить и создать|pendingCreate|executePendingCreate' \
+  platform/macos/QADREN/SettingsPanel.swift; then
+  echo "Scenario Create still contains an obsolete ordinary-read confirmation" >&2
+  exit 1
+fi
+rg -q 'Button\("Создать копию"\) \{ executeCreate\(item\) \}' \
+  platform/macos/QADREN/SettingsPanel.swift
+rg -q 'Button\("Создать все: \\(creates.count\\)"\) \{' \
+  platform/macos/QADREN/SettingsPanel.swift
+
 for cmd in cargo xcrun mktemp; do
   command -v "$cmd" >/dev/null || { echo "Missing test tool: $cmd" >&2; exit 1; }
 done
