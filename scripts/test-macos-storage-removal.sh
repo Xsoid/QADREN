@@ -23,6 +23,7 @@ trap 'rm -rf -- "$TEST_ROOT"' EXIT
 xcrun swiftc -O -target "$ARCH-apple-macos13.0" \
   -framework Foundation -framework Security \
   platform/macos/QADREN/JobInventory.swift \
+  platform/macos/QADREN/WorkerIPC.swift \
   platform/macos/QADREN/StorageRegistry.swift \
   platform/macos/Tests/StorageRegistryRemovalTests.swift \
   "$ROOT/core/target/$TARGET/release/libqadren_core.a" \
