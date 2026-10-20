@@ -915,6 +915,28 @@ impl Registry {
         Err(RegistryError::IntegrityFailed)
     }
 
+    /// Return the immutable Scenario identity that owns one scheduled child
+    /// effect. The Worker uses this only to find the already-selected Local
+    /// destination for read-only UNKNOWN reconciliation.
+    pub fn schedule_child_job_scenario(&self, job_id: &str) -> Result<Option<ScenarioReference>> {
+        self.db
+            .query_row(
+                "SELECT o.scenario_id,o.scenario_revision
+                 FROM schedule_child_jobs c
+                 JOIN schedule_job_outbox o ON o.job_id=c.schedule_job_id
+                 WHERE c.job_id=?1",
+                [job_id],
+                |row| {
+                    Ok(ScenarioReference {
+                        scenario_id: row.get(0)?,
+                        revision: row.get::<_, i64>(1)? as u64,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     /// Enable or disable one schedule without changing its already claimed
     /// occurrences. Re-enabling must never replay an older local slot.
     pub fn set_scenario_schedule_enabled(

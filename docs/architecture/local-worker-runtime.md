@@ -71,9 +71,11 @@ stores. A second start fails before it can issue I/O. The Worker releases the
 lock only during controlled shutdown.
 
 On startup after an unclean exit, the Worker performs only read-only
-reconciliation for durable ambiguous attempts. It persists a verified result
+reconciliation for durable ambiguous attempts. For a scheduled Local Filesystem
+child copy, the Registry mapping identifies the pinned destination root. The
+Worker checks only the saved destination metadata. It persists a verified result
 when evidence is sufficient. Otherwise it retains `UNKNOWN`. It never repeats
-a replacement or deletion as recovery.
+a copy, replacement, or deletion as recovery.
 
 The Worker uses the existing Registry and JobStore files. It does not create a
 second JobStore, queue, scenario engine, or business-logic copy in Swift.
