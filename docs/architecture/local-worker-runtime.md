@@ -107,7 +107,9 @@ and its saved snapshots. It rejects missing consent, stale snapshots, and an
 unselected task before it changes a file.
 The macOS bundle includes the executable and the `SMAppService` LaunchAgent
 definition. `QADRENApp` requests registration and reports the system
-registration state without treating it as a health check.
+registration state without treating it as a health check. If the registration
+request fails, it reports a failed registration. It does not display a system
+error that can contain installation-specific paths.
 
 Each schedule Job remains a coordinator receipt that stores a Scenario identity
 and revision, not a durable multi-file execution plan. At execution time the
@@ -138,6 +140,10 @@ controller to exit. The fixture then submits and verifies a confirmed
 replacement through the still-running Worker. This proves controller-process
 exit does not stop the direct development Worker. It does not prove a signed
 `SMAppService` registration or a full SwiftUI Quit lifecycle.
+
+`scripts/test-macos-worker-bundle.sh` builds the developer bundle and verifies
+the bundled executable and LaunchAgent contract. It does not register the
+service. Only a signed installed bundle can provide that evidence.
 
 ## Rationale
 
