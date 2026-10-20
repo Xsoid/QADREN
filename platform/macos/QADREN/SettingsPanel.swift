@@ -899,16 +899,35 @@ private struct ScenarioDryRunView: View {
         )
         workerOwnedCreateBatch = kind == "create"
         if kind == "create" {
+            let receiptID: String
+            do {
+                receiptID = try StorageRegistryBridge.confirmScenarioCreateBatch(
+                    scenario: batchScenario, items: items
+                )
+            } catch {
+                activeBatch = nil
+                workerOwnedCreateBatch = false
+                self.error = "Не удалось подтвердить пакет: \(error.localizedDescription)"
+                return
+            }
             batchTask = Task.detached(priority: .userInitiated) {
                 do {
-                    try StorageRegistryBridge.executeScenarioCreateBatch(
-                        scenario: batchScenario, items: items
-                    )
+                    _ = try WorkerIPC.executeScenarioCreateBatch(receiptID: receiptID)
+                    let receipt = try? StorageRegistryBridge.scenarioCreateBatch(id: receiptID)
                     await MainActor.run {
+                        let completed = receipt?.children.filter { $0.state == "completed" }.count ?? 0
+                        let failures = receipt?.children.filter { $0.state != "completed" }.count ?? 0
                         activeBatch = ScenarioBatchProgress(
-                            total: items.count, processed: items.count, failures: 0,
+                            total: items.count, processed: completed, failures: failures,
                             currentPath: items.last?.relative_path ?? "", cancellationRequested: false
                         )
+                        if failures > 0 {
+                            let failedPaths = receipt?.children
+                                .filter { $0.state != "completed" }
+                                .map(\.relative_path)
+                                .joined(separator: ", ") ?? ""
+                            self.error = "Worker зафиксировал незавершённые элементы пакета: \(failedPaths). Они не будут автоматически повторены."
+                        }
                     }
                 } catch {
                     let message = error.localizedDescription

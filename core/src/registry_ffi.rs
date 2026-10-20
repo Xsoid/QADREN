@@ -269,6 +269,25 @@ pub extern "C" fn qadren_scenario_create_batch(
     }
 }
 
+/// Return durable Create-batch child states. This function is read-only.
+#[no_mangle]
+pub extern "C" fn qadren_scenario_create_batch_get(
+    path: *const c_char,
+    batch_id: *const c_char,
+) -> *mut c_char {
+    let (Some(path), Some(batch_id)) = (input(path), input(batch_id)) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    match Registry::open(Path::new(&path)).and_then(|db| db.scenario_create_batch(&batch_id)) {
+        Ok(Some(receipt)) => output(json!({
+            "ok":true,
+            "data":{"id":receipt.id,"children":receipt.children}
+        })),
+        Ok(None) => output(json!({"ok":false,"error":"not_found"})),
+        Err(_) => output(json!({"ok":false,"error":"registry_error"})),
+    }
+}
+
 /// Compose a metadata-only dry run for one exact persisted Scenario revision.
 /// Both snapshots are caller-supplied JSON arrays; this function never scans
 /// adapters, reads content, creates a Job, advances FileSyncState, or records
@@ -855,6 +874,49 @@ pub unsafe extern "C" fn qadren_registry_free_string(ptr: *mut c_char) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn create_batch_receipt_states_round_trip_through_ffi() {
+        let file = std::env::temp_dir().join(format!(
+            "qadren-batch-receipt-ffi-{}-{}.sqlite3",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut registry = Registry::open(&file).unwrap();
+        let left = registry.add("local_filesystem", "Left").unwrap();
+        let right = registry.add("local_filesystem", "Right").unwrap();
+        let scenario = registry
+            .create_scenario("Receipt", &left, "/left", &right, "/right", "left_to_right")
+            .unwrap();
+        let receipt = registry
+            .create_scenario_create_batch(
+                &ScenarioReference {
+                    scenario_id: scenario,
+                    revision: 1,
+                },
+                &[("report.txt".into(), true)],
+            )
+            .unwrap();
+        registry
+            .set_scenario_create_batch_child_state(&receipt.id, "report.txt", "completed")
+            .unwrap();
+        drop(registry);
+        let path = CString::new(file.to_str().unwrap()).unwrap();
+        let id = CString::new(receipt.id).unwrap();
+        let pointer = qadren_scenario_create_batch_get(path.as_ptr(), id.as_ptr());
+        let response: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(pointer) }.to_str().unwrap()).unwrap();
+        unsafe { qadren_registry_free_string(pointer) };
+        assert_eq!(
+            response["data"]["children"][0]["relative_path"],
+            "report.txt"
+        );
+        assert_eq!(response["data"]["children"][0]["state"], "completed");
+        std::fs::remove_file(file).unwrap();
+    }
 
     #[test]
     fn same_provider_connections_persist_independently_through_ffi() {

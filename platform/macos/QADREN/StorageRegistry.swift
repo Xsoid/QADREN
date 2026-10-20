@@ -17,9 +17,13 @@ private func scenarioSetEnabled(
     _ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ enabled: UInt8
 ) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_scenario_create_batch")
-private func scenarioCreateBatch(
+private func scenarioCreateBatchFFI(
     _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?, _ revision: UInt64,
     _ items: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_scenario_create_batch_get")
+private func scenarioCreateBatchGet(
+    _ path: UnsafePointer<CChar>?, _ batchID: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_scenarios_dry_run")
 private func scenarioDryRun(
@@ -206,7 +210,14 @@ struct ScenarioPlanItem: Decodable, Identifiable {
     var id: String { relative_path }
 }
 
-private struct ScenarioCreateBatchReceipt: Decodable { let id: String }
+struct ScenarioCreateBatchReceipt: Decodable {
+    let id: String
+    let children: [ScenarioCreateBatchChild]
+}
+struct ScenarioCreateBatchChild: Decodable {
+    let relative_path: String
+    let state: String
+}
 private struct ScenarioCreateBatchItem: Encodable {
     let relative_path: String
     let source_is_left: Bool
@@ -518,7 +529,7 @@ enum StorageRegistryBridge {
         _ = try WorkerIPC.executeScenarioCreate(request)
     }
 
-    static func executeScenarioCreateBatch(scenario: ScenarioEntry, items: [ScenarioPlanItem]) throws {
+    static func confirmScenarioCreateBatch(scenario: ScenarioEntry, items: [ScenarioPlanItem]) throws -> String {
         let children = try items.map { item -> ScenarioCreateBatchItem in
             guard item.action.kind == "create", let sourceIsLeft = item.action.from_left else {
                 throw StorageError.operation("План не разрешает создание этого файла")
@@ -531,10 +542,19 @@ enum StorageRegistryBridge {
         let database = try path
         let receipt: ScenarioCreateBatchReceipt = try database.withCString { path in
             try scenario.id.withCString { id in try payloadString.withCString { items in
-                try unwrap(scenarioCreateBatch(path, id, scenario.revision, items), as: ScenarioCreateBatchReceipt.self, databasePath: database)
+                try unwrap(scenarioCreateBatchFFI(path, id, scenario.revision, items), as: ScenarioCreateBatchReceipt.self, databasePath: database)
             }}
         }
-        _ = try WorkerIPC.executeScenarioCreateBatch(receiptID: receipt.id)
+        return receipt.id
+    }
+
+    static func scenarioCreateBatch(id: String) throws -> ScenarioCreateBatchReceipt {
+        let database = try path
+        return try database.withCString { path in
+            try id.withCString { id in
+                try unwrap(scenarioCreateBatchGet(path, id), as: ScenarioCreateBatchReceipt.self, databasePath: database)
+            }
+        }
     }
 
     /// Test seam for the Rust-owned execution bridge. Production uses the
