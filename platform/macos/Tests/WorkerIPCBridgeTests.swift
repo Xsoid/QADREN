@@ -160,6 +160,60 @@ struct WorkerIPCBridgeTests {
         check(stored.first?.scenario_id == scenario, "Worker IPC Job binds the Scenario identity")
         check(stored.first?.state == "completed", "Worker IPC Job is verified complete")
 
+        let caseSourceRoot = root.appendingPathComponent("case-source", isDirectory: true)
+        let caseDestinationRoot = root.appendingPathComponent("case-destination", isDirectory: true)
+        try FileManager.default.createDirectory(at: caseSourceRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: caseDestinationRoot, withIntermediateDirectories: true)
+        try Data("new worker report".utf8).write(to: caseSourceRoot.appendingPathComponent("report.txt"))
+        try Data("protected worker report".utf8).write(to: caseDestinationRoot.appendingPathComponent("REPORT.txt"))
+        let caseScenario = try createScenario(
+            database: registry, leftID: left, leftRoot: caseSourceRoot.path,
+            rightID: right, rightRoot: caseDestinationRoot.path
+        )
+        let jobsBeforeCaseCollision = try JobInventory.list(databasePath: jobs).count
+        do {
+            _ = try WorkerIPC.executeScenarioCreate(WorkerScenarioCreateRequest(
+                scenario_id: caseScenario, scenario_revision: 1,
+                source_root: caseSourceRoot.path, source_connection_id: left,
+                source_relative_path: "report.txt", destination_root: caseDestinationRoot.path,
+                destination_connection_id: right, destination_relative_path: "report.txt",
+                job_id: "swift-worker-ipc-case-collision"
+            ), socketPath: socket)
+            fatalError("Worker Scenario Create overwrote a case-colliding destination")
+        } catch WorkerIPCError.rejected("target_exists") {
+            let protectedBytes = try Data(contentsOf: caseDestinationRoot.appendingPathComponent("REPORT.txt"))
+            check(protectedBytes == Data("protected worker report".utf8), "Worker preserves case-colliding destination bytes")
+        }
+        let jobsAfterCaseCollision = try JobInventory.list(databasePath: jobs).count
+        check(jobsAfterCaseCollision == jobsBeforeCaseCollision, "Worker case collision creates no Job")
+
+        let overlapRoot = root.appendingPathComponent("overlap", isDirectory: true)
+        let nestedOverlapRoot = overlapRoot.appendingPathComponent("nested", isDirectory: true)
+        try FileManager.default.createDirectory(at: nestedOverlapRoot, withIntermediateDirectories: true)
+        try Data("must not copy".utf8).write(to: overlapRoot.appendingPathComponent("report.txt"))
+        let overlapScenario = try createScenario(
+            database: registry, leftID: left, leftRoot: overlapRoot.path,
+            rightID: right, rightRoot: nestedOverlapRoot.path
+        )
+        let jobsBeforeOverlap = try JobInventory.list(databasePath: jobs).count
+        do {
+            _ = try WorkerIPC.executeScenarioCreate(WorkerScenarioCreateRequest(
+                scenario_id: overlapScenario, scenario_revision: 1,
+                source_root: overlapRoot.path, source_connection_id: left,
+                source_relative_path: "report.txt", destination_root: nestedOverlapRoot.path,
+                destination_connection_id: right, destination_relative_path: "report.txt",
+                job_id: "swift-worker-ipc-overlap"
+            ), socketPath: socket)
+            fatalError("Worker Scenario Create accepted overlapping roots")
+        } catch WorkerIPCError.rejected("invalid_request") {
+            check(
+                !FileManager.default.fileExists(atPath: nestedOverlapRoot.appendingPathComponent("report.txt").path),
+                "Worker overlapping roots do not write the nested destination"
+            )
+        }
+        let jobsAfterOverlap = try JobInventory.list(databasePath: jobs).count
+        check(jobsAfterOverlap == jobsBeforeOverlap, "Worker overlapping roots create no Job")
+
         try Data("Worker IPC replacement".utf8).write(to: sourceRoot.appendingPathComponent("report.txt"))
         let declinedReplacement = WorkerScenarioReplaceRequest(
             scenario_id: scenario,
