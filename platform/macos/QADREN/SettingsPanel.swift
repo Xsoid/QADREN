@@ -596,6 +596,7 @@ private struct ScenarioDryRunView: View {
     @State private var pendingBatch: [ScenarioPlanItem] = []
     @State private var pendingBatchKind: String?
     @State private var activeBatch: ScenarioBatchProgress?
+    @State private var batchTask: Task<Void, Never>?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -656,14 +657,25 @@ private struct ScenarioDryRunView: View {
                 if let activeBatch {
                     GroupBox("Выполнение пакета") {
                         VStack(alignment: .leading, spacing: 8) {
-                            ProgressView(value: Double(activeBatch.completed), total: Double(activeBatch.total))
-                            Text("\(activeBatch.completed) из \(activeBatch.total) · \(activeBatch.currentPath)")
+                            ProgressView(value: Double(activeBatch.processed), total: Double(activeBatch.total))
+                            Text("Обработано \(activeBatch.processed) из \(activeBatch.total) · \(activeBatch.currentPath)")
                                 .font(.caption.monospaced())
-                            Text("Обычные переносы продолжаются при ошибке одного файла. Очередь конфликтов работает отдельно.")
+                            if activeBatch.failures > 0 {
+                                Text("Ошибок: \(activeBatch.failures). Остальные элементы продолжаются.")
+                                    .font(.caption)
+                                    .foregroundStyle(.orange)
+                            }
+                            Text(activeBatch.cancellationRequested
+                                ? "Отмена запрошена. QADREN завершит текущую операцию и не запустит следующий файл."
+                                : "Обычные переносы продолжаются при ошибке одного файла. Очередь конфликтов работает отдельно.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                            Button("Остановить после текущего файла", role: .cancel) { cancelActiveBatch() }
+                                .disabled(activeBatch.cancellationRequested)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityElement(children: .contain)
+                        .accessibilityLabel("Выполнение пакета сценария")
                     }
                 }
                 List(plan) { item in
@@ -875,15 +887,20 @@ private struct ScenarioDryRunView: View {
         guard !items.isEmpty, (kind == "create" || kind == "update") else { return }
         let batchScenario = scenario
         activeBatch = ScenarioBatchProgress(
-            total: items.count, completed: 0, currentPath: items[0].relative_path
+            total: items.count, processed: 0, failures: 0, currentPath: items[0].relative_path,
+            cancellationRequested: false
         )
-        Task.detached(priority: .userInitiated) {
+        batchTask = Task.detached(priority: .userInitiated) {
             var failures: [String] = []
+            var processed = 0
             for (offset, item) in items.enumerated() {
+                guard !Task.isCancelled else { break }
+                let progressBeforeItem = ScenarioBatchProgress(
+                    total: items.count, processed: processed, failures: failures.count,
+                    currentPath: item.relative_path, cancellationRequested: false
+                )
                 await MainActor.run {
-                    activeBatch = ScenarioBatchProgress(
-                        total: items.count, completed: offset, currentPath: item.relative_path
-                    )
+                    activeBatch = progressBeforeItem
                 }
                 do {
                     if kind == "create" {
@@ -894,16 +911,39 @@ private struct ScenarioDryRunView: View {
                 } catch {
                     failures.append(item.relative_path)
                 }
+                processed = offset + 1
+                let progressAfterItem = ScenarioBatchProgress(
+                    total: items.count, processed: processed, failures: failures.count,
+                    currentPath: item.relative_path, cancellationRequested: Task.isCancelled
+                )
+                await MainActor.run {
+                    activeBatch = progressAfterItem
+                }
             }
             let finishedFailures = failures
+            let wasCancelled = Task.isCancelled
+            let processedCount = processed
+            let total = items.count
             await MainActor.run {
                 activeBatch = nil
-                if !finishedFailures.isEmpty {
+                batchTask = nil
+                if wasCancelled {
+                    error = "Пакет остановлен после обработанных файлов: \(processedCount) из \(total). Незавершённые файлы не запускались."
+                } else if !finishedFailures.isEmpty {
                     error = "Не удалось выполнить файлов: \(finishedFailures.joined(separator: ", ")). Остальные элементы пакета были обработаны."
                 }
                 loadPlan()
             }
         }
+    }
+
+    private func cancelActiveBatch() {
+        guard let activeBatch else { return }
+        batchTask?.cancel()
+        self.activeBatch = ScenarioBatchProgress(
+            total: activeBatch.total, processed: activeBatch.processed, failures: activeBatch.failures,
+            currentPath: activeBatch.currentPath, cancellationRequested: true
+        )
     }
 
     private func executePendingCreate() {
@@ -952,8 +992,10 @@ private struct ScenarioDryRunView: View {
 
 private struct ScenarioBatchProgress {
     let total: Int
-    let completed: Int
+    let processed: Int
+    let failures: Int
     let currentPath: String
+    let cancellationRequested: Bool
 }
 
 private struct ScenarioConflictTaskView: View {
