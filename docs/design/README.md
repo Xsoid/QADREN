@@ -18,7 +18,7 @@ In case of discrepancy: safety from `docs/policies/` and domain solutions from `
 ## Do Not Change During Implementation
 
 - Monitoring — **a canvas of interactive widgets without a permanent Sidebar or section navigation**. The fixed widget set supports order and density changes in layout mode.
-- Two types of work windows are already defined: monitoring (several independent windows) and the settings panel. The macOS menu is the entry point and for quick actions; closing the UI is not equal to stopping the background service after its implementation.
+- Two work windows are defined: one monitoring window and the settings panel. The macOS menu is the entry point and for quick actions; closing the UI is not equal to stopping the background service after its implementation.
 - Dark cyberpunk theme — the primary artistic baseline: dark depth, electric cyan/blue, controlled glow; light and system themes are also provided.
 - **Use only** `assets/qadren-logo.png` as the QADREN mark; do not create a "similar" mark, do not replace SF Symbols with a third-party product logo.
 - Fictitious graphs/numbers, replacing UNKNOWN with error/success, local content upload to the main MacBook without permission, and decorating an unavailable function with an active button are prohibited.

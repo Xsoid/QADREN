@@ -1,4 +1,4 @@
-//! Narrow metadata-only Local Filesystem ABI for the macOS file-manager shell.
+//! Narrow metadata-only Local Filesystem ABI for macOS scenario folder selection.
 use crate::local_fs::LocalFilesystem;
 use crate::registry::Registry;
 use serde_json::json;

@@ -21,7 +21,7 @@ Existing entry points in `QADRENApp.swift`: one `Window("Контрольная 
 | Third row: 4 + 4 + 4 | Events · Scenarios · Optional File Activity |
 | Bottom narrow line | Worker · service · update · global problems |
 
-This is the **default user layout without a saved configuration**, not a permanently fixed scheme. The user can remove or change sizes and repeat a widget type only in a different dashboard. Use deterministic reflow for narrow windows; do not use horizontal scrolling for the entire canvas. Do not draw "file activity" without real aggregates.
+This is the **default user layout without a saved configuration**. The fixed widget set supports order and density changes only. Use deterministic reflow for narrow windows; do not use horizontal scrolling for the entire canvas. Do not draw "file activity" without real aggregates.
 
 ## 3. Visual hierarchy
 
@@ -71,7 +71,7 @@ Jobs awaiting a decision are not presented as active or queued work.
 ## 7. Mode specifications
 
 **Monitoring:** layout fixed; data may refresh; view interactions active; no edit grid.
-**Editing:** dashed grid, snap, move/resize handles, catalog searchable by widget name, remove/undo, save-after-each-valid-step. Entering this mode does not stop Jobs and does not change scenarios.
+**Editing:** move controls, density choices, Undo/Redo, and save after each valid step. Entering this mode does not stop Jobs and does not change scenarios.
 **Expanded widget:** expansion within the working area or in a separate window; the state of the original panel and scroll is preserved. Focus returns to the original widget upon return.
 **Offline/read-only:** stale data is marked, no live claim; unavailable commands are disabled.
 
@@ -82,7 +82,7 @@ The menu must quickly report health and actual values for active/waiting/attenti
 ## 9. UI acceptance
 
 - 1180×760 and 900×620: no sidebar, no overflow/overlay, and no loss of critical indicators.
-- Two windows: different layouts/filters, one shared Core job truth, no duplicate executions.
+- One monitoring window: one local layout and one shared Core job truth, with no duplicate executions.
 - Monitoring/edit switch: no dirty layout loss, no widget duplicates in one panel, undo/redo and recovery.
 - 0 jobs, many jobs, auth failure, offline, unknown, consent, conflict: correct semantics, no false numbers/ETA.
 - No focus loss on refresh; keyboard, contrast, and Reduced Motion are verified. VoiceOver support is out of scope.

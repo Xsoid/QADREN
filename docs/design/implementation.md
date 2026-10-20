@@ -4,7 +4,7 @@
 
 ## 0. Boundaries and Actual Baseline
 
-This documentation is a **visual-behavioral contract**, not an order to create non-existent Core APIs. Historical baseline before the October 14 push (do not apply without verification): `QADRENApp.swift` has WindowGroup monitoring, `scenario-settings` window, and MenuBarExtra. `MainView.swift` contains dashboard status tiles, jobs list, two local metadata panels, and connections/OAuth setup; `StorageConnections.swift`, `YandexConnection.swift`, `LocalWorkspace.swift`, and `JobInventory.swift` exist. The first full Rust Job execution/independent worker service is still passing roadmap gates. **Check HEAD before implementation**; this list may become obsolete.
+This documentation is a **visual-behavioral contract**, not an order to create non-existent Core APIs. Current baseline: `QADRENApp.swift` has one monitoring window, a `scenario-settings` window, and MenuBarExtra. `MainView.swift` contains the dashboard and connections/OAuth setup. `LocalWorkspace.swift` supports folder selection inside scenario settings. The first full Rust Job execution/independent worker service is still passing roadmap gates. **Check HEAD before implementation**; this list may become obsolete.
 
 The UI shall not invent data pipelines, second queues, runtime history, or registries. The active controller for Release 1 is Local FS. Yandex UI and feature work are post-release; preserve existing records and tokens. iCloud connection, synchronization, and backup UI are excluded from active implementation (D-017). VoiceOver support is out of scope. Keyboard access and accurate SwiftUI accessibility metadata remain required. All changes occur in `main`. Do not create feature or documentation branches. Completion of documentation does not prove service readiness.
 
@@ -24,7 +24,7 @@ The UI shall not invent data pipelines, second queues, runtime history, or regis
 | `platform/macos/QADREN/MainView.swift` | composition root | gradually move tokens/components/widgets; do not leave "dashboard/jobs/files" switch as the primary UX |
 | `StorageConnections.swift` + `YandexConnection.swift` | actual connection metadata + OAuth | adapt to Settings and Connection widget; do not rewrite Keychain/Registry |
 | `JobInventory.swift` | read-only durable Job data + supported commands | do not replace mock-job with successful live transfer |
-| `LocalWorkspace.swift` | local FS metadata and browse | open files via expanded workspace/separate window; do not use sneak-content-preview |
+| `LocalWorkspace.swift` | local folder metadata and selection | choose scenario roots in settings only; do not open file content or add a separate file workspace |
 | Rust `jobs.rs`, `jobs_ffi.rs`, `model.rs`, `scenario_planner.rs`, `confirmation.rs` | source of truth | ViewModels subscribe to commands and durable state; Swift does not calculate policy and job outcomes |
 
 Suggested SwiftUI type names (`QDTheme`, `QDWidgetFrame`, `QDLayoutStore`) are provided as decomposition directions; if existing types are suitable, **reuse** them.
