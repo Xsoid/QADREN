@@ -39,6 +39,12 @@ struct ObservedFileInput {
     checksum_md5: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct BatchCreateInput {
+    relative_path: String,
+    source_is_left: bool,
+}
+
 impl From<ObservedFileInput> for ObservedFile {
     fn from(value: ObservedFileInput) -> Self {
         Self {
@@ -225,6 +231,42 @@ pub extern "C" fn qadren_scenarios_set_enabled(
         db.set_scenario_enabled(&id, enabled == 1)?;
         Ok(json!(true))
     })
+}
+
+/// Persist a confirmed Create batch before the Worker receives its receipt ID.
+#[no_mangle]
+pub extern "C" fn qadren_scenario_create_batch(
+    path: *const c_char,
+    scenario_id: *const c_char,
+    revision: u64,
+    items_json: *const c_char,
+) -> *mut c_char {
+    let (Some(path), Some(scenario_id), Some(items_json)) =
+        (input(path), input(scenario_id), input(items_json))
+    else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    let Ok(items) = serde_json::from_str::<Vec<BatchCreateInput>>(&items_json) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    let children = items
+        .into_iter()
+        .map(|item| (item.relative_path, item.source_is_left))
+        .collect::<Vec<_>>();
+    match Registry::open(Path::new(&path)).and_then(|mut db| {
+        db.create_scenario_create_batch(
+            &ScenarioReference {
+                scenario_id,
+                revision,
+            },
+            &children,
+        )
+    }) {
+        Ok(receipt) => {
+            output(json!({"ok":true,"data":{"id":receipt.id,"children":receipt.children}}))
+        }
+        Err(_) => output(json!({"ok":false,"error":"registry_error"})),
+    }
 }
 
 /// Compose a metadata-only dry run for one exact persisted Scenario revision.

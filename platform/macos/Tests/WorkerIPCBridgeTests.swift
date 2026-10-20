@@ -8,6 +8,11 @@ private func scenarioCreateForWorkerTest(
     _ rightID: UnsafePointer<CChar>?, _ rightRoot: UnsafePointer<CChar>?,
     _ direction: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_scenario_create_batch")
+private func scenarioCreateBatchForWorkerTest(
+    _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?, _ revision: UInt64,
+    _ items: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_free_string")
 private func freeRegistryStringForWorkerTest(_ pointer: UnsafeMutablePointer<CChar>?)
 
@@ -17,6 +22,7 @@ private struct WorkerTestEnvelope<T: Decodable>: Decodable {
     let error: String?
 }
 private struct WorkerTestCreatedID: Decodable { let id: String }
+private struct WorkerTestBatchReceipt: Decodable { let id: String }
 
 private func check(_ condition: @autoclosure () -> Bool, _ message: String) {
     guard condition() else { fatalError("FAIL: \(message)") }
@@ -61,6 +67,27 @@ private func createScenario(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+private func createBatch(database: String, scenario: String, items: String) throws -> String {
+    try database.withCString { database in
+        try scenario.withCString { scenario in
+            try items.withCString { items in
+                guard let pointer = scenarioCreateBatchForWorkerTest(database, scenario, 1, items) else {
+                    throw StorageError.operation("missing Rust batch response")
+                }
+                defer { freeRegistryStringForWorkerTest(pointer) }
+                let response = try JSONDecoder().decode(
+                    WorkerTestEnvelope<WorkerTestBatchReceipt>.self,
+                    from: Data(String(cString: pointer).utf8)
+                )
+                guard response.ok, let receipt = response.data else {
+                    throw StorageError.operation(response.error ?? "Rust batch request failed")
+                }
+                return receipt.id
             }
         }
     }
@@ -141,6 +168,33 @@ struct WorkerIPCBridgeTests {
         }
         check(FileManager.default.fileExists(atPath: socket), "Worker socket is available")
 
+        let batchSource = root.appendingPathComponent("batch-source", isDirectory: true)
+        let batchDestination = root.appendingPathComponent("batch-destination", isDirectory: true)
+        try FileManager.default.createDirectory(at: batchSource, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: batchDestination, withIntermediateDirectories: true)
+        try Data("first batch file".utf8).write(to: batchSource.appendingPathComponent("first.txt"))
+        try Data("second batch file".utf8).write(to: batchSource.appendingPathComponent("second.txt"))
+        let batchScenario = try createScenario(
+            database: registry, leftID: left, leftRoot: batchSource.path,
+            rightID: right, rightRoot: batchDestination.path
+        )
+        let batchID = try createBatch(
+            database: registry, scenario: batchScenario,
+            items: #"[{"relative_path":"first.txt","source_is_left":true},{"relative_path":"second.txt","source_is_left":true}]"#
+        )
+        let batchStatus = try WorkerIPC.executeScenarioCreateBatch(receiptID: batchID, socketPath: socket)
+        check(batchStatus == "completed", "Worker accepts a confirmed Create batch receipt")
+        let firstBatchBytes = try Data(contentsOf: batchDestination.appendingPathComponent("first.txt"))
+        let secondBatchBytes = try Data(contentsOf: batchDestination.appendingPathComponent("second.txt"))
+        check(
+            firstBatchBytes == Data("first batch file".utf8),
+            "Worker batch creates the first selected destination"
+        )
+        check(
+            secondBatchBytes == Data("second batch file".utf8),
+            "Worker batch creates the second selected destination"
+        )
+
         let controller = Process()
         controller.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
         controller.arguments = [
@@ -156,9 +210,10 @@ struct WorkerIPCBridgeTests {
             "Worker creates the exact requested destination bytes"
         )
         let stored = try JobInventory.list(databasePath: jobs)
-        check(stored.count == 1, "Worker IPC creates one durable Job")
-        check(stored.first?.scenario_id == scenario, "Worker IPC Job binds the Scenario identity")
-        check(stored.first?.state == "completed", "Worker IPC Job is verified complete")
+        check(stored.count == 3, "Worker batch and controller create three durable Jobs")
+        let controllerJob = stored.first { $0.scenario_id == scenario }
+        check(controllerJob?.scenario_id == scenario, "Worker IPC Job binds the Scenario identity")
+        check(controllerJob?.state == "completed", "Worker IPC Job is verified complete")
 
         let caseSourceRoot = root.appendingPathComponent("case-source", isDirectory: true)
         let caseDestinationRoot = root.appendingPathComponent("case-destination", isDirectory: true)
@@ -258,8 +313,8 @@ struct WorkerIPCBridgeTests {
             "confirmed Worker replacement changes the exact destination bytes"
         )
         let replaced = try JobInventory.list(databasePath: jobs)
-        check(replaced.count == 2, "confirmed Worker replacement creates one additional durable Job")
-        check(replaced.allSatisfy { $0.scenario_id == scenario && $0.state == "completed" },
+        check(replaced.count == 4, "confirmed Worker replacement creates one additional durable Job")
+        check(replaced.filter { $0.scenario_id == scenario }.allSatisfy { $0.state == "completed" },
               "Worker replacement Job stays revision-bound and verified complete")
 
         try Data("Manual Worker copy".utf8).write(to: sourceRoot.appendingPathComponent("manual.txt"))

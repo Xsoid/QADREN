@@ -11,6 +11,7 @@ use crate::scheduler::{OccurrenceKey, WeeklySchedule};
 use chrono::{DateTime, Utc, Weekday};
 use chrono_tz::Tz;
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::Serialize;
 use std::path::Path;
 use std::str::FromStr;
 
@@ -119,6 +120,23 @@ pub struct ScheduleOutboxEntry {
     pub scenario_revision: u64,
 }
 
+/// A confirmed manual batch. It stores only immutable Scenario identity and
+/// selected relative paths. Each child remains one independent Job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioCreateBatchReceipt {
+    pub id: String,
+    pub scenario: ScenarioReference,
+    pub children: Vec<ScenarioBatchChild>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ScenarioBatchChild {
+    pub relative_path: String,
+    pub source_is_left: bool,
+    pub job_id: String,
+    pub state: String,
+}
+
 /// A user-owned conflict task. It is Registry metadata, not a JobStore Job;
 /// pending conflict work never blocks ordinary Scenario transfers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,7 +176,7 @@ impl Registry {
         }
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 12 {
+        if version > 13 {
             return Err(RegistryError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -360,6 +378,29 @@ impl Registry {
                     PRIMARY KEY(schedule_job_id,relative_path)
                  );
                  PRAGMA user_version = 12;
+                 COMMIT;",
+            )?;
+        }
+        if version <= 12 {
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE scenario_create_batches (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    scenario_id TEXT NOT NULL,
+                    scenario_revision INTEGER NOT NULL CHECK(scenario_revision > 0),
+                    FOREIGN KEY(scenario_id,scenario_revision)
+                      REFERENCES scenario_revisions(scenario_id,revision) ON DELETE RESTRICT
+                 );
+                 CREATE TABLE scenario_create_batch_children (
+                    batch_id TEXT NOT NULL REFERENCES scenario_create_batches(id) ON DELETE RESTRICT,
+                    relative_path TEXT NOT NULL,
+                    source_is_left INTEGER NOT NULL CHECK(source_is_left IN (0,1)),
+                    job_id TEXT NOT NULL UNIQUE,
+                    state TEXT NOT NULL DEFAULT 'pending'
+                      CHECK(state IN ('pending','completed','failed','cancelled','unknown')),
+                    PRIMARY KEY(batch_id,relative_path)
+                 );
+                 PRAGMA user_version = 13;
                  COMMIT;",
             )?;
         }
@@ -935,6 +976,141 @@ impl Registry {
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    /// Save one user-confirmed Create batch before the Worker starts a child.
+    /// Paths are immutable and get stable Job IDs, so a controller reconnect
+    /// can observe work without submitting the same effect again.
+    pub fn create_scenario_create_batch(
+        &mut self,
+        scenario: &ScenarioReference,
+        children: &[(String, bool)],
+    ) -> Result<ScenarioCreateBatchReceipt> {
+        if scenario.scenario_id.is_empty() || scenario.revision == 0 || children.is_empty() {
+            return Err(RegistryError::InvalidSyncState);
+        }
+        let mut paths = children.to_vec();
+        paths.sort_by(|left, right| left.0.cmp(&right.0));
+        if paths.windows(2).any(|pair| pair[0].0 == pair[1].0)
+            || paths.iter().any(|(path, _)| !valid_sync_path(path))
+        {
+            return Err(RegistryError::InvalidSyncState);
+        }
+        let transaction = self.db.transaction()?;
+        let exists: Option<i64> = transaction
+            .query_row(
+                "SELECT 1 FROM scenario_revisions WHERE scenario_id=?1 AND revision=?2",
+                params![scenario.scenario_id, scenario.revision as i64],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if exists.is_none() {
+            return Err(RegistryError::NotFound);
+        }
+        let id: String =
+            transaction.query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
+        transaction.execute(
+            "INSERT INTO scenario_create_batches(id,scenario_id,scenario_revision) VALUES(?1,?2,?3)",
+            params![id, scenario.scenario_id, scenario.revision as i64],
+        )?;
+        let mut receipt_children = Vec::with_capacity(paths.len());
+        for (path, source_is_left) in paths {
+            let job_id: String = transaction.query_row(
+                "SELECT 'scenario-batch-copy-' || lower(hex(randomblob(16)))",
+                [],
+                |row| row.get(0),
+            )?;
+            transaction.execute(
+                "INSERT INTO scenario_create_batch_children(batch_id,relative_path,source_is_left,job_id) VALUES(?1,?2,?3,?4)",
+                params![id, path, source_is_left, job_id],
+            )?;
+            receipt_children.push(ScenarioBatchChild {
+                relative_path: path,
+                source_is_left,
+                job_id,
+                state: "pending".into(),
+            });
+        }
+        transaction.commit()?;
+        Ok(ScenarioCreateBatchReceipt {
+            id,
+            scenario: scenario.clone(),
+            children: receipt_children,
+        })
+    }
+
+    /// Load a confirmed batch exactly as saved. This does not create Jobs or
+    /// authorize an effect.
+    pub fn scenario_create_batch(&self, id: &str) -> Result<Option<ScenarioCreateBatchReceipt>> {
+        let parent: Option<ScenarioReference> = self
+            .db
+            .query_row(
+                "SELECT scenario_id,scenario_revision FROM scenario_create_batches WHERE id=?1",
+                [id],
+                |row| {
+                    Ok(ScenarioReference {
+                        scenario_id: row.get(0)?,
+                        revision: row.get::<_, i64>(1)? as u64,
+                    })
+                },
+            )
+            .optional()?;
+        let Some(scenario) = parent else {
+            return Ok(None);
+        };
+        let mut statement = self.db.prepare(
+            "SELECT relative_path,source_is_left,job_id,state FROM scenario_create_batch_children WHERE batch_id=?1 ORDER BY relative_path",
+        )?;
+        let children = statement
+            .query_map([id], |row| {
+                Ok(ScenarioBatchChild {
+                    relative_path: row.get(0)?,
+                    source_is_left: row.get(1)?,
+                    job_id: row.get(2)?,
+                    state: row.get(3)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(Some(ScenarioCreateBatchReceipt {
+            id: id.into(),
+            scenario,
+            children,
+        }))
+    }
+
+    /// Return receipt IDs that still have effects the Worker has not started.
+    /// Terminal and UNKNOWN child outcomes never become eligible for replay.
+    pub fn pending_scenario_create_batch_ids(&self) -> Result<Vec<String>> {
+        let mut statement = self.db.prepare(
+            "SELECT DISTINCT batch_id FROM scenario_create_batch_children WHERE state='pending' ORDER BY batch_id",
+        )?;
+        let result = statement
+            .query_map([], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into);
+        result
+    }
+
+    /// Persist the authoritative Worker outcome for a selected batch child.
+    pub fn set_scenario_create_batch_child_state(
+        &self,
+        batch_id: &str,
+        relative_path: &str,
+        state: &str,
+    ) -> Result<()> {
+        if !matches!(state, "completed" | "failed" | "cancelled" | "unknown") {
+            return Err(RegistryError::InvalidSyncState);
+        }
+        let changed = self.db.execute(
+            "UPDATE scenario_create_batch_children
+             SET state=?3 WHERE batch_id=?1 AND relative_path=?2 AND state='pending'",
+            params![batch_id, relative_path, state],
+        )?;
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err(RegistryError::NotFound)
+        }
     }
 
     /// Enable or disable one schedule without changing its already claimed
@@ -1971,6 +2147,60 @@ mod tests {
             .list_confirmed_file_states(&reference)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn confirmed_create_batch_pins_revision_and_stable_child_job_ids() {
+        let mut db = Registry::in_memory().unwrap();
+        let left = db.add("local_filesystem", "Left").unwrap();
+        let right = db.add("local_filesystem", "Right").unwrap();
+        let scenario_id = db
+            .create_scenario(
+                "Documents",
+                &left,
+                "/source",
+                &right,
+                "/target",
+                "left_to_right",
+            )
+            .unwrap();
+        let receipt = db
+            .create_scenario_create_batch(
+                &ScenarioReference {
+                    scenario_id: scenario_id.clone(),
+                    revision: 1,
+                },
+                &[("b.txt".into(), false), ("a.txt".into(), true)],
+            )
+            .unwrap();
+        assert_eq!(receipt.scenario.scenario_id, scenario_id);
+        assert_eq!(receipt.scenario.revision, 1);
+        assert_eq!(
+            receipt
+                .children
+                .iter()
+                .map(|child| child.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.txt", "b.txt"]
+        );
+        assert!(receipt.children[0].source_is_left);
+        assert!(!receipt.children[1].source_is_left);
+        assert!(receipt
+            .children
+            .iter()
+            .all(|child| child.job_id.starts_with("scenario-batch-copy-")));
+        assert_eq!(
+            db.scenario_create_batch(&receipt.id).unwrap(),
+            Some(receipt.clone())
+        );
+        assert_eq!(db.scenario_create_batch("missing").unwrap(), None);
+        assert!(matches!(
+            db.create_scenario_create_batch(
+                &receipt.scenario,
+                &[("a.txt".into(), true), ("a.txt".into(), false)],
+            ),
+            Err(RegistryError::InvalidSyncState)
+        ));
     }
 
     #[test]

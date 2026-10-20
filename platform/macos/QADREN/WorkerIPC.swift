@@ -14,6 +14,11 @@ struct WorkerScenarioCreateRequest: Encodable {
     let job_id: String
 }
 
+struct WorkerScenarioCreateBatchRequest: Encodable {
+    let command = "execute_create_batch"
+    let batch_id: String
+}
+
 struct WorkerScenarioReplaceRequest: Encodable {
     let command = "execute_replace"
     let scenario_id: String
@@ -90,6 +95,22 @@ enum WorkerIPC {
         _ request: WorkerScenarioCreateRequest, socketPath: String? = nil
     ) throws -> String {
         let payload = try JSONEncoder().encode(request) + Data([0x0a])
+        let response = try send(payload, socketPath: socketPath ?? defaultSocketPath())
+        guard response.ok else { throw WorkerIPCError.rejected(response.status) }
+        guard ["completed", "existing"].contains(response.status) else {
+            throw WorkerIPCError.invalidResponse
+        }
+        return response.status
+    }
+
+    /// The Worker owns a confirmed batch receipt. The controller only sends
+    /// its ID, so closing the settings window cannot cancel selected work.
+    static func executeScenarioCreateBatch(
+        receiptID: String, socketPath: String? = nil
+    ) throws -> String {
+        let payload = try JSONEncoder().encode(
+            WorkerScenarioCreateBatchRequest(batch_id: receiptID)
+        ) + Data([0x0a])
         let response = try send(payload, socketPath: socketPath ?? defaultSocketPath())
         guard response.ok else { throw WorkerIPCError.rejected(response.status) }
         guard ["completed", "existing"].contains(response.status) else {

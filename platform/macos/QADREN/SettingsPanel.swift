@@ -597,6 +597,7 @@ private struct ScenarioDryRunView: View {
     @State private var pendingBatchKind: String?
     @State private var activeBatch: ScenarioBatchProgress?
     @State private var batchTask: Task<Void, Never>?
+    @State private var workerOwnedCreateBatch = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -658,20 +659,26 @@ private struct ScenarioDryRunView: View {
                     GroupBox("Выполнение пакета") {
                         VStack(alignment: .leading, spacing: 8) {
                             ProgressView(value: Double(activeBatch.processed), total: Double(activeBatch.total))
-                            Text("Обработано \(activeBatch.processed) из \(activeBatch.total) · \(activeBatch.currentPath)")
+                            Text(workerOwnedCreateBatch
+                                ? "Подтверждённый пакет передан Local Worker. Результаты появятся в списке Job."
+                                : "Обработано \(activeBatch.processed) из \(activeBatch.total) · \(activeBatch.currentPath)")
                                 .font(.caption.monospaced())
                             if activeBatch.failures > 0 {
                                 Text("Ошибок: \(activeBatch.failures). Остальные элементы продолжаются.")
                                     .font(.caption)
                                     .foregroundStyle(.orange)
                             }
-                            Text(activeBatch.cancellationRequested
+                            Text(workerOwnedCreateBatch
+                                ? "Закрытие окна не отменяет пакет. После перезапуска Worker продолжит только файлы без зафиксированного исхода."
+                                : activeBatch.cancellationRequested
                                 ? "Отмена запрошена. QADREN завершит текущую операцию и не запустит следующий файл."
                                 : "Обычные переносы продолжаются при ошибке одного файла. Очередь конфликтов работает отдельно.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                            Button("Остановить после текущего файла", role: .cancel) { cancelActiveBatch() }
-                                .disabled(activeBatch.cancellationRequested)
+                            if !workerOwnedCreateBatch {
+                                Button("Остановить после текущего файла", role: .cancel) { cancelActiveBatch() }
+                                    .disabled(activeBatch.cancellationRequested)
+                            }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .accessibilityElement(children: .contain)
@@ -890,6 +897,34 @@ private struct ScenarioDryRunView: View {
             total: items.count, processed: 0, failures: 0, currentPath: items[0].relative_path,
             cancellationRequested: false
         )
+        workerOwnedCreateBatch = kind == "create"
+        if kind == "create" {
+            batchTask = Task.detached(priority: .userInitiated) {
+                do {
+                    try StorageRegistryBridge.executeScenarioCreateBatch(
+                        scenario: batchScenario, items: items
+                    )
+                    await MainActor.run {
+                        activeBatch = ScenarioBatchProgress(
+                            total: items.count, processed: items.count, failures: 0,
+                            currentPath: items.last?.relative_path ?? "", cancellationRequested: false
+                        )
+                    }
+                } catch {
+                    let message = error.localizedDescription
+                    await MainActor.run {
+                        self.error = "Пакет подтверждён Worker. Он сохранит результаты и продолжит незавершённые файлы после перезапуска: \(message)"
+                    }
+                }
+                await MainActor.run {
+                    activeBatch = nil
+                    batchTask = nil
+                    workerOwnedCreateBatch = false
+                    loadPlan()
+                }
+            }
+            return
+        }
         batchTask = Task.detached(priority: .userInitiated) {
             var failures: [String] = []
             var processed = 0
@@ -927,6 +962,7 @@ private struct ScenarioDryRunView: View {
             await MainActor.run {
                 activeBatch = nil
                 batchTask = nil
+                workerOwnedCreateBatch = false
                 if wasCancelled {
                     error = "Пакет остановлен после обработанных файлов: \(processedCount) из \(total). Незавершённые файлы не запускались."
                 } else if !finishedFailures.isEmpty {

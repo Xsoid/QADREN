@@ -119,6 +119,8 @@ struct Request {
     source_is_left: Option<bool>,
     #[serde(default)]
     decision: Option<String>,
+    #[serde(default)]
+    batch_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -143,6 +145,7 @@ fn dispatch_due(paths: &WorkerPaths) -> Result<(usize, usize), String> {
     let registry =
         Registry::open(&paths.registry).map_err(|_| "registry_unavailable".to_string())?;
     reconcile_unknown_scenario_creates(paths, &registry)?;
+    resume_pending_scenario_create_batches(paths, &registry);
     let staged = registry
         .stage_due_schedule_occurrences(after, through)
         .map_err(|_| "schedule_stage_unavailable".to_string())?;
@@ -152,6 +155,18 @@ fn dispatch_due(paths: &WorkerPaths) -> Result<(usize, usize), String> {
     drop(jobs);
     execute_queued_schedule_jobs(paths, &registry)?;
     Ok((staged, dispatched))
+}
+
+/// A confirmed Create receipt belongs to the Worker, not to a SwiftUI task.
+/// Resume only children that never reached an outcome. UNKNOWN is deliberately
+/// excluded: it must go through the normal non-mutating reconciliation path.
+fn resume_pending_scenario_create_batches(paths: &WorkerPaths, registry: &Registry) {
+    let Ok(batch_ids) = registry.pending_scenario_create_batch_ids() else {
+        return;
+    };
+    for batch_id in batch_ids {
+        let _ = execute_create_batch_id(paths, &batch_id);
+    }
 }
 
 /// Reconcile only UNKNOWN, no-overwrite Scenario Create Jobs with an exact
@@ -554,6 +569,90 @@ fn execute_create(paths: &WorkerPaths, request: &Request) -> Result<&'static str
         Err(LocalFileCopyError::Local(_)) => Err("local_operation_failed"),
         Err(LocalFileCopyError::Store(_)) => Err("job_store_unavailable"),
         Err(_) => Err("scenario_create_unavailable"),
+    }
+}
+
+fn execute_create_batch(
+    paths: &WorkerPaths,
+    request: &Request,
+) -> Result<&'static str, &'static str> {
+    let Some(batch_id) = request.batch_id.as_deref() else {
+        return Err("invalid_request");
+    };
+    execute_create_batch_id(paths, batch_id)
+}
+
+fn execute_create_batch_id(
+    paths: &WorkerPaths,
+    batch_id: &str,
+) -> Result<&'static str, &'static str> {
+    let registry = Registry::open(&paths.registry).map_err(|_| "registry_unavailable")?;
+    let receipt = registry
+        .scenario_create_batch(batch_id)
+        .map_err(|_| "batch_unavailable")?
+        .ok_or("batch_unavailable")?;
+    let scenario = registry
+        .get_scenario_revision(&receipt.scenario.scenario_id, receipt.scenario.revision)
+        .map_err(|_| "batch_unavailable")?
+        .ok_or("batch_unavailable")?;
+    let mut had_failure = false;
+    for child in receipt
+        .children
+        .into_iter()
+        .filter(|child| child.state == "pending")
+    {
+        let (source_root, source_connection, destination_root, destination_connection) =
+            if child.source_is_left {
+                (
+                    &scenario.left_root,
+                    &scenario.left_connection_id,
+                    &scenario.right_root,
+                    &scenario.right_connection_id,
+                )
+            } else {
+                (
+                    &scenario.right_root,
+                    &scenario.right_connection_id,
+                    &scenario.left_root,
+                    &scenario.left_connection_id,
+                )
+            };
+        let state = match run_local_scenario_file_copy(
+            &paths.jobs,
+            &paths.registry,
+            &receipt.scenario.scenario_id,
+            receipt.scenario.revision,
+            Path::new(source_root),
+            source_connection,
+            Path::new(&child.relative_path),
+            Path::new(destination_root),
+            destination_connection,
+            Path::new(&child.relative_path),
+            &child.job_id,
+        ) {
+            Ok(LocalFileCopyStatus::Completed)
+            | Ok(LocalFileCopyStatus::Existing(JobState::Completed)) => "completed",
+            Ok(LocalFileCopyStatus::Existing(JobState::Failed)) => "failed",
+            Ok(LocalFileCopyStatus::Existing(JobState::Cancelled)) => "cancelled",
+            Ok(LocalFileCopyStatus::Existing(_)) | Err(LocalFileCopyError::OutcomeUnknown(_)) => {
+                "unknown"
+            }
+            Err(LocalFileCopyError::TargetExists) | Err(_) => "failed",
+        };
+        if registry
+            .set_scenario_create_batch_child_state(batch_id, &child.relative_path, state)
+            .is_err()
+        {
+            return Err("batch_unavailable");
+        }
+        if state != "completed" {
+            had_failure = true;
+        }
+    }
+    if had_failure {
+        Err("batch_child_failed")
+    } else {
+        Ok("completed")
     }
 }
 
@@ -963,6 +1062,26 @@ fn handle_client(mut stream: UnixStream, paths: &WorkerPaths, stop: &mut bool) {
                 },
             ),
         },
+        "execute_create_batch" => match execute_create_batch(paths, &request) {
+            Ok(status) => respond(
+                &mut stream,
+                &Response {
+                    ok: true,
+                    status,
+                    staged: None,
+                    dispatched: None,
+                },
+            ),
+            Err(status) => respond(
+                &mut stream,
+                &Response {
+                    ok: false,
+                    status,
+                    staged: None,
+                    dispatched: None,
+                },
+            ),
+        },
         "execute_replace" => match execute_replace(paths, &request) {
             Ok(status) => respond(
                 &mut stream,
@@ -1324,6 +1443,81 @@ mod tests {
                 .unwrap()
                 .len(),
             1
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn worker_restart_resumes_confirmed_create_batch_without_controller() {
+        let root = root("create-batch-restart");
+        let left_root = root.join("left");
+        let right_root = root.join("right");
+        fs::create_dir_all(&left_root).unwrap();
+        fs::create_dir_all(&right_root).unwrap();
+        fs::write(left_root.join("first.txt"), b"first").unwrap();
+        fs::write(left_root.join("second.txt"), b"second").unwrap();
+        let paths = WorkerPaths {
+            socket: root.join("worker.sock"),
+            registry: root.join("registry.sqlite3"),
+            jobs: root.join("jobs.sqlite3"),
+        };
+        let mut registry = Registry::open(&paths.registry).unwrap();
+        let left = registry.add("local_filesystem", "Left").unwrap();
+        let right = registry.add("local_filesystem", "Right").unwrap();
+        let scenario = registry
+            .create_scenario(
+                "Restart batch",
+                &left,
+                left_root.to_str().unwrap(),
+                &right,
+                right_root.to_str().unwrap(),
+                "left_to_right",
+            )
+            .unwrap();
+        let receipt = registry
+            .create_scenario_create_batch(
+                &ScenarioReference {
+                    scenario_id: scenario,
+                    revision: 1,
+                },
+                &[("first.txt".into(), true), ("second.txt".into(), true)],
+            )
+            .unwrap();
+        drop(registry);
+
+        // The receipt was saved by a controller that has now exited. A new
+        // Worker process polls it from the existing Registry and owns effects.
+        assert_eq!(dispatch_due(&paths).unwrap(), (0, 0));
+        assert_eq!(fs::read(right_root.join("first.txt")).unwrap(), b"first");
+        assert_eq!(fs::read(right_root.join("second.txt")).unwrap(), b"second");
+        let registry = Registry::open(&paths.registry).unwrap();
+        let stored = registry
+            .scenario_create_batch(&receipt.id)
+            .unwrap()
+            .unwrap();
+        assert!(stored
+            .children
+            .iter()
+            .all(|child| child.state == "completed"));
+        assert_eq!(
+            JobStore::open(&paths.jobs)
+                .unwrap()
+                .list_jobs()
+                .unwrap()
+                .len(),
+            2
+        );
+
+        // A subsequent restart finds no pending child and therefore creates no
+        // duplicate Job or replacement effect.
+        assert_eq!(dispatch_due(&paths).unwrap(), (0, 0));
+        assert_eq!(
+            JobStore::open(&paths.jobs)
+                .unwrap()
+                .list_jobs()
+                .unwrap()
+                .len(),
+            2
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -1783,6 +1977,7 @@ mod tests {
             locally_paused: None,
             source_is_left: None,
             decision: None,
+            batch_id: None,
         };
         assert_eq!(
             execute_conflict(&paths, &declined, true),
@@ -1837,6 +2032,7 @@ mod tests {
             destructive_consent: None,
             source_is_left: None,
             decision: None,
+            batch_id: None,
         };
         assert_eq!(update_registry_control(&paths, &pause), Ok("updated"));
         assert!(

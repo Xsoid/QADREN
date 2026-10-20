@@ -93,8 +93,8 @@ does not invent a healthy status from a process launch attempt.
 `qadren-worker` currently acquires the private lock, opens the existing
 Registry and JobStore, stages due schedule receipts, dispatches their pinned
 Jobs, scans the pinned Local Filesystem roots at run time, and serves `status`, `poll`, controlled `stop`, `execute_create`,
-`execute_replace`, `execute_conflict_replace`, `execute_conflict_delete`,
-`set_scenario_paused`, and `select_conflict_decision`
+`execute_create_batch`, `execute_replace`, `execute_conflict_replace`,
+`execute_conflict_delete`, `set_scenario_paused`, and `select_conflict_decision`
 over the private socket. The Scenario commands accept one exact
 Scenario revision, connection IDs, roots, relative source and destination
 paths, and Job ID. `execute_create` uses the existing Rust no-overwrite
@@ -125,7 +125,15 @@ blindly replay it. The production Swift Scenario `Create` and native-confirmed
 fall back to in-process FFI. If the private socket is unavailable before a
 request is accepted, the UI reports the failure and does not write a file.
 Native-confirmed conflict replacement and deletion also use the Worker. Scenario
-pause and conflict-decision persistence also use the Worker. Mock-only
+pause and conflict-decision persistence also use the Worker. A confirmed
+multi-file Scenario `Create` stores one Registry receipt before the Worker
+receives it. The receipt pins the Scenario revision, selected relative paths,
+direction, and stable child Job IDs. It is not a second JobStore, queue, or
+Scenario runner. The Worker executes each pending child through the existing
+no-overwrite Create executor and stores its outcome in the receipt. On a later
+Worker start it resumes only `pending` children. Completed, failed, cancelled,
+and `UNKNOWN` children are not replayed. The usual read-only reconciliation
+remains responsible for an UNKNOWN Job. Mock-only
 pause/resume and read-only Job status remain FFI test and inventory paths. Therefore this increment does not yet establish the Issue
 #23 single-mutation-owner acceptance or the UI-quit execution acceptance.
 
