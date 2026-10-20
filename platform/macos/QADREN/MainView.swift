@@ -44,7 +44,6 @@ struct MainView: View {
                     Label("Пространство", systemImage: "rectangle.3.group")
                 }
                 if workspace == .monitoring {
-                    Button("Новая панель", systemImage: "macwindow.on.rectangle") { openWindow(id: "monitoring") }
                     if workspace == .monitoring {
                         Button(isEditingLayout ? "Готово" : "Компоновка", systemImage: "rectangle.3.group.bubble") {
                             isEditingLayout.toggle()
@@ -89,7 +88,6 @@ struct MainView: View {
                         }
                         .disabled(!isEditingLayout)
                     }
-                    Button("Обновить", systemImage: "arrow.clockwise") { refreshCurrentWorkspace() }
                 }
             }
         }
@@ -168,7 +166,7 @@ struct MainView: View {
                 HStack(spacing: 8) {
                     QDStatusLabel(kind: workerStatusKind, text: "Worker: \(workerStatus)")
                     Divider().frame(height: 14)
-                    Text("Обновлено по запросу").font(.caption).foregroundStyle(.secondary)
+                    Text("Состояние из локального Core").font(.caption).foregroundStyle(.secondary)
                     Spacer()
                     QDStatusLabel(kind: .unsupported, text: "Файловые операции пока недоступны")
                 }
@@ -425,20 +423,6 @@ struct MainView: View {
 
     private var localConnections: [StorageEntry] {
         connections.entries.filter { $0.adapter == "local_filesystem" }
-    }
-
-    private func refreshCurrentWorkspace() {
-        switch workspace {
-        case .monitoring:
-            refreshJobs()
-            connections.refresh()
-        case .scenarios:
-            connections.refresh()
-        case .files:
-            connections.refresh()
-            localWorkspace.refresh()
-            rightLocalWorkspace.refresh()
-        }
     }
 
     private var workerStatus: String {

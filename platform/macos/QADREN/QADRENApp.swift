@@ -9,7 +9,7 @@ struct QADRENApp: App {
     }
 
     var body: some Scene {
-        WindowGroup("Контрольная панель", id: "monitoring") {
+        Window("Контрольная панель", id: "monitoring") {
             MainView(workspace: .monitoring)
                 .frame(minWidth: 900, minHeight: 620)
                 .preferredColorScheme(QDThemeMode(rawValue: themeRaw)?.preferredColorScheme)
@@ -44,7 +44,6 @@ private struct MenuBarWorkspaceMenu: View {
         Text(coreStatus).foregroundStyle(.secondary)
         Divider()
         Button("Открыть контрольную панель") { open(id: "monitoring") }
-        Button("Новая контрольная панель") { open(id: "monitoring") }
         Button("Настройки") { open(id: "scenario-settings") }
         Button("Файловый менеджер") { open(id: "file-manager") }
         Divider()

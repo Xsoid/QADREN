@@ -43,7 +43,7 @@ Example for the queue: 2×2 — active/waiting/unknown (counters), 4×3 — seve
 
 ## 5. Observation Mode and Layout Mode
 
-**Observation** (default): widgets are locked; actions are available within them; no drag handles; zoom/filter context, manual refresh, and details work without transitions.
+**Observation** (default): widgets are locked; actions are available within them; no drag handles; zoom/filter context and details work without transitions.
 
 **Layout** (explicitly enabled in toolbar): a grid line, drag handle, resize anchor, `+ Widget` button, and `Done` button appear. Only in this mode does the catalog drawer/popover open with search **by widget types**, not search for user files. Auto-save every valid change; Undo/Redo (Cmd-Z/Shift-Cmd-Z); optional layout recovery, but not without warning upon layout loss. Deleting a widget does not delete jobs, scenarios, connections, or their history.
 
@@ -53,7 +53,7 @@ Order: select → drag / resize → snap + safe reflow → validate bounds/type-
 
 Global filters (connections, scenarios, worker/time window — only where applicable) apply to linked widgets; each widget can use `inherit` or `override`. When an object is selected from one widget, other widgets with `followSelection` enabled update without resetting scroll/selection. Back/forward history and breadcrumbs preserve a clear navigation context. **System critical signals and required consents are visible outside these filters**, even if the corresponding widget type is deleted (global status indication). There is no separate mandatory "confirmation center."
 
-Refresh scope: dashboard refresh requests updates only for permitted metadata; widget refresh requests updates only for its source. Do not start hidden content reads. The UI shows `lastFetched` and `lastVerified` as separate fields where applicable.
+Metadata reads use only the permitted source. They do not start hidden content reads. The UI shows `lastFetched` and `lastVerified` as separate fields where applicable.
 
 ## 7. Standard Types Registry
 

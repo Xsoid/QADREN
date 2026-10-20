@@ -4,7 +4,7 @@
 
 The main window is a **working canvas of widgets**. The user configures this canvas one time and then monitors it without transitions between sections. It is NOT separate pages for "Overview/Queue/Files/History" and it does NOT have a permanent Sidebar.
 
-Existing entry points in `QADRENApp.swift`: `WindowGroup("QADREN", id: "monitoring")`, MenuBarExtra → "Monitoring Panel" / "New Working Panel". Maintain support for multiple windows with independent `panelID` and configurations. When you open the window again, do not create random duplicates by default: the "Open" action activates the existing main panel, and "New" adds a separate panel with a new ID. Select the technical method to manage SwiftUI instances after the inventory.
+Existing entry points in `QADRENApp.swift`: one `Window("Контрольная панель", id: "monitoring")` and MenuBarExtra → "Monitoring Panel". Opening the entry point activates that one monitoring window.
 
 ## 2. Three horizontal zones
 
@@ -36,7 +36,7 @@ Priority from first to last: (1) blocking consent/conflict/UNKNOWN and errors; (
 - Click on conflict/needs consent → context panel with consequences and a resolution. The interface is read-only and the action is disabled until the real Core Policy is available.
 - Click on Scenario → brief information and status of current jobs; the "Configure Scenario" button opens settings for a specific ID.
 - Global filter popover → connection/scenario/worker. Selecting an event sets a shared context only for widgets subscribed to it. Each widget has a local "Override" + "Return to Shared".
-- The "+ Widget" button is available only in layout mode; the catalog is a temporary drawer/popover and closes after adding a widget or exiting. In monitoring mode, top actions are only Filter, Refresh, Layout, Window, and current health.
+- The "+ Widget" button is available only in layout mode; the catalog is a temporary drawer/popover and closes after adding a widget or exiting. In monitoring mode, top actions are only Filter, Layout, Window, and current health.
 
 ## 5. Behavior during risks
 

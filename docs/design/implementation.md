@@ -1,6 +1,6 @@
 # QADREN — UI Integration Plan for Codex and Acceptance
 
-> **Current baseline / D-018:** `DesignSystem.swift`, `DashboardLayout.swift`, `DashboardLayoutTests.swift`, `MainView.swift`, `SettingsPanel.swift`, and `QADRENApp.swift` already implement the widget canvas, preservation of order, visibility, density, grid scale, Undo/Redo, multi-window support, and settings. The UI-A–F sequence below is a **verification and completion checklist**, not an instruction to recreate these classes. The independent service is later autonomy work. Yandex Disk is post-release; iCloud is out of scope. [Current State Audit](../development/current-state-audit.md).
+> **Current baseline / D-018:** `DesignSystem.swift`, `DashboardLayout.swift`, `DashboardLayoutTests.swift`, `MainView.swift`, `SettingsPanel.swift`, and `QADRENApp.swift` already implement the widget canvas, preservation of order, visibility, density, grid scale, Undo/Redo, and settings. The UI-A–F sequence below is a **verification and completion checklist**, not an instruction to recreate these classes. The independent service is later autonomy work. Yandex Disk is post-release; iCloud is out of scope. [Current State Audit](../development/current-state-audit.md).
 
 ## 0. Boundaries and Actual Baseline
 
@@ -35,7 +35,7 @@ Suggested SwiftUI type names (`QDTheme`, `QDWidgetFrame`, `QDLayoutStore`) are p
 
 **UI-B — Chrome and dashboard (PARTIAL IN MAIN; audit/finish).** Verify existing reusable `QDWidgetFrame`, standard headers, and states; hardcoded `PreviewFixtures` shall be in `#Preview`/tests only, not in runtime. Replace permanent section navigation with a single dashboard grid. Actual data providers shall display read-only/unsupported for now.
 
-**UI-C — Preservation and multiwindow (PARTIAL IN MAIN; audit/finish).** Existing DashboardLayoutStore, Dashboard `panelID`, type registry, grid sizing+reflow, layout editing with catalog, config/Undo/Redo, independent window state/zoom/density/filters, persist+restore. No two second Job runners shall operate simultaneously.
+**UI-C — Layout presentation (PARTIAL IN MAIN; audit/finish).** Existing DashboardLayoutStore, Dashboard `panelID`, type registry, grid sizing+reflow, layout editing with catalog, config/Undo/Redo, and persist+restore. No two second Job runners shall operate simultaneously.
 
 **UI-D — Real data and safety.** Connect active Jobs, connections, events, and Worker state via existing Swift/FFI models with real evidence/freshness. If the API is absent, show an honest `not available`. Commands shall execute only after capability check/Core policy. Use Consent/UNKNOWN/conflict from Rust contracts; no blind retries.
 
