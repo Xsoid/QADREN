@@ -142,7 +142,7 @@ fn dispatch_due(paths: &WorkerPaths) -> Result<(usize, usize), String> {
             .map_err(|_| "worker_clock_unavailable".to_string())?;
     let registry =
         Registry::open(&paths.registry).map_err(|_| "registry_unavailable".to_string())?;
-    reconcile_unknown_scheduled_copies(paths, &registry)?;
+    reconcile_unknown_scenario_creates(paths, &registry)?;
     let staged = registry
         .stage_due_schedule_occurrences(after, through)
         .map_err(|_| "schedule_stage_unavailable".to_string())?;
@@ -154,9 +154,11 @@ fn dispatch_due(paths: &WorkerPaths) -> Result<(usize, usize), String> {
     Ok((staged, dispatched))
 }
 
-/// Reconcile only UNKNOWN child copies whose schedule mapping identifies an
-/// exact Local destination. This reads metadata and never retries an effect.
-fn reconcile_unknown_scheduled_copies(
+/// Reconcile only UNKNOWN, no-overwrite Scenario Create Jobs with an exact
+/// persisted Scenario destination. This reads metadata and never retries an
+/// effect. Replacement and deletion stay UNKNOWN until their dedicated,
+/// stricter evidence paths can prove an outcome.
+fn reconcile_unknown_scenario_creates(
     paths: &WorkerPaths,
     registry: &Registry,
 ) -> Result<(), String> {
@@ -167,33 +169,35 @@ fn reconcile_unknown_scheduled_copies(
             .map_err(|_| "job_store_unavailable".to_string())?
             .into_iter()
             .filter(|job| job.state == JobState::Unknown)
-            .map(|job| job.id)
+            .filter_map(|job| {
+                job.scenario_id
+                    .zip(job.scenario_revision)
+                    .map(|(scenario_id, revision)| (job.id, scenario_id, revision))
+            })
             .collect::<Vec<_>>();
         let attempts = store
             .unresolved_attempts()
             .map_err(|_| "job_store_unavailable".to_string())?;
         unknown
             .into_iter()
-            .filter_map(|job_id| {
+            .filter_map(|(job_id, scenario_id, revision)| {
                 attempts
                     .iter()
-                    .find(|attempt| attempt.job_id == job_id && attempt.status == "unknown")
+                    .find(|attempt| {
+                        attempt.job_id == job_id
+                            && attempt.status == "unknown"
+                            && attempt.operation_kind.as_deref() == Some("local_copy_new")
+                    })
                     .and_then(|attempt| attempt.target_connection_id.as_deref())
-                    .map(|connection_id| (job_id, connection_id.to_owned()))
+                    .map(|connection_id| (job_id, scenario_id, revision, connection_id.to_owned()))
             })
             .collect::<Vec<_>>()
     };
-    for (job_id, destination_connection_id) in candidates {
-        let Some(reference) = registry
-            .schedule_child_job_scenario(&job_id)
-            .map_err(|_| "schedule_registry_unavailable".to_string())?
-        else {
-            continue;
-        };
+    for (job_id, scenario_id, revision, destination_connection_id) in candidates {
         let scenario = registry
-            .get_scenario_revision(&reference.scenario_id, reference.revision)
-            .map_err(|_| "schedule_scenario_unavailable".to_string())?
-            .ok_or_else(|| "schedule_scenario_unavailable".to_string())?;
+            .get_scenario_revision(&scenario_id, revision)
+            .map_err(|_| "scenario_unavailable".to_string())?
+            .ok_or_else(|| "scenario_unavailable".to_string())?;
         let destination_root = if destination_connection_id == scenario.left_connection_id {
             &scenario.left_root
         } else if destination_connection_id == scenario.right_connection_id {
@@ -1411,7 +1415,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_reconciles_unknown_scheduled_copy_after_restart_without_replay() {
+    fn worker_reconciles_unknown_scenario_creates_after_restart_without_replay() {
         let root = root("scheduled-reconciliation");
         let left_root = root.join("left");
         let right_root = root.join("right");
@@ -1419,6 +1423,8 @@ mod tests {
         fs::create_dir_all(&right_root).unwrap();
         fs::write(left_root.join("report.txt"), b"payload").unwrap();
         fs::write(right_root.join("report.txt"), b"payload").unwrap();
+        fs::write(left_root.join("manual.txt"), b"manual").unwrap();
+        fs::write(right_root.join("manual.txt"), b"manual").unwrap();
         let paths = WorkerPaths {
             socket: root.join("worker.sock"),
             registry: root.join("registry.sqlite3"),
@@ -1484,15 +1490,46 @@ mod tests {
                 &root_identity,
             )
             .unwrap();
+        store
+            .enqueue("manual-scenario-copy", Some((&scenario, 1)))
+            .unwrap();
+        store
+            .advance(
+                "manual-scenario-copy",
+                JobState::Queued,
+                JobState::Running,
+                Confirmation::Confirmed(EvidenceLevel::Requested),
+            )
+            .unwrap();
+        store
+            .prepare_bound_attempt_with_root_identity(
+                "manual-scenario-copy",
+                "manual-scenario-copy-attempt",
+                "local_copy_new",
+                &right,
+                "manual.txt",
+                6,
+                "00000000000000000000000000000000",
+                &root_identity,
+            )
+            .unwrap();
         drop(store);
 
         let registry = Registry::open(&paths.registry).unwrap();
-        reconcile_unknown_scheduled_copies(&paths, &registry).unwrap();
+        reconcile_unknown_scenario_creates(&paths, &registry).unwrap();
         assert_eq!(
             JobStore::open(&paths.jobs).unwrap().state(&child).unwrap(),
             Some(JobState::Completed)
         );
         assert_eq!(fs::read(right_root.join("report.txt")).unwrap(), b"payload");
+        assert_eq!(
+            JobStore::open(&paths.jobs)
+                .unwrap()
+                .state("manual-scenario-copy")
+                .unwrap(),
+            Some(JobState::Completed)
+        );
+        assert_eq!(fs::read(right_root.join("manual.txt")).unwrap(), b"manual");
         fs::remove_dir_all(root).unwrap();
     }
 
