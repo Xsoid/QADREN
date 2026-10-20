@@ -34,10 +34,10 @@ This audit uses source reading, the local Git history, and recorded local comman
 | Alternative deletion | A selected absent-source deletion rejects a declined delete. A confirmed delete removes only the selected destination and records one completed Job. | Mass-deletion presentation is not covered. |
 | Two-way Create and Update | A right-only file creates a `from_left=false` proposal. A later right-only change creates a right-to-left `Update`. The Rust bridge validates the permitted bidirectional endpoint direction. | The fixture covers one file per direction. |
 | Concurrent two-way changes | Two changed endpoints produce `conflict`. The dry run creates no Job and changes no file. | The fixture does not automate a later user decision for this planned conflict. |
-| Negative bridge gates | An unavailable Scenario revision creates no Job or destination file. A disabled Local connection blocks a metadata snapshot before a scan. | Case and Unicode collision evidence is in Core tests, not this native fixture. |
+| Negative bridge gates | An unavailable Scenario revision creates no Job or destination file. A disabled Local connection blocks a metadata snapshot before a scan. A case-colliding destination and nested Local roots both fail before they create a Job or modify a destination. | Unicode collision evidence is in Core tests, not this native fixture. |
 | UNKNOWN, cancellation, and restart | Core tests cover durable UNKNOWN, cancellation state limits, and read-only reconciliation. | Native Scenario bridge restart, cancellation, and Settings reopen evidence are not recorded. |
 
-The recorded native Scenario fixture passed on `6e596e5`. Run it again on the exact release candidate. Do not treat this matrix as proof of Worker autonomy, File Provider compatibility, or a signed release.
+Run the native Scenario fixture again on the exact release candidate. Do not treat this matrix as proof of Worker autonomy, File Provider compatibility, or a signed release.
 
 ## Recorded Local Evidence
 

@@ -496,6 +496,110 @@ struct ScenarioDryRunBridgeTests {
         )
         check(leftAfterConcurrentDryRun == Data("left divergent".utf8), "concurrent dry run preserves the left file")
         check(rightAfterConcurrentDryRun == Data("right divergent".utf8), "concurrent dry run preserves the right file")
+
+        let caseLeftRoot = temporary.appendingPathComponent("case-left", isDirectory: true)
+        let caseRightRoot = temporary.appendingPathComponent("case-right", isDirectory: true)
+        try FileManager.default.createDirectory(at: caseLeftRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: caseRightRoot, withIntermediateDirectories: true)
+        try Data("new report".utf8).write(to: caseLeftRoot.appendingPathComponent("report.txt"))
+        try Data("protected report".utf8).write(to: caseRightRoot.appendingPathComponent("REPORT.txt"))
+        let caseScenarioID = try createScenario(
+            database: database, leftID: leftID, leftRoot: caseLeftRoot.path,
+            rightID: rightID, rightRoot: caseRightRoot.path
+        )
+        let caseScenario = ScenarioEntry(
+            id: caseScenarioID,
+            name: "Case collision",
+            left_connection_id: leftID,
+            left_root: caseLeftRoot.path,
+            right_connection_id: rightID,
+            right_root: caseRightRoot.path,
+            direction: "left_to_right",
+            enabled: true,
+            revision: 1
+        )
+        let casePlan = try StorageRegistryBridge.dryRunScenario(
+            id: caseScenarioID, revision: 1,
+            left: try StorageRegistryBridge.localScenarioSnapshot(
+                root: caseLeftRoot.path, connectionID: leftID, databasePath: database
+            ),
+            right: try StorageRegistryBridge.localScenarioSnapshot(
+                root: caseRightRoot.path, connectionID: rightID, databasePath: database
+            ),
+            databasePath: database
+        )
+        guard let caseCreate = casePlan.first(where: {
+            $0.relative_path == "report.txt" && $0.action.kind == "create"
+        }) else {
+            fatalError("case collision did not retain the source create proposal")
+        }
+        let jobsBeforeCaseCollision = try JobInventory.list(databasePath: jobs).count
+        do {
+            try StorageRegistryBridge.executeScenarioCreate(
+                scenario: caseScenario, item: caseCreate, registryPath: database, jobsPath: jobs
+            )
+            fatalError("case-colliding Scenario create overwrote a destination")
+        } catch {
+            // The native bridge rejects the no-overwrite collision before it creates a Job.
+        }
+        let caseCollisionDestination = try Data(
+            contentsOf: caseRightRoot.appendingPathComponent("REPORT.txt")
+        )
+        check(
+            caseCollisionDestination == Data("protected report".utf8),
+            "case-colliding Scenario create preserves the destination bytes"
+        )
+        let jobsAfterCaseCollision = try JobInventory.list(databasePath: jobs).count
+        check(
+            jobsAfterCaseCollision == jobsBeforeCaseCollision,
+            "case-colliding Scenario create records no Job"
+        )
+
+        let overlapRoot = temporary.appendingPathComponent("overlap", isDirectory: true)
+        let nestedOverlapRoot = overlapRoot.appendingPathComponent("nested", isDirectory: true)
+        try FileManager.default.createDirectory(at: nestedOverlapRoot, withIntermediateDirectories: true)
+        try Data("must not copy".utf8).write(to: overlapRoot.appendingPathComponent("report.txt"))
+        let overlapScenarioID = try createScenario(
+            database: database, leftID: leftID, leftRoot: overlapRoot.path,
+            rightID: rightID, rightRoot: nestedOverlapRoot.path
+        )
+        let overlapScenario = ScenarioEntry(
+            id: overlapScenarioID,
+            name: "Overlapping roots",
+            left_connection_id: leftID,
+            left_root: overlapRoot.path,
+            right_connection_id: rightID,
+            right_root: nestedOverlapRoot.path,
+            direction: "left_to_right",
+            enabled: true,
+            revision: 1
+        )
+        let overlapPlan = try StorageRegistryBridge.dryRunScenario(
+            id: overlapScenarioID, revision: 1,
+            left: try StorageRegistryBridge.localScenarioSnapshot(
+                root: overlapRoot.path, connectionID: leftID, databasePath: database
+            ),
+            right: try StorageRegistryBridge.localScenarioSnapshot(
+                root: nestedOverlapRoot.path, connectionID: rightID, databasePath: database
+            ),
+            databasePath: database
+        )
+        check(overlapPlan.count == 1 && overlapPlan[0].action.kind == "create", "overlap starts as a create proposal")
+        let jobsBeforeOverlap = try JobInventory.list(databasePath: jobs).count
+        do {
+            try StorageRegistryBridge.executeScenarioCreate(
+                scenario: overlapScenario, item: overlapPlan[0], registryPath: database, jobsPath: jobs
+            )
+            fatalError("overlapping Scenario roots started a copy")
+        } catch {
+            // The pinned Local roots reject a recursive scope before a Job is created.
+        }
+        check(
+            !FileManager.default.fileExists(atPath: nestedOverlapRoot.appendingPathComponent("report.txt").path),
+            "overlapping Scenario roots do not write the nested destination"
+        )
+        let jobsAfterOverlap = try JobInventory.list(databasePath: jobs).count
+        check(jobsAfterOverlap == jobsBeforeOverlap, "overlapping Scenario roots record no Job")
         try setConnectionEnabled(database: database, id: leftID, enabled: false)
         do {
             _ = try StorageRegistryBridge.localScenarioSnapshot(
