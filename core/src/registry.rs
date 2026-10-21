@@ -177,7 +177,7 @@ impl Registry {
         }
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 14 {
+        if version > 15 {
             return Err(RegistryError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -412,6 +412,18 @@ impl Registry {
                    ADD COLUMN cancellation_requested INTEGER NOT NULL DEFAULT 0
                    CHECK(cancellation_requested IN (0,1));
                  PRAGMA user_version = 14;
+                 COMMIT;",
+            )?;
+        }
+        if version <= 14 {
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE schedule_conflict_links (
+                    schedule_job_id TEXT NOT NULL,
+                    conflict_id TEXT NOT NULL REFERENCES scenario_conflict_tasks(id) ON DELETE RESTRICT,
+                    PRIMARY KEY(schedule_job_id, conflict_id)
+                 );
+                 PRAGMA user_version = 15;
                  COMMIT;",
             )?;
         }
@@ -1600,6 +1612,35 @@ impl Registry {
             "UPDATE scenario_conflict_tasks SET state='completed' WHERE id=?1 AND state='selected'",
             params![id],
         )?)
+    }
+
+    /// Associate a scheduler coordinator with a conflict task without adding a
+    /// JobStore dependency to the conflict queue.
+    pub fn link_schedule_conflict(&self, schedule_job_id: &str, conflict_id: &str) -> Result<()> {
+        self.changed(self.db.execute(
+            "INSERT OR IGNORE INTO schedule_conflict_links(schedule_job_id,conflict_id)
+             SELECT ?1,id FROM scenario_conflict_tasks WHERE id=?2",
+            params![schedule_job_id, conflict_id],
+        )?)
+    }
+
+    /// Return coordinator IDs only when every linked task completed. Stale
+    /// work remains visible and never becomes a successful coordinator Job.
+    pub fn completed_schedule_jobs_for_conflict(&self, conflict_id: &str) -> Result<Vec<String>> {
+        let mut statement = self.db.prepare(
+            "SELECT DISTINCT l.schedule_job_id
+             FROM schedule_conflict_links l
+             WHERE l.conflict_id=?1 AND NOT EXISTS (
+                SELECT 1 FROM schedule_conflict_links other
+                JOIN scenario_conflict_tasks task ON task.id=other.conflict_id
+                WHERE other.schedule_job_id=l.schedule_job_id AND task.state != 'completed'
+             )",
+        )?;
+        let jobs = statement
+            .query_map([conflict_id], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(RegistryError::from)?;
+        Ok(jobs)
     }
 
     /// Read one task only when it is still eligible for an explicit effect.

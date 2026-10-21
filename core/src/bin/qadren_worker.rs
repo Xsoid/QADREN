@@ -429,7 +429,7 @@ fn execute_schedule_job(
                             &item.relative_path,
                         );
                         if let (Some(source), Some(destination)) = (source, destination) {
-                            registry
+                            let conflict_id = registry
                                 .queue_conflict_task(
                                     reference,
                                     &item.relative_path,
@@ -442,6 +442,9 @@ fn execute_schedule_job(
                                     }),
                                     Some(&if from_left { destination } else { source }),
                                 )
+                                .map_err(|_| "schedule_conflict_unavailable".to_string())?;
+                            registry
+                                .link_schedule_conflict(schedule_job_id, &conflict_id)
                                 .map_err(|_| "schedule_conflict_unavailable".to_string())?;
                             waiting_for_decision = true;
                         } else {
@@ -458,7 +461,7 @@ fn execute_schedule_job(
                     .ok_or_else(|| "schedule_conflict_unavailable".to_string())?;
                 let right_version = observed_version(&right, &item.relative_path)
                     .ok_or_else(|| "schedule_conflict_unavailable".to_string())?;
-                registry
+                let conflict_id = registry
                     .queue_conflict_task(
                         reference,
                         &item.relative_path,
@@ -468,6 +471,9 @@ fn execute_schedule_job(
                         Some(&right_version),
                     )
                     .map_err(|_| "schedule_conflict_unavailable".to_string())?;
+                registry
+                    .link_schedule_conflict(schedule_job_id, &conflict_id)
+                    .map_err(|_| "schedule_conflict_unavailable".to_string())?;
                 waiting_for_decision = true;
             }
             PlanAction::Conflict { .. } => {
@@ -475,7 +481,7 @@ fn execute_schedule_job(
                     .ok_or_else(|| "schedule_conflict_unavailable".to_string())?;
                 let right_version = observed_version(&right, &item.relative_path)
                     .ok_or_else(|| "schedule_conflict_unavailable".to_string())?;
-                registry
+                let conflict_id = registry
                     .queue_conflict_task(
                         reference,
                         &item.relative_path,
@@ -485,12 +491,15 @@ fn execute_schedule_job(
                         Some(&right_version),
                     )
                     .map_err(|_| "schedule_conflict_unavailable".to_string())?;
+                registry
+                    .link_schedule_conflict(schedule_job_id, &conflict_id)
+                    .map_err(|_| "schedule_conflict_unavailable".to_string())?;
                 waiting_for_decision = true;
             }
             PlanAction::DeleteRequiresDecision { .. } => {
                 let left_version = observed_version(&left, &item.relative_path);
                 let right_version = observed_version(&right, &item.relative_path);
-                registry
+                let conflict_id = registry
                     .queue_conflict_task(
                         reference,
                         &item.relative_path,
@@ -499,6 +508,9 @@ fn execute_schedule_job(
                         left_version.as_ref(),
                         right_version.as_ref(),
                     )
+                    .map_err(|_| "schedule_conflict_unavailable".to_string())?;
+                registry
+                    .link_schedule_conflict(schedule_job_id, &conflict_id)
                     .map_err(|_| "schedule_conflict_unavailable".to_string())?;
                 waiting_for_decision = true;
             }
@@ -965,8 +977,14 @@ fn execute_conflict(
         )
     };
     match result {
-        Ok(LocalFileCopyStatus::Completed) => Ok("completed"),
-        Ok(LocalFileCopyStatus::Existing(_)) => Ok("existing"),
+        Ok(LocalFileCopyStatus::Completed) => {
+            complete_ready_schedule_jobs(paths, conflict_id)?;
+            Ok("completed")
+        }
+        Ok(LocalFileCopyStatus::Existing(_)) => {
+            complete_ready_schedule_jobs(paths, conflict_id)?;
+            Ok("existing")
+        }
         Err(LocalFileCopyError::ConsentRequired) => Err("consent_required"),
         Err(LocalFileCopyError::ConflictStale) => Err("conflict_stale"),
         Err(LocalFileCopyError::ConflictUnavailable) => Err("conflict_unavailable"),
@@ -976,6 +994,34 @@ fn execute_conflict(
         Err(LocalFileCopyError::Local(_)) => Err("local_operation_failed"),
         Err(_) => Err("conflict_operation_failed"),
     }
+}
+
+fn complete_ready_schedule_jobs(
+    paths: &WorkerPaths,
+    conflict_id: &str,
+) -> Result<(), &'static str> {
+    let registry = Registry::open(&paths.registry).map_err(|_| "registry_unavailable")?;
+    let ready = registry
+        .completed_schedule_jobs_for_conflict(conflict_id)
+        .map_err(|_| "schedule_conflict_unavailable")?;
+    let mut jobs = JobStore::open(&paths.jobs).map_err(|_| "job_store_unavailable")?;
+    for job_id in ready {
+        jobs.advance(
+            &job_id,
+            JobState::WaitingForDecision,
+            JobState::Running,
+            Confirmation::Confirmed(EvidenceLevel::Requested),
+        )
+        .map_err(|_| "schedule_job_state_unavailable")?;
+        jobs.advance(
+            &job_id,
+            JobState::Running,
+            JobState::Completed,
+            Confirmation::Confirmed(EvidenceLevel::ProviderAcknowledged),
+        )
+        .map_err(|_| "schedule_job_state_unavailable")?;
+    }
+    Ok(())
 }
 
 fn update_registry_control(
@@ -1005,6 +1051,9 @@ fn update_registry_control(
             registry
                 .select_conflict_task(id, Some(source_is_left), decision)
                 .map_err(|_| "conflict_unavailable")?;
+            if matches!(decision, "skip_transfer" | "keep_file") {
+                complete_ready_schedule_jobs(paths, id)?;
+            }
             Ok("updated")
         }
         _ => Err("unsupported_command"),
@@ -1712,6 +1761,16 @@ mod tests {
         assert!(jobs
             .iter()
             .any(|job| job.state == JobState::WaitingForDecision));
+        registry
+            .select_conflict_task(&conflicts[0].id, Some(true), "skip_transfer")
+            .unwrap();
+        complete_ready_schedule_jobs(&paths, &conflicts[0].id).unwrap();
+        assert!(JobStore::open(&paths.jobs)
+            .unwrap()
+            .list_jobs()
+            .unwrap()
+            .iter()
+            .any(|job| job.id.starts_with("schedule-") && job.state == JobState::Completed));
         fs::remove_dir_all(root).unwrap();
     }
 
