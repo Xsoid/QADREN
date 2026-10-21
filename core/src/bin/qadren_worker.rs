@@ -169,10 +169,10 @@ fn resume_pending_scenario_create_batches(paths: &WorkerPaths, registry: &Regist
     }
 }
 
-/// Reconcile only UNKNOWN, no-overwrite Scenario Create Jobs with an exact
+/// Reconcile UNKNOWN Scenario Create and replacement Jobs with an exact
 /// persisted Scenario destination. This reads metadata and never retries an
-/// effect. Replacement and deletion stay UNKNOWN until their dedicated,
-/// stricter evidence paths can prove an outcome.
+/// effect. Deletion stays UNKNOWN because missing metadata cannot prove that
+/// this Worker performed the deletion.
 fn reconcile_unknown_scenario_creates(
     paths: &WorkerPaths,
     registry: &Registry,
@@ -201,7 +201,10 @@ fn reconcile_unknown_scenario_creates(
                     .find(|attempt| {
                         attempt.job_id == job_id
                             && attempt.status == "unknown"
-                            && attempt.operation_kind.as_deref() == Some("local_copy_new")
+                            && matches!(
+                                attempt.operation_kind.as_deref(),
+                                Some("local_copy_new") | Some("local_copy_replace")
+                            )
                     })
                     .and_then(|attempt| attempt.target_connection_id.as_deref())
                     .map(|connection_id| (job_id, scenario_id, revision, connection_id.to_owned()))
