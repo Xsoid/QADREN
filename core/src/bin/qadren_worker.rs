@@ -1569,6 +1569,67 @@ mod tests {
     }
 
     #[test]
+    fn worker_cancellation_marks_pending_create_batch_children_without_effect() {
+        let root = root("create-batch-cancel");
+        let left_root = root.join("left");
+        let right_root = root.join("right");
+        fs::create_dir_all(&left_root).unwrap();
+        fs::create_dir_all(&right_root).unwrap();
+        fs::write(left_root.join("first.txt"), b"first").unwrap();
+        fs::write(left_root.join("second.txt"), b"second").unwrap();
+        let paths = WorkerPaths {
+            socket: root.join("worker.sock"),
+            registry: root.join("registry.sqlite3"),
+            jobs: root.join("jobs.sqlite3"),
+        };
+        let mut registry = Registry::open(&paths.registry).unwrap();
+        let left = registry.add("local_filesystem", "Left").unwrap();
+        let right = registry.add("local_filesystem", "Right").unwrap();
+        let scenario = registry
+            .create_scenario(
+                "Cancelled batch",
+                &left,
+                left_root.to_str().unwrap(),
+                &right,
+                right_root.to_str().unwrap(),
+                "left_to_right",
+            )
+            .unwrap();
+        let receipt = registry
+            .create_scenario_create_batch(
+                &ScenarioReference {
+                    scenario_id: scenario,
+                    revision: 1,
+                },
+                &[("first.txt".into(), true), ("second.txt".into(), true)],
+            )
+            .unwrap();
+        registry
+            .request_scenario_create_batch_cancellation(&receipt.id)
+            .unwrap();
+        drop(registry);
+
+        assert_eq!(dispatch_due(&paths).unwrap(), (0, 0));
+        assert!(!right_root.join("first.txt").exists());
+        assert!(!right_root.join("second.txt").exists());
+        let stored = Registry::open(&paths.registry)
+            .unwrap()
+            .scenario_create_batch(&receipt.id)
+            .unwrap()
+            .unwrap();
+        assert!(stored
+            .children
+            .iter()
+            .all(|child| child.state == "cancelled"));
+        assert!(JobStore::open(&paths.jobs)
+            .unwrap()
+            .list_jobs()
+            .unwrap()
+            .is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn scheduled_run_scans_roots_copies_new_files_and_queues_existing_file_updates() {
         let root = root("scheduled-execution");
         let left_root = root.join("left");
