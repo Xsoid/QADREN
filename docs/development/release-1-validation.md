@@ -19,6 +19,24 @@ Release 1 is a local-first macOS product. It includes one Rust JobStore, Local F
 
 The initial recorded executable baseline is `f9121b2`. Later rows record newer checked commits.
 
+## Clean Export Record — 2026-10-21
+
+`61107b3` was exported with `git archive HEAD` into a new temporary directory. The export did not contain the owner's uncommitted workspace files. The following checks passed in that export on macOS:
+
+| Check | Result | Evidence scope |
+|---|---|---|
+| `scripts/test-core.sh` | PASS, 277 Core tests and 11 Worker tests | Rust format, Clippy, Core, Worker, and doc tests on `61107b3` |
+| `scripts/test-macos-worker-ipc.sh` | PASS | Swift IPC to the real local Worker. It verifies Scenario Create, durable multi-file receipt reopen, cancellation, no-overwrite, confirmed replacement, and completed Job evidence. |
+| `scripts/test-macos-scenario-schedules.sh` | PASS | Swift FFI schedule staging, duplicate suppression, pause, and UTC occurrence identity. |
+| `scripts/test-macos-local-workspace.sh` | PASS | Swift Local Filesystem controller bridge. |
+| `scripts/test-macos-scenario-dry-run.sh` | PASS | Swift Scenario plan, confirmed update, conflict replacement/deletion, and durable state bridge. |
+| `scripts/test-macos-storage-removal.sh` | PASS | Local connection removal bridge. |
+| `scripts/test-macos-keychain.sh` | PASS | Native Keychain smoke test. |
+| `scripts/build-macos.sh` | PASS | Unsigned local/internal `QADREN.app`. Bundle ID: `dev.qadren.bootstrap`. Version: `1`. |
+| Launch `Contents/MacOS/QADREN` | PASS | The clean exported bundle stayed alive after launch. SHA-256: `059fe2b1a526cd6eba6c03c8be8541abcefd7077008dfaaeffca90aa2e0d678b`. |
+
+The native automation channel returned a pipe error after the Settings command opened a second window. It did not report an application exit. This is not Settings interaction evidence. A real File Provider item was not available for the clean-export run. Both cases remain unverified compatibility evidence. They are not recorded as PASS.
+
 | Check | Result | Evidence scope |
 |---|---|---|
 | `cargo clippy --manifest-path core/Cargo.toml --lib -- -D warnings` | PASS | Rust Core lint on `f9121b2` |
