@@ -1466,19 +1466,34 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn root(name: &str) -> PathBuf {
-        let path = std::env::current_dir()
-            .unwrap()
-            .join("target")
-            .join(format!(
-                "qadren-worker-{name}-{}",
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
+        // Unix-domain socket paths have a small platform limit. Keep test
+        // roots under the system temporary directory so an exported checkout
+        // cannot make the private Worker socket unbindable.
+        let temporary = std::env::temp_dir().canonicalize().unwrap();
+        let path = temporary.join(format!(
+            "qw-{name}-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         fs::create_dir_all(&path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         path
+    }
+
+    fn wait_for_socket(socket: &Path) -> bool {
+        // The Worker binds only after it obtains the exclusive lock and checks
+        // the socket directory. A loaded macOS host can need more than one
+        // second for that setup. Polling the real socket keeps the test tied to
+        // the public readiness boundary instead of to thread scheduling.
+        for _ in 0..500 {
+            if socket.exists() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        false
     }
 
     #[test]
@@ -1904,13 +1919,7 @@ mod tests {
         };
         let socket = paths.socket.clone();
         let handle = thread::spawn(move || run(paths, false));
-        for _ in 0..100 {
-            if socket.exists() {
-                break;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        assert!(socket.exists());
+        assert!(wait_for_socket(&socket));
 
         let mut status = UnixStream::connect(&socket).unwrap();
         writeln!(status, r#"{{"command":"status"}}"#).unwrap();
@@ -1980,12 +1989,7 @@ mod tests {
         drop(registry);
         let socket = paths.socket.clone();
         let handle = thread::spawn(move || run(paths, false));
-        for _ in 0..100 {
-            if socket.exists() {
-                break;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
+        assert!(wait_for_socket(&socket));
         let request = serde_json::json!({
             "command":"execute_create",
             "scenario_id":scenario,
