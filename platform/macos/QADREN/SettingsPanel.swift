@@ -1770,7 +1770,7 @@ struct ApplicationSettingsView: View {
             }
             Section("Состояние приложения") {
                 LabeledContent("Настройки", value: "Отдельное окно")
-                LabeledContent("Выполнение сценариев", value: "Недоступно до готовности Core")
+                LabeledContent("Выполнение сценариев", value: "Local Filesystem · Local Worker")
             }
         }
         .formStyle(.grouped)
