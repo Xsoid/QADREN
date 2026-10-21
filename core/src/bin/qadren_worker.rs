@@ -1790,7 +1790,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_reconciles_unknown_scenario_creates_after_restart_without_replay() {
+    fn worker_reconciles_unknown_scenario_effects_after_restart_without_replay() {
         let root = root("scheduled-reconciliation");
         let left_root = root.join("left");
         let right_root = root.join("right");
@@ -1800,6 +1800,7 @@ mod tests {
         fs::write(right_root.join("report.txt"), b"payload").unwrap();
         fs::write(left_root.join("manual.txt"), b"manual").unwrap();
         fs::write(right_root.join("manual.txt"), b"manual").unwrap();
+        fs::write(right_root.join("replacement.txt"), b"replacement").unwrap();
         let paths = WorkerPaths {
             socket: root.join("worker.sock"),
             registry: root.join("registry.sqlite3"),
@@ -1888,10 +1889,57 @@ mod tests {
                 &root_identity,
             )
             .unwrap();
+        store
+            .enqueue("replacement-scenario-copy", Some((&scenario, 1)))
+            .unwrap();
+        store
+            .advance(
+                "replacement-scenario-copy",
+                JobState::Queued,
+                JobState::Running,
+                Confirmation::Confirmed(EvidenceLevel::Requested),
+            )
+            .unwrap();
+        store
+            .prepare_bound_attempt_with_root_identity(
+                "replacement-scenario-copy",
+                "replacement-scenario-copy-attempt",
+                "local_copy_replace",
+                &right,
+                "replacement.txt",
+                11,
+                "00000000000000000000000000000000",
+                &root_identity,
+            )
+            .unwrap();
+        store
+            .enqueue("delete-scenario-copy", Some((&scenario, 1)))
+            .unwrap();
+        store
+            .advance(
+                "delete-scenario-copy",
+                JobState::Queued,
+                JobState::Running,
+                Confirmation::Confirmed(EvidenceLevel::Requested),
+            )
+            .unwrap();
+        store
+            .prepare_bound_attempt_with_root_identity(
+                "delete-scenario-copy",
+                "delete-scenario-copy-attempt",
+                "local_delete",
+                &right,
+                "deleted.txt",
+                7,
+                "00000000000000000000000000000000",
+                &root_identity,
+            )
+            .unwrap();
         drop(store);
 
-        let registry = Registry::open(&paths.registry).unwrap();
-        reconcile_unknown_scenario_creates(&paths, &registry).unwrap();
+        // dispatch_due is the first operation of a one-shot Worker start.
+        // It must resolve only effects with positive metadata proof.
+        dispatch_due(&paths).unwrap();
         assert_eq!(
             JobStore::open(&paths.jobs).unwrap().state(&child).unwrap(),
             Some(JobState::Completed)
@@ -1905,6 +1953,26 @@ mod tests {
             Some(JobState::Completed)
         );
         assert_eq!(fs::read(right_root.join("manual.txt")).unwrap(), b"manual");
+        assert_eq!(
+            JobStore::open(&paths.jobs)
+                .unwrap()
+                .state("replacement-scenario-copy")
+                .unwrap(),
+            Some(JobState::Completed)
+        );
+        assert_eq!(
+            fs::read(right_root.join("replacement.txt")).unwrap(),
+            b"replacement"
+        );
+        assert_eq!(
+            JobStore::open(&paths.jobs)
+                .unwrap()
+                .state("delete-scenario-copy")
+                .unwrap(),
+            Some(JobState::Unknown),
+            "missing metadata cannot prove that this Worker performed a deletion"
+        );
+        assert!(!right_root.join("deleted.txt").exists());
         fs::remove_dir_all(root).unwrap();
     }
 
