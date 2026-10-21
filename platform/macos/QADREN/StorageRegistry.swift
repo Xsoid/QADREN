@@ -216,6 +216,7 @@ struct ScenarioPlanItem: Decodable, Identifiable {
 
 struct ScenarioCreateBatchReceipt: Decodable {
     let id: String
+    let cancellation_requested: Bool
     let children: [ScenarioCreateBatchChild]
 }
 struct ScenarioCreateBatchChild: Decodable {

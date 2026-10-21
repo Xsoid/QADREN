@@ -262,9 +262,9 @@ pub extern "C" fn qadren_scenario_create_batch(
             &children,
         )
     }) {
-        Ok(receipt) => {
-            output(json!({"ok":true,"data":{"id":receipt.id,"children":receipt.children}}))
-        }
+        Ok(receipt) => output(
+            json!({"ok":true,"data":{"id":receipt.id,"cancellation_requested":receipt.cancellation_requested,"children":receipt.children}}),
+        ),
         Err(_) => output(json!({"ok":false,"error":"registry_error"})),
     }
 }
@@ -281,7 +281,7 @@ pub extern "C" fn qadren_scenario_create_batch_get(
     match Registry::open(Path::new(&path)).and_then(|db| db.scenario_create_batch(&batch_id)) {
         Ok(Some(receipt)) => output(json!({
             "ok":true,
-            "data":{"id":receipt.id,"children":receipt.children}
+            "data":{"id":receipt.id,"cancellation_requested":receipt.cancellation_requested,"children":receipt.children}
         })),
         Ok(None) => output(json!({"ok":false,"error":"not_found"})),
         Err(_) => output(json!({"ok":false,"error":"registry_error"})),
@@ -309,6 +309,7 @@ pub extern "C" fn qadren_scenario_pending_create_batches(
             "ok":true,
             "data":receipts.into_iter().map(|receipt| json!({
                 "id":receipt.id,
+                "cancellation_requested":receipt.cancellation_requested,
                 "children":receipt.children,
             })).collect::<Vec<_>>(),
         })),

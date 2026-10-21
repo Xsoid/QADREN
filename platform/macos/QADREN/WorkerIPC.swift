@@ -19,6 +19,11 @@ struct WorkerScenarioCreateBatchRequest: Encodable {
     let batch_id: String
 }
 
+struct WorkerScenarioCreateBatchCancellationRequest: Encodable {
+    let command = "cancel_create_batch"
+    let batch_id: String
+}
+
 struct WorkerScenarioReplaceRequest: Encodable {
     let command = "execute_replace"
     let scenario_id: String
@@ -117,6 +122,16 @@ enum WorkerIPC {
             throw WorkerIPCError.invalidResponse
         }
         return response.status
+    }
+
+    static func cancelScenarioCreateBatch(receiptID: String, socketPath: String? = nil) throws {
+        let payload = try JSONEncoder().encode(
+            WorkerScenarioCreateBatchCancellationRequest(batch_id: receiptID)
+        ) + Data([0x0a])
+        let response = try send(payload, socketPath: socketPath ?? defaultSocketPath())
+        guard response.ok, response.status == "cancellation_requested" else {
+            throw WorkerIPCError.rejected(response.status)
+        }
     }
 
     static func executeScenarioReplace(

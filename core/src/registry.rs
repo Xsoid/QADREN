@@ -126,6 +126,7 @@ pub struct ScheduleOutboxEntry {
 pub struct ScenarioCreateBatchReceipt {
     pub id: String,
     pub scenario: ScenarioReference,
+    pub cancellation_requested: bool,
     pub children: Vec<ScenarioBatchChild>,
 }
 
@@ -176,7 +177,7 @@ impl Registry {
         }
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 13 {
+        if version > 14 {
             return Err(RegistryError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -401,6 +402,16 @@ impl Registry {
                     PRIMARY KEY(batch_id,relative_path)
                  );
                  PRAGMA user_version = 13;
+                 COMMIT;",
+            )?;
+        }
+        if version <= 13 {
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE scenario_create_batches
+                   ADD COLUMN cancellation_requested INTEGER NOT NULL DEFAULT 0
+                   CHECK(cancellation_requested IN (0,1));
+                 PRAGMA user_version = 14;
                  COMMIT;",
             )?;
         }
@@ -1035,6 +1046,7 @@ impl Registry {
         Ok(ScenarioCreateBatchReceipt {
             id,
             scenario: scenario.clone(),
+            cancellation_requested: false,
             children: receipt_children,
         })
     }
@@ -1042,20 +1054,20 @@ impl Registry {
     /// Load a confirmed batch exactly as saved. This does not create Jobs or
     /// authorize an effect.
     pub fn scenario_create_batch(&self, id: &str) -> Result<Option<ScenarioCreateBatchReceipt>> {
-        let parent: Option<ScenarioReference> = self
+        let parent: Option<(ScenarioReference, bool)> = self
             .db
             .query_row(
-                "SELECT scenario_id,scenario_revision FROM scenario_create_batches WHERE id=?1",
+            "SELECT scenario_id,scenario_revision,cancellation_requested FROM scenario_create_batches WHERE id=?1",
                 [id],
                 |row| {
-                    Ok(ScenarioReference {
+                    Ok((ScenarioReference {
                         scenario_id: row.get(0)?,
                         revision: row.get::<_, i64>(1)? as u64,
-                    })
+                    }, row.get::<_, bool>(2)?))
                 },
             )
             .optional()?;
-        let Some(scenario) = parent else {
+        let Some((scenario, cancellation_requested)) = parent else {
             return Ok(None);
         };
         let mut statement = self.db.prepare(
@@ -1074,6 +1086,7 @@ impl Registry {
         Ok(Some(ScenarioCreateBatchReceipt {
             id: id.into(),
             scenario,
+            cancellation_requested,
             children,
         }))
     }
@@ -1089,6 +1102,21 @@ impl Registry {
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into);
         result
+    }
+
+    /// Persist a stop request. The Worker reads it before each next child, so
+    /// an already-started child keeps its durable real outcome.
+    pub fn request_scenario_create_batch_cancellation(&self, batch_id: &str) -> Result<()> {
+        let changed = self.db.execute(
+            "UPDATE scenario_create_batches SET cancellation_requested=1
+             WHERE id=?1 AND cancellation_requested=0",
+            [batch_id],
+        )?;
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err(RegistryError::NotFound)
+        }
     }
 
     /// Load unfinished Create batches for one exact Scenario revision. This is
@@ -2220,6 +2248,14 @@ mod tests {
         assert_eq!(
             db.scenario_create_batch(&receipt.id).unwrap(),
             Some(receipt.clone())
+        );
+        db.request_scenario_create_batch_cancellation(&receipt.id)
+            .unwrap();
+        assert!(
+            db.scenario_create_batch(&receipt.id)
+                .unwrap()
+                .unwrap()
+                .cancellation_requested
         );
         assert_eq!(db.scenario_create_batch("missing").unwrap(), None);
         assert_eq!(

@@ -601,6 +601,17 @@ fn execute_create_batch_id(
         .into_iter()
         .filter(|child| child.state == "pending")
     {
+        let cancellation_requested = registry
+            .scenario_create_batch(batch_id)
+            .map_err(|_| "batch_unavailable")?
+            .ok_or("batch_unavailable")?
+            .cancellation_requested;
+        if cancellation_requested {
+            registry
+                .set_scenario_create_batch_child_state(batch_id, &child.relative_path, "cancelled")
+                .map_err(|_| "batch_unavailable")?;
+            continue;
+        }
         let (source_root, source_connection, destination_root, destination_connection) =
             if child.source_is_left {
                 (
@@ -654,6 +665,18 @@ fn execute_create_batch_id(
     } else {
         Ok("completed")
     }
+}
+
+fn request_create_batch_cancellation(
+    paths: &WorkerPaths,
+    request: &Request,
+) -> Result<&'static str, &'static str> {
+    let batch_id = request.batch_id.as_deref().ok_or("invalid_request")?;
+    Registry::open(&paths.registry)
+        .map_err(|_| "registry_unavailable")?
+        .request_scenario_create_batch_cancellation(batch_id)
+        .map_err(|_| "batch_unavailable")?;
+    Ok("cancellation_requested")
 }
 
 fn execute_replace(paths: &WorkerPaths, request: &Request) -> Result<&'static str, &'static str> {
@@ -1063,6 +1086,26 @@ fn handle_client(mut stream: UnixStream, paths: &WorkerPaths, stop: &mut bool) {
             ),
         },
         "execute_create_batch" => match execute_create_batch(paths, &request) {
+            Ok(status) => respond(
+                &mut stream,
+                &Response {
+                    ok: true,
+                    status,
+                    staged: None,
+                    dispatched: None,
+                },
+            ),
+            Err(status) => respond(
+                &mut stream,
+                &Response {
+                    ok: false,
+                    status,
+                    staged: None,
+                    dispatched: None,
+                },
+            ),
+        },
+        "cancel_create_batch" => match request_create_batch_cancellation(paths, &request) {
             Ok(status) => respond(
                 &mut stream,
                 &Response {

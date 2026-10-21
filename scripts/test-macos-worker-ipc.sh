@@ -16,7 +16,7 @@ case "$ARCH" in
 esac
 
 export MACOSX_DEPLOYMENT_TARGET=13.0
-cargo build --release --manifest-path core/Cargo.toml --target "$TARGET" --bin qadren-worker
+cargo build --release --manifest-path core/Cargo.toml --target "$TARGET" --bin qadren-worker --lib
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf -- "$TEST_ROOT"' EXIT
 

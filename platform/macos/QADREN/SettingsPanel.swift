@@ -670,13 +670,18 @@ private struct ScenarioDryRunView: View {
                                     .foregroundStyle(.orange)
                             }
                             Text(workerOwnedCreateBatch
-                                ? "Закрытие окна не отменяет пакет. После перезапуска Worker продолжит только файлы без зафиксированного исхода."
+                                ? activeBatch.cancellationRequested
+                                ? "Отмена сохранена. QADREN завершит текущую операцию и не запустит следующий файл."
+                                : "Закрытие окна не отменяет пакет. После перезапуска Worker продолжит только файлы без зафиксированного исхода."
                                 : activeBatch.cancellationRequested
                                 ? "Отмена запрошена. QADREN завершит текущую операцию и не запустит следующий файл."
                                 : "Обычные переносы продолжаются при ошибке одного файла. Очередь конфликтов работает отдельно.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                            if !workerOwnedCreateBatch {
+                            if workerOwnedCreateBatch {
+                                Button("Остановить после текущего файла", role: .cancel) { cancelWorkerCreateBatch() }
+                                    .disabled(activeBatch.cancellationRequested)
+                            } else {
                                 Button("Остановить после текущего файла", role: .cancel) { cancelActiveBatch() }
                                     .disabled(activeBatch.cancellationRequested)
                             }
@@ -935,6 +940,10 @@ private struct ScenarioDryRunView: View {
                 receiptID = try StorageRegistryBridge.confirmScenarioCreateBatch(
                     scenario: batchScenario, items: items
                 )
+                activeBatch = ScenarioBatchProgress(
+                    total: items.count, processed: 0, failures: 0, currentPath: items[0].relative_path,
+                    cancellationRequested: false, receiptID: receiptID
+                )
             } catch {
                 activeBatch = nil
                 workerOwnedCreateBatch = false
@@ -953,7 +962,7 @@ private struct ScenarioDryRunView: View {
                         total: receipt.children.count, processed: completed, failures: failures,
                         currentPath: receipt.children.first { $0.state == "pending" }?.relative_path
                             ?? receipt.children.last?.relative_path ?? "",
-                        cancellationRequested: false
+                        cancellationRequested: receipt.cancellation_requested, receiptID: receiptID
                     )
                     if receipt.children.allSatisfy({ $0.state != "pending" }) { return }
                 }
@@ -1070,7 +1079,7 @@ private struct ScenarioDryRunView: View {
                         failures: failures,
                         currentPath: receipt.children.first { $0.state == "pending" }?.relative_path
                             ?? receipt.children.last?.relative_path ?? "",
-                        cancellationRequested: false,
+                        cancellationRequested: receipt.cancellation_requested,
                         receiptID: receipt.id
                     )
                 }
@@ -1091,6 +1100,20 @@ private struct ScenarioDryRunView: View {
             total: activeBatch.total, processed: activeBatch.processed, failures: activeBatch.failures,
             currentPath: activeBatch.currentPath, cancellationRequested: true
         )
+    }
+
+    private func cancelWorkerCreateBatch() {
+        guard let receiptID = activeBatch?.receiptID else { return }
+        do {
+            try WorkerIPC.cancelScenarioCreateBatch(receiptID: receiptID)
+            guard let activeBatch else { return }
+            self.activeBatch = ScenarioBatchProgress(
+                total: activeBatch.total, processed: activeBatch.processed, failures: activeBatch.failures,
+                currentPath: activeBatch.currentPath, cancellationRequested: true, receiptID: receiptID
+            )
+        } catch {
+            self.error = "Не удалось остановить пакет: " + error.localizedDescription
+        }
     }
 
     private func executeCreate(_ item: ScenarioPlanItem) {
