@@ -34,6 +34,7 @@ The initial recorded executable baseline is `f9121b2`. Later rows record newer c
 | `scripts/test-macos-keychain.sh` | PASS | Native Keychain smoke test. |
 | `scripts/build-macos.sh` | PASS | Unsigned local/internal `QADREN.app`. Bundle ID: `dev.qadren.bootstrap`. Version: `1`. |
 | Launch `Contents/MacOS/QADREN` | PASS | The clean exported bundle stayed alive after launch. SHA-256: `059fe2b1a526cd6eba6c03c8be8541abcefd7077008dfaaeffca90aa2e0d678b`. |
+| Clean install, relaunch, and uninstall | PASS | A copied bundle launched twice from a new disposable directory. The disposable directory was then moved to Trash. No `/Applications` or user data path was changed. |
 
 The native automation channel returned a pipe error after the Settings command opened a second window. It did not report an application exit. This is not Settings interaction evidence. A real File Provider item was not available for the clean-export run. Both cases remain unverified compatibility evidence. They are not recorded as PASS.
 
