@@ -702,6 +702,15 @@ private struct ScenarioDryRunView: View {
                                     ProgressView(value: Double(batch.processed), total: Double(batch.total))
                                     Text("Подтверждено \(batch.processed) из \(batch.total) · \(batch.currentPath)")
                                         .font(.caption.monospaced())
+                                    if batch.cancellationRequested {
+                                        Text("Отмена сохранена. QADREN завершит текущую операцию и не запустит следующий файл.")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    } else {
+                                        Button("Остановить после текущего файла", role: .cancel) {
+                                            cancelResumedWorkerCreateBatch(batch)
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1111,6 +1120,22 @@ private struct ScenarioDryRunView: View {
                 total: activeBatch.total, processed: activeBatch.processed, failures: activeBatch.failures,
                 currentPath: activeBatch.currentPath, cancellationRequested: true, receiptID: receiptID
             )
+        } catch {
+            self.error = "Не удалось остановить пакет: " + error.localizedDescription
+        }
+    }
+
+    private func cancelResumedWorkerCreateBatch(_ batch: ScenarioBatchProgress) {
+        guard let receiptID = batch.receiptID else { return }
+        do {
+            try WorkerIPC.cancelScenarioCreateBatch(receiptID: receiptID)
+            resumedCreateBatches = resumedCreateBatches.map { current in
+                guard current.receiptID == receiptID else { return current }
+                return ScenarioBatchProgress(
+                    total: current.total, processed: current.processed, failures: current.failures,
+                    currentPath: current.currentPath, cancellationRequested: true, receiptID: receiptID
+                )
+            }
         } catch {
             self.error = "Не удалось остановить пакет: " + error.localizedDescription
         }
