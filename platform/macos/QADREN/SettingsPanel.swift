@@ -1382,7 +1382,7 @@ private struct ScenarioSchedulesView: View {
                                     .foregroundStyle(.secondary)
                             }
                         }
-                        Text("Когда QADREN запущен, локальный таймер ставит наступивший кандидат в существующую очередь Job. Он не читает файлы, не передаёт данные и не заменяет подтверждение операции.")
+                        Text("Local Worker сохраняет наступивший weekly slot в существующую очередь Job и выполняет безопасные Create без открытого окна. Замены, удаления и конфликты остаются в WAITING_FOR_DECISION до явного решения.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
