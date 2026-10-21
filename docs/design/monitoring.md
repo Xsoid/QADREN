@@ -44,7 +44,7 @@ Priority from first to last: (1) blocking consent/conflict/UNKNOWN and errors; (
 
 **UNKNOWN:** Use a separate "Result unknown" label. Detailed read-only reconciliation is available; do not provide a "Retry" button without information that the operation did not occur.
 
-**Content download consent:** Show the source, the destination "main MacBook", files/set, volume (if known), the reason for the download, and the scope of rights. The default is "Deny"; lack of reaction does not confirm the download. Do not consider a system iCloud download as part of the QADREN consent.
+**Requested content read:** Read only the source files required by the configured or user-requested operation. Do not show a separate content-read or File Provider materialization prompt. macOS can materialize a provider item as part of that read. Do not prefetch unrelated content.
 
 **Dangerous deletion/overwrite:** Show the full path, counters, and consequences. Do not provide a mass delete button without a policy. Separately show the use of the provider's trash if the API confirms it.
 
