@@ -68,6 +68,21 @@ The Rust format gate now passes on `9a67258`. The earlier Core formatting debt i
 
 These checks do not prove a signed release, an independent Worker, or File Provider materialization with a user-selected provider item.
 
+## Audit Update 2026-10-21 (Non-Release Evidence)
+
+The latest code commits are `4ada175`, `b61edcd`, and `963e520`. They restore durable pending Create-batch progress after Settings reopens, prove that a new Swift Registry reader observes the persisted receipt without executing it, and disclose the exact selected destination in the conflict-delete confirmation.
+
+The following commands passed after these changes:
+
+| Command | Result | Evidence boundary |
+|---|---|---|
+| `scripts/test-core.sh` | PASS, 277 Core tests and 10 Worker tests | Local Rust format, lint, unit, and documentation tests. |
+| `scripts/test-macos-worker-ipc.sh` | PASS | Native Swift socket bridge, persisted pending-receipt reader, Worker execution, and terminal receipt filtering. |
+| `scripts/test-macos-scenario-dry-run.sh` | PASS | Native Swift/FFI Scenario bridge, including conflict replacement and deletion guards. |
+| `scripts/build-macos.sh` | PASS | Unsigned local development bundle. |
+
+These results ran with `963e520` checked out and with owner changes still present in `platform/macos/Info.plist`, `platform/macos/QADREN/SettingsPanel.swift`, and `scripts/build-macos.sh`. They are not evidence for an exact clean commit or a release artifact. Re-run the required checks from a clean release candidate before a release claim.
+
 ## Policy / Code Mismatch (2026-10-18)
 
 The source snapshot above recorded the historical one-time `read_content` decision path. The owner authorizes silent reads and possible File Provider hydration for content required by a requested or configured operation. The active Local copy path has no separate content-read decision. Keep separate confirmation only for destructive effects. Reconnecting a selected Local root automatically runs only non-mutating reconciliation. No real File Provider materialization test has been recorded.
