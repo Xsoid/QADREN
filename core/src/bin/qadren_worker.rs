@@ -211,10 +211,11 @@ fn reconcile_unknown_scenario_creates(
             .collect::<Vec<_>>()
     };
     for (job_id, scenario_id, revision, destination_connection_id) in candidates {
-        let scenario = registry
-            .get_scenario_revision(&scenario_id, revision)
-            .map_err(|_| "scenario_unavailable".to_string())?
-            .ok_or_else(|| "scenario_unavailable".to_string())?;
+        // One unresolvable Job must not stop schedules or other checks. It
+        // stays UNKNOWN and is checked again on the next poll.
+        let Ok(Some(scenario)) = registry.get_scenario_revision(&scenario_id, revision) else {
+            continue;
+        };
         let destination_root = if destination_connection_id == scenario.left_connection_id {
             &scenario.left_root
         } else if destination_connection_id == scenario.right_connection_id {
@@ -2112,6 +2113,67 @@ mod tests {
         let states = coordinator_states(&paths);
         assert!(states.contains(&JobState::Failed));
         assert!(!states.contains(&JobState::WaitingForDecision));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unresolvable_unknown_job_does_not_block_scheduled_runs() {
+        let (root, left_root, right_root, paths, scenario) =
+            scheduled_fixture("unresolvable-unknown");
+        fs::write(left_root.join("report.txt"), b"scheduled").unwrap();
+        let identity = LocalFilesystem::open(&right_root)
+            .unwrap()
+            .root_identity()
+            .unwrap();
+        let mut store = JobStore::open(&paths.jobs).unwrap();
+        // The Job names a Scenario revision that the Registry cannot supply.
+        store
+            .enqueue("orphan-copy", Some(("missing-scenario", 1)))
+            .unwrap();
+        store
+            .advance(
+                "orphan-copy",
+                JobState::Queued,
+                JobState::Running,
+                Confirmation::Confirmed(EvidenceLevel::Requested),
+            )
+            .unwrap();
+        store
+            .prepare_bound_attempt_with_root_identity(
+                "orphan-copy",
+                "orphan-copy-attempt",
+                "local_copy_new",
+                "missing-connection",
+                "orphan.txt",
+                6,
+                "00000000000000000000000000000000",
+                &format!("unix:{}:{}", identity.device, identity.inode),
+            )
+            .unwrap();
+        drop(store);
+        // Reopening after the simulated crash turns the running Job UNKNOWN.
+        assert_eq!(
+            JobStore::open(&paths.jobs)
+                .unwrap()
+                .state("orphan-copy")
+                .unwrap(),
+            Some(JobState::Unknown)
+        );
+
+        schedule_current_minute(&paths, &scenario);
+        assert_eq!(dispatch_due(&paths).unwrap(), (1, 1));
+        assert_eq!(
+            fs::read(right_root.join("report.txt")).unwrap(),
+            b"scheduled"
+        );
+        assert_eq!(
+            JobStore::open(&paths.jobs)
+                .unwrap()
+                .state("orphan-copy")
+                .unwrap(),
+            Some(JobState::Unknown)
+        );
+        assert!(!right_root.join("orphan.txt").exists());
         fs::remove_dir_all(root).unwrap();
     }
 
