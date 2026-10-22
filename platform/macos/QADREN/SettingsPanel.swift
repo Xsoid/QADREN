@@ -778,11 +778,11 @@ private struct ScenarioDryRunView: View {
             batchProgressTask?.cancel()
             batchProgressTask = nil
         }
-        .alert("Разрешить загрузку и замену файла?", isPresented: Binding(
+        .alert("Заменить существующий файл?", isPresented: Binding(
             get: { pendingUpdate != nil }, set: { if !$0 { pendingUpdate = nil } }
         )) {
             Button("Отмена", role: .cancel) { pendingUpdate = nil }
-            Button("Загрузить и заменить", role: .destructive) { executePendingUpdate() }
+            Button("Заменить файл", role: .destructive) { executePendingUpdate() }
         } message: {
             Text("macOS может скачать исходный файл из File Provider на этот Mac. QADREN заменит только этот существующий файл назначения и сохранит Job с точной ревизией сценария.")
         }
@@ -791,7 +791,7 @@ private struct ScenarioDryRunView: View {
         )) {
             Button("Отмена", role: .cancel) { pendingConflictReplace = nil }
             Button(
-                pendingConflictReplace?.decision == "replace_if_newer" ? "Проверить и заменить" : "Загрузить и заменить",
+                pendingConflictReplace?.decision == "replace_if_newer" ? "Проверить и заменить" : "Заменить файл",
                 role: .destructive
             ) { executePendingConflictReplace() }
         } message: {
