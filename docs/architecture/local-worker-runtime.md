@@ -111,6 +111,17 @@ registration state without treating it as a health check. If the registration
 request fails, it reports a failed registration. It does not display a system
 error that can contain installation-specific paths.
 
+The Registry stores the last UTC instant that the schedule evaluator observed.
+Each poll evaluates the slots after that instant and records the new instant in
+the same transaction as the slot claims. If the Worker was stopped or the Mac
+was asleep, all slots missed by one Scenario become one catch-up Job. The other
+missed slots stay claimed and never create a Job later. A poll applies the
+current pause and enable state. Slots that a running Worker observes while a
+Scenario is paused or disabled do not create a later catch-up. A pause that
+starts and ends while the Worker is stopped is not observed. Without an earlier observation, or after the clock moves backward,
+the Worker evaluates only its short poll overlap window. Two rules of one
+Scenario that are due in the same poll also create only one Job.
+
 Each schedule Job remains a coordinator receipt that stores a Scenario identity
 and revision, not a durable multi-file execution plan. At execution time the
 Worker reads only Local Filesystem metadata, composes the existing conservative

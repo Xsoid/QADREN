@@ -114,6 +114,81 @@ mod tests {
     }
 
     #[test]
+    fn interval_excludes_its_start_and_includes_its_end() {
+        let schedule = WeeklySchedule {
+            timezone: chrono_tz::UTC,
+            weekday: Weekday::Mon,
+            hour: 9,
+            minute: 0,
+        };
+        let slot = utc("2026-10-19T09:00:00Z");
+        assert_eq!(
+            schedule
+                .occurrences_between(slot - Duration::minutes(1), slot)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(schedule
+            .occurrences_between(slot, slot + Duration::minutes(1))
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            schedule.occurrences_between(slot, slot - Duration::minutes(1)),
+            Err(ScheduleError::InvalidInterval)
+        );
+    }
+
+    #[test]
+    fn new_york_dst_transitions_keep_one_slot_or_none() {
+        let schedule = WeeklySchedule {
+            timezone: chrono_tz::America::New_York,
+            weekday: Weekday::Sun,
+            hour: 1,
+            minute: 30,
+        };
+        // 2026-11-01 01:30 local occurs twice. One persistable key exists.
+        assert_eq!(
+            schedule
+                .occurrences_between(utc("2026-11-01T04:00:00Z"), utc("2026-11-01T07:00:00Z"))
+                .unwrap(),
+            vec![OccurrenceKey("2026-11-01 01:30@America/New_York".into())]
+        );
+        let spring = WeeklySchedule {
+            hour: 2,
+            ..schedule
+        };
+        // 2026-03-08 02:30 local does not exist.
+        assert!(spring
+            .occurrences_between(utc("2026-03-08T05:00:00Z"), utc("2026-03-08T09:00:00Z"))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn long_gap_yields_each_weekly_slot_once_across_a_dst_change() {
+        let schedule = WeeklySchedule {
+            timezone: chrono_tz::Europe::Berlin,
+            weekday: Weekday::Mon,
+            hour: 9,
+            minute: 0,
+        };
+        let slots = schedule
+            .occurrences_between(utc("2026-10-12T00:00:00Z"), utc("2026-11-09T23:59:00Z"))
+            .unwrap();
+        assert_eq!(
+            slots,
+            vec![
+                OccurrenceKey("2026-10-12 09:00@Europe/Berlin".into()),
+                OccurrenceKey("2026-10-19 09:00@Europe/Berlin".into()),
+                OccurrenceKey("2026-10-26 09:00@Europe/Berlin".into()),
+                OccurrenceKey("2026-11-02 09:00@Europe/Berlin".into()),
+                OccurrenceKey("2026-11-09 09:00@Europe/Berlin".into()),
+            ]
+        );
+    }
+
+    #[test]
     fn missing_dst_hour_never_creates_a_slot() {
         let schedule = WeeklySchedule {
             timezone: chrono_tz::Europe::Berlin,

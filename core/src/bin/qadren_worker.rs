@@ -139,15 +139,14 @@ fn now() -> chrono::DateTime<chrono::Utc> {
 
 fn dispatch_due(paths: &WorkerPaths) -> Result<(usize, usize), String> {
     let through = now();
-    let after = through
-        - chrono::Duration::from_std(POLL_OVERLAP)
-            .map_err(|_| "worker_clock_unavailable".to_string())?;
+    let overlap = chrono::Duration::from_std(POLL_OVERLAP)
+        .map_err(|_| "worker_clock_unavailable".to_string())?;
     let registry =
         Registry::open(&paths.registry).map_err(|_| "registry_unavailable".to_string())?;
     reconcile_unknown_scenario_creates(paths, &registry)?;
     resume_pending_scenario_create_batches(paths, &registry);
     let staged = registry
-        .stage_due_schedule_occurrences(after, through)
+        .stage_schedule_catch_up(through, overlap)
         .map_err(|_| "schedule_stage_unavailable".to_string())?;
     let mut jobs = JobStore::open(&paths.jobs).map_err(|_| "job_store_unavailable".to_string())?;
     let dispatched = dispatch_pending_schedule_jobs(&registry, &mut jobs)
@@ -1786,6 +1785,76 @@ mod tests {
             .unwrap()
             .iter()
             .any(|job| job.id.starts_with("schedule-") && job.state == JobState::Completed));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn worker_runs_one_catch_up_for_a_slot_missed_while_unavailable() {
+        let root = root("scheduled-catch-up");
+        let left_root = root.join("left");
+        let right_root = root.join("right");
+        fs::create_dir_all(&left_root).unwrap();
+        fs::create_dir_all(&right_root).unwrap();
+        fs::write(left_root.join("missed.txt"), b"missed slot").unwrap();
+        let paths = WorkerPaths {
+            socket: root.join("worker.sock"),
+            registry: root.join("registry.sqlite3"),
+            jobs: root.join("jobs.sqlite3"),
+        };
+        let registry = Registry::open(&paths.registry).unwrap();
+        let left = registry.add("local_filesystem", "Left").unwrap();
+        let right = registry.add("local_filesystem", "Right").unwrap();
+        let scenario = registry
+            .create_scenario(
+                "Catch-up",
+                &left,
+                left_root.to_str().unwrap(),
+                &right,
+                right_root.to_str().unwrap(),
+                "left_to_right",
+            )
+            .unwrap();
+        let current = now();
+        let missed = current - chrono::Duration::hours(3);
+        registry
+            .create_scenario_schedule(
+                &scenario,
+                "UTC",
+                missed.weekday().num_days_from_monday() as u8,
+                missed.hour() as u8,
+                missed.minute() as u8,
+            )
+            .unwrap();
+        // The last poll happened one day ago. The Worker was then stopped or
+        // the Mac was asleep, so the slot three hours ago was never observed.
+        assert_eq!(
+            registry
+                .stage_schedule_catch_up(
+                    current - chrono::Duration::days(1),
+                    chrono::Duration::from_std(POLL_OVERLAP).unwrap(),
+                )
+                .unwrap(),
+            0
+        );
+        drop(registry);
+
+        assert_eq!(dispatch_due(&paths).unwrap(), (1, 1));
+        assert_eq!(
+            fs::read(right_root.join("missed.txt")).unwrap(),
+            b"missed slot"
+        );
+        let jobs = JobStore::open(&paths.jobs).unwrap().list_jobs().unwrap();
+        assert_eq!(jobs.len(), 2);
+        assert!(jobs.iter().all(|job| job.state == JobState::Completed));
+        assert_eq!(dispatch_due(&paths).unwrap(), (0, 0));
+        assert_eq!(
+            JobStore::open(&paths.jobs)
+                .unwrap()
+                .list_jobs()
+                .unwrap()
+                .len(),
+            2
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

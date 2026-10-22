@@ -177,7 +177,7 @@ impl Registry {
         }
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 15 {
+        if version > 16 {
             return Err(RegistryError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -424,6 +424,19 @@ impl Registry {
                     PRIMARY KEY(schedule_job_id, conflict_id)
                  );
                  PRAGMA user_version = 15;
+                 COMMIT;",
+            )?;
+        }
+        if version <= 15 {
+            // The last UTC instant the schedule evaluator observed. It lets a
+            // restarted or woken Worker merge missed slots into one catch-up.
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE schedule_observation (
+                    id INTEGER PRIMARY KEY NOT NULL CHECK(id = 1),
+                    observed_through TEXT NOT NULL
+                 );
+                 PRAGMA user_version = 16;
                  COMMIT;",
             )?;
         }
@@ -794,14 +807,64 @@ impl Registry {
     /// Persist every currently due slot with a Job submission request.  This
     /// does not open JobStore or execute a Job; it only closes the crash gap
     /// between a schedule receipt and future submission.
+    ///
+    /// All slots claimed in one pass for the same Scenario are merged into one
+    /// Job for the last claimed slot. The other slots stay claimed, so a later
+    /// pass never turns them into extra Jobs.
     pub fn stage_due_schedule_occurrences(
         &self,
         after: DateTime<Utc>,
         through: DateTime<Utc>,
     ) -> Result<usize> {
         let due = self.due_schedule_occurrences(after, through)?;
+        self.stage_occurrences(due, None)
+    }
+
+    /// Stage due slots since the last durable observation and record
+    /// `through` as the new observation in the same transaction. Slots missed
+    /// while the Worker was stopped or the Mac was asleep become one catch-up
+    /// Job per Scenario. Without an earlier observation, or after the clock
+    /// moves backward, only the `overlap` window is evaluated.
+    pub fn stage_schedule_catch_up(
+        &self,
+        through: DateTime<Utc>,
+        overlap: chrono::Duration,
+    ) -> Result<usize> {
+        let window_start = through - overlap;
+        let after = match self.schedule_observed_through()? {
+            Some(observed) if observed < window_start => observed,
+            _ => window_start,
+        };
+        let due = self.due_schedule_occurrences(after, through)?;
+        self.stage_occurrences(due, Some(through))
+    }
+
+    /// The last UTC instant recorded by `stage_schedule_catch_up`.
+    pub fn schedule_observed_through(&self) -> Result<Option<DateTime<Utc>>> {
+        let value: Option<String> = self
+            .db
+            .query_row(
+                "SELECT observed_through FROM schedule_observation WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        value
+            .map(|value| {
+                DateTime::parse_from_rfc3339(&value)
+                    .map(|value| value.with_timezone(&Utc))
+                    .map_err(|_| RegistryError::IntegrityFailed)
+            })
+            .transpose()
+    }
+
+    fn stage_occurrences(
+        &self,
+        due: Vec<DueScheduleOccurrence>,
+        observed_through: Option<DateTime<Utc>>,
+    ) -> Result<usize> {
         let transaction = self.db.unchecked_transaction()?;
-        let mut staged = 0;
+        let mut claimed_by_scenario: Vec<DueScheduleOccurrence> = Vec::new();
         for occurrence in due {
             let claimed = transaction.execute(
                 "INSERT OR IGNORE INTO schedule_occurrences(schedule_id,occurrence_key)
@@ -819,6 +882,15 @@ impl Registry {
             if claimed == 0 {
                 continue;
             }
+            // `due` is sorted by Scenario, so the last claimed slot of each
+            // Scenario replaces the earlier ones of that pass.
+            match claimed_by_scenario.last_mut() {
+                Some(last) if last.scenario_id == occurrence.scenario_id => *last = occurrence,
+                _ => claimed_by_scenario.push(occurrence),
+            }
+        }
+        let mut staged = 0;
+        for occurrence in claimed_by_scenario {
             // The complete bounded, validated tuple is retained rather than
             // hashed: Job identity must not rely on collision resistance.
             let job_id = format!(
@@ -846,6 +918,13 @@ impl Registry {
                 return Err(RegistryError::IntegrityFailed);
             }
             staged += 1;
+        }
+        if let Some(observed_through) = observed_through {
+            transaction.execute(
+                "INSERT INTO schedule_observation(id,observed_through) VALUES (1,?1)
+                 ON CONFLICT(id) DO UPDATE SET observed_through=excluded.observed_through",
+                [observed_through.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)],
+            )?;
         }
         transaction.commit()?;
         Ok(staged)
@@ -2559,6 +2638,187 @@ mod tests {
             db.due_schedule_occurrences(through, after),
             Err(RegistryError::InvalidSchedule)
         ));
+    }
+
+    fn schedule_utc(value: &str) -> DateTime<Utc> {
+        value.parse().unwrap()
+    }
+
+    fn schedule_fixture(db: &Registry, name: &str) -> String {
+        let left = db.add("local_filesystem", "Left").unwrap();
+        let right = db.add("local_filesystem", "Right").unwrap();
+        db.create_scenario(
+            name,
+            &left,
+            &format!("/{name}/source"),
+            &right,
+            &format!("/{name}/target"),
+            "left_to_right",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn missed_slots_after_sleep_merge_into_one_catch_up_per_scenario() {
+        let db = Registry::in_memory().unwrap();
+        let overlap = chrono::Duration::seconds(90);
+        let documents = schedule_fixture(&db, "documents");
+        let photos = schedule_fixture(&db, "photos");
+        // Several weekly rules, one of them in a non-UTC IANA timezone.
+        db.create_scenario_schedule(&documents, "UTC", 0, 9, 0)
+            .unwrap();
+        db.create_scenario_schedule(&documents, "Europe/Berlin", 2, 18, 15)
+            .unwrap();
+        db.create_scenario_schedule(&photos, "America/New_York", 4, 7, 45)
+            .unwrap();
+
+        // The first observation has no history and never backfills old slots.
+        assert_eq!(
+            db.stage_schedule_catch_up(schedule_utc("2026-10-05T08:00:00Z"), overlap)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.schedule_observed_through().unwrap(),
+            Some(schedule_utc("2026-10-05T08:00:00Z"))
+        );
+
+        // The Worker is unavailable for two weeks. Four slots of `documents`
+        // and two slots of `photos` are missed.
+        let woke = schedule_utc("2026-10-19T08:00:00Z");
+        assert_eq!(db.stage_schedule_catch_up(woke, overlap).unwrap(), 2);
+        let outbox = db.pending_schedule_job_outbox().unwrap();
+        assert_eq!(outbox.len(), 2);
+        let mut scenarios: Vec<_> = outbox.iter().map(|e| e.scenario_id.clone()).collect();
+        scenarios.sort();
+        let mut expected = vec![documents.clone(), photos.clone()];
+        expected.sort();
+        assert_eq!(scenarios, expected);
+        let claimed: i64 = db
+            .db
+            .query_row("SELECT count(*) FROM schedule_occurrences", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(claimed, 6, "merged slots stay claimed and never replay");
+
+        // Repeating the same observation or a short later poll adds nothing.
+        assert_eq!(db.stage_schedule_catch_up(woke, overlap).unwrap(), 0);
+        assert_eq!(
+            db.stage_schedule_catch_up(schedule_utc("2026-10-19T08:01:00Z"), overlap)
+                .unwrap(),
+            0
+        );
+        assert_eq!(db.pending_schedule_job_outbox().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn catch_up_ignores_slots_missed_while_paused_or_disabled() {
+        let db = Registry::in_memory().unwrap();
+        let overlap = chrono::Duration::seconds(90);
+        let scenario = schedule_fixture(&db, "documents");
+        let schedule = db
+            .create_scenario_schedule(&scenario, "UTC", 0, 9, 0)
+            .unwrap();
+        db.stage_schedule_catch_up(schedule_utc("2026-10-05T08:00:00Z"), overlap)
+            .unwrap();
+
+        // A durable local pause survives a Registry reopen in production.
+        // Polls continue while it is active, so its slots are observed and
+        // not converted into a later catch-up.
+        db.set_scenario_locally_paused(&scenario, true).unwrap();
+        assert_eq!(
+            db.stage_schedule_catch_up(schedule_utc("2026-10-12T10:00:00Z"), overlap)
+                .unwrap(),
+            0
+        );
+        db.set_scenario_locally_paused(&scenario, false).unwrap();
+        assert_eq!(
+            db.stage_schedule_catch_up(schedule_utc("2026-10-12T10:01:00Z"), overlap)
+                .unwrap(),
+            0
+        );
+
+        db.set_scenario_schedule_enabled(&scenario, &schedule, false)
+            .unwrap();
+        assert_eq!(
+            db.stage_schedule_catch_up(schedule_utc("2026-10-19T10:00:00Z"), overlap)
+                .unwrap(),
+            0
+        );
+        db.set_scenario_schedule_enabled(&scenario, &schedule, true)
+            .unwrap();
+        assert_eq!(
+            db.stage_schedule_catch_up(schedule_utc("2026-10-26T09:00:00Z"), overlap)
+                .unwrap(),
+            1
+        );
+        assert!(db.pending_schedule_job_outbox().unwrap()[0]
+            .job_id
+            .ends_with("2026-10-26 09:00@UTC"));
+    }
+
+    #[test]
+    fn clock_moving_backward_uses_only_the_overlap_window() {
+        let db = Registry::in_memory().unwrap();
+        let overlap = chrono::Duration::seconds(90);
+        let scenario = schedule_fixture(&db, "documents");
+        db.create_scenario_schedule(&scenario, "UTC", 0, 9, 0)
+            .unwrap();
+        db.stage_schedule_catch_up(schedule_utc("2026-10-26T12:00:00Z"), overlap)
+            .unwrap();
+        // The system clock is corrected to an earlier time. The evaluator does
+        // not fail and does not schedule the skipped-back period twice.
+        assert_eq!(
+            db.stage_schedule_catch_up(schedule_utc("2026-10-19T09:00:30Z"), overlap)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.stage_schedule_catch_up(schedule_utc("2026-10-19T09:01:00Z"), overlap)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.schedule_observed_through().unwrap(),
+            Some(schedule_utc("2026-10-19T09:01:00Z"))
+        );
+    }
+
+    #[test]
+    fn staged_schedule_job_keeps_its_scenario_revision_after_an_edit() {
+        let db = Registry::in_memory().unwrap();
+        let overlap = chrono::Duration::seconds(90);
+        let scenario = schedule_fixture(&db, "documents");
+        db.create_scenario_schedule(&scenario, "UTC", 0, 9, 0)
+            .unwrap();
+        db.stage_schedule_catch_up(schedule_utc("2026-10-05T08:00:00Z"), overlap)
+            .unwrap();
+        db.stage_schedule_catch_up(schedule_utc("2026-10-05T09:00:00Z"), overlap)
+            .unwrap();
+        let current = db.get_scenario_revision(&scenario, 1).unwrap().unwrap();
+        db.update_scenario(
+            &scenario,
+            ScenarioUpdate {
+                name: "Edited",
+                left_connection_id: &current.left_connection_id,
+                left_root: &current.left_root,
+                right_connection_id: &current.right_connection_id,
+                right_root: "/documents/other-target",
+                direction: "left_to_right",
+            },
+        )
+        .unwrap();
+        let outbox = db.pending_schedule_job_outbox().unwrap();
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(outbox[0].scenario_revision, 1);
+        assert_eq!(
+            db.schedule_job_reference(&outbox[0].job_id)
+                .unwrap()
+                .unwrap()
+                .revision,
+            1
+        );
     }
 
     #[test]
