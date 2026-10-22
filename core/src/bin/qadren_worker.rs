@@ -985,7 +985,12 @@ fn execute_conflict(
             Ok("existing")
         }
         Err(LocalFileCopyError::ConsentRequired) => Err("consent_required"),
-        Err(LocalFileCopyError::ConflictStale) => Err("conflict_stale"),
+        Err(LocalFileCopyError::ConflictStale) => {
+            // Report the stale snapshot even if the coordinator update fails.
+            // The coordinator then stays waiting and is never shown as done.
+            let _ = complete_ready_schedule_jobs(paths, conflict_id);
+            Err("conflict_stale")
+        }
         Err(LocalFileCopyError::ConflictUnavailable) => Err("conflict_unavailable"),
         Err(LocalFileCopyError::CapabilityUnavailable) => Err("local_capability_unavailable"),
         Err(LocalFileCopyError::OutcomeUnknown(_)) => Err("outcome_unknown"),
@@ -995,16 +1000,36 @@ fn execute_conflict(
     }
 }
 
+/// Move each coordinator linked to `conflict_id` out of
+/// `WAITING_FOR_DECISION` once all its linked tasks are terminal. All completed
+/// tasks complete the coordinator. Any stale task fails it, so the scheduled run
+/// is never reported as a success. A coordinator that already left the waiting
+/// state is skipped.
 fn complete_ready_schedule_jobs(
     paths: &WorkerPaths,
     conflict_id: &str,
 ) -> Result<(), &'static str> {
     let registry = Registry::open(&paths.registry).map_err(|_| "registry_unavailable")?;
     let ready = registry
-        .completed_schedule_jobs_for_conflict(conflict_id)
+        .resolved_schedule_jobs_for_conflict(conflict_id)
         .map_err(|_| "schedule_conflict_unavailable")?;
     let mut jobs = JobStore::open(&paths.jobs).map_err(|_| "job_store_unavailable")?;
-    for job_id in ready {
+    for (job_id, succeeded) in ready {
+        if jobs.state(&job_id).map_err(|_| "job_store_unavailable")?
+            != Some(JobState::WaitingForDecision)
+        {
+            continue;
+        }
+        if !succeeded {
+            jobs.advance(
+                &job_id,
+                JobState::WaitingForDecision,
+                JobState::Failed,
+                Confirmation::Unknown,
+            )
+            .map_err(|_| "schedule_job_state_unavailable")?;
+            continue;
+        }
         jobs.advance(
             &job_id,
             JobState::WaitingForDecision,
@@ -1855,6 +1880,238 @@ mod tests {
                 .len(),
             2
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Add one more weekly rule for the current minute. Each call produces one
+    /// new due slot for the next `dispatch_due`.
+    fn schedule_current_minute(paths: &WorkerPaths, scenario: &str) {
+        let current = now();
+        Registry::open(&paths.registry)
+            .unwrap()
+            .create_scenario_schedule(
+                scenario,
+                "UTC",
+                current.weekday().num_days_from_monday() as u8,
+                current.hour() as u8,
+                current.minute() as u8,
+            )
+            .unwrap();
+    }
+
+    fn scheduled_fixture(name: &str) -> (PathBuf, PathBuf, PathBuf, WorkerPaths, String) {
+        let root = root(name);
+        let left_root = root.join("left");
+        let right_root = root.join("right");
+        fs::create_dir_all(&left_root).unwrap();
+        fs::create_dir_all(&right_root).unwrap();
+        let paths = WorkerPaths {
+            socket: root.join("worker.sock"),
+            registry: root.join("registry.sqlite3"),
+            jobs: root.join("jobs.sqlite3"),
+        };
+        let registry = Registry::open(&paths.registry).unwrap();
+        let left = registry.add("local_filesystem", "Left").unwrap();
+        let right = registry.add("local_filesystem", "Right").unwrap();
+        let scenario = registry
+            .create_scenario(
+                "Decisions",
+                &left,
+                left_root.to_str().unwrap(),
+                &right,
+                right_root.to_str().unwrap(),
+                "left_to_right",
+            )
+            .unwrap();
+        (root, left_root, right_root, paths, scenario)
+    }
+
+    fn coordinator_states(paths: &WorkerPaths) -> Vec<JobState> {
+        let mut jobs: Vec<_> = JobStore::open(&paths.jobs)
+            .unwrap()
+            .list_jobs()
+            .unwrap()
+            .into_iter()
+            .filter(|job| job.id.starts_with("schedule-") && !job.id.starts_with("schedule-copy-"))
+            .collect();
+        jobs.sort_by(|left, right| left.id.cmp(&right.id));
+        jobs.into_iter().map(|job| job.state).collect()
+    }
+
+    fn conflict_request(command: &str, conflict_id: &str, job_id: &str, consent: bool) -> Request {
+        serde_json::from_value(serde_json::json!({
+            "command": command,
+            "conflict_id": conflict_id,
+            "job_id": job_id,
+            "destructive_consent": consent,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn scheduled_deletion_waits_for_fresh_consent_and_completes_its_coordinator() {
+        let (root, left_root, right_root, paths, scenario) =
+            scheduled_fixture("scheduled-deletion");
+        fs::write(left_root.join("report.txt"), b"baseline").unwrap();
+        schedule_current_minute(&paths, &scenario);
+        assert_eq!(dispatch_due(&paths).unwrap(), (1, 1));
+        assert_eq!(
+            fs::read(right_root.join("report.txt")).unwrap(),
+            b"baseline"
+        );
+
+        // The source file is deleted. The next scheduled run must not delete
+        // the destination by itself.
+        fs::remove_file(left_root.join("report.txt")).unwrap();
+        schedule_current_minute(&paths, &scenario);
+        assert_eq!(dispatch_due(&paths).unwrap(), (1, 1));
+        assert!(right_root.join("report.txt").exists());
+        let registry = Registry::open(&paths.registry).unwrap();
+        let reference = ScenarioReference {
+            scenario_id: scenario.clone(),
+            revision: 1,
+        };
+        let conflicts = registry.list_conflict_tasks(&reference).unwrap();
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].kind, "deletion");
+        assert_eq!(conflicts[0].state, "pending");
+        let states = coordinator_states(&paths);
+        assert_eq!(states.len(), 2);
+        assert!(states.contains(&JobState::Completed));
+        assert!(coordinator_states(&paths).contains(&JobState::WaitingForDecision));
+
+        // An unselected task cannot be executed, even with consent.
+        assert_eq!(
+            execute_conflict(
+                &paths,
+                &conflict_request(
+                    "execute_conflict_delete",
+                    &conflicts[0].id,
+                    "delete-early",
+                    true
+                ),
+                true,
+            ),
+            Err("conflict_unavailable")
+        );
+        registry
+            .select_conflict_task(&conflicts[0].id, Some(true), "delete_as_source")
+            .unwrap();
+        assert_eq!(
+            execute_conflict(
+                &paths,
+                &conflict_request(
+                    "execute_conflict_delete",
+                    &conflicts[0].id,
+                    "delete-declined",
+                    false
+                ),
+                true,
+            ),
+            Err("consent_required")
+        );
+        assert!(right_root.join("report.txt").exists());
+        assert!(coordinator_states(&paths).contains(&JobState::WaitingForDecision));
+
+        assert_eq!(
+            execute_conflict(
+                &paths,
+                &conflict_request(
+                    "execute_conflict_delete",
+                    &conflicts[0].id,
+                    "delete-confirmed",
+                    true
+                ),
+                true,
+            ),
+            Ok("completed")
+        );
+        assert!(!right_root.join("report.txt").exists());
+        assert!(coordinator_states(&paths)
+            .iter()
+            .all(|state| *state == JobState::Completed));
+        // The used consent is not reusable for another effect.
+        assert_eq!(
+            execute_conflict(
+                &paths,
+                &conflict_request(
+                    "execute_conflict_delete",
+                    &conflicts[0].id,
+                    "delete-again",
+                    true
+                ),
+                true,
+            ),
+            Err("conflict_unavailable")
+        );
+        assert_eq!(dispatch_due(&paths).unwrap(), (0, 0));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_scheduled_conflict_fails_its_coordinator_without_an_effect() {
+        let (root, left_root, right_root, paths, scenario) =
+            scheduled_fixture("scheduled-stale-conflict");
+        fs::write(left_root.join("a.txt"), b"first a").unwrap();
+        fs::write(left_root.join("b.txt"), b"first b").unwrap();
+        schedule_current_minute(&paths, &scenario);
+        assert_eq!(dispatch_due(&paths).unwrap(), (1, 1));
+
+        fs::write(left_root.join("a.txt"), b"second version of a").unwrap();
+        fs::write(left_root.join("b.txt"), b"second version of b").unwrap();
+        schedule_current_minute(&paths, &scenario);
+        assert_eq!(dispatch_due(&paths).unwrap(), (1, 1));
+        let registry = Registry::open(&paths.registry).unwrap();
+        let conflicts = registry
+            .list_conflict_tasks(&ScenarioReference {
+                scenario_id: scenario.clone(),
+                revision: 1,
+            })
+            .unwrap();
+        assert_eq!(conflicts.len(), 2);
+        let task = |path: &str| {
+            conflicts
+                .iter()
+                .find(|task| task.relative_path == path)
+                .unwrap()
+                .id
+                .clone()
+        };
+
+        // One resolved task out of two keeps the coordinator waiting.
+        registry
+            .select_conflict_task(&task("b.txt"), Some(true), "skip_transfer")
+            .unwrap();
+        complete_ready_schedule_jobs(&paths, &task("b.txt")).unwrap();
+        assert!(coordinator_states(&paths).contains(&JobState::WaitingForDecision));
+
+        // The destination changes after the decision was offered. The selected
+        // replacement becomes stale and changes no file.
+        fs::write(right_root.join("a.txt"), b"edited at the destination").unwrap();
+        registry
+            .select_conflict_task(&task("a.txt"), Some(true), "replace_from_source")
+            .unwrap();
+        assert_eq!(
+            execute_conflict(
+                &paths,
+                &conflict_request(
+                    "execute_conflict_replace",
+                    &task("a.txt"),
+                    "replace-stale",
+                    true
+                ),
+                false,
+            ),
+            Err("conflict_stale")
+        );
+        assert_eq!(
+            fs::read(right_root.join("a.txt")).unwrap(),
+            b"edited at the destination"
+        );
+        assert_eq!(fs::read(right_root.join("b.txt")).unwrap(), b"first b");
+        let states = coordinator_states(&paths);
+        assert!(states.contains(&JobState::Failed));
+        assert!(!states.contains(&JobState::WaitingForDecision));
         fs::remove_dir_all(root).unwrap();
     }
 

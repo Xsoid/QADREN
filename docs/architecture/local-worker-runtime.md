@@ -130,6 +130,10 @@ An `Update`, deletion, content conflict, or an unavailable metadata proof does
 not change a destination. The Worker saves a durable conflict task and leaves
 the coordinator Job `WAITING_FOR_DECISION` where it has complete observed
 snapshots. A scan or local operation failure marks the coordinator Job failed.
+The coordinator leaves `WAITING_FOR_DECISION` only when all its linked conflict
+tasks are terminal. If all tasks completed, the coordinator completes. If a
+selected task became stale because a snapshot changed, the task changes no
+file and the coordinator fails. A later scheduled run plans the path again.
 An UNKNOWN child effect leaves the coordinator UNKNOWN. The Worker does not
 blindly replay it. The production Swift Scenario `Create` and native-confirmed
 `Update` paths send their exact scope to the Worker and do not

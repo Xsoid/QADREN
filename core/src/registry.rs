@@ -1703,20 +1703,32 @@ impl Registry {
         )?)
     }
 
-    /// Return coordinator IDs only when every linked task completed. Stale
-    /// work remains visible and never becomes a successful coordinator Job.
-    pub fn completed_schedule_jobs_for_conflict(&self, conflict_id: &str) -> Result<Vec<String>> {
+    /// Return the coordinators linked to `conflict_id` whose linked tasks are
+    /// all terminal (`completed` or `stale`). The flag is true only when every
+    /// linked task completed. Stale work never becomes a successful
+    /// coordinator Job; a pending or selected task keeps it waiting.
+    pub fn resolved_schedule_jobs_for_conflict(
+        &self,
+        conflict_id: &str,
+    ) -> Result<Vec<(String, bool)>> {
         let mut statement = self.db.prepare(
-            "SELECT DISTINCT l.schedule_job_id
+            "SELECT l.schedule_job_id,
+                    NOT EXISTS (
+                        SELECT 1 FROM schedule_conflict_links other
+                        JOIN scenario_conflict_tasks task ON task.id=other.conflict_id
+                        WHERE other.schedule_job_id=l.schedule_job_id AND task.state='stale'
+                    )
              FROM schedule_conflict_links l
              WHERE l.conflict_id=?1 AND NOT EXISTS (
                 SELECT 1 FROM schedule_conflict_links other
                 JOIN scenario_conflict_tasks task ON task.id=other.conflict_id
-                WHERE other.schedule_job_id=l.schedule_job_id AND task.state != 'completed'
-             )",
+                WHERE other.schedule_job_id=l.schedule_job_id
+                  AND task.state NOT IN ('completed','stale')
+             )
+             ORDER BY l.schedule_job_id",
         )?;
         let jobs = statement
-            .query_map([conflict_id], |row| row.get(0))?
+            .query_map([conflict_id], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(RegistryError::from)?;
         Ok(jobs)
