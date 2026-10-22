@@ -87,15 +87,15 @@ node scripts/validate-tokens.cjs --dir src/
 |--------|---------|
 | `generate-tokens.cjs` | Generate CSS from JSON token config |
 | `validate-tokens.cjs` | Check for hardcoded values in code |
-| `search-slides.py` | BM25 search + contextual recommendations |
-| `slide-token-validator.py` | Validate slide HTML for token compliance |
-| `fetch-background.py` | Fetch images from Pexels/Unsplash |
+| `scripts/search-slides.py` | BM25 search + contextual recommendations |
+| `scripts/slide-token-validator.py` | Validate slide HTML for token compliance |
+| `scripts/fetch-background.py` | Fetch images from Pexels/Unsplash |
 
 ## Templates
 
 | Template | Purpose |
 |----------|---------|
-| `design-tokens-starter.json` | Starter JSON with three-layer structure |
+| `templates/design-tokens-starter.json` | Starter JSON with three-layer structure |
 
 ## Integration
 
@@ -113,8 +113,8 @@ Brand-compliant presentations using design tokens + Chart.js + contextual decisi
 
 | File | Purpose |
 |------|---------|
-| `docs/brand-guidelines.md` | Brand identity, voice, colors |
-| `assets/design-tokens.json` | Token definitions (primitive→semantic→component) |
+| `docs/design/visual-language.md` | QADREN brand identity, voice, colors |
+| `docs/design/tokens.json` | QADREN token definitions |
 | `assets/design-tokens.css` | CSS variables (import in slides) |
 | `assets/css/slide-animations.css` | CSS animation library |
 
@@ -162,7 +162,7 @@ python scripts/search-slides.py "cta" --context --position 9 --prev-emotion frus
         ↓
 4. Generate HTML with design tokens
         ↓
-5. Validate with slide-token-validator.py
+5. Validate with scripts/slide-token-validator.py
 ```
 
 ### Pattern Breaking (Duarte Sparkline)

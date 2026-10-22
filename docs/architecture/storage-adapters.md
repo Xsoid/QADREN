@@ -31,6 +31,8 @@ Current flags do not prove the implementation of content APIs or confirmation of
 
 OAuth Authorization Code + PKCE, independent Keychain credentials based on `connection_id`, and reading of quota and the first page of the directory via GET Disk REST API without retrieving file bytes are implemented. Statuses 401/403/404/429/5xx and network errors are handled; automatic retry is off, Refresh is on user demand. Mock HTTP tests include 200/401/403/429/503/timeout; two accounts and independent disconnection are verified on a real Mac. Behavior for large files, API limits, checksums, resuming downloads and live uploads is **not verified E2E**; partial streaming upload code exists, but full file transfer is not accepted. Do not consider server-to-server copy available without verification.
 
+The detailed adapter contract is in [Yandex Disk adapter](yandex-adapter.md).
+
 ## iCloud Documents — deferred (D-017)
 
 **Not part of Release 1.** Do not develop sync/backup, own Documents container, adapter, entitlements, native spike, connection UI or integration tests. The historical idea was limited to its own visible container, not arbitrary access to iCloud Drive/CloudKit. Previous architectural assumptions do not mean current capabilities. Return only by a separate decision on price, access and Apple APIs. [D-017](../decisions/D-017-defer-icloud.md).

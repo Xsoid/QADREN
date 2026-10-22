@@ -2,6 +2,8 @@
 
 Status: Registry v2, SwiftUI integration, independent Keychain OAuth by connection_id and metadata-only Yandex Disk are implemented in `main`. The multiple connections model [D-016](../decisions/D-016-multiple-connections.md) is accepted. Content operations and the synchronization engine are not implemented.
 
+The first multiple-connection UI test record is in [Multiple independent connections testing](../development/multiple-connections-testing.md).
+
 ## Purpose
 
 `StorageConnection` is a local record of **one instance** of a connection to a provider. The number of instances of one `adapter` or one external account is not limited. The `id` is not equal to the login and does not depend on the connection name. In the current model, `Scenario` refers to independent connections by stable IDs; the registry does not perform transfers.

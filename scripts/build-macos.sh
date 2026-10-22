@@ -24,6 +24,7 @@ mkdir -p "$APP/Contents/MacOS"
 mkdir -p "$APP/Contents/Resources"
 mkdir -p "$APP/Contents/Library/LaunchAgents"
 cp platform/macos/Info.plist "$APP/Contents/Info.plist"
+cp assets/qadren.icns "$APP/Contents/Resources/qadren.icns"
 cp assets/qadren-logo.png "$APP/Contents/Resources/qadren-logo.png"
 cp "$ROOT/core/target/$TARGET/release/qadren-worker" "$APP/Contents/Resources/qadren-worker"
 cp platform/macos/LaunchAgents/dev.qadren.worker.plist "$APP/Contents/Library/LaunchAgents/dev.qadren.worker.plist"
@@ -53,6 +54,9 @@ xcrun swiftc -O -target "$ARCH-apple-macos13.0" \
   platform/macos/QADREN/*.swift \
   "$ROOT/core/target/$TARGET/release/libqadren_core.a" \
   -o "$APP/Contents/MacOS/QADREN"
+
+# Finder uses the bundle directory modification date to invalidate its icon cache.
+touch "$APP"
 
 echo "Built $APP"
 echo "Run: open '$APP'"

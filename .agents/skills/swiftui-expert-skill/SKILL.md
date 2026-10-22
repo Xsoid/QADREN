@@ -54,7 +54,7 @@ Trigger when the user asks to "record a trace", "profile the app", "capture a se
    ```bash
    python3 "${SKILL_DIR}/scripts/record_trace.py" \
        --device "<name|udid>" --attach "<AppName>" \
-       --stop-file /tmp/stop-trace --output ~/Desktop/session.trace
+       --stop-file /tmp/stop-trace --output ./session.trace
    ```
    For interactive sessions, just tell the user to press Ctrl+C when done.
 4. **Signal stop** — when the user says they've finished exercising the app, `touch /tmp/stop-trace`. The script cleanly SIGINTs xctrace and waits up to 60s for finalisation.

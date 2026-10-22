@@ -23,6 +23,7 @@ The product specification is v0.2 (2026-10-09). Documents about BackupSet and co
 | [Decision record](decisions/README.md) | Accepted decisions and their reasons |
 | [D-017: Defer iCloud](decisions/D-017-defer-icloud.md) | iCloud is outside the current release scope |
 | [Roadmap](roadmap.md) | Current work queue |
+| [v0.1.0 bootstrap](development/bootstrap.md) | Historical record of the first prototype |
 
 ## Status words
 

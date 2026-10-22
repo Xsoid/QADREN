@@ -1615,17 +1615,19 @@ private struct ScenarioFolderBrowserSheet: View {
         VStack(spacing: 0) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Выберите (role)").font(.title2.bold())
+                    Text("Выберите \(role)").font(.title2.bold())
                     Text("Этот браузер читает только имена, типы и размеры. Файлы не открываются.")
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button("Отмена", role: .cancel) { dismiss() }
                 Button("Использовать эту папку") {
-                    select(workspace.selectedDirectory ?? initialRoot)
+                    guard let selectedDirectory = workspace.selectedDirectory else { return }
+                    select(selectedDirectory)
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
+                .disabled(workspace.selectedDirectory == nil)
             }
             .padding(20)
 
@@ -1644,44 +1646,72 @@ private struct ScenarioFolderBrowserSheet: View {
             }
             .padding(.horizontal, 20).padding(.vertical, 12)
 
-            List(workspace.entries) { entry in
-                Button {
-                    guard entry.is_directory else { return }
-                    workspace.open(entry)
-                } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: entry.is_directory ? "folder.fill" : "doc")
-                            .foregroundStyle(entry.is_directory ? Color.accentColor : Color.secondary)
-                        Text(entry.name)
-                        Spacer()
-                        if !entry.is_directory {
-                            Text(ByteCountFormatter.string(fromByteCount: Int64(clamping: entry.size), countStyle: .file))
-                                .foregroundStyle(.secondary)
-                        } else {
-                            Image(systemName: "chevron.right").foregroundStyle(.secondary)
+            if workspace.root == nil {
+                SettingsEmptyState(
+                    title: "Сначала выберите начальную папку",
+                    detail: "Откроется стандартный Finder. Затем этот браузер позволит перейти в нужный подкаталог.",
+                    symbol: "folder"
+                ) {
+                    Button("Выбрать папку в Finder…", systemImage: "folder") { chooseRootInFinder() }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(workspace.entries) { entry in
+                    Button {
+                        guard entry.is_directory else { return }
+                        workspace.open(entry)
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: entry.is_directory ? "folder.fill" : "doc")
+                                .foregroundStyle(entry.is_directory ? Color.accentColor : Color.secondary)
+                            Text(entry.name)
+                            Spacer()
+                            if !entry.is_directory {
+                                Text(ByteCountFormatter.string(fromByteCount: Int64(clamping: entry.size), countStyle: .file))
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                Image(systemName: "chevron.right").foregroundStyle(.secondary)
+                            }
                         }
                     }
+                    .buttonStyle(.plain)
+                    .disabled(!entry.is_directory)
                 }
-                .buttonStyle(.plain)
-                .disabled(!entry.is_directory)
-            }
-            .listStyle(.inset)
-            .overlay {
-                if workspace.entries.isEmpty && workspace.error == nil {
-                    SettingsEmptyState(
-                        title: "Папка пуста",
-                        detail: "Выберите эту папку или перейдите выше.",
-                        symbol: "folder"
-                    )
+                .listStyle(.inset)
+                .overlay {
+                    if workspace.entries.isEmpty && workspace.error == nil {
+                        SettingsEmptyState(
+                            title: "Папка пуста",
+                            detail: "Выберите эту папку или перейдите выше.",
+                            symbol: "folder"
+                        )
+                    }
                 }
             }
+
             if let error = workspace.error {
                 SettingsNotice(text: error, symbol: "exclamationmark.triangle")
                     .padding(16)
             }
         }
         .frame(minWidth: 820, minHeight: 560)
-        .onAppear { workspace.selectRoot(initialRoot) }
+        .onAppear {
+            if initialRoot != "/" { workspace.selectRoot(initialRoot) }
+        }
+    }
+
+    private func chooseRootInFinder() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Открыть в браузере"
+        panel.message = "Выберите начальную папку для \(role)."
+        guard let window = NSApp.keyWindow ?? NSApp.mainWindow else { return }
+        panel.beginSheetModal(for: window) { response in
+            guard response == .OK, let url = panel.url else { return }
+            workspace.selectRoot(url.path)
+        }
     }
 }
 

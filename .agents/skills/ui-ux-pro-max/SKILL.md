@@ -425,7 +425,7 @@ python3 .agents/skills/ui-ux-pro-max/scripts/search.py "<query>" --design-system
 This also creates:
 - `design-system/<project-slug>/pages/dashboard.md` — Page-specific deviations from Master
 
-If Master already exists, a new page file is created without changing Master. Existing Master and page files are skipped by default. Read an existing `MASTER.md` before deciding whether `--force` is justified; without explicit user authorization, keep existing files unchanged.
+If Master already exists, a new page file is created without changing Master. Existing Master and page files are skipped by default. Read an existing `design-system/<project-slug>/MASTER.md` before deciding whether `--force` is justified; without explicit user authorization, keep existing files unchanged.
 
 **How hierarchical retrieval works:**
 1. Read `design-system/<project-slug>/MASTER.md`

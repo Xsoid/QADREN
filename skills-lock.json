@@ -18,23 +18,53 @@
     ]
   },
   "skills": {
+    "banner-design": {
+      "source": "project-installed",
+      "sourceType": "local",
+      "skillPath": ".agents/skills/banner-design/SKILL.md",
+      "computedHash": "14ebeef433fa751471f8d0d122246b783fe7eb9c885aeac648a4de72a1330b17"
+    },
+    "brand": {
+      "source": "project-installed",
+      "sourceType": "local",
+      "skillPath": ".agents/skills/brand/SKILL.md",
+      "computedHash": "a22b642408e4caf2d4a0eb92f809026cfffde21cb994a8584e24a63c704a0928"
+    },
+    "design": {
+      "source": "project-installed",
+      "sourceType": "local",
+      "skillPath": ".agents/skills/design/SKILL.md",
+      "computedHash": "07bf7c674b35af00ace3ea90c2efe8a50ce622e4af1505b6af4fd708d5a32fb0"
+    },
     "design-system": {
       "source": "project-installed",
       "sourceType": "local",
       "skillPath": ".agents/skills/design-system/SKILL.md",
-      "computedHash": "655468bb723a6bc9d17fcb09a6a005e10e313d63b879f4d74fb2abdc3041ae3f"
+      "computedHash": "562afd4ca01be0e23b7fbc6367dec652740d412c27c3b8cac90f596a9fc2a01c"
+    },
+    "slides": {
+      "source": "project-installed",
+      "sourceType": "local",
+      "skillPath": ".agents/skills/slides/SKILL.md",
+      "computedHash": "2b90bdaf63f231919a01f4962f374ecd84af101a7e7545f8d9c68e049025accb"
     },
     "swiftui-expert-skill": {
       "source": "AvdLee/SwiftUI-Agent-Skill",
       "sourceType": "github",
       "skillPath": ".agents/skills/swiftui-expert-skill/SKILL.md",
-      "computedHash": "3b794f9cb46efb016eafcad2fcedce7127c74d60c50a949619e0bcd2bc38351f"
+      "computedHash": "88ac102fbf27ab682cb070f70e881c5d205c64fec03ce701600eea7d85a8ee5f"
+    },
+    "ui-styling": {
+      "source": "project-installed",
+      "sourceType": "local",
+      "skillPath": ".agents/skills/ui-styling/SKILL.md",
+      "computedHash": "f8b6c3832d2af51f67b3932e3c4a79bcd8a8596cc61ce1547a686fc951e5c62d"
     },
     "ui-ux-pro-max": {
       "source": "project-installed",
       "sourceType": "local",
       "skillPath": ".agents/skills/ui-ux-pro-max/SKILL.md",
-      "computedHash": "e5baf9400d4347e5ed3eb1f6b99cd0b9ba545b8b0e507aabb2b87397bbf73ea1"
+      "computedHash": "4d0784e04eb1659bf8f2265d42370f7563d330b6419f55b99de860de2e3e1172"
     }
   }
 }
