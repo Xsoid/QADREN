@@ -9,7 +9,7 @@ Baseline date: **2026-10-08**. Records list agreements. They do not prove the fe
 | D-003 | Revised D-017/D-018 | Initial integrations included iCloud and Yandex. Release 1 is Local Filesystem. Yandex is post-release. |
 | D-004 | Accepted | Cross-platform core. OS limitations are a property of the adapter. |
 | D-005 | Accepted | One application on several nodes with logical roles: Controller/Worker. |
-| D-006 | Accepted | On the main MacBook, QADREN does not start a download of content without prior agreement. |
+| D-006 | Revised D-018 | A needed content read needs no separate confirmation. Destructive effects require policy-defined consent. |
 | D-007 | Accepted | Do not interfere with downloads of macOS, iCloud, and other applications. |
 | D-008 | Accepted | Only the assigned Worker performs a delegated task. The Controller receives the report. |
 | D-009 | Revised v0.2 | Do not apply automatic deletions/conflicts to the last protected version. |
@@ -25,11 +25,11 @@ Baseline date: **2026-10-08**. Records list agreements. They do not prove the fe
 
 ## Revision 2026-10-09 — specification v0.2
 
-The following is agreed: QADREN focuses on synchronization. BackupSet/backup file versions are deferred. Scenario/Job, service history of the last confirmed states without content storage, enhanced protection of dangerous operations, a private iCloud Documents container, and an independent Local Filesystem adapter are current. Release 1 is a full local Controller+Worker. Release 2 is remote Workers. The historical meaning of D-001/D-002/D-009 is preserved, but the old wording **is not an active MVP requirement**. See [specification](../architecture/backup-model.md) and [BackupSet future](../architecture/backup-model.md).
+QADREN focuses on synchronization. BackupSet and content versions are deferred. Scenario and Job, service history without content storage, protection for destructive operations, and an independent Local Filesystem adapter are current contracts. Release 1 is local-first. Remote Workers are post-release. Historical wording in D-001, D-002, and D-009 is not an active requirement. See [the synchronization model](../architecture/backup-model.md).
 
 ## Revision 2026-10-12 — iCloud deferred
 
-[D-017](D-017-defer-icloud.md) overrides the iCloud part of D-003 and D-012: a private iCloud Documents container, iCloud backup/sync, and native spike are not in Release 1. Local Filesystem is independent and active. Protection against accidental download of iCloud/File Provider placeholders through Local FS remains.
+[D-017](D-017-defer-icloud.md) overrides the iCloud part of D-003 and D-012: an iCloud Documents container, iCloud backup/sync, and native spike are not in Release 1. Local Filesystem is independent and active. A required Local Filesystem read can materialize a File Provider item without a separate prompt.
 
 ## Change rule
 

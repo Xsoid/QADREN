@@ -1,55 +1,46 @@
 # QADREN
 
-<img src="assets/qadren-logo.png" alt="Эмблема QADREN" width="144">
+<img src="assets/qadren-logo.png" alt="QADREN logo" width="144">
 
-**QADREN** — проект кроссплатформенной системы синхронизации и обмена данными между независимыми хранилищами и узлами.
+QADREN is a cross-platform system for file transfer and synchronization between independent storage connections.
 
-> Статус: проектирование и реализация ранних компонентов; продуктовая спецификация v0.2 (2026-10-09). Метаданные Яндекс Диска и прототип macOS UI уже реализованы; полноценная синхронизация ещё не реализована.
+## Release 1
 
-## Цель
+Release 1 is local-first. It uses Local Filesystem connections, one Rust JobStore, and a SwiftUI macOS control interface. A `Scenario` defines synchronization rules. A `Job` is one execution or one manual file operation.
 
-Управление передачей и односторонней или двусторонней синхронизацией файлов между независимыми подключениями. Первый релиз — полноценная локальная версия Controller + Worker с автоматизацией, очередью, файловым менеджером и мониторингом; удалённые Worker — следующий этап. BackupSet и собственное версионирование содержимого отложены.
+Yandex Disk and iCloud are post-release. Do not add their API, OAuth, transfer, entitlement, or live end-to-end work without a new owner decision. See [D-018](docs/decisions/D-018-local-first-priorities.md).
 
-**Текущая очередность разработки (D-018, 2026-10-14):** сначала фундамент Rust/SQLite/FFI и нативная виджетная панель QADREN с отдельными настройками; затем проверяемая Local↔Local синхронизация, Job/Scenario/Policy и автономная локальная служба. Локальная версия не зависит от доступности облаков.
+QADREN reads content needed by an enabled or requested operation without a separate prompt. A destructive replacement or deletion requires the policy-defined confirmation. After uncertain effects, QADREN performs non-mutating reconciliation and retains `UNKNOWN` when proof is insufficient.
 
-- **Local Filesystem** — активный самостоятельный адаптер и приоритетная область реализации.
-- **Яндекс Диск** — контроллер вынесен **за Release 1**. Исходный код metadata/OAuth/передачи сохраняется, но интеграция заморожена до нового отдельного решения владельца; она не блокирует UI, Core и локальный релиз. Live-функциональность не подтверждена.
-- **iCloud** — отложен на неопределённый срок; сейчас коннектор не разрабатывается из-за недоступной платной учётной записи разработчика. Защита от скрытой материализации файлов сохраняется.
+## Quick start on macOS
 
-См. [D-018](docs/decisions/D-018-local-first-priorities.md) и [аудит фактического состояния](docs/development/current-state-audit.md). Устаревшие cloud-first описания не являются заданиями для Codex.
+Developer prerequisites: a supported Rust toolchain and Xcode Command Line Tools or Xcode.
 
-## Ключевые решения
+```bash
+bash scripts/test-core.sh
+bash scripts/build-macos.sh
+open dist/QADREN.app
+```
 
-- Сценарии (`Scenario`) для отдельных каталогов: одно- и двусторонняя синхронизация; разовые файловые операции выполняются общей системой `Job`.
-- Кроссплатформенное ядро; адаптеры сообщают совместимость с ОС и поддерживаемые операции.
-- Одно приложение может исполнять роли управляющего узла (Controller) и исполнителя (Worker).
-- Главный MacBook — центр управления, не обязательный посредник передачи файлов.
-- **Чтение нужного файла выполняется автоматически**, включая возможную загрузку macOS из File Provider на основной MacBook. Отдельное согласие на чтение не требуется; посторонние файлы QADREN не загружает заранее.
-- **Замена и массовое удаление файлов требуют осознанного решения**, если действие не покрыто явно согласованным правилом сценария. После сбоя QADREN перепроверяет результат автоматически и сообщает об ограничениях охвата операции.
-- Делегированное задание выполняет только назначенный Worker; Controller принимает его отчёт, не дублируя исполнение.
-- Усиленная защита от массовых удалений и неоднозначных перезаписей без собственного хранения версий файлов.
-- Протокол связи экземпляров приложения пока **не проектируется**.
+The generated bundle is an unsigned developer artifact. It is not release evidence.
 
-## Документация
+## Repository map
 
-- [Индекс документации](docs/README.md)
-- [Дизайн-система и UX интерфейса QADREN](docs/design/README.md)
-- [Обзор архитектуры](docs/architecture/overview.md)
-- [Модель сценариев синхронизации](docs/architecture/backup-model.md)
-- [Узлы и делегирование](docs/architecture/nodes-and-delegation.md)
-- [Адаптеры хранилищ](docs/architecture/storage-adapters.md)
-- [Локальные загрузки и разрешения](docs/policies/local-downloads.md)
-- [Надёжность и целостность](docs/policies/data-safety.md)
-- [Принятые решения](docs/decisions/README.md)
-- [Открытые вопросы и дорожная карта](docs/roadmap.md)
+- `core/`: Rust core and JobStore.
+- `platform/macos/`: SwiftUI macOS interface and platform integration.
+- `scripts/`: build and validation commands.
+- `docs/`: canonical project documentation.
 
-## Технический контекст
+## Documentation
 
-- [Стек](docs/architecture/technology-stack.md)
-- [Правила разработки](docs/development/engineering-rules.md)
-- [Сборка и релизы](docs/development/build-and-release.md)
-- [Инструкции для агентов](AGENTS.md)
+- [Documentation index](docs/README.md)
+- [Architecture](docs/architecture/overview.md)
+- [Decisions](docs/decisions/README.md)
+- [Safety policies](docs/policies/data-safety.md)
+- [Design system](docs/design/README.md)
+- [Development guide](docs/development/build-and-release.md)
+- [Testing and quality](docs/development/testing-and-quality.md)
+- [Roadmap](docs/roadmap.md)
+- [Agent instructions](AGENTS.md)
 
-## Принцип документации
-
-Отличать **утверждённое решение**, **предложение** и **вопрос для проверки**. Возможность будущей интеграции iCloud не считать подтверждённой. Возобновление только после нового решения о технической и экономической осуществимости. См. [D-017](docs/decisions/D-017-defer-icloud.md).
+GitHub Issues contain active work, audits, test results for a specific SHA, and closure criteria. Git history contains change history.

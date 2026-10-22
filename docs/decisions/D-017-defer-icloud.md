@@ -6,9 +6,7 @@
 
 In the first QADREN release, **do not develop backup, synchronization, file transfer with iCloud, iCloud Documents adapter, own container, entitlement/provisioning, native feasibility spike, iCloud connection UI, or iCloud integration/E2E**. iCloud remains a potential future integration, not a current task and not a dependency. Do not start iCloud implementation without an explicit owner decision.
 
-**Historical order from October 12, REVISED by D-018 from October 14:** the Yandex↔Local requirement stated below is no longer a gate for the local release; the priority is now foundation/UI → Local↔Local → autonomous local version, and only then Yandex. [D-018](D-018-local-first-priorities.md).
-
-Active endpoints in the historical scope: **Yandex Disk and Local Filesystem**. Former priority — Local→Yandex upload, Yandex→Local download (with individual consent when downloading to the main MacBook), Local↔Local; other pairs, including Yandex↔Yandex, only after capabilities verification. Then one-way and two-way synchronization and safe conflicts. Do not consider a simple copy as a guaranteed backup version: there is no own BackupSet and no content versioning.
+Release 1 uses Local Filesystem. Yandex Disk is also post-release under [D-018](D-018-local-first-priorities.md).
 
 ## Basis and return conditions
 
@@ -17,9 +15,9 @@ The owner decided to postpone iCloud because of limitations of the free integrat
 ## Does not cancel
 
 - System iCloud/macOS works independently; QADREN does not interfere.
-- Guards in Local Filesystem against implicit materialization of File Provider/iCloud placeholders and downloading of content to the main MacBook **remain** as safety requirements. This does not mean the implementation of iCloud.
+- A required Local Filesystem read may materialize a File Provider item without a separate prompt. This does not mean the implementation of iCloud.
 - Durable attempts, UNKNOWN/recovery, no-overwrite/conflict/delete policies, individual consent, independent connections, and metadata sync state remain active.
 
 ## Revision of decisions
 
-Replaces the iCloud part of D-003 and D-012. Other decisions about architecture and local file systems remain. Linked documents: `README.md`, `AGENTS.md`, `docs/roadmap.md`, `docs/architecture/*`, `docs/development/*`, and `docs/design/settings.md`.
+Replaces the iCloud part of D-003 and D-012. Other decisions about architecture and local file systems remain.

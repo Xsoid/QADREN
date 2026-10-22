@@ -1,77 +1,53 @@
 # QADREN
 
-QADREN is a cross-platform system for file transfer and file synchronization.
-It manages independent storage connections and application nodes.
-
-## Current scope
-
-Read `docs/decisions/D-018-local-first-priorities.md` first.
-
-- Release 1 has a local-first scope.
-- The native UI and Rust/SQLite/FFI baseline is complete. Do not start another general baseline audit.
-- P1 is safe Local Filesystem to Local Filesystem execution through one Rust JobStore.
-- P2 is the scheduler, an independent local service, and local distribution.
-- Yandex Disk is post-release and parked. Do not add API, OAuth, transfer, or live E2E work without a new owner decision.
-- iCloud is post-release and parked, with no implementation date. Do not add an adapter, entitlement, UI, or feasibility test during Release 1.
+QADREN is a cross-platform file transfer and synchronization system. Rust owns cross-platform business logic. SwiftUI is the macOS control interface.
 
 ## Required reading
-
-Read these files before you change QADREN:
 
 1. `AGENTS.md`
 2. `README.md`
 3. `docs/README.md`
-4. `docs/architecture/backup-model.md`
-5. `docs/decisions/README.md`
+4. `docs/decisions/D-018-local-first-priorities.md`
+5. `docs/architecture/backup-model.md`
 6. `docs/architecture/technology-stack.md`
-7. `docs/development/engineering-rules.md`
-8. `docs/development/current-state-audit.md`
-9. `docs/roadmap.md`
+7. `docs/roadmap.md`
+8. The matching policy, design, or development document for the change.
 
-Read the matching design documents before you change the macOS UI.
-Read the matching policy documents before you change storage, transfer, or destructive actions.
+## Release 1
 
-## Non-negotiable rules
+- Release 1 is Local Filesystem only.
+- Use one Rust JobStore. A `Scenario` defines synchronization rules. A `Job` is one execution or manual file operation.
+- Keep each `StorageConnection` independent. Bind OAuth and Keychain state to `connection_id`.
+- Yandex Disk and iCloud are post-release. Do not add API, OAuth, transfer, entitlement, or live end-to-end work without a new owner decision.
+- Do not add content versioning, runtime BackupSet, Scenario dependencies, or remote Worker protocol.
 
-- Keep Rust as the cross-platform core. Keep SwiftUI as the macOS UI.
-- Use one Rust JobStore. Do not add a second job engine.
-- A `Scenario` describes synchronization rules. A `Job` is one execution or one manual file operation.
-- Keep each `StorageConnection` independent. Store OAuth and Keychain state by `connection_id`.
-- Do not store secrets in SQLite, Git, logs, or HTTP URLs.
-- Do not delete cloud objects when the user selects Remove or Disconnect in the UI.
-- Read content required by an enabled or requested operation without a separate prompt. This can materialize a File Provider item. Do not prefetch unrelated content.
-- Before an external effect, save a durable attempt. Check capability, consent, destination state, and no-overwrite.
-- If proof of an external effect is lost, set the result to `UNKNOWN`. Reconcile in read-only mode. Do not retry blindly.
-- Use the approved replacement protocol for an existing Local Filesystem destination. Keep durable attempts, exact scope checks, and `UNKNOWN` reconciliation.
-- Do not add content versioning, runtime BackupSet, scenario dependencies, or remote Worker protocol to Release 1.
+## Safety
 
-## Documentation and communication
+- Do not save secrets in SQLite, Git, logs, or HTTP URLs.
+- Remove and Disconnect change local state only. They do not delete provider objects.
+- Read content needed by an enabled or requested operation without a separate prompt. Do not prefetch unrelated content.
+- Before a modifying external effect, save a durable attempt. Check capability, exact scope, destination state, no-overwrite for new files, and required destructive consent.
+- If effect proof is lost, reconcile without mutation. Persist a verified outcome only when evidence is sufficient. Otherwise retain `UNKNOWN`.
+- A Local Filesystem update can replace an existing destination only through the approved replacement protocol.
 
-Write new and changed project documentation in English in ASD-STE100 style.
-Use short active sentences and exact technical names.
-Do not claim full ASD-STE100 compliance without an approved-dictionary check.
-Write external work-tracker text in the same style.
-Do not rewrite external work-tracker history unless the owner asks for it.
+## Documentation
+
+Repository documentation contains stable contracts. GitHub Issues contain active work, audits, current test results, and closure criteria. Git history contains change history.
+
+Canonical documents:
+
+- Product order: `docs/decisions/D-018-local-first-priorities.md`
+- Architecture: `docs/architecture/`
+- Safety: `docs/policies/`
+- UI: `docs/design/`
+- Build and release: `docs/development/build-and-release.md`
+- Testing and quality: `docs/development/testing-and-quality.md`
+- Product stages: `docs/roadmap.md`
+
+Write changed project documentation and external tracker text in English and ASD-STE100 style. Use short active sentences and exact technical names. Do not claim full ASD-STE100 compliance without an approved-dictionary check.
 
 ## Verification
 
-Record the exact SHA and the worktree state before you change files.
-Run `bash scripts/test-core.sh`.
-On a supported Mac, run `bash scripts/build-macos.sh`.
-Run the relevant native, adapter, and integration tests.
-Report only checks that you ran. Mark unavailable checks as BLOCKED or SKIPPED.
-Do not say that local checks are GitHub CI checks.
+Record the SHA and worktree state before changes. Run checks relevant to the patch. `bash scripts/test-core.sh` is the standard Core check. On a supported Mac, run `bash scripts/build-macos.sh` and applicable native checks. Report only checks that ran. Mark unavailable checks as `BLOCKED` or `SKIPPED`.
 
-Before commit, push, or PR, run the project-scoped AI Docs Hub pre-publish gate for the exact patch. Then run code review and security review for that same patch.
-
-## Canonical documents
-
-- Product order: `docs/decisions/D-018-local-first-priorities.md`
-- Current work queue: `docs/roadmap.md`
-- System contracts: `docs/architecture/`
-- UI contracts: `docs/design/`
-- Safety rules: `docs/policies/`
-- Engineering rules: `docs/development/engineering-rules.md`
-- Current evidence: `docs/development/current-state-audit.md`
-
-If code and documentation disagree, inspect the source and report the conflict. Do not silently change the architecture.
+Before commit, push, or PR, run the project-scoped AI Docs Hub pre-publish gate and repeat code and security review for the exact patch.

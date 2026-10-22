@@ -1,6 +1,6 @@
 # QADREN — UI/UX Design System
 
-Status: **mandatory source specification for SwiftUI implementation**, revision 2026-10-12. The visual design direction is agreed as "cyberpunk instrument panel"; the exact token values are the initial verifiable baseline, not a statement of completed visual acceptance. The implementation remains PARTIAL until tests and approved screenshots are available.
+Status: **mandatory source specification for SwiftUI implementation**. The visual design direction is "cyberpunk instrument panel". Token values define the approved baseline. Patch-specific visual acceptance belongs in GitHub Issues.
 
 ![Original QADREN logo](../../assets/qadren-logo.png)
 
@@ -21,7 +21,7 @@ In case of discrepancy: safety from `docs/policies/` and domain solutions from `
 - Three work windows are defined: monitoring, settings, and a read-only two-pane file browser. The macOS menu is the entry point and for quick actions. The file browser shows only names, types, sizes, and paths. It does not copy, replace, or delete files. Closing the UI is not equal to stopping the background service after its implementation.
 - Dark cyberpunk theme — the primary artistic baseline: dark depth, electric cyan/blue, controlled glow; light and system themes are also provided.
 - **Use only** `assets/qadren-logo.png` as the QADREN mark; do not create a "similar" mark, do not replace SF Symbols with a third-party product logo.
-- Fictitious graphs/numbers, replacing UNKNOWN with error/success, local content upload to the main MacBook without permission, and decorating an unavailable function with an active button are prohibited.
+- Fictitious graphs/numbers, replacing UNKNOWN with error/success, unrelated content prefetch to the main MacBook, and decorating an unavailable function with an active button are prohibited.
 - First the existing `MainView.swift`, `QADRENApp.swift`, `StorageConnections.swift`, `JobInventory.swift`, `LocalWorkspace.swift`, not a second UI layer and not a second Rust Job Engine.
 
 ## Separation of Decisions
@@ -31,7 +31,7 @@ In case of discrepancy: safety from `docs/policies/` and domain solutions from `
 | Synchronization functions, local uploads, confirmations | `docs/architecture/backup-model.md`, `docs/policies/` |
 | UI composition and interaction | `docs/design/*.md` files |
 | Spacing, palette, sizes, typography | `docs/design/tokens.json` + explanations in `visual-language.md` |
-| Existing API and runtime readiness | `main` source code, tests, and the current-state audit |
+| Existing API and runtime readiness | Current source code, tests, and the applicable GitHub Issue |
 | HTML demonstration | only stylistic and compositional reference |
 
 Do not change accepted documents "according to Codex taste"; describe and agree on any conflict. Documentation is not a permission to activate dangerous commands prematurely.

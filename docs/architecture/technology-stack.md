@@ -42,7 +42,7 @@ Electron, Chromium bundle, Node.js/Python runtime in production, JVM, Docker, mi
 - RAM at rest: desired target up to **40 MB**.
 - CPU without tasks: close to zero, without active polling.
 - No permanent local mirror on the main MacBook.
-- No unauthorized download of QADREN content to the main MacBook.
+- No unrelated content prefetch or mirroring to the main MacBook.
 
 Measure size on the **release, signed** build; verify RAM, energy, disk activity, and network bytes with tests. Do not promise these values in advance.
 

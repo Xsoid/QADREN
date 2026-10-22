@@ -18,7 +18,7 @@ Yandex Disk and iCloud are post-release and parked. Do not add cloud API, OAuth,
 
 The current local product needs a verified end-to-end operation before remote-provider scope. The owner reported Yandex Disk emergency conditions and partial Disk/API availability. iCloud capability needs a separate access and platform decision. Neither provider is a Release 1 dependency.
 
-## Constraints and Owner Clarification — 2026-10-18
+## Constraints
 
 Work in `main`. Verify the current code and SHA before each change. Use `VERIFIED` only for behavior checked on a specific SHA. Distinguish `PARTIAL`, `BLOCKED`, and `PARKED` in evidence.
 
@@ -36,7 +36,7 @@ Do not block release simply because it is impossible to prove a file read will n
 
 ## Consequences
 
-- The current local product sequence is in [the roadmap](../roadmap.md).
-- The current implementation and evidence boundaries are in [the audit](../development/current-state-audit.md) and [validation record](../development/release-1-validation.md).
+- The local product sequence is in [the roadmap](../roadmap.md).
+- GitHub Issues contain implementation and evidence status for a specific SHA.
 - Yandex Disk and iCloud remain future candidates without an automatic deadline or implementation commitment.
 - A later owner decision must update this decision and the affected contracts before cloud work resumes.

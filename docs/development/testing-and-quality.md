@@ -1,55 +1,32 @@
-# Testing and Quality Criteria
+# Testing and Quality
 
-Status: mandatory validation strategy. Bootstrap CI is implemented in `.github/workflows/bootstrap.yml`. Add integration checks with the feature that they validate.
+## Test layers
 
-## Test Pyramid
+1. Rust unit tests cover Scenario, Job, `FileSyncState`, policy, state transition, conflict, and recovery rules.
+2. Adapter contract tests cover incomplete metadata, authorization failure, timeout, repeated response, and capability limits.
+3. Native integration tests cover Rust/Swift FFI, Keychain, Local Filesystem, and Worker boundaries.
+4. End-to-end tests cover real selected roots, copies, failure, restart, and reconciliation.
+5. Release validation covers the signed bundle, clean installation, launch, lifecycle, and resource use.
 
-1. **Rust unit tests:** Scenario, Job, `FileSyncState`, revision, conflict, deletion, state-transition, and policy rules.
-2. **Adapter contract tests:** API mocks with incomplete metadata, delays, authorization errors, and repeated responses.
-3. **Integration tests:** Rust/Swift FFI, Keychain, Yandex API, and Local Filesystem with test credentials and directories. iCloud adapter, entitlement, and integration checks are outside Release 1.
-4. **End-to-end tests:** two folders or storage connections, real copies, failures, and execution recovery from service state. Do not store historical content versions.
-5. **Resource checks:** idle CPU and RAM, local disk, network bytes, and signed application size.
+Do not treat a mock, unit test, or unsigned bundle as evidence for a different layer.
 
-## Mandatory Scenarios for Each Data Operation
+## Required operation coverage
 
-- Transfer interruption and under-downloaded temporary object.
-- Restart between transfer and confirmation.
-- Double start of one Job and repeat after timeout.
-- Token expiration, rate limit, and cloud unavailability.
-- Independent-version conflict and mass deletion.
-- Incorrect or missing checksum.
-- A QADREN-initiated download on the primary MacBook does not start without confirmation, including verification and recovery.
-- A Controller does not download content or start the same delegated Job.
-- A successful Yandex Disk API response does not prove integrity of the written copy. Local Filesystem rejects hidden iCloud or File Provider materialization.
+For each modifying operation, test durable attempt creation before the effect, exact scope and capability checks, new-destination no-overwrite, destructive confirmation where required, interruption, restart, repeated request, destination conflict, permission loss, and reconciliation. Verify that an uncertain outcome remains `UNKNOWN` when evidence is insufficient. Do not test only the success path.
 
-## Before Publication to `main` or Release
+An enabled or requested operation may read necessary content without a separate read-consent test. Test File Provider compatibility when a suitable fixture exists. Do not prefetch unrelated content.
 
-- Run `bash scripts/test-core.sh` for Rust formatting, clippy, and tests.
-- Run applicable `cargo test`, platform Swift tests, and integration scenarios in available environments.
-- For the Swift-to-Rust Job inventory bridge, run `bash scripts/test-macos-job-inventory.sh`. It uses only a temporary app-owned mock root and does not start `QADREN.app`.
-- For the Local Filesystem `mkdir` bridge, run `bash scripts/test-macos-local-workspace.sh`. It creates and deletes only a unique test root in the checkout and verifies no-overwrite.
-- For the macOS Keychain lifecycle, run `bash scripts/test-macos-keychain.sh`. It uses an unpredictable test-only connection ID and removes only that test item.
-- Perform dependency and security review. Verify no secrets and updated canonical documentation.
-- Build the macOS artifact and verify `.app` completeness and dependencies.
-- Before a user release, verify signing, notarization, and a clean-install smoke test.
-- If a test set is incomplete, list every not-performed item in the validation record and final handoff. Publication directly to `main` does not remove code-review or security-review requirements.
+## Commands
 
-Establish performance thresholds and supported OS versions after the baseline prototype. iCloud synchronization, backup, entitlement spike, and end-to-end work are outside the active release scope per D-017. Maintain standard macOS File Provider safety-guard checks for the local adapter.
+Run only the commands relevant to the patch. The standard baseline is:
 
-## Acceptance Evidence
+```bash
+bash scripts/test-core.sh
+bash scripts/build-macos.sh
+```
 
-Record for every gate: base SHA and final `HEAD`, command, OS and toolchain version, `PASS`, `FAIL`, `BLOCKED`, or `SKIPPED`, evidence source (unit, mock, native, or live), commit link, and untested scenarios. Do not extrapolate Rust test results to macOS Keychain, Apple entitlements, or a real cloud API. Mac checks performed by the owner are valid only for the recorded SHA and commands.
+Use the relevant `scripts/test-macos-*.sh` command for changed macOS, Worker, storage, schedule, Keychain, or Scenario behavior. Run `python3 -m json.tool docs/design/tokens.json >/dev/null` when the token file changes. Native checks require a supported Mac.
 
-If a Mac is unavailable, run available Rust and static checks. Stop only the corresponding native gate and do not claim release readiness. If the Hub is unavailable, run standard commands and review without it. Hosted CI does not prove real integration by itself.
+## Publication and release evidence
 
-## Context Transfer Check
-
-Before an independent implementation session, perform a read-only context check. Do not edit files or commit during this check.
-
-1. Record current `HEAD` and `git status -sb` when the local tree is available.
-2. Map existing `JobStore`, `jobs_ffi.rs`, `JobInventory.swift`, `verification.rs`, and `local_fs.rs` APIs. State the difference between read-only inventory and execution.
-3. Define one minimal functional acceptance scope: no-overwrite create, durable attempt before effect, verified or `UNKNOWN` outcome, FFI command, real UI status, and negative tests.
-4. List conditions that require owner input: new data-loss risk, policy conflict, missing Apple entitlement, production credentials or consent, or an undefined distribution decision.
-5. State the code and security review plan, supported test commands, and unconfirmed real-Mac or live-cloud checks.
-
-The context check passes only when it matches current code and preserves safety policy. It fails if it proposes a second JobStore, disables consent, treats a mock as production end-to-end behavior, creates BackupSet, introduces a normal branch workflow, or starts a file effect without durable attempt preparation. If repository access is unavailable, record the check as unavailable and do not infer the missing state.
+Before commit, push, or PR, run the project-scoped AI Docs Hub pre-publish gate and repeat code and security review for the exact patch fingerprint. Record the base and final SHA, command, environment, result, evidence layer, and untested cases in the applicable GitHub Issue or handoff. Use `PASS`, `FAIL`, `BLOCKED`, or `SKIPPED`. Do not infer unavailable evidence.
