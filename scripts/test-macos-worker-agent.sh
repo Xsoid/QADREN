@@ -96,6 +96,36 @@ fi
 FIRST_PID="$(worker_pid)"
 echo "   launchd Worker pid $FIRST_PID"
 
+if [[ "${QADREN_SLEEP_TEST:-}" == "1" ]]; then
+  step "Sleep: a slot that falls during Mac sleep runs once after wake"
+  SRC="$TEST_ROOT/src"; DST="$TEST_ROOT/dst"; mkdir -p "$SRC" "$DST"
+  printf 'made after wake\n' > "$SRC/after-wake.txt"
+  TZ_NAME="$(readlink /etc/localtime | sed 's#.*/zoneinfo/##')"
+  read -r DOW HOUR MINUTE <<<"$(date -v+150S '+%u %H %M')"
+  QADREN_DATA_ROOT="$DATA" "$REGTOOL" setup-scheduled "E2E sleep" "$SRC" "$DST" "$TZ_NAME" $((DOW - 1)) $((10#$HOUR)) $((10#$MINUTE)) >/dev/null \
+    || fail "could not prepare the scheduled Scenario"
+  quit_app
+  echo "   slot at $HOUR:$MINUTE. Put the Mac to sleep now and wake it after $HOUR:$MINUTE + 2 minutes."
+  # Detect sleep: a short wall-clock wait that takes much longer than asked.
+  SLEPT=0
+  for _ in $(seq 1 300); do
+    before=$(date +%s); sleep 2; after=$(date +%s)
+    if (( after - before > 60 )); then SLEPT=$((after - before)); break; fi
+  done
+  (( SLEPT > 0 )) || fail "no Mac sleep was detected within 10 minutes"
+  echo "   the Mac slept for about $SLEPT s; woke at $(date '+%H:%M:%S')"
+  [[ "$(date +%s)" -gt "$(date -j -f '%H:%M' "$HOUR:$MINUTE" +%s)" ]] || echo "   NOTE: the Mac woke before the slot; the slot runs normally"
+  wait_for 240 test -f "$DST/after-wake.txt" || fail "the slot missed during sleep did not run after wake"
+  cmp -s "$SRC/after-wake.txt" "$DST/after-wake.txt" || fail "bytes differ after wake"
+  sleep 65
+  SID="$(sqlite3 "$DATA/connections.sqlite3" "select id from scenarios where name='E2E sleep'")"
+  RUNS="$(sqlite3 "$DATA/jobs.sqlite3" "select count(*) from jobs where scenario_id='$SID' and id like 'schedule-%' and id not like 'schedule-copy-%'")"
+  [[ "$RUNS" == 1 ]] || fail "the slot ran $RUNS times after wake"
+  worker_running || fail "the Worker does not answer after wake"
+  echo "PASS: a slot missed during Mac sleep ran exactly once after wake"
+  exit 0
+fi
+
 step "A schedule is set and the user quits QADREN"
 SRC="$TEST_ROOT/src"; DST="$TEST_ROOT/dst"; mkdir -p "$SRC" "$DST"
 printf 'made by the background Worker\n' > "$SRC/after-quit.txt"

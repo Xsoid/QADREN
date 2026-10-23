@@ -161,16 +161,25 @@ fn matches_conflict_snapshot(
 
 /// Local metadata revisions contain mtime seconds and nanoseconds. This is
 /// only an ordering signal for the same Local Filesystem adapter contract.
-fn local_snapshot_modified_at(version: &ConfirmedFileVersion) -> Option<(i64, u32)> {
+/// Modification time from a Local object revision, in epoch seconds. The
+/// current format is `local:<dev>:<ino>:<hex bits of a double>`; older stored
+/// revisions use `<seconds>:<nanoseconds>[:<ctime>...]`.
+fn local_snapshot_modified_at(version: &ConfirmedFileVersion) -> Option<f64> {
     let mut fields = version.object_revision.as_deref()?.split(':');
     if fields.next()? != "local" {
         return None;
     }
     let _device = fields.next()?;
     let _inode = fields.next()?;
-    let seconds = fields.next()?.parse().ok()?;
-    let nanoseconds = fields.next()?.parse().ok()?;
-    Some((seconds, nanoseconds))
+    let first = fields.next()?;
+    match fields.next() {
+        None => Some(f64::from_bits(u64::from_str_radix(first, 16).ok()?)),
+        Some(nanoseconds) => {
+            let seconds: i64 = first.parse().ok()?;
+            let nanoseconds: u32 = nanoseconds.parse().ok()?;
+            Some(seconds as f64 + f64::from(nanoseconds) / 1e9)
+        }
+    }
 }
 
 fn source_snapshot_is_newer(

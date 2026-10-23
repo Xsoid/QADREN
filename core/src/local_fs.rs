@@ -107,6 +107,25 @@ pub struct LocalStorageSpace {
     pub available_bytes: u64,
 }
 
+/// Modification time as the bits of a double of epoch seconds. iCloud Drive
+/// keeps mtime as a double: a download restores the nearest nanosecond of that
+/// double (observed -56..+102 ns). Both values map to the same double, so a
+/// download or eviction never changes this value. A real edit does.
+pub(crate) fn provider_stable_mtime(seconds: i64, nanoseconds: i64) -> u64 {
+    (seconds as f64 + nanoseconds as f64 / 1e9).to_bits()
+}
+
+/// Exact mtime match, except for a source that the read downloaded, where the
+/// provider's double representation must match.
+#[cfg(unix)]
+fn same_modification_time(before: (i64, i64), after: (i64, i64), materialized: bool) -> bool {
+    if materialized {
+        provider_stable_mtime(before.0, before.1) == provider_stable_mtime(after.0, after.1)
+    } else {
+        before == after
+    }
+}
+
 #[cfg(unix)]
 fn validate_copy_source(
     before: &std::fs::Metadata,
@@ -134,8 +153,11 @@ fn validate_copy_source(
         || before.dev() != after.dev()
         || before.ino() != after.ino()
         || before.len() != after.len()
-        || before.mtime() != after.mtime()
-        || before.mtime_nsec() != after.mtime_nsec()
+        || !same_modification_time(
+            (before.mtime(), before.mtime_nsec()),
+            (after.mtime(), after.mtime_nsec()),
+            materialized,
+        )
         || (ctime_changed && !materialized)
     {
         return Err(LocalError::OutcomeUnknown(io::Error::other(
@@ -3348,6 +3370,44 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn downloaded_placeholder_tolerates_only_provider_mtime_rounding() {
+        // Observed on iCloud Drive: ...570309 ns became ...570325 ns.
+        let second = 1_792_777_907;
+        assert!(same_modification_time(
+            (second, 345_570_309),
+            (second, 345_570_325),
+            true
+        ));
+        assert!(!same_modification_time(
+            (second, 345_570_309),
+            (second, 345_570_325),
+            false
+        ));
+        // A real edit moves mtime by much more than the double spacing.
+        assert!(!same_modification_time(
+            (second, 345_570_309),
+            (second, 345_571_309),
+            true
+        ));
+        assert!(!same_modification_time(
+            (second, 345_570_309),
+            (second + 1, 345_570_309),
+            true
+        ));
+        // A download never changes the revision value, also at a microsecond
+        // or second boundary: the restored nanoseconds map to the same double.
+        for nanos in [345_570_309_i64, 345_570_999, 999_999_950, 1] {
+            let value = f64::from_bits(provider_stable_mtime(second, nanos));
+            let restored = ((value - second as f64) * 1e9).round() as i64;
+            assert_eq!(
+                provider_stable_mtime(second, nanos),
+                provider_stable_mtime(second, restored),
+                "{nanos}"
+            );
+        }
+    }
+
     #[test]
     fn object_revision_ignores_a_metadata_only_ctime_change() {
         use std::os::unix::fs::PermissionsExt;

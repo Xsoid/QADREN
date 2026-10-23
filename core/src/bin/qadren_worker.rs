@@ -718,7 +718,7 @@ fn execute_create_batch_id(
                     &scenario.left_connection_id,
                 )
             };
-        let state = match run_local_scenario_file_copy(
+        let result = run_local_scenario_file_copy(
             &paths.jobs,
             &paths.registry,
             &receipt.scenario.scenario_id,
@@ -730,7 +730,16 @@ fn execute_create_batch_id(
             destination_connection,
             Path::new(&child.relative_path),
             &child.job_id,
-        ) {
+        );
+        if let Err(error) = &result {
+            // Diagnostics: the error kind only, never a path or content.
+            eprintln!(
+                "qadren-worker: batch child {} failed: {}",
+                child.job_id,
+                copy_error_kind(error)
+            );
+        }
+        let state = match result {
             Ok(LocalFileCopyStatus::Completed)
             | Ok(LocalFileCopyStatus::Existing(JobState::Completed)) => "completed",
             Ok(LocalFileCopyStatus::Existing(JobState::Failed)) => "failed",
@@ -754,6 +763,36 @@ fn execute_create_batch_id(
         Err("batch_child_failed")
     } else {
         Ok("completed")
+    }
+}
+
+/// A stable, path-free name for a copy error, for the Worker log.
+fn copy_error_kind(error: &LocalFileCopyError) -> String {
+    match error {
+        LocalFileCopyError::OutcomeUnknown(inner) => {
+            format!("outcome_unknown({})", local_error_kind(inner))
+        }
+        LocalFileCopyError::Local(inner) => format!("local({})", local_error_kind(inner)),
+        other => format!("{other:?}")
+            .chars()
+            .take_while(|c| *c != '(')
+            .collect(),
+    }
+}
+
+fn local_error_kind(error: &qadren_core::local_fs::LocalError) -> String {
+    use qadren_core::local_fs::LocalError;
+    match error {
+        LocalError::Io(io) | LocalError::OutcomeUnknown(io) => {
+            // io::Error messages from QADREN are fixed strings without paths.
+            format!(
+                "{:?}:{}",
+                io.kind(),
+                io.raw_os_error()
+                    .map_or_else(|| io.to_string(), |code| code.to_string())
+            )
+        }
+        other => format!("{other:?}"),
     }
 }
 

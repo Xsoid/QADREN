@@ -372,15 +372,19 @@ fn local_object_revision(info: &libc::stat) -> Option<String> {
     #[cfg(target_os = "macos")]
     {
         return Some(format!(
-            "local:{}:{}:{}:{}",
-            info.st_dev, info.st_ino, info.st_mtime, info.st_mtime_nsec,
+            "local:{}:{}:{:x}",
+            info.st_dev,
+            info.st_ino,
+            crate::local_fs::provider_stable_mtime(info.st_mtime, info.st_mtime_nsec),
         ));
     }
     #[cfg(target_os = "linux")]
     {
         return Some(format!(
-            "local:{}:{}:{}:{}",
-            info.st_dev, info.st_ino, info.st_mtim.tv_sec, info.st_mtim.tv_nsec,
+            "local:{}:{}:{:x}",
+            info.st_dev,
+            info.st_ino,
+            crate::local_fs::provider_stable_mtime(info.st_mtim.tv_sec, info.st_mtim.tv_nsec),
         ));
     }
     #[allow(unreachable_code)]

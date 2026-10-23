@@ -585,7 +585,8 @@ ax gone Настройки "*" "Выполнение пакета" 180
 done
 FP_SCENARIO="$(registry_sql "select id from scenarios where name='E2E file provider'")"
 [[ "$(jobs_sql "select count(*) from jobs where scenario_id='$FP_SCENARIO' and state='completed'")" == "$TOTAL" ]] \
-  || fail "provider Jobs: $(jobs_sql "select id, state from jobs where scenario_id='$FP_SCENARIO'" | tr '\n' ' ')"
+  || { grep "qadren-worker:" "$TEST_ROOT/worker.log" >&2 || true
+       fail "provider Jobs: $(jobs_sql "select id, state from jobs where scenario_id='$FP_SCENARIO'" | tr '\n' ' ')"; }
 ax press Настройки AXButton "Проверить план" 0
 ax wait Настройки AXStaticText "без действия" 20
 ax gone Настройки AXButton "Создать копию" 3
