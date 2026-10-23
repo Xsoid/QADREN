@@ -21,7 +21,7 @@ Status: **accepted owner decision, 2026-10-18**. This policy supersedes the earl
 - A Scenario root can be inside a File Provider folder, such as iCloud Drive with "Optimize Mac Storage". Files there can be dataless placeholders.
 - A metadata plan does not download placeholders. Only a Create or an Update reads the needed source file, and macOS downloads it as part of that read.
 - macOS can show a one-time system prompt for access to files that a provider manages. This is an operating-system permission, not a QADREN read-consent prompt. The user answers it.
-- A download or an eviction by macOS changes the file ctime and the dataless flag, but not the content. The Local object revision therefore uses device, inode, and modification time, not ctime, and a copy accepts a ctime change that comes from the download of the source.
+- A download or an eviction by macOS changes the file ctime and the dataless flag, but not the content. iCloud Drive also restores the modification time from a double of epoch seconds, which can move it by up to about 120 ns. The Local object revision therefore uses device, inode, and the modification time as that double, not ctime. A copy accepts these changes only for a source that the read downloaded.
 
 ## Crash Recovery
 
