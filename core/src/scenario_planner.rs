@@ -12,6 +12,12 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const NAME_COLLISION_REASON: &str =
     "names differ only by letter case or Unicode form and can name the same file";
 
+/// Reason for a path that is a symbolic link or special file on a side.
+/// QADREN does not follow or synchronize such entries, so the path must not
+/// be planned as a Create, an Update, or a deletion.
+pub const SKIPPED_ENTRY_REASON: &str =
+    "a symbolic link or special file has this name; QADREN does not synchronize it";
+
 /// Conservative comparison key: NFC form and lowercase. A false match only
 /// makes a path non-executable; it never authorizes an effect.
 pub fn name_key(path: &str) -> String {
@@ -235,6 +241,35 @@ pub fn plan(
     left_snapshot: &[ObservedFile],
     right_snapshot: &[ObservedFile],
 ) -> Result<Vec<PlanItem>, PlannerError> {
+    plan_with_skipped(
+        scenario,
+        reference,
+        baseline,
+        left_snapshot,
+        right_snapshot,
+        &[],
+        &[],
+    )
+}
+
+/// Like `plan`, with the relative paths of symbolic links and special files
+/// that each side skipped. A skipped path that also appears in the baseline or
+/// on the other side is never executable: a link that replaced a confirmed file
+/// must not look like a deletion, and a file must not be created over a link.
+pub fn plan_with_skipped(
+    scenario: &ScenarioDraft,
+    reference: &ScenarioReference,
+    baseline: &[FileSyncState],
+    left_snapshot: &[ObservedFile],
+    right_snapshot: &[ObservedFile],
+    skipped_left: &[String],
+    skipped_right: &[String],
+) -> Result<Vec<PlanItem>, PlannerError> {
+    let skipped = skipped_left
+        .iter()
+        .chain(skipped_right)
+        .map(|path| path.as_str())
+        .collect::<BTreeSet<_>>();
     scenario
         .validate()
         .map_err(|_| PlannerError::InvalidScenario)?;
@@ -296,7 +331,11 @@ pub fn plan(
             let left_change = delta(left_file, state.and_then(|entry| entry.left.as_ref()));
             let right_change = delta(right_file, state.and_then(|entry| entry.right.as_ref()));
             let collides = variants.get(&name_key(path)).copied().unwrap_or(0) > 1;
-            let action = if collides {
+            let action = if skipped.contains(path.as_str()) {
+                PlanAction::NeedsVerification {
+                    reason: SKIPPED_ENTRY_REASON,
+                }
+            } else if collides {
                 PlanAction::NeedsVerification {
                     reason: NAME_COLLISION_REASON,
                 }
@@ -376,6 +415,43 @@ mod tests {
             object_revision: version.object_revision.clone(),
             size: version.size,
             checksum_md5: version.checksum_md5.clone(),
+        }
+    }
+
+    #[test]
+    fn skipped_links_never_become_create_update_or_deletion() {
+        let confirmed_file = file("was-file.txt", "l1", None);
+        let baseline = FileSyncState {
+            scenario: reference(),
+            relative_path: "was-file.txt".into(),
+            left: Some(confirmed(&confirmed_file)),
+            right: Some(confirmed(&file("was-file.txt", "r1", None))),
+        };
+        for direction in [SyncDirection::LeftToRight, SyncDirection::Bidirectional] {
+            let items = plan_with_skipped(
+                &scenario(direction),
+                &reference(),
+                std::slice::from_ref(&baseline),
+                // The left file became a link; the right still has the file.
+                &[file("plain.txt", "l2", None)],
+                &[
+                    file("was-file.txt", "r1", None),
+                    file("link-on-left.txt", "r3", None),
+                ],
+                &["was-file.txt".into(), "link-on-left.txt".into()],
+                &[],
+            )
+            .unwrap();
+            for item in &items {
+                let expected = if item.relative_path == "plain.txt" {
+                    PlanAction::Create { from_left: true }
+                } else {
+                    PlanAction::NeedsVerification {
+                        reason: SKIPPED_ENTRY_REASON,
+                    }
+                };
+                assert_eq!(item.action, expected, "{}", item.relative_path);
+            }
         }
     }
 

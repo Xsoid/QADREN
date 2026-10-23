@@ -194,6 +194,9 @@ struct ScenarioSnapshotItem: Codable {
     let object_revision: String?
     let size: UInt64
     let checksum_md5: String?
+    /// A symbolic link or special file that the scan skipped. QADREN does not
+    /// synchronize it; the planner blocks its path.
+    var special: Bool? = nil
 }
 private struct ScenarioBaselineDispatchStatus: Decodable {
     let dispatched: Int
@@ -287,6 +290,8 @@ enum QADRENUserMessage {
             "Подключение сценария выключено или недоступно. Включите его в разделе «Подключения»."
         case "local_metadata_unavailable":
             "Не удалось прочитать папку. QADREN не открывает папки, в которых есть символические ссылки или специальные файлы, и не следует по ссылкам. Проверьте папку или выберите другую."
+        case "a symbolic link or special file has this name; QADREN does not synchronize it":
+            "Под этим именем находится символическая ссылка или специальный файл. QADREN такие объекты не синхронизирует, поэтому действий с этим путём нет."
         case "conflict_stale":
             "Файлы изменились после создания задачи конфликта. Обновите снимок конфликта."
         default:

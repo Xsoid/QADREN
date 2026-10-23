@@ -277,23 +277,32 @@ fn reconcile_unknown_scenario_creates(
     Ok(())
 }
 
-fn observed_files(root: &Path) -> Result<Vec<ObservedFile>, String> {
+/// Metadata of synchronizable files and the paths of skipped symbolic links
+/// and special files below one Scenario root.
+#[allow(clippy::type_complexity)]
+fn observed_files(root: &Path) -> Result<(Vec<ObservedFile>, Vec<String>), String> {
     let filesystem =
         LocalFilesystem::open(root).map_err(|_| "schedule_root_unavailable".to_string())?;
     filesystem
-        .list_tree(Path::new(""), MAX_SCHEDULE_SCAN_ENTRIES)
+        .list_tree_with_skipped(Path::new(""), MAX_SCHEDULE_SCAN_ENTRIES)
         .map_err(|_| "schedule_scan_unavailable".to_string())
-        .map(|entries| {
-            entries
-                .into_iter()
-                .filter(|(_, entry)| !entry.is_directory)
-                .map(|(path, entry)| ObservedFile {
-                    relative_path: path.to_string_lossy().into_owned(),
-                    object_revision: entry.object_revision,
-                    size: entry.size,
-                    checksum_md5: None,
-                })
-                .collect()
+        .map(|(entries, skipped)| {
+            (
+                entries
+                    .into_iter()
+                    .filter(|(_, entry)| !entry.is_directory)
+                    .map(|(path, entry)| ObservedFile {
+                        relative_path: path.to_string_lossy().into_owned(),
+                        object_revision: entry.object_revision,
+                        size: entry.size,
+                        checksum_md5: None,
+                    })
+                    .collect(),
+                skipped
+                    .into_iter()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect(),
+            )
         })
 }
 
@@ -403,10 +412,10 @@ fn execute_schedule_job(
         .ok_or_else(|| "schedule_scenario_unavailable".to_string())?;
     enabled_local_connection(registry, &scenario.left_connection_id)?;
     enabled_local_connection(registry, &scenario.right_connection_id)?;
-    let left = observed_files(Path::new(&scenario.left_root))?;
-    let right = observed_files(Path::new(&scenario.right_root))?;
+    let (left, skipped_left) = observed_files(Path::new(&scenario.left_root))?;
+    let (right, skipped_right) = observed_files(Path::new(&scenario.right_root))?;
     let plan = registry
-        .plan_scenario_dry_run(reference, &left, &right)
+        .plan_scenario_dry_run_with_skipped(reference, &left, &right, &skipped_left, &skipped_right)
         .map_err(|_| "schedule_plan_unavailable".to_string())?;
     let mut waiting_for_decision = false;
     for item in plan {

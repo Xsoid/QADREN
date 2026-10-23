@@ -37,6 +37,18 @@ struct ObservedFileInput {
     object_revision: Option<String>,
     size: u64,
     checksum_md5: Option<String>,
+    /// A symbolic link or special file that the snapshot skipped.
+    #[serde(default)]
+    special: bool,
+}
+
+/// Split a snapshot into synchronizable files and skipped special paths.
+fn split_snapshot(items: Vec<ObservedFileInput>) -> (Vec<ObservedFile>, Vec<String>) {
+    let (special, files): (Vec<_>, Vec<_>) = items.into_iter().partition(|item| item.special);
+    (
+        files.into_iter().map(Into::into).collect(),
+        special.into_iter().map(|item| item.relative_path).collect(),
+    )
 }
 
 #[derive(Deserialize)]
@@ -395,16 +407,16 @@ pub extern "C" fn qadren_scenarios_dry_run(
         revision,
     };
     with_registry(path, |db| {
-        let left_snapshot = left_snapshot
-            .into_iter()
-            .map(Into::into)
-            .collect::<Vec<_>>();
-        let right_snapshot = right_snapshot
-            .into_iter()
-            .map(Into::into)
-            .collect::<Vec<_>>();
+        let (left_snapshot, skipped_left) = split_snapshot(left_snapshot);
+        let (right_snapshot, skipped_right) = split_snapshot(right_snapshot);
         Ok(json!(db
-            .plan_scenario_dry_run(&reference, &left_snapshot, &right_snapshot)?
+            .plan_scenario_dry_run_with_skipped(
+                &reference,
+                &left_snapshot,
+                &right_snapshot,
+                &skipped_left,
+                &skipped_right,
+            )?
             .into_iter()
             .map(plan_item_value)
             .collect::<Vec<_>>()))

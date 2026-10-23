@@ -534,6 +534,34 @@ ax press Настройки AXButton "Проверить план" 0
 ax wait Настройки AXButton "Создать все: $((80 - AT_DISABLE))" 10
 fi
 
+if section links; then
+step "Links: symbolic links and special files are skipped and disclosed"
+KSRC="$TEST_ROOT/ksrc"; KDST="$TEST_ROOT/kdst"; mkdir -p "$KSRC" "$KDST"
+printf 'keep\n' > "$KSRC/keep.txt"
+ln -s keep.txt "$KSRC/link.txt"
+ln -s /private/tmp "$KSRC/outside-dir"
+mkfifo "$KSRC/pipe"
+to_scenario_list
+create_scenario "E2E links" "$KSRC" "$KDST"
+open_plan "E2E links"
+ax wait Настройки AXStaticText "Пропущено объектов, которые QADREN не синхронизирует" 10
+ax wait Настройки AXStaticText "в источнике 3, в назначении 0" 5
+ax wait Настройки AXButton "Создать все: 1"
+ax press Настройки AXButton "Создать все: 1"
+wait_for 20 test -f "$KDST/keep.txt" || fail "the regular file was not copied"
+ax gone Настройки "*" "Выполнение пакета" 20
+[[ "$(ls -A "$KDST")" == "keep.txt" ]] || fail "a link or special file reached the destination: $(ls -A "$KDST" | tr '\n' ' ')"
+
+step "Links: a confirmed file replaced by a link is not planned as a deletion"
+rm "$KSRC/keep.txt"
+ln -s /etc/hosts "$KSRC/keep.txt"
+ax press Настройки AXButton "Проверить план" 0
+ax wait Настройки AXStaticText "символическая ссылка или специальный файл" 10
+ax gone Настройки AXButton "Добавить в очередь конфликтов" 2
+ax gone Настройки AXButton "Создать копию" 2
+[[ "$(cat "$KDST/keep.txt")" == "keep" ]] || fail "the destination file changed"
+fi
+
 # File Provider compatibility. Runs only when E2E_SECTIONS names it and
 # FP_SOURCE points to an owner-approved provider folder with evicted
 # (dataless) files; FP_ORIG holds local copies of the same bytes. The

@@ -399,6 +399,22 @@ impl LocalFilesystem {
         }
     }
 
+    /// List regular files and directories and the names of skipped symbolic
+    /// links and special files. On non-Unix platforms nothing is skipped.
+    pub fn list_with_skipped(&self, path: &Path) -> Result<(Vec<LocalEntry>, Vec<String>)> {
+        if !path.as_os_str().is_empty() {
+            Self::relative(path)?;
+        }
+        #[cfg(unix)]
+        {
+            secure::list_with_skipped(&self.root_fd, path)
+        }
+        #[cfg(not(unix))]
+        {
+            self.list(path).map(|entries| (entries, Vec::new()))
+        }
+    }
+
     pub fn list(&self, path: &Path) -> Result<Vec<LocalEntry>> {
         if !path.as_os_str().is_empty() {
             Self::relative(path)?;
@@ -444,11 +460,27 @@ impl LocalFilesystem {
         path: &Path,
         max_entries: usize,
     ) -> Result<Vec<(std::path::PathBuf, LocalEntry)>> {
+        self.list_tree_with_skipped(path, max_entries)
+            .map(|(entries, _)| entries)
+    }
+
+    /// Like `list_tree`, and also return the relative paths of symbolic links
+    /// and special files that were skipped. They are never followed.
+    #[allow(clippy::type_complexity)]
+    pub fn list_tree_with_skipped(
+        &self,
+        path: &Path,
+        max_entries: usize,
+    ) -> Result<(
+        Vec<(std::path::PathBuf, LocalEntry)>,
+        Vec<std::path::PathBuf>,
+    )> {
         if !path.as_os_str().is_empty() {
             Self::relative(path)?;
         }
         let mut pending = vec![(path.to_path_buf(), 0usize)];
         let mut result = Vec::new();
+        let mut skipped = Vec::new();
         // An inode can be reached via more than one directory entry on some
         // filesystems. Never revisit it and accidentally scan a cycle.
         #[cfg(unix)]
@@ -464,7 +496,13 @@ impl LocalFilesystem {
                     return Err(LocalError::UnsafeEntry);
                 }
             }
-            let entries = self.list(&directory)?;
+            let (entries, skipped_names) = self.list_with_skipped(&directory)?;
+            for name in skipped_names {
+                if result.len() + skipped.len() >= max_entries {
+                    return Err(LocalError::UnsafeEntry);
+                }
+                skipped.push(directory.join(name));
+            }
             for entry in entries {
                 if result.len() >= max_entries {
                     return Err(LocalError::UnsafeEntry);
@@ -482,7 +520,8 @@ impl LocalFilesystem {
             }
         }
         result.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(result)
+        skipped.sort();
+        Ok((result, skipped))
     }
 
     /// Stable lexical pagination over a snapshot of directory metadata.
@@ -1484,10 +1523,10 @@ mod tests {
             adapter.stat(Path::new("entries/alias")),
             Err(LocalError::UnsafeEntry)
         ));
-        assert!(matches!(
-            adapter.list(Path::new("entries")),
-            Err(LocalError::UnsafeEntry)
-        ));
+        // A listing skips the link and reports it; stat still refuses it.
+        let (entries, skipped) = adapter.list_with_skipped(Path::new("entries")).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(skipped, vec!["alias".to_owned()]);
         fs::remove_file(root.join("entries").join("alias")).unwrap();
         let entries = adapter.list(Path::new("entries")).unwrap();
         assert_eq!(entries.len(), 1);
@@ -2270,16 +2309,31 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn list_tree_rejects_unsafe_symlink_without_partial_success() {
+    fn list_tree_skips_links_and_special_files_and_reports_them() {
         let root = sandbox();
         fs::create_dir(root.join("nested")).unwrap();
         fs::write(root.join("nested/file.txt"), b"data").unwrap();
+        // Owner decision 2026-10-23: skip links and special files, never
+        // follow them, and disclose them instead of rejecting the folder.
         std::os::unix::fs::symlink("../nested/file.txt", root.join("nested/alias")).unwrap();
+        std::os::unix::fs::symlink("/", root.join("outside-dir")).unwrap();
+        std::os::unix::net::UnixListener::bind(root.join("nested/socket")).unwrap();
         let adapter = LocalFilesystem::open(&root).unwrap();
-        assert!(matches!(
-            adapter.list_tree(Path::new(""), 100),
-            Err(LocalError::UnsafeEntry)
-        ));
+        let (entries, skipped) = adapter.list_tree_with_skipped(Path::new(""), 100).unwrap();
+        let names = entries
+            .iter()
+            .map(|(path, _)| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["nested", "nested/file.txt"]);
+        assert_eq!(
+            skipped,
+            vec![
+                std::path::PathBuf::from("nested/alias"),
+                std::path::PathBuf::from("nested/socket"),
+                std::path::PathBuf::from("outside-dir"),
+            ]
+        );
+        assert_eq!(adapter.list_tree(Path::new(""), 100).unwrap().len(), 2);
         fs::remove_dir_all(root).unwrap();
     }
 

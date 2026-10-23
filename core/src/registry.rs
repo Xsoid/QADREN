@@ -1871,6 +1871,18 @@ impl Registry {
         left_snapshot: &[ObservedFile],
         right_snapshot: &[ObservedFile],
     ) -> Result<Vec<PlanItem>> {
+        self.plan_scenario_dry_run_with_skipped(reference, left_snapshot, right_snapshot, &[], &[])
+    }
+
+    /// Plan with the paths of skipped symbolic links and special files.
+    pub fn plan_scenario_dry_run_with_skipped(
+        &self,
+        reference: &ScenarioReference,
+        left_snapshot: &[ObservedFile],
+        right_snapshot: &[ObservedFile],
+        skipped_left: &[String],
+        skipped_right: &[String],
+    ) -> Result<Vec<PlanItem>> {
         let stored = self
             .get_scenario_revision(&reference.scenario_id, reference.revision)?
             .ok_or(RegistryError::NotFound)?;
@@ -1897,12 +1909,14 @@ impl Registry {
             policies: ScenarioPolicies::default(),
         };
         let baseline = self.list_confirmed_file_states(reference)?;
-        scenario_planner::plan(
+        scenario_planner::plan_with_skipped(
             &scenario,
             reference,
             &baseline,
             left_snapshot,
             right_snapshot,
+            skipped_left,
+            skipped_right,
         )
         .map_err(|_| RegistryError::PlanningFailed)
     }

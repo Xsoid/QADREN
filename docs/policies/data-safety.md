@@ -37,6 +37,7 @@ For scheduled or unattended work, carry out ordinary reads and unambiguously saf
 - A confirmed replacement carries the metadata of both files from the plan that the user saw. The Worker refuses the replacement, before it creates a Job, if either file changed after planning. The user must check the plan again and give a new consent.
 - An interactive request for a superseded Scenario revision is refused. Staged schedule Jobs and confirmed batch receipts keep their pinned revision.
 - Two Local Filesystem roots of one Scenario must not be the same folder or be inside each other. The Registry refuses such a Scenario when it is saved. Executors still check the opened folders.
+- QADREN does not follow or synchronize symbolic links and special files (sockets, FIFOs, devices). A scan skips them, and the plan shows how many it skipped on each side. If a skipped path also appears in the confirmed baseline or on the other side, the plan marks it as "needs verification" and offers no Create, Update, or deletion for it. Owner decision on 2026-10-23.
 - Paths that differ only by letter case or Unicode form can name the same file on APFS. The plan marks them as "needs verification" and offers no Create or Update for them.
 
 ## Main MacBook Limitations

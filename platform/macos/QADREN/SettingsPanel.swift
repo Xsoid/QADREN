@@ -621,6 +621,9 @@ private struct ScenarioDryRunView: View {
             if let error {
                 SettingsNotice(text: error, symbol: "exclamationmark.triangle")
             }
+            if let skippedNotice {
+                SettingsNotice(text: skippedNotice, symbol: "link")
+            }
             if isLoading {
                 ProgressView("Чтение метаданных и построение плана…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1221,6 +1224,17 @@ private struct ScenarioDryRunView: View {
 
     /// Core reasons are stable English codes. Show known reasons in Russian
     /// and keep an unknown reason visible instead of hiding it.
+    /// Truthful scope: count the links and special files that the scan skipped.
+    private var skippedNotice: String? {
+        let left = leftSnapshot.filter { $0.special == true }.count
+        let right = rightSnapshot.filter { $0.special == true }.count
+        guard left + right > 0 else { return nil }
+        let sides = scenario.direction == "bidirectional"
+            ? "слева \(left), справа \(right)"
+            : "в источнике \(left), в назначении \(right)"
+        return "Пропущено объектов, которые QADREN не синхронизирует (символические ссылки и специальные файлы): \(sides). Они не копируются, не изменяются и не удаляются."
+    }
+
     private func reasonTitle(_ reason: String) -> String {
         switch reason {
         case "destination changed since the confirmed baseline":
@@ -1234,7 +1248,7 @@ private struct ScenarioDryRunView: View {
         case "names differ only by letter case or Unicode form and can name the same file":
             "Имена отличаются только регистром букв или формой Unicode. На этом Mac они могут означать один и тот же файл, поэтому QADREN не копирует их автоматически."
         default:
-            reason
+            QADRENUserMessage.text(for: reason)
         }
     }
 

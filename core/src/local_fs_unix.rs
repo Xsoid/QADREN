@@ -555,6 +555,13 @@ pub fn is_dataless(root: &File, target: &Path) -> Result<bool> {
 /// Enumerate via fdopendir/readdir. On macOS /dev/fd/N is not a
 /// directory pathname usable by read_dir, so enumeration must use the fd.
 pub fn list(root: &File, relative: &Path) -> Result<Vec<LocalEntry>> {
+    list_with_skipped(root, relative).map(|(entries, _)| entries)
+}
+
+/// Enumerate regular files and directories. Symbolic links and special files
+/// (sockets, FIFOs, devices) are never followed or synchronized; their names
+/// are returned separately, so callers can disclose them truthfully.
+pub fn list_with_skipped(root: &File, relative: &Path) -> Result<(Vec<LocalEntry>, Vec<String>)> {
     let dir = directory(root, relative)?;
     let owned_fd = dir.try_clone()?.into_raw_fd();
     let stream = unsafe { libc::fdopendir(owned_fd) };
@@ -570,6 +577,7 @@ pub fn list(root: &File, relative: &Path) -> Result<Vec<LocalEntry>> {
     }
     let stream = DirectoryStream(stream);
     let mut entries = Vec::new();
+    let mut skipped = Vec::new();
     loop {
         #[cfg(target_os = "macos")]
         let errno = unsafe { libc::__error() };
@@ -590,8 +598,17 @@ pub fn list(root: &File, relative: &Path) -> Result<Vec<LocalEntry>> {
             continue;
         }
         let leaf = CString::new(bytes).map_err(|_| LocalError::InvalidPath)?;
-        let (is_directory, size, object_revision) = leaf_metadata(&dir, &leaf)?;
         let name = std::str::from_utf8(bytes).map_err(|_| LocalError::UnsafeEntry)?;
+        let (is_directory, size, object_revision) = match leaf_metadata(&dir, &leaf) {
+            Ok(metadata) => metadata,
+            // leaf_metadata reports UnsafeEntry only for an entry that is not a
+            // regular file or directory, such as a symbolic link.
+            Err(LocalError::UnsafeEntry) => {
+                skipped.push(name.to_owned());
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         entries.push(LocalEntry {
             name: name.to_owned(),
             is_directory,
@@ -604,7 +621,8 @@ pub fn list(root: &File, relative: &Path) -> Result<Vec<LocalEntry>> {
         // Distinct non-UTF8 names must not silently collapse after lossy conversion.
         return Err(LocalError::UnsafeEntry);
     }
-    Ok(entries)
+    skipped.sort();
+    Ok((entries, skipped))
 }
 
 /// Check sibling names without stat-ing unrelated entries. A directory may

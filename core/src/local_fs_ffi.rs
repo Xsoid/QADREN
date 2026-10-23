@@ -23,21 +23,33 @@ fn response(value: serde_json::Value) -> *mut c_char {
 fn metadata_snapshot(root: &str) -> crate::local_fs::Result<serde_json::Value> {
     const MAX_ENTRIES: usize = 10_000;
     LocalFilesystem::open(Path::new(root)).and_then(|fs| {
-        fs.list_tree(Path::new(""), MAX_ENTRIES).map(|entries| {
-            json!(entries
-                .into_iter()
-                .filter_map(|(relative_path, entry)| {
-                    (!entry.is_directory).then(|| {
-                        json!({
-                            "relative_path": relative_path.to_string_lossy(),
-                            "object_revision": entry.object_revision,
-                            "size": entry.size,
-                            "checksum_md5": null
+        fs.list_tree_with_skipped(Path::new(""), MAX_ENTRIES)
+            .map(|(entries, skipped)| {
+                // Skipped links and special files are listed as `special` so the
+                // planner can block their paths and the UI can disclose them.
+                json!(entries
+                    .into_iter()
+                    .filter_map(|(relative_path, entry)| {
+                        (!entry.is_directory).then(|| {
+                            json!({
+                                "relative_path": relative_path.to_string_lossy(),
+                                "object_revision": entry.object_revision,
+                                "size": entry.size,
+                                "checksum_md5": null
+                            })
                         })
                     })
-                })
-                .collect::<Vec<_>>())
-        })
+                    .chain(skipped.into_iter().map(|relative_path| {
+                        json!({
+                            "relative_path": relative_path.to_string_lossy(),
+                            "object_revision": null,
+                            "size": 0,
+                            "checksum_md5": null,
+                            "special": true
+                        })
+                    }))
+                    .collect::<Vec<_>>())
+            })
     })
 }
 
