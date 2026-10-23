@@ -363,29 +363,24 @@ fn directory(root: &File, relative: &Path) -> Result<File> {
 
 /// Read leaf metadata without opening file content. This avoids triggering
 /// placeholder materialization through metadata-only list/stat calls.
+///
+/// The revision deliberately omits ctime. macOS changes ctime when it
+/// downloads or evicts a File Provider placeholder (iCloud Drive and similar),
+/// which is not a content change. With ctime, every eviction would look like
+/// an edit and the Scenario baseline would never stay confirmed.
 fn local_object_revision(info: &libc::stat) -> Option<String> {
     #[cfg(target_os = "macos")]
     {
         return Some(format!(
-            "local:{}:{}:{}:{}:{}:{}",
-            info.st_dev,
-            info.st_ino,
-            info.st_mtime,
-            info.st_mtime_nsec,
-            info.st_ctime,
-            info.st_ctime_nsec,
+            "local:{}:{}:{}:{}",
+            info.st_dev, info.st_ino, info.st_mtime, info.st_mtime_nsec,
         ));
     }
     #[cfg(target_os = "linux")]
     {
         return Some(format!(
-            "local:{}:{}:{}:{}:{}:{}",
-            info.st_dev,
-            info.st_ino,
-            info.st_mtim.tv_sec,
-            info.st_mtim.tv_nsec,
-            info.st_ctim.tv_sec,
-            info.st_ctim.tv_nsec,
+            "local:{}:{}:{}:{}",
+            info.st_dev, info.st_ino, info.st_mtim.tv_sec, info.st_mtim.tv_nsec,
         ));
     }
     #[allow(unreachable_code)]

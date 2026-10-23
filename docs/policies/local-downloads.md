@@ -16,6 +16,13 @@ Status: **accepted owner decision, 2026-10-18**. This policy supersedes the earl
 - Before a mass deletion proposal, show affected files, count and known consequences, and require explicit confirmation; a general schedule switch is not approval of new mass-deletion effects.
 - If an operation cannot be limited to the selected files, report the limitation and the **actual known scope** before execution. Do not describe an overbroad operation as a selected-file action. Obtain approval for the described broader scope if it can be bounded; otherwise explain the inability to enforce an exact boundary.
 
+## File Provider Placeholders
+
+- A Scenario root can be inside a File Provider folder, such as iCloud Drive with "Optimize Mac Storage". Files there can be dataless placeholders.
+- A metadata plan does not download placeholders. Only a Create or an Update reads the needed source file, and macOS downloads it as part of that read.
+- macOS can show a one-time system prompt for access to files that a provider manages. This is an operating-system permission, not a QADREN read-consent prompt. The user answers it.
+- A download or an eviction by macOS changes the file ctime and the dataless flag, but not the content. The Local object revision therefore uses device, inode, and modification time, not ctime, and a copy accepts a ctime change that comes from the download of the source.
+
 ## Crash Recovery
 
 - After an interrupted or uncertain effect, QADREN automatically performs available **non-mutating, read-only reconciliation**, including reading required metadata or content. This does not require another confirmation.

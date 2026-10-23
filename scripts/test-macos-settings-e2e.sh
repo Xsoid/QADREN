@@ -57,6 +57,8 @@ fail() {
     "$DRIVER" "$APP_PID" dump Настройки >"$TEST_ROOT/failure-dump.txt" 2>/dev/null || true
     sed -n 1,80p "$TEST_ROOT/failure-dump.txt" >&2
   fi
+  # Debug aid: keep the app open for inspection.
+  [[ -n "${E2E_PAUSE_ON_FAIL:-}" ]] && { echo "paused: pid $APP_PID root $TEST_ROOT" >&2; sleep 600; }
   exit 1
 }
 ax() { "$DRIVER" "$APP_PID" "$@" || fail "step failed: $*"; }
@@ -76,7 +78,9 @@ choose_folder() {
   ax press Настройки AXButton "Выбрать папку в Finder"
   ax wait Настройки AXButton "OKButton"
   ax press Настройки AXButton "OKButton"
-  ax wait Настройки AXStaticText "$folder"
+  # A provider folder can show a one-time macOS access prompt; the owner
+  # answers it. Wait long enough for that answer.
+  ax wait Настройки AXStaticText "$folder" 120
   ax press Настройки AXButton "Использовать эту папку"
   ax gone Настройки AXButton "Использовать эту папку"
 }
@@ -521,6 +525,47 @@ ax gone Настройки AXStaticText "Изменения не найдены"
 regtool local-enabled true
 ax press Настройки AXButton "Проверить план" 0
 ax wait Настройки AXButton "Создать все: $((80 - AT_DISABLE))" 10
+fi
+
+# File Provider compatibility. Runs only when E2E_SECTIONS names it and
+# FP_SOURCE points to an owner-approved provider folder with evicted
+# (dataless) files; FP_ORIG holds local copies of the same bytes. The
+# caller owns and removes FP_SOURCE; this section writes only to TEST_ROOT.
+if [[ " ${E2E_SECTIONS:-} " == *" fileprovider "* ]]; then
+step "File Provider: a metadata plan does not download, a Create reads the placeholder"
+[[ -d "${FP_SOURCE:-}" && -d "${FP_ORIG:-}" ]] || fail "set FP_SOURCE and FP_ORIG for the fileprovider section"
+dataless_count() { find "$FP_SOURCE" -type f -flags +dataless | wc -l | tr -d ' '; }
+TOTAL="$(find "$FP_SOURCE" -type f | wc -l | tr -d ' ')"
+[[ "$(dataless_count)" == "$TOTAL" ]] || fail "FP_SOURCE files must be evicted placeholders before the test"
+FPDST="$TEST_ROOT/fpdst"; mkdir -p "$FPDST"
+to_scenario_list
+create_scenario "E2E file provider" "$FP_SOURCE" "$FPDST"
+open_plan "E2E file provider"
+ax wait Настройки AXButton "Создать все: $TOTAL" 20
+[[ "$(dataless_count)" == "$TOTAL" ]] || fail "the metadata plan downloaded provider content"
+ax press Настройки AXButton "Создать все: $TOTAL"
+ax gone Настройки "*" "Выполнение пакета" 180
+(cd "$FP_ORIG" && find . -type f) | while read -r f; do
+  cmp -s "$FP_ORIG/$f" "$FPDST/$f" || fail "provider file was not copied exactly: $f"
+done
+FP_SCENARIO="$(registry_sql "select id from scenarios where name='E2E file provider'")"
+[[ "$(jobs_sql "select count(*) from jobs where scenario_id='$FP_SCENARIO' and state='completed'")" == "$TOTAL" ]] \
+  || fail "provider Jobs: $(jobs_sql "select id, state from jobs where scenario_id='$FP_SCENARIO'" | tr '\n' ' ')"
+ax press Настройки AXButton "Проверить план" 0
+ax wait Настройки AXStaticText "без действия" 20
+ax gone Настройки AXButton "Создать копию" 3
+# Evict the sources again. A download or eviction is not a content change,
+# so the confirmed baseline must stay valid.
+if command -v brctl >/dev/null; then
+  (cd "$FP_SOURCE" && find . -type f | while read -r f; do brctl evict "$f" >/dev/null 2>&1 || true; done)
+  wait_for 30 bash -c "[[ \$(find '$FP_SOURCE' -type f -flags +dataless | wc -l | tr -d ' ') == $TOTAL ]]" \
+    || fail "provider files could not be evicted again"
+  ax press Настройки AXButton "Проверить план" 0
+  ax wait Настройки AXStaticText "без действия" 20
+  ax gone Настройки AXStaticText "изменён" 3
+  ax gone Настройки AXButton "Заменить файл" 2
+  [[ "$(dataless_count)" == "$TOTAL" ]] || fail "the plan after eviction downloaded provider content"
+fi
 fi
 
 echo "Settings native E2E passed"

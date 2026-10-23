@@ -118,14 +118,25 @@ fn validate_copy_source(
     // Compare the opened inode, not the source pathname. Nanosecond mtime
     // and ctime catch more same-length mutations than modified() alone.
     // This remains best-effort detection, not an immutable snapshot.
+    // Reading a macOS dataless placeholder makes the OS download it. That
+    // clears SF_DATALESS and changes ctime, but not the content identity.
+    #[cfg(target_os = "macos")]
+    let materialized = {
+        use std::os::macos::fs::MetadataExt as _;
+        const SF_DATALESS: u32 = 0x4000_0000;
+        before.st_flags() & SF_DATALESS != 0 && after.st_flags() & SF_DATALESS == 0
+    };
+    #[cfg(not(target_os = "macos"))]
+    let materialized = false;
+    let ctime_changed =
+        before.ctime() != after.ctime() || before.ctime_nsec() != after.ctime_nsec();
     if bytes != before.len()
         || before.dev() != after.dev()
         || before.ino() != after.ino()
         || before.len() != after.len()
         || before.mtime() != after.mtime()
         || before.mtime_nsec() != after.mtime_nsec()
-        || before.ctime() != after.ctime()
-        || before.ctime_nsec() != after.ctime_nsec()
+        || (ctime_changed && !materialized)
     {
         return Err(LocalError::OutcomeUnknown(io::Error::other(
             "source metadata changed during local copy",
@@ -3283,6 +3294,28 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn object_revision_ignores_a_metadata_only_ctime_change() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = sandbox();
+        fs::write(root.join("placeholder.txt"), b"content").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let before = adapter.stat(Path::new("placeholder.txt")).unwrap();
+        // chmod changes only ctime, like a File Provider download or eviction.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::set_permissions(
+            root.join("placeholder.txt"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let after = adapter.stat(Path::new("placeholder.txt")).unwrap();
+        assert_eq!(before.object_revision, after.object_revision);
+        fs::write(root.join("placeholder.txt"), b"changed").unwrap();
+        let edited = adapter.stat(Path::new("placeholder.txt")).unwrap();
+        assert_ne!(before.object_revision, edited.object_revision);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn staged_link_post_publish_io_error_keeps_both_names() {
         let root = sandbox();
