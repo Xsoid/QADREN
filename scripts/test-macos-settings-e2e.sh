@@ -682,6 +682,33 @@ ax toggle Настройки "Приостановить автоматичес�
 sleep 70
 [[ ! -e "$SDST/paused.txt" ]] || fail "a slot missed while paused ran after resume"
 
+step "Schedule: a two-way slot missed while the Worker is stopped runs once after restart"
+TL="$TEST_ROOT/sched-left"; TR="$TEST_ROOT/sched-right"; mkdir -p "$TL" "$TR"
+printf 'from the left\n' > "$TL/left-new.txt"
+printf 'from the right\n' > "$TR/right-new.txt"
+to_scenario_list
+create_scenario "E2E schedule two-way" "$TL" "$TR" two_way
+open_schedules "E2E schedule two-way"
+add_next_slot
+ax close Настройки
+kill "$WORKER_PID"; wait "$WORKER_PID" 2>/dev/null || true
+sleep 100
+[[ ! -e "$TR/left-new.txt" && ! -e "$TL/right-new.txt" ]] || fail "files changed while the Worker was stopped"
+start_worker
+wait_for 150 bash -c "[[ -f '$TR/left-new.txt' && -f '$TL/right-new.txt' ]]" \
+  || fail "the missed two-way slot did not run after the Worker restart"
+cmp -s "$TL/left-new.txt" "$TR/left-new.txt" && cmp -s "$TR/right-new.txt" "$TL/right-new.txt" \
+  || fail "two-way scheduled bytes differ"
+TW_ID="$(registry_sql "select id from scenarios where name='E2E schedule two-way'")"
+sleep 65
+COORDINATORS="$(jobs_sql "select count(*) from jobs where scenario_id='$TW_ID' and id like 'schedule-%' and id not like 'schedule-copy-%'")"
+[[ "$COORDINATORS" == 1 ]] || fail "the missed slot ran $COORDINATORS times: $(jobs_sql "select id, state from jobs where scenario_id='$TW_ID'" | tr '\n' ' ')"
+[[ "$(jobs_sql "select count(*) from jobs where scenario_id='$TW_ID' and state<>'completed'")" == 0 ]] \
+  || fail "a two-way scheduled Job did not complete: $(jobs_sql "select id, state from jobs where scenario_id='$TW_ID'" | tr '\n' ' ')"
+ax menu Window Настройки
+ax wait Настройки AXStaticText "Сценарии" 10
+open_schedules "E2E schedule"
+
 step "Schedule: a disabled connection fails the slot before any effect"
 add_next_slot
 regtool local-enabled false
