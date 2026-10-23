@@ -4,6 +4,8 @@
 
 **Separate "Settings" window**, called from MenuBarExtra, widget inspector, and system menus. Navigation **is permitted here**; it DOES NOT become the monitoring panel Sidebar. Window id `scenario-settings` is kept for deep links. "Application Settings" is one section of the left menu, not a separate window.
 
+The sidebar button has one fixed place: in the titlebar, right after the QADREN mark. It hides and shows the section sidebar and does not move when the sidebar is hidden. The system sidebar toggle is removed, because it moves between the sidebar and the toolbar and can fall into the toolbar overflow menu. Opening the window does not put the keyboard focus on a control. The titlebar has one plain background in both sidebar states; the window keeps the sidebar state.
+
 Recommended 2-column layout: a narrow permanent navigation with sections on the left, and a list + inspector or a specific entity editor on the right. For small widths, use a navigation stack without two nested permanently visible sidebars. On macOS, use native `NavigationSplitView`, `Form`, `Table/List`, `Toolbar`, and native fields styled with semantic tokens; do not change panels into a glowing HUD.
 
 ## 2. Structure

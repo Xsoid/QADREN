@@ -8,6 +8,8 @@ struct MainView: View {
     @SceneStorage("qadren.monitoring.panel-id") private var monitoringPanelID = ""
     @StateObject private var feed = MonitoringFeed()
     @State private var isEditingLayout = false
+    /// Survives a recreated window content and remembers the user's choice.
+    @SceneStorage("qadren.settings.sidebar-hidden") private var settingsSidebarHidden = false
     let workspace: DispatcherSection
 
     init(workspace: DispatcherSection = .monitoring) {
@@ -24,12 +26,14 @@ struct MainView: View {
         .qadrenAccessibilityPresentation()
         .tint(QDTheme.color(.focus, for: colorScheme))
         .navigationTitle(workspace.title)
-        .background(TitlebarLogoAccessory().frame(width: 0, height: 0))
-        .background {
-            if workspace == .monitoring {
-                InitialFocusReset().frame(width: 0, height: 0)
-            }
-        }
+        .background(
+            TitlebarLogoAccessory(
+                toggleSidebar: workspace == .scenarios ? toggleSettingsSidebar : nil,
+                sidebarVisible: !settingsSidebarHidden
+            )
+            .frame(width: 0, height: 0)
+        )
+        .background(InitialFocusReset().frame(width: 0, height: 0))
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Menu {
@@ -277,7 +281,19 @@ struct MainView: View {
     }
 
     private var scenarioSettingsWorkspace: some View {
-        SettingsPanelView(connections: connections)
+        SettingsPanelView(
+            connections: connections,
+            sidebarVisibility: Binding(
+                get: { settingsSidebarHidden ? .detailOnly : .all },
+                set: { settingsSidebarHidden = $0 == .detailOnly }
+            )
+        )
+    }
+
+    private func toggleSettingsSidebar() {
+        withAnimation {
+            settingsSidebarHidden.toggle()
+        }
     }
 
     private func refreshCurrentWorkspace() {

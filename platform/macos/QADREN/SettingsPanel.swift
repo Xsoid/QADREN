@@ -174,6 +174,8 @@ private enum SettingsPanelSection: String, CaseIterable, Hashable, Identifiable 
 
 struct SettingsPanelView: View {
     @ObservedObject var connections: StorageConnections
+    /// The window titlebar owns the sidebar button; see TitlebarLogoAccessory.
+    @Binding var sidebarVisibility: NavigationSplitViewVisibility
     @StateObject private var scenarios = ScenarioSettings()
     @State private var selection: SettingsPanelSection? = .connections
     @State private var isEditingScenario = false
@@ -182,7 +184,7 @@ struct SettingsPanelView: View {
     @State private var previewScenario: ScenarioEntry?
 
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $sidebarVisibility) {
             List(selection: $selection) {
                 Section("Настройка") {
                     ForEach(SettingsPanelSection.allCases) { section in
@@ -192,6 +194,8 @@ struct SettingsPanelView: View {
             }
             .listStyle(.sidebar)
             .navigationTitle("Настройки")
+            .withoutSystemSidebarToggle()
+            .withoutTopScrollEdge()
         } detail: {
             Group {
                 switch selection ?? .connections {
@@ -249,6 +253,7 @@ struct SettingsPanelView: View {
                 }
             }
         }
+        .uniformTitlebar()
         .onAppear {
             connections.refresh()
             scenarios.refresh()
@@ -2084,5 +2089,41 @@ struct ApplicationSettingsView: View {
         let version = info?["CFBundleShortVersionString"] as? String ?? "—"
         let build = info?["CFBundleVersion"] as? String ?? "—"
         return "\(version) (сборка \(build))"
+    }
+}
+
+private extension View {
+    /// With a hidden sidebar, macOS draws the detail toolbar background with
+    /// side insets, and the titlebar looks broken. QADREN windows use one
+    /// plain titlebar, so hide that background in both sidebar states.
+    @ViewBuilder
+    func uniformTitlebar() -> some View {
+        if #available(macOS 15.0, *) {
+            toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
+        } else {
+            self
+        }
+    }
+
+    /// The short section list never scrolls under the titlebar, so its top
+    /// edge separator only draws a stray line.
+    @ViewBuilder
+    func withoutTopScrollEdge() -> some View {
+        if #available(macOS 26.0, *) {
+            scrollEdgeEffectHidden(true, for: .top)
+        } else {
+            self
+        }
+    }
+
+    /// The system button moves between the sidebar and the toolbar and can
+    /// fall into the toolbar overflow menu. The titlebar button replaces it.
+    @ViewBuilder
+    func withoutSystemSidebarToggle() -> some View {
+        if #available(macOS 14.0, *) {
+            toolbar(removing: .sidebarToggle)
+        } else {
+            self
+        }
     }
 }
