@@ -987,13 +987,8 @@ private struct ScenarioDryRunView: View {
                     failure = error.localizedDescription
                 }
                 let receipt = try? StorageRegistryBridge.scenarioCreateBatch(id: receiptID)
-                let failedPaths = receipt?.children
-                    .filter { $0.state != "completed" }
-                    .map(\.relative_path)
-                    .joined(separator: ", ") ?? ""
-                let outcome: String? = !failedPaths.isEmpty
-                    ? "Worker зафиксировал незавершённые элементы пакета: \(failedPaths). Они не будут автоматически повторены."
-                    : failure.map { "Worker не подтвердил завершение пакета: \($0)" }
+                let outcome = receipt.map(Self.createBatchOutcome)
+                    ?? failure.map { "Worker не подтвердил завершение пакета: \($0)" }
                 await MainActor.run {
                     batchProgressTask?.cancel()
                     batchProgressTask = nil
@@ -1056,6 +1051,25 @@ private struct ScenarioDryRunView: View {
         }
     }
 
+    /// Describes a finished Worker-owned Create batch from its durable receipt.
+    /// A cancelled child is not a failure: it never started.
+    nonisolated static func createBatchOutcome(_ receipt: ScenarioCreateBatchReceipt) -> String? {
+        let total = receipt.children.count
+        let completed = receipt.children.filter { $0.state == "completed" }.count
+        let cancelled = receipt.children.filter { $0.state == "cancelled" }.count
+        let unfinished = receipt.children
+            .filter { !["completed", "cancelled"].contains($0.state) }
+            .map(\.relative_path)
+        var parts: [String] = []
+        if cancelled > 0 {
+            parts.append("Пакет остановлен по запросу: создано \(completed) из \(total). Остальные файлы (\(cancelled)) не запускались.")
+        }
+        if !unfinished.isEmpty {
+            parts.append("Не завершены: \(unfinished.joined(separator: ", ")). Они не будут автоматически повторены.")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " ")
+    }
+
     private func executeCreateBatch(_ items: [ScenarioPlanItem]) {
         guard !items.isEmpty else { return }
         pendingBatch = items
@@ -1103,7 +1117,7 @@ private struct ScenarioDryRunView: View {
     private func cancelWorkerCreateBatch() {
         guard let receiptID = activeBatch?.receiptID else { return }
         do {
-            try WorkerIPC.cancelScenarioCreateBatch(receiptID: receiptID)
+            try StorageRegistryBridge.requestScenarioCreateBatchCancellation(id: receiptID)
             guard let activeBatch else { return }
             self.activeBatch = ScenarioBatchProgress(
                 total: activeBatch.total, processed: activeBatch.processed, failures: activeBatch.failures,
@@ -1117,7 +1131,7 @@ private struct ScenarioDryRunView: View {
     private func cancelResumedWorkerCreateBatch(_ batch: ScenarioBatchProgress) {
         guard let receiptID = batch.receiptID else { return }
         do {
-            try WorkerIPC.cancelScenarioCreateBatch(receiptID: receiptID)
+            try StorageRegistryBridge.requestScenarioCreateBatchCancellation(id: receiptID)
             resumedCreateBatches = resumedCreateBatches.map { current in
                 guard current.receiptID == receiptID else { return current }
                 return ScenarioBatchProgress(

@@ -73,6 +73,26 @@ choose_folder() {
   ax gone Настройки AXButton "Использовать эту папку"
 }
 
+# Create a Scenario in the open Scenario list. $4=two_way selects both directions.
+create_scenario() {
+  local name="$1" left="$2" right="$3" mode="${4:-one_way}"
+  ax press Настройки AXButton "Создать сценарий" 0
+  ax wait Настройки AXTextField "Название сценария"
+  ax set Настройки AXTextField "Название сценария" "$name"
+  [[ "$mode" == "two_way" ]] && ax press Настройки AXRadioButton "В обе стороны"
+  choose_folder 0 "$left"
+  choose_folder 1 "$right"
+  ax press Настройки AXButton "Создать сценарий" 0
+  ax wait Настройки AXStaticText "$name"
+}
+open_plan() {
+  ax within Настройки "$1" AXButton "Проверить план"
+  ax wait Настройки AXStaticText "План сценария"
+  ax wait Настройки AXStaticText "$1" 10
+}
+registry_sql() { sqlite3 "$DATA/connections.sqlite3" "$1"; }
+has_files() { [[ -n "$(ls -A "$1")" ]]; }
+
 printf 'alpha\n' > "$SRC/a.txt"
 printf 'bravo\n' > "$SRC/b.txt"
 printf 'charlie\n' > "$SRC/sub/c.txt"
@@ -98,16 +118,10 @@ ax press Настройки AXButton "Добавить этот Mac"
 ax wait Настройки AXTextField "Этот Mac"
 ax select Настройки "Сценарии"
 ax wait Настройки AXButton "Создать сценарий"
-ax press Настройки AXButton "Создать сценарий"
-ax wait Настройки AXTextField "Название сценария"
-ax set Настройки AXTextField "Название сценария" "E2E one-way"
-choose_folder 0 "$SRC"
-choose_folder 1 "$DST"
-ax press Настройки AXButton "Создать сценарий" 0
-ax wait Настройки AXStaticText "Ревизия 1"
+create_scenario "E2E one-way" "$SRC" "$DST"
 
 step "Preview the plan and run the Create batch"
-ax press Настройки AXButton "Проверить план" 0
+open_plan "E2E one-way"
 ax wait Настройки AXButton "Создать все: 3"
 ax press Настройки AXButton "Создать все: 3"
 wait_for 20 test -f "$DST/sub/c.txt" || fail "nested file was not created"
@@ -153,5 +167,97 @@ ax gone Настройки AXButton "Заменить файл" 2
 
 step "Monitoring shows the completed Jobs from the same JobStore"
 ax wait monitoring AXStaticText "Задания: Готово" 15
+
+step "Two-way: Create runs in both directions"
+LEFT="$TEST_ROOT/left"; RIGHT="$TEST_ROOT/right"
+mkdir -p "$LEFT" "$RIGHT"
+printf 'left one\n' > "$LEFT/l1.txt"
+printf 'right one\n' > "$RIGHT/r1.txt"
+ax press Настройки AXButton "Назад"
+ax wait Настройки AXStaticText "E2E one-way"
+create_scenario "E2E two-way" "$LEFT" "$RIGHT" two_way
+open_plan "E2E two-way"
+ax wait Настройки AXButton "Создать все: 2"
+ax press Настройки AXButton "Создать все: 2"
+wait_for 20 test -f "$LEFT/r1.txt" || fail "right-to-left Create did not run"
+wait_for 20 test -f "$RIGHT/l1.txt" || fail "left-to-right Create did not run"
+ax gone Настройки "*" "Выполнение пакета" 20
+cmp -s "$LEFT/l1.txt" "$RIGHT/l1.txt" && cmp -s "$LEFT/r1.txt" "$RIGHT/r1.txt" || fail "two-way bytes differ"
+
+step "Two-way: a content conflict needs an explicit source and consent"
+printf 'left edit, longer\n' > "$LEFT/l1.txt"
+printf 'right edit\n' > "$RIGHT/l1.txt"
+JOBS_BEFORE="$(jobs_sql "select count(*) from jobs")"
+ax press Настройки AXButton "Проверить план" 0
+ax wait Настройки AXStaticText "конфликт"
+ax within Настройки "l1.txt" AXButton "Добавить в очередь конфликтов"
+ax wait Настройки AXStaticText "Альтернативная очередь конфликтов"
+ax pick Настройки "Выберите источник" 0 "Левая сторона"
+ax press Настройки AXButton "Заменить из источника"
+ax wait Настройки AXButton "Выполнить замену из источника"
+ax press Настройки AXButton "Выполнить замену из источника"
+ax wait Настройки AXStaticText "Выполнить решение конфликта?"
+ax alert Настройки "Отмена"
+[[ "$(cat "$RIGHT/l1.txt")" == "right edit" ]] || fail "declined conflict replacement changed the file"
+[[ "$(jobs_sql "select count(*) from jobs")" == "$JOBS_BEFORE" ]] || fail "declined conflict replacement created a Job"
+ax press Настройки AXButton "Выполнить замену из источника"
+ax wait Настройки AXStaticText "Выполнить решение конфликта?"
+ax alert Настройки "Заменить файл"
+wait_for 20 cmp -s "$LEFT/l1.txt" "$RIGHT/l1.txt" || fail "confirmed conflict replacement did not copy the left bytes"
+
+step "Two-way: a deletion needs an explicit decision and consent"
+rm "$LEFT/r1.txt"
+ax press Настройки AXButton "Проверить план" 0
+ax wait Настройки AXStaticText "нужно отдельное решение"
+ax within Настройки "r1.txt" AXButton "Добавить в очередь конфликтов"
+ax wait Настройки AXStaticText "конфликт удаления"
+ax pick Настройки "Выберите источник" 0 "Левая сторона"
+ax press Настройки AXButton "Удалить как в источнике"
+ax wait Настройки AXButton "Подтвердить удаление файла"
+ax press Настройки AXButton "Подтвердить удаление файла"
+ax wait Настройки AXStaticText "Удалить файл как в источнике?"
+ax alert Настройки "Отмена"
+[[ -f "$RIGHT/r1.txt" ]] || fail "declined deletion removed the file"
+ax press Настройки AXButton "Подтвердить удаление файла"
+ax wait Настройки AXStaticText "Удалить файл как в источнике?"
+ax alert Настройки "Удалить файл"
+wait_for 20 test ! -e "$RIGHT/r1.txt" || fail "confirmed deletion did not remove the selected file"
+[[ -f "$RIGHT/l1.txt" ]] || fail "deletion changed another file"
+[[ "$(jobs_sql "select count(*) from jobs where state not in ('completed')")" == 0 ]] \
+  || fail "a Job is not completed: $(jobs_sql "select id, state from jobs where state<>'completed'")"
+
+step "Batch cancellation stops after the current file; reopened Settings shows the result"
+BIG="$TEST_ROOT/big"; BIGDST="$TEST_ROOT/bigdst"
+mkdir -p "$BIG" "$BIGDST"
+for i in $(seq -w 1 80); do dd if=/dev/urandom of="$BIG/f$i.bin" bs=1m count=32 2>/dev/null; done
+ax press Настройки AXButton "Назад"
+ax wait Настройки AXStaticText "E2E two-way"
+create_scenario "E2E cancel" "$BIG" "$BIGDST"
+open_plan "E2E cancel"
+ax wait Настройки AXButton "Создать все: 80"
+ax press Настройки AXButton "Создать все: 80"
+ax press Настройки AXButton "Остановить после текущего файла"
+ax gone Настройки "*" "Выполнение пакета" 120
+ax wait Настройки AXStaticText "Пакет остановлен по запросу" 5
+COPIED="$(ls "$BIGDST" | wc -l | tr -d ' ')"
+CANCELLED="$(registry_sql "select count(*) from scenario_create_batch_children where state='cancelled'")"
+echo "   copied $COPIED of 80, cancelled $CANCELLED"
+(( COPIED < 80 && CANCELLED > 0 )) || fail "cancellation did not stop the batch (copied $COPIED, cancelled $CANCELLED)"
+(( COPIED + CANCELLED == 80 )) || fail "batch children are not all completed or cancelled"
+[[ "$(jobs_sql "select count(*) from jobs where state<>'completed'")" == 0 ]] || fail "cancellation left an unfinished Job"
+for f in "$BIGDST"/*; do cmp -s "$f" "$BIG/$(basename "$f")" || fail "copied file differs: $f"; done
+REMAINING=$((80 - COPIED))
+ax wait Настройки AXButton "Создать все: $REMAINING" 10
+ax close Настройки
+ax menu Window Настройки
+ax wait Настройки AXStaticText "Сценарии" 10
+if ! "$DRIVER" "$APP_PID" wait Настройки AXStaticText "План сценария" 2 2>/dev/null; then
+  ax select Настройки "Сценарии"
+  open_plan "E2E cancel"
+fi
+ax press Настройки AXButton "Проверить план" 0
+ax wait Настройки AXButton "Создать все: $REMAINING" 10
+ax gone Настройки "*" "Выполнение пакета" 3
+ax gone Настройки AXButton "Остановить после текущего файла" 3
 
 echo "Settings native E2E passed"

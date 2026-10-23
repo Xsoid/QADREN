@@ -15,6 +15,8 @@ import ApplicationServices
 //   wait WINDOW ROLE LABEL [SECONDS] wait until a match exists
 //   gone WINDOW ROLE LABEL [SECONDS] wait until no match exists
 //   close WINDOW                     press the window close button
+//   pick WINDOW POPUP INDEX ITEM     choose ITEM in the INDEX-th popup menu with label POPUP
+//   within WINDOW ANCHOR ROLE LABEL  press LABEL in the nearest container that shows ANCHOR
 
 let arguments = CommandLine.arguments
 guard arguments.count >= 3, let pid = pid_t(arguments[1]) else {
@@ -80,6 +82,9 @@ func dump(_ element: AXUIElement, depth: Int) {
 }
 
 func press(_ element: AXUIElement) {
+    // SwiftUI enables a control after a state change. Do not press it early.
+    let enabled = poll(seconds: 5) { attribute(element, kAXEnabledAttribute) as? Bool != false }
+    guard enabled else { fail("control stayed disabled: \(label(element))") }
     let result = AXUIElementPerformAction(element, kAXPressAction as CFString)
     guard result == .success else { fail("AXPress returned \(result.rawValue)") }
 }
@@ -157,6 +162,33 @@ case "close":
         fail("close button not found")
     }
     press(button as! AXUIElement)
+case "pick":
+    let popups = matches(in: requireWindow(rest[0]), role: "AXPopUpButton", label: rest[1])
+    let index = Int(rest[2])!
+    guard popups.count > index else { fail("popup '\(rest[1])' not found (\(popups.count) matches)") }
+    press(popups[index])
+    var item: AXUIElement?
+    _ = poll(seconds: 3) {
+        item = descendants(popups[index]).first { role($0) == "AXMenuItem" && label($0).contains(rest[3]) }
+        return item != nil
+    }
+    guard let item else { fail("menu item not found: \(rest[3])") }
+    press(item)
+case "within":
+    let root = requireWindow(rest[0])
+    guard let anchor = descendants(root).first(where: { label($0) == rest[1] || label($0).hasPrefix(rest[1] + " |") }) else {
+        fail("anchor not found: \(rest[1])")
+    }
+    var container = anchor
+    while let parent = attribute(container, kAXParentAttribute) {
+        container = parent as! AXUIElement
+        if let target = matches(in: container, role: rest[2], label: rest[3]).first {
+            press(target)
+            exit(0)
+        }
+        if role(container) == "AXWindow" { break }
+    }
+    fail("\(rest[2]) '\(rest[3])' not found near '\(rest[1])'")
 default:
     fail("unknown command \(command)")
 }

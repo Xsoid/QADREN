@@ -10,6 +10,8 @@ The local transport uses a private Unix domain socket below the QADREN Applicati
 
 The Worker owns Job execution, reconciliation, scheduling, pause state, and destructive decisions. SwiftUI may request status, queue operations, pause, resume, stop, pending decisions, and an explicit decision. SwiftUI must not open a second executor or schedule timer.
 
+The Worker answers one IPC request at a time. A long request, such as a confirmed Create batch, delays later requests until it ends. For this reason, a stop request for a confirmed Create batch is a durable cancellation flag on the batch receipt in the Registry. SwiftUI writes the flag. The Worker reads it before each next file, finishes the current file, and records the remaining files as `cancelled`. A status request that gets no answer in time means "busy or not responding", not "stopped".
+
 An ordinary content read required by an enabled or requested operation needs no decision. Replacement, deletion, and mass deletion require the policy-defined durable consent and exact scope checks. If scope cannot be enforced, the Worker must disclose the actual bounded scope or refuse the action.
 
 ## Exclusivity and recovery

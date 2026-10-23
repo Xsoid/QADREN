@@ -25,6 +25,10 @@ private func scenarioCreateBatchFFI(
 private func scenarioCreateBatchGet(
     _ path: UnsafePointer<CChar>?, _ batchID: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_scenario_create_batch_request_cancellation")
+private func requestScenarioCreateBatchCancellationFFI(
+    _ path: UnsafePointer<CChar>?, _ batchID: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_scenario_pending_create_batches")
 private func pendingScenarioCreateBatchesFFI(
     _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?, _ revision: UInt64
@@ -578,6 +582,21 @@ enum StorageRegistryBridge {
             try id.withCString { id in
                 try unwrap(scenarioCreateBatchGet(path, id), as: ScenarioCreateBatchReceipt.self, databasePath: database)
             }
+        }
+    }
+
+    /// Saves a durable cancellation request in the Registry. The Worker reads it
+    /// before the next file, so the request works while the Worker is busy.
+    static func requestScenarioCreateBatchCancellation(id: String) throws {
+        struct Status: Decodable { let status: String }
+        let database = try path
+        let result: Status = try database.withCString { path in
+            try id.withCString { id in
+                try unwrap(requestScenarioCreateBatchCancellationFFI(path, id), as: Status.self, databasePath: database)
+            }
+        }
+        guard result.status == "cancellation_requested" else {
+            throw StorageError.operation("Cancellation was not saved")
         }
     }
 

@@ -288,6 +288,34 @@ pub extern "C" fn qadren_scenario_create_batch_get(
     }
 }
 
+/// Save a durable cancellation request for one confirmed Create batch. The
+/// Worker reads this flag before each child, so the request takes effect after
+/// the current file even while the Worker is busy and cannot answer IPC.
+/// A repeated request is accepted. This function never starts or stops I/O.
+#[no_mangle]
+pub extern "C" fn qadren_scenario_create_batch_request_cancellation(
+    path: *const c_char,
+    batch_id: *const c_char,
+) -> *mut c_char {
+    let (Some(path), Some(batch_id)) = (input(path), input(batch_id)) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    let result = Registry::open(Path::new(&path)).and_then(|db| {
+        match db.request_scenario_create_batch_cancellation(&batch_id) {
+            Ok(()) => Ok(true),
+            Err(RegistryError::NotFound) => db
+                .scenario_create_batch(&batch_id)
+                .map(|receipt| receipt.is_some_and(|receipt| receipt.cancellation_requested)),
+            Err(error) => Err(error),
+        }
+    });
+    match result {
+        Ok(true) => output(json!({"ok":true,"data":{"status":"cancellation_requested"}})),
+        Ok(false) => output(json!({"ok":false,"error":"not_found"})),
+        Err(_) => output(json!({"ok":false,"error":"registry_error"})),
+    }
+}
+
 /// Return unfinished durable Create batches for one exact Scenario revision.
 /// This is read-only and does not submit work to the Worker.
 #[no_mangle]
@@ -960,6 +988,30 @@ mod tests {
             serde_json::from_str(unsafe { CStr::from_ptr(pointer) }.to_str().unwrap()).unwrap();
         unsafe { qadren_registry_free_string(pointer) };
         assert!(response["data"].as_array().unwrap().is_empty());
+
+        for _ in 0..2 {
+            let pointer =
+                qadren_scenario_create_batch_request_cancellation(path.as_ptr(), id.as_ptr());
+            let response: Value =
+                serde_json::from_str(unsafe { CStr::from_ptr(pointer) }.to_str().unwrap()).unwrap();
+            unsafe { qadren_registry_free_string(pointer) };
+            assert_eq!(response["data"]["status"], "cancellation_requested");
+        }
+        assert!(
+            Registry::open(&file)
+                .unwrap()
+                .scenario_create_batch(id.to_str().unwrap())
+                .unwrap()
+                .unwrap()
+                .cancellation_requested
+        );
+        let missing = CString::new("missing-batch").unwrap();
+        let pointer =
+            qadren_scenario_create_batch_request_cancellation(path.as_ptr(), missing.as_ptr());
+        let response: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(pointer) }.to_str().unwrap()).unwrap();
+        unsafe { qadren_registry_free_string(pointer) };
+        assert_eq!(response["error"], "not_found");
         std::fs::remove_file(file).unwrap();
     }
 

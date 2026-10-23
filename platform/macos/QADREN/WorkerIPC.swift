@@ -114,13 +114,20 @@ enum WorkerIPC {
         let payload = try JSONEncoder().encode(
             WorkerScenarioCreateBatchRequest(batch_id: receiptID)
         ) + Data([0x0a])
-        let response = try send(payload, socketPath: socketPath ?? defaultSocketPath())
+        // The Worker answers after the whole batch. The UI reads progress from
+        // the durable receipt, so wait for the answer instead of reporting a
+        // false failure after the default 5 s.
+        let response = try send(
+            payload, socketPath: socketPath ?? defaultSocketPath(), timeoutSeconds: batchAnswerTimeoutSeconds
+        )
         guard response.ok else { throw WorkerIPCError.rejected(response.status) }
         guard ["completed", "existing"].contains(response.status) else {
             throw WorkerIPCError.invalidResponse
         }
         return response.status
     }
+
+    static let batchAnswerTimeoutSeconds = 6 * 60 * 60
 
     static func cancelScenarioCreateBatch(receiptID: String, socketPath: String? = nil) throws {
         let payload = try JSONEncoder().encode(
