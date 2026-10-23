@@ -7,11 +7,12 @@
 use qadren_core::confirmation::{Confirmation, EvidenceLevel};
 use qadren_core::job_execution::{
     local_directory_reconciliation_candidates, local_file_copy_reconciliation_candidates,
-    reconcile_local_directory_create, reconcile_local_file_copy, require_current_scenario_revision,
-    run_local_directory_create, run_local_file_copy, run_local_file_replace,
-    run_local_scenario_conflict_delete, run_local_scenario_conflict_replace,
-    run_local_scenario_file_copy, run_local_scenario_file_replace_planned, LocalFileCopyError,
-    LocalFileCopyReconciliationStatus, LocalFileCopyStatus,
+    reconcile_local_directory_create, reconcile_local_file_copy, remove_interrupted_staging,
+    require_current_scenario_revision, run_local_directory_create, run_local_file_copy,
+    run_local_file_replace, run_local_scenario_conflict_delete,
+    run_local_scenario_conflict_replace, run_local_scenario_file_copy,
+    run_local_scenario_file_replace_planned, LocalFileCopyError, LocalFileCopyReconciliationStatus,
+    LocalFileCopyStatus,
 };
 use qadren_core::jobs::JobStore;
 use qadren_core::local_fs::LocalFilesystem;
@@ -239,26 +240,38 @@ fn reconcile_unknown_scenario_creates(
         let Ok(Some(scenario)) = registry.get_scenario_revision(&scenario_id, revision) else {
             continue;
         };
-        let destination_root = if destination_connection_id == scenario.left_connection_id {
-            &scenario.left_root
-        } else if destination_connection_id == scenario.right_connection_id {
-            &scenario.right_root
-        } else {
-            continue;
-        };
-        match reconcile_local_file_copy(
-            &paths.jobs,
-            &paths.registry,
-            Path::new(destination_root),
-            &destination_connection_id,
-            &job_id,
-        ) {
-            Ok(
-                LocalFileCopyReconciliationStatus::Completed
-                | LocalFileCopyReconciliationStatus::StillUnknown
-                | LocalFileCopyReconciliationStatus::Existing(_),
-            ) => {}
-            Err(_) => {}
+        // Both endpoints can use the same Local connection ("This Mac"). Try
+        // each root of that connection. Reconciliation is read-only and checks
+        // the durable root identity, so a wrong root stays StillUnknown.
+        let roots = [
+            (&scenario.left_connection_id, &scenario.left_root),
+            (&scenario.right_connection_id, &scenario.right_root),
+        ];
+        for (_, destination_root) in roots
+            .into_iter()
+            .filter(|(connection, _)| **connection == destination_connection_id)
+        {
+            // Remove junk staging of the interrupted write first. This never
+            // touches the target file and never changes the Job state.
+            let _ = remove_interrupted_staging(
+                &paths.jobs,
+                Path::new(destination_root),
+                &destination_connection_id,
+                &job_id,
+            );
+            if matches!(
+                reconcile_local_file_copy(
+                    &paths.jobs,
+                    &paths.registry,
+                    Path::new(destination_root),
+                    &destination_connection_id,
+                    &job_id,
+                ),
+                Ok(LocalFileCopyReconciliationStatus::Completed
+                    | LocalFileCopyReconciliationStatus::Existing(_))
+            ) {
+                break;
+            }
         }
     }
     Ok(())
@@ -656,6 +669,28 @@ fn execute_create_batch_id(
             registry
                 .set_scenario_create_batch_child_state(batch_id, &child.relative_path, "cancelled")
                 .map_err(|_| "batch_unavailable")?;
+            continue;
+        }
+        // A resumed child can already have a Job from before a crash. Report
+        // that Job's state; never start a second attempt for the same child.
+        let existing = JobStore::open(&paths.jobs)
+            .map_err(|_| "job_store_unavailable")?
+            .get(&child.job_id)
+            .map_err(|_| "job_store_unavailable")?
+            .map(|job| job.state);
+        if let Some(state) = existing {
+            let state = match state {
+                JobState::Completed => "completed",
+                JobState::Failed => "failed",
+                JobState::Cancelled => "cancelled",
+                _ => "unknown",
+            };
+            registry
+                .set_scenario_create_batch_child_state(batch_id, &child.relative_path, state)
+                .map_err(|_| "batch_unavailable")?;
+            if state != "completed" {
+                had_failure = true;
+            }
             continue;
         }
         let (source_root, source_connection, destination_root, destination_connection) =
@@ -2228,6 +2263,76 @@ mod tests {
             Some(JobState::Unknown)
         );
         assert!(!right_root.join("orphan.txt").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn same_local_connection_on_both_sides_reconciles_the_destination_root() {
+        let root = root("same-connection-reconciliation");
+        let left_root = root.join("left");
+        let right_root = root.join("right");
+        fs::create_dir_all(&left_root).unwrap();
+        fs::create_dir_all(&right_root).unwrap();
+        fs::write(left_root.join("report.txt"), b"payload").unwrap();
+        fs::write(right_root.join("report.txt"), b"payload").unwrap();
+        let paths = WorkerPaths {
+            socket: root.join("worker.sock"),
+            registry: root.join("registry.sqlite3"),
+            jobs: root.join("jobs.sqlite3"),
+        };
+        let registry = Registry::open(&paths.registry).unwrap();
+        // One "This Mac" connection is the usual Release 1 layout.
+        let mac = registry.add("local_filesystem", "This Mac").unwrap();
+        let scenario = registry
+            .create_scenario(
+                "Same connection",
+                &mac,
+                left_root.to_str().unwrap(),
+                &mac,
+                right_root.to_str().unwrap(),
+                "left_to_right",
+            )
+            .unwrap();
+        let identity = LocalFilesystem::open(&right_root)
+            .unwrap()
+            .root_identity()
+            .unwrap();
+        let root_identity = format!("unix:{}:{}", identity.device, identity.inode);
+        {
+            let mut store = JobStore::open(&paths.jobs).unwrap();
+            store.enqueue("crashed-copy", Some((&scenario, 1))).unwrap();
+            store
+                .advance(
+                    "crashed-copy",
+                    JobState::Queued,
+                    JobState::Running,
+                    Confirmation::Confirmed(EvidenceLevel::Requested),
+                )
+                .unwrap();
+            store
+                .prepare_bound_attempt_with_root_identity(
+                    "crashed-copy",
+                    "crashed-copy-attempt",
+                    "local_copy_new",
+                    &mac,
+                    "report.txt",
+                    7,
+                    "00000000000000000000000000000000",
+                    &root_identity,
+                )
+                .unwrap();
+        }
+        // The next open applies the restart rule: running becomes UNKNOWN.
+        reconcile_unknown_scenario_creates(&paths, &registry).unwrap();
+        assert_eq!(
+            JobStore::open(&paths.jobs)
+                .unwrap()
+                .state("crashed-copy")
+                .unwrap(),
+            Some(JobState::Completed)
+        );
+        assert_eq!(fs::read(right_root.join("report.txt")).unwrap(), b"payload");
+        drop(registry);
         fs::remove_dir_all(root).unwrap();
     }
 

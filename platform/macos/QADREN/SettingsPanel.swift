@@ -599,6 +599,9 @@ private struct ScenarioDryRunView: View {
     @State private var batchProgressTask: Task<Void, Never>?
     @State private var resumedCreateBatches: [ScenarioBatchProgress] = []
     @State private var workerOwnedCreateBatch = false
+    /// True when the last plan read failed. An empty plan is then not
+    /// evidence of "no changes".
+    @State private var planUnavailable = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -629,6 +632,13 @@ private struct ScenarioDryRunView: View {
                 ) {
                     Button("Проверить план", action: loadPlan)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if plan.isEmpty && planUnavailable {
+                SettingsEmptyState(
+                    title: "План не построен",
+                    detail: "Метаданные не прочитаны, поэтому QADREN не знает, есть ли изменения. Устраните причину выше и нажмите «Проверить план».",
+                    symbol: "exclamationmark.triangle"
+                )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if plan.isEmpty {
                 SettingsEmptyState(
@@ -830,12 +840,14 @@ private struct ScenarioDryRunView: View {
     private func loadPlan() {
         isLoading = true
         error = nil
+        planUnavailable = false
         defer { isLoading = false; hasRequestedPreview = true }
         do {
             // A plan for a superseded revision must not offer actions.
             if let current = try StorageRegistryBridge.listScenarios().first(where: { $0.id == scenario.id }),
                current.revision != scenario.revision {
                 plan = []
+                planUnavailable = true
                 error = "Сценарий изменён (ревизия \(current.revision)). Этот план построен для ревизии \(scenario.revision). Вернитесь к списку сценариев и откройте план заново."
                 return
             }
@@ -854,6 +866,7 @@ private struct ScenarioDryRunView: View {
             loadConflictTasks()
         } catch {
             plan = []
+            planUnavailable = true
             self.error = "Не удалось прочитать метаданные или построить план: " + error.localizedDescription
         }
     }
@@ -1010,8 +1023,8 @@ private struct ScenarioDryRunView: View {
                     workerOwnedCreateBatch = false
                     loadPlan()
                     // loadPlan() clears the previous notice. Show the batch
-                    // outcome after it, so a failed file stays visible.
-                    if let outcome { error = outcome }
+                    // outcome after it and keep a plan read error visible.
+                    if let outcome { error = [outcome, error].compactMap { $0 }.joined(separator: "\n") }
                 }
             }
             return
@@ -1082,7 +1095,9 @@ private struct ScenarioDryRunView: View {
             parts.append("Пакет остановлен по запросу: создано \(completed) из \(total). Остальные файлы (\(cancelled)) не запускались.")
         }
         if !unfinished.isEmpty {
-            parts.append("Не завершены: \(unfinished.joined(separator: ", ")). Они не будут автоматически повторены.")
+            let shown = unfinished.prefix(5).joined(separator: ", ")
+            let rest = unfinished.count > 5 ? " и ещё \(unfinished.count - 5)" : ""
+            parts.append("Не завершены файлы (\(unfinished.count)): \(shown)\(rest). Они не будут автоматически повторены.")
         }
         return parts.isEmpty ? nil : parts.joined(separator: " ")
     }

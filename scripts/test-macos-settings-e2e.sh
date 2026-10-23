@@ -98,9 +98,23 @@ open_plan() {
   ax wait Настройки AXStaticText "План сценария"
   ax wait Настройки AXStaticText "$1" 10
 }
+regtool_build() {
+  [[ -x "$TEST_ROOT/settings-e2e-registry" ]] && return 0
+  REGTOOL="$TEST_ROOT/settings-e2e-registry"
+  xcrun swiftc -O -target "$ARCH-apple-macos13.0" -framework Foundation -framework Security \
+    platform/macos/QADREN/JobInventory.swift platform/macos/QADREN/WorkerIPC.swift \
+    platform/macos/QADREN/StorageRegistry.swift platform/macos/Tests/SettingsE2ERegistryTool.swift \
+    "$ROOT/core/target/$TARGET/release/libqadren_core.a" -o "$REGTOOL"
+}
+regtool() { QADREN_DATA_ROOT="$DATA" "$TEST_ROOT/settings-e2e-registry" "$@"; }
 # E2E_SECTIONS="negative" runs only the named sections after the shared setup.
 section() { [[ -z "${E2E_SECTIONS:-}" || " $E2E_SECTIONS " == *" $1 "* ]]; }
 to_scenario_list() {
+  if ! "$DRIVER" "$APP_PID" dump Настройки >/dev/null 2>&1; then
+    echo "   WARNING: the Settings window was not open; opening it again" >&2
+    ax menu Window Настройки
+    ax wait Настройки AXStaticText "Сценарии" 10
+  fi
   "$DRIVER" "$APP_PID" press Настройки AXButton "Назад" 2>/dev/null || true
   ax select Настройки "Сценарии"
   ax wait Настройки AXButton "Создать сценарий"
@@ -284,12 +298,7 @@ ax gone Настройки AXButton "Остановить после текущ�
 fi
 
 if section negative; then
-REGTOOL="$TEST_ROOT/settings-e2e-registry"
-xcrun swiftc -O -target "$ARCH-apple-macos13.0" -framework Foundation -framework Security \
-  platform/macos/QADREN/JobInventory.swift platform/macos/QADREN/WorkerIPC.swift \
-  platform/macos/QADREN/StorageRegistry.swift platform/macos/Tests/SettingsE2ERegistryTool.swift \
-  "$ROOT/core/target/$TARGET/release/libqadren_core.a" -o "$REGTOOL"
-regtool() { QADREN_DATA_ROOT="$DATA" "$REGTOOL" "$@"; }
+regtool_build
 NSRC="$TEST_ROOT/nsrc"; NDST="$TEST_ROOT/ndst"
 mkdir -p "$NSRC" "$NDST"
 
@@ -407,6 +416,111 @@ sleep 2
   || fail "a confirmed Update overwrote a destination that changed after planning"
 ax wait Настройки AXStaticText "изменились после построения плана" 10
 [[ "$(jobs_sql "select count(*) from jobs where state='unknown'")" == 0 ]] || fail "a refused action left an UNKNOWN Job"
+fi
+
+start_worker() {
+  "$WORKER" --socket "$DATA/worker.sock" --registry "$DATA/connections.sqlite3" --jobs "$DATA/jobs.sqlite3" \
+    >>"$TEST_ROOT/worker.log" 2>&1 &
+  WORKER_PID=$!
+  wait_for 10 test -S "$DATA/worker.sock" || fail "Worker socket did not appear"
+}
+make_big_source() {
+  mkdir -p "$1"
+  for i in $(seq -w 1 "$2"); do dd if=/dev/urandom of="$1/f$i.bin" bs=1m count=32 2>/dev/null; done
+}
+file_count() { ls -1 "$1" | wc -l | tr -d ' '; }
+batch_children() { registry_sql "select state, count(*) from scenario_create_batch_children c join scenario_create_batches b on b.id=c.batch_id join scenarios s on s.id=b.scenario_id where s.name='$1' group by state"; }
+pending_children() { registry_sql "select count(*) from scenario_create_batch_children c join scenario_create_batches b on b.id=c.batch_id join scenarios s on s.id=b.scenario_id where s.name='$1' and c.state='pending'"; }
+no_pending_children() { [[ "$(pending_children "$1")" == 0 ]]; }
+
+if section crash; then
+step "Crash: the Worker is killed during a batch and recovers after restart"
+CSRC="$TEST_ROOT/csrc"; CDST="$TEST_ROOT/cdst"; mkdir -p "$CDST"
+make_big_source "$CSRC" 80
+to_scenario_list
+create_scenario "E2E crash" "$CSRC" "$CDST"
+open_plan "E2E crash"
+ax wait Настройки AXButton "Создать все: 80"
+ax press Настройки AXButton "Создать все: 80"
+wait_for 30 bash -c "(( \$(ls -1 '$CDST' | wc -l) >= 3 ))" || fail "batch did not start"
+kill -9 "$WORKER_PID"; wait "$WORKER_PID" 2>/dev/null || true
+COPIED_AT_CRASH="$(file_count "$CDST")"
+echo "   killed the Worker after $COPIED_AT_CRASH files"
+ax gone Настройки "*" "Выполнение пакета" 20
+ax wait monitoring AXStaticText "Worker не запущен" 15
+sleep 2
+[[ "$(file_count "$CDST")" == "$COPIED_AT_CRASH" ]] || fail "files changed while the Worker was stopped"
+start_worker
+wait_for 120 no_pending_children "E2E crash" || fail "the restarted Worker did not resume the batch: $(batch_children "E2E crash")"
+echo "   children after restart: $(batch_children "E2E crash" | tr '\n' ' ')"
+for row in $(registry_sql "select c.relative_path||':'||c.job_id||':'||c.state from scenario_create_batch_children c join scenario_create_batches b on b.id=c.batch_id join scenarios s on s.id=b.scenario_id where s.name='E2E crash' and c.state<>'completed'"); do
+  job="$(echo "$row" | cut -d: -f2)"
+  echo "   unfinished child $row; job=$(jobs_sql "select state from jobs where id='$job'"); events=$(jobs_sql "select kind||'>'||state from job_events where job_id='$job' order by rowid" | tr '\n' ' '); attempts=$(jobs_sql "select status from job_attempts where job_id='$job'" | tr '\n' ' '); dest=$(ls -la "$CDST/$(echo "$row" | cut -d: -f1)" 2>&1 | awk '{print $5}')"
+done
+UNKNOWN_CHILDREN="$(registry_sql "select count(*) from scenario_create_batch_children c join scenario_create_batches b on b.id=c.batch_id join scenarios s on s.id=b.scenario_id where s.name='E2E crash' and c.state not in ('completed')")"
+(( UNKNOWN_CHILDREN <= 1 )) || fail "more than the in-flight file is unfinished after restart"
+[[ "$(jobs_sql "select count(*) from jobs where state='running'")" == 0 ]] || fail "a Job stays running after restart"
+HIDDEN="$(ls -A "$CDST" | grep -v '^f[0-9]*\.bin$' || true)"
+[[ -z "$HIDDEN" ]] || fail "the restarted Worker left staging files of the interrupted write: $HIDDEN"
+for f in "$CDST"/*; do
+  name="$(basename "$f")"
+  [[ "$name" == f*.bin ]] || fail "an unexpected destination entry remains after the crash: $name"
+  cmp -s "$f" "$CSRC/$name" || fail "a destination file differs from its source after the crash: $name"
+done
+echo "   unfinished Jobs: $(jobs_sql "select id, state from jobs where state<>'completed'" | tr '\n' ' ')"
+MISSING=$((80 - $(file_count "$CDST")))
+(( MISSING <= 1 )) || fail "more than one file is missing after restart"
+ax press Настройки AXButton "Проверить план" 0
+if (( MISSING == 0 )); then
+  ax wait Настройки AXStaticText "без действия" 10
+  ax gone Настройки AXButton "Создать копию" 3
+else
+  # The interrupted file was not published. The plan offers it again as a
+  # new no-overwrite Create; nothing is replayed automatically.
+  ax wait Настройки AXButton "Создать все: 1" 10
+fi
+fi
+
+if section lifecycle; then
+LSRC="$TEST_ROOT/lsrc"; LDST="$TEST_ROOT/ldst"; mkdir -p "$LDST"
+make_big_source "$LSRC" 80
+regtool_build
+to_scenario_list
+create_scenario "E2E lifecycle" "$LSRC" "$LDST"
+
+step "Lifecycle: a connection used by a Scenario cannot be removed"
+ax select Настройки "Подключения"
+ax wait Настройки AXButton "Удалить"
+ax press Настройки AXButton "Удалить" 0
+ax wait Настройки AXButton "Удалить подключение"
+ax alert Настройки "Удалить подключение"
+ax wait Настройки AXStaticText "Нельзя удалить подключение" 10
+[[ "$(registry_sql "select count(*) from storage_connections where adapter='local_filesystem' and enabled=1")" == 1 ]] \
+  || fail "a refused removal removed or disabled the connection"
+
+step "Lifecycle: disabling the connection during a batch stops new files"
+to_scenario_list
+open_plan "E2E lifecycle"
+ax wait Настройки AXButton "Создать все: 80"
+ax press Настройки AXButton "Создать все: 80"
+wait_for 30 bash -c "(( \$(ls -1 '$LDST' | wc -l) >= 2 ))" || fail "batch did not start"
+UNKNOWN_BEFORE="$(jobs_sql "select count(*) from jobs where state='unknown'")"
+regtool local-enabled false
+wait_for 120 no_pending_children "E2E lifecycle" || fail "the batch did not finish after disable"
+AT_DISABLE="$(file_count "$LDST")"
+echo "   children: $(batch_children "E2E lifecycle" | tr '\n' ' ')"
+(( AT_DISABLE < 80 )) || fail "files were still copied after the connection was disabled"
+[[ "$(jobs_sql "select count(*) from jobs where state='running'")" == 0 \
+   && "$(jobs_sql "select count(*) from jobs where state='unknown'")" == "$UNKNOWN_BEFORE" ]] \
+  || fail "disable left a running or new UNKNOWN Job: $(jobs_sql "select id, state from jobs where state in ('running','unknown')" | tr '\n' ' ')"
+for f in "$LDST"/*; do cmp -s "$f" "$LSRC/$(basename "$f")" || fail "partial file after disable: $f"; done
+ax gone Настройки "*" "Выполнение пакета" 20
+ax wait Настройки AXStaticText "Не завершены файлы" 10
+ax wait Настройки AXStaticText "План не построен" 10
+ax gone Настройки AXStaticText "Изменения не найдены" 2
+regtool local-enabled true
+ax press Настройки AXButton "Проверить план" 0
+ax wait Настройки AXButton "Создать все: $((80 - AT_DISABLE))" 10
 fi
 
 echo "Settings native E2E passed"

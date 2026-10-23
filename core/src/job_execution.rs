@@ -1436,6 +1436,104 @@ pub fn reconcile_local_file_copy(
     Ok(LocalFileCopyReconciliationStatus::Completed)
 }
 
+/// Return the writer process id of a QADREN staging name:
+/// `.qadren-<pid>-<serial>.tmp` or `.qadren-replace-<leaf>-<pid>-<serial>.stage`.
+/// Any other name is not QADREN staging and is never touched.
+fn staging_writer_pid(name: &str) -> Option<i32> {
+    let rest = name.strip_prefix(".qadren-")?;
+    let (body, replace) = if let Some(body) = rest.strip_suffix(".tmp") {
+        (body, false)
+    } else {
+        (rest.strip_suffix(".stage")?, true)
+    };
+    let mut parts = body.rsplitn(3, '-');
+    parts.next()?.parse::<u64>().ok()?;
+    let pid = parts.next()?.parse::<i32>().ok()?;
+    match (replace, parts.next()) {
+        (false, None) => Some(pid),
+        (true, Some(prefix)) if prefix.starts_with("replace-") => Some(pid),
+        _ => None,
+    }
+}
+
+/// True only when the process provably no longer exists. A live process,
+/// including this one, keeps its staging file.
+fn writer_process_is_gone(pid: i32) -> bool {
+    if pid <= 0 || pid == std::process::id() as i32 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: signal 0 only checks that the process exists.
+        let result = unsafe { libc::kill(pid, 0) };
+        result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+/// Remove staging files that an interrupted Local copy of this UNKNOWN Job
+/// left next to its target. Only QADREN staging names in the target folder of
+/// the bound destination root are removed, and only when their writer process
+/// is gone. The target file, other files, and the Job state are not changed.
+pub fn remove_interrupted_staging(
+    database_path: &Path,
+    destination_root: &Path,
+    destination_connection_id: &str,
+    job_id: &str,
+) -> Result<usize, LocalFileCopyError> {
+    if !valid_job_id(job_id) || destination_connection_id.is_empty() {
+        return Err(LocalFileCopyError::InvalidRequest);
+    }
+    let destination = LocalFilesystem::open(destination_root).map_err(LocalFileCopyError::Local)?;
+    let identity = destination
+        .root_identity()
+        .map_err(LocalFileCopyError::Local)?;
+    let root_identity = format!("unix:{}:{}", identity.device, identity.inode);
+    let store = JobStore::open(database_path)?;
+    if store.get(job_id)?.map(|job| job.state) != Some(JobState::Unknown) {
+        return Ok(0);
+    }
+    let mut removed = 0;
+    for attempt in store.unresolved_attempts()?.iter().filter(|attempt| {
+        attempt.job_id == job_id
+            && attempt.status == "unknown"
+            && is_local_file_copy_operation(attempt.operation_kind.as_deref())
+            && attempt.target_connection_id.as_deref() == Some(destination_connection_id)
+    }) {
+        if store
+            .attempt_root_identity(job_id, &attempt.attempt_id)?
+            .as_deref()
+            != Some(root_identity.as_str())
+        {
+            continue;
+        }
+        let Some(expected) = store.expected_metadata(job_id, &attempt.attempt_id)? else {
+            continue;
+        };
+        let folder = Path::new(&expected.target_path)
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .to_path_buf();
+        let Ok(entries) = destination.list(&folder) else {
+            continue;
+        };
+        for entry in entries {
+            if entry.is_directory
+                || !staging_writer_pid(&entry.name).is_some_and(writer_process_is_gone)
+            {
+                continue;
+            }
+            if destination.delete_file(&folder.join(&entry.name)).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    Ok(removed)
+}
+
 /// List UNKNOWN Local Filesystem copy Jobs bound to exactly this opened
 /// destination root and Local connection. This does not inspect target paths,
 /// read content, retry an effect, or complete a Job. Opening JobStore may
@@ -2114,6 +2212,86 @@ mod tests {
             .state("local-copy-file-parent")
             .unwrap();
         assert_ne!(state, Some(JobState::Unknown));
+    }
+
+    #[test]
+    fn interrupted_staging_is_removed_only_for_a_dead_writer() {
+        assert_eq!(staging_writer_pid(".qadren-123-4.tmp"), Some(123));
+        assert_eq!(
+            staging_writer_pid(".qadren-replace-report.txt-123-4.stage"),
+            Some(123)
+        );
+        assert_eq!(staging_writer_pid(".qadren-notes.tmp"), None);
+        assert_eq!(staging_writer_pid(".qadren-1-2-3.tmp"), None);
+        assert_eq!(staging_writer_pid("qadren-123-4.tmp"), None);
+
+        let (database, registry_path, source_root, _) = local_fixture("staging-cleanup");
+        let destination_root = source_root.parent().unwrap().join("staging-destination");
+        fs::create_dir_all(destination_root.join("sub")).unwrap();
+        let registry = Registry::open(&registry_path).unwrap();
+        let destination_connection = registry
+            .add("local_filesystem", "Staging Destination")
+            .unwrap();
+        let destination = LocalFilesystem::open(&destination_root).unwrap();
+        let identity = destination.root_identity().unwrap();
+        let root_identity = format!("unix:{}:{}", identity.device, identity.inode);
+        // PID 2147483646 cannot exist on macOS; this process is alive.
+        let dead = "sub/.qadren-2147483646-7.tmp";
+        let alive = format!("sub/.qadren-{}-8.tmp", std::process::id());
+        for (path, bytes) in [
+            (dead.to_owned(), b"partial".as_slice()),
+            (alive.clone(), b"in use".as_slice()),
+            ("sub/.qadren-notes.tmp".to_owned(), b"user file".as_slice()),
+            ("sub/other.txt".to_owned(), b"other".as_slice()),
+        ] {
+            fs::write(destination_root.join(path), bytes).unwrap();
+        }
+        {
+            let mut store = JobStore::open(&database).unwrap();
+            store.enqueue("staging-job", None).unwrap();
+            store
+                .advance(
+                    "staging-job",
+                    JobState::Queued,
+                    JobState::Running,
+                    Confirmation::Unknown,
+                )
+                .unwrap();
+            store
+                .prepare_bound_attempt_with_root_identity(
+                    "staging-job",
+                    "staging-attempt",
+                    "local_copy_new",
+                    &destination_connection,
+                    "sub/report.txt",
+                    7,
+                    "00000000000000000000000000000000",
+                    &root_identity,
+                )
+                .unwrap();
+        }
+        // The next open applies the restart rule: the Job becomes UNKNOWN.
+        assert_eq!(
+            remove_interrupted_staging(
+                &database,
+                &destination_root,
+                &destination_connection,
+                "staging-job"
+            )
+            .unwrap(),
+            1
+        );
+        assert!(!destination_root.join(dead).exists());
+        assert!(destination_root.join(&alive).exists());
+        assert!(destination_root.join("sub/.qadren-notes.tmp").exists());
+        assert!(destination_root.join("sub/other.txt").exists());
+        assert_eq!(
+            JobStore::open(&database)
+                .unwrap()
+                .state("staging-job")
+                .unwrap(),
+            Some(JobState::Unknown)
+        );
     }
 
     #[test]

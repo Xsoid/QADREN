@@ -185,6 +185,34 @@ fn parse_state(value: &str) -> rusqlite::Result<JobState> {
 }
 
 impl JobStore {
+    /// Open the JobStore for reads by a controller such as the monitoring UI.
+    /// It takes no owner lock, runs no migration, and does not apply the
+    /// restart rule. The Worker therefore never meets `AlreadyOpen` because a
+    /// controller is reading, and a reader never marks a running Job UNKNOWN.
+    /// Returns `Ok(None)` when no JobStore exists yet.
+    pub fn open_read_only(path: &Path) -> Result<Option<Self>> {
+        if !path.exists() {
+            return Ok(None);
+        }
+        let db = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        // The Worker commits short write transactions. Wait for them.
+        db.busy_timeout(std::time::Duration::from_secs(2))?;
+        let version: i32 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if version != 12 {
+            // Only the Worker migrates. A reader must not guess an old layout.
+            return Err(JobStoreError::UnsupportedSchema(version));
+        }
+        Ok(Some(Self {
+            db,
+            _owner_lock: None,
+            #[cfg(unix)]
+            identity: None,
+        }))
+    }
+
     pub fn open(path: &Path) -> Result<Self> {
         // A dangling symlink must not be treated as a new database path.
         // Otherwise its alias would have an independent owner-lock name.
@@ -1915,6 +1943,42 @@ mod tests {
             ),
             Err(JobStoreError::InvalidTransition)
         ));
+    }
+
+    #[test]
+    fn read_only_open_needs_no_owner_lock_and_never_marks_running_unknown() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "qadren-jobs-read-only-{}-{unique}.sqlite",
+            std::process::id()
+        ));
+        assert!(JobStore::open_read_only(&path).unwrap().is_none());
+        let mut owner = JobStore::open(&path).unwrap();
+        owner.enqueue("active", None).unwrap();
+        owner
+            .advance(
+                "active",
+                JobState::Queued,
+                JobState::Running,
+                Confirmation::Unknown,
+            )
+            .unwrap();
+        // The owner keeps the store open, as the Worker does during a copy.
+        let reader = JobStore::open_read_only(&path).unwrap().unwrap();
+        let jobs = reader.list_jobs().unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].state, JobState::Running);
+        drop(reader);
+        assert_eq!(owner.state("active").unwrap(), Some(JobState::Running));
+        drop(owner);
+        std::fs::remove_file(&path).unwrap();
+        let mut lock = path.as_os_str().to_os_string();
+        lock.push(".owner.sqlite");
+        std::fs::remove_file(Path::new(&lock)).unwrap();
     }
 
     #[test]

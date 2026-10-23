@@ -78,6 +78,13 @@ final class StorageConnections: ObservableObject {
             guard let entry = try StorageRegistryBridge.list().first(where: { $0.id == id }) else {
                 throw StorageError.operation("Connection not found; credentials were not touched")
             }
+            // Check Scenario references before any change. A refused removal
+            // must not leave the connection disabled as a side effect.
+            if let scenarioName = try StorageRegistryBridge.listScenarios()
+                .first(where: { $0.left_connection_id == id || $0.right_connection_id == id })?.name {
+                self.error = "Нельзя удалить подключение: его использует сценарий «\(scenarioName)». Сначала измените или удалите сценарий. Подключение и файлы не изменены."
+                return
+            }
             let disable = { try StorageRegistryBridge.setEnabled(id: id, enabled: false) }
             let ensureNoUnresolvedAttempts = {
                 try JobInventory.requireNoUnresolvedAttempts(connectionID: id)

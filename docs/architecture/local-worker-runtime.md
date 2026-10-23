@@ -16,9 +16,9 @@ An ordinary content read required by an enabled or requested operation needs no 
 
 ## Exclusivity and recovery
 
-The Worker acquires a private lock before it opens mutable stores. A second start fails before it can issue I/O. The Worker uses the existing Registry and one JobStore. It must not create a second queue, Scenario engine, or Swift business-logic copy.
+The Worker acquires a private lock before it opens mutable stores. A second start fails before it can issue I/O. SwiftUI reads the JobStore in read-only mode. A read takes no owner lock, runs no migration, and does not apply the restart rule, so a controller read never blocks the Worker or changes a Job state. The Worker uses the existing Registry and one JobStore. It must not create a second queue, Scenario engine, or Swift business-logic copy.
 
-After an unclean exit, the Worker performs read-only reconciliation for ambiguous attempts. It persists a verified result only when evidence is sufficient. Otherwise it retains `UNKNOWN`. It never replays a copy, replacement, or deletion merely because a response was lost.
+After an unclean exit, the Worker performs read-only reconciliation for ambiguous attempts. When both Scenario endpoints use the same Local connection, reconciliation checks each root of that connection against the durable root identity of the attempt. A resumed batch file that already has a Job reports that Job state and never starts a second attempt. The Worker removes QADREN staging files (`.qadren-<pid>-<n>.tmp`, `.qadren-replace-<leaf>-<pid>-<n>.stage`) that an interrupted copy of an UNKNOWN Job left next to its target, only in the bound destination root and only when the writer process no longer exists. It never removes the target file or a file with any other name. It persists a verified result only when evidence is sufficient. Otherwise it retains `UNKNOWN`. It never replays a copy, replacement, or deletion merely because a response was lost.
 
 ## Lifecycle
 

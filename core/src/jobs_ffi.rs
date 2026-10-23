@@ -160,7 +160,10 @@ pub unsafe extern "C" fn qadren_jobs_list(path: *const c_char) -> *mut c_char {
     let Some(path) = input(path) else {
         return response(json!({"ok": false, "error": "invalid_path"}));
     };
-    match JobStore::open(Path::new(path)).and_then(|store| store.list_jobs()) {
+    // Read-only: the Worker owns the JobStore lock and the restart rule.
+    match JobStore::open_read_only(Path::new(path))
+        .and_then(|store| store.map_or_else(|| Ok(Vec::new()), |store| store.list_jobs()))
+    {
         Ok(jobs) => response(json!({
             "ok": true,
             "data": jobs.into_iter().map(|job| json!({
