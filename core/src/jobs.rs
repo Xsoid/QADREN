@@ -157,6 +157,12 @@ struct StoreIdentity {
     lock_inode: u64,
 }
 
+/// Stable snake_case name of a Job state. FFI and the UI use exactly these
+/// names; never derive them from `Debug`, which drops the underscores.
+pub fn state_label(state: JobState) -> &'static str {
+    label(state)
+}
+
 fn label(state: JobState) -> &'static str {
     match state {
         JobState::Queued => "queued",

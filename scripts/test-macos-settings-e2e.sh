@@ -75,8 +75,15 @@ choose_folder() {
   defaults write "$BUNDLE_ID" "$NAV_KEY" "$folder"
   ax press Настройки AXButton "Открыть браузер папок" "$index"
   ax wait Настройки AXButton "Выбрать папку в Finder"
+  ax activate
   ax press Настройки AXButton "Выбрать папку в Finder"
-  ax wait Настройки AXButton "OKButton"
+  # The system open panel sometimes appears slowly; retry the request once.
+  if ! "$DRIVER" "$APP_PID" wait Настройки AXButton "OKButton" 20 2>/dev/null; then
+    echo "   WARNING: the Finder panel did not appear; requesting it again" >&2
+    ax activate
+    ax press Настройки AXButton "Выбрать папку в Finder"
+    ax wait Настройки AXButton "OKButton" 30
+  fi
   ax press Настройки AXButton "OKButton"
   # A provider folder can show a one-time macOS access prompt; the owner
   # answers it. Wait long enough for that answer.
@@ -123,6 +130,7 @@ to_scenario_list() {
   ax select Настройки "Сценарии"
   ax wait Настройки AXButton "Создать сценарий"
 }
+jobs_count() { jobs_sql "select count(*) from jobs"; }
 registry_sql() { sqlite3 "$DATA/connections.sqlite3" "$1"; }
 has_files() { [[ -n "$(ls -A "$1")" ]]; }
 
@@ -308,7 +316,6 @@ mkdir -p "$NSRC" "$NDST"
 
 NFC_NAME="$(printf 'caf\xc3\xa9.txt')"
 NFD_NAME="$(printf 'cafe\xcc\x81.txt')"
-jobs_count() { jobs_sql "select count(*) from jobs"; }
 # Byte-exact name check: ls prints names exactly as stored.
 # grep reads all input (no -q), so pipefail never sees SIGPIPE from ls.
 has_exact_name() { ls -1 "$1" | LC_ALL=C grep -Fx -- "$2" >/dev/null; }
@@ -566,6 +573,98 @@ if command -v brctl >/dev/null; then
   ax gone Настройки AXButton "Заменить файл" 2
   [[ "$(dataless_count)" == "$TOTAL" ]] || fail "the plan after eviction downloaded provider content"
 fi
+fi
+
+
+# Scheduled execution. Opt-in: every slot needs real wall-clock time, so the
+# section takes about 8 minutes. Run it with E2E_SECTIONS=schedule.
+WEEKDAYS=(Понедельник Вторник Среда Четверг Пятница Суббота Воскресенье)
+open_schedules() {
+  to_scenario_list
+  ax within Настройки "$1" AXButton "Расписания"
+  ax wait Настройки AXButton "Добавить расписание"
+}
+# Add a weekly slot for today about 75 s from now, then return its minute.
+add_next_slot() {
+  ax date Настройки 0 75 >/dev/null
+  local today="${WEEKDAYS[$(( $(date +%u) - 1 ))]}"
+  local current
+  current="$("$DRIVER" "$APP_PID" dump Настройки | grep -oE 'AXPopUpButton (Понедельник|Вторник|Среда|Четверг|Пятница|Суббота|Воскресенье)' | head -1 | awk '{print $2}')"
+  [[ "$current" == "$today" ]] || ax pick Настройки "$current" 0 "$today"
+  sleep 2
+  ax press Настройки AXButton "Добавить расписание"
+  sleep 1
+}
+
+if [[ " ${E2E_SECTIONS:-} " == *" schedule "* ]]; then
+step "Schedule: a slot runs a safe Create without the Settings window"
+regtool_build
+SSRC="$TEST_ROOT/ssrc"; SDST="$TEST_ROOT/sdst"; mkdir -p "$SSRC" "$SDST"
+printf 'update me\n' > "$SSRC/u.txt"
+to_scenario_list
+create_scenario "E2E schedule" "$SSRC" "$SDST"
+open_plan "E2E schedule"
+ax wait Настройки AXButton "Создать все: 1"
+ax press Настройки AXButton "Создать все: 1"
+wait_for 20 test -f "$SDST/u.txt" || fail "initial Create did not run"
+printf 'source changed for the schedule\n' > "$SSRC/u.txt"
+printf 'scheduled new\n' > "$SSRC/new.txt"
+JOBS_BEFORE="$(jobs_count)"
+open_schedules "E2E schedule"
+add_next_slot
+ax close Настройки
+wait_for 240 test -f "$SDST/new.txt" || fail "the scheduled slot did not create the new file"
+cmp -s "$SSRC/new.txt" "$SDST/new.txt" || fail "scheduled Create bytes differ"
+sleep 3
+[[ "$(cat "$SDST/u.txt")" == "update me" ]] || fail "a scheduled run replaced a file without a decision"
+WAITING="$(jobs_sql "select count(*) from jobs where state='waiting_for_decision'")"
+(( WAITING >= 1 )) || fail "the scheduled replacement is not waiting for a decision: $(jobs_sql "select id, state from jobs" | tail -5 | tr '\n' ' ')"
+ax wait monitoring AXStaticText "Требует решения" 15
+
+step "Schedule: the waiting decision is found and resolved in Settings"
+ax menu Window Настройки
+ax wait Настройки AXStaticText "Сценарии" 10
+to_scenario_list
+open_plan "E2E schedule"
+ax wait Настройки AXStaticText "Альтернативная очередь конфликтов" 15
+ax within Настройки "u.txt" AXButton "Заменить из источника"
+ax wait Настройки AXButton "Выполнить замену из источника" 10
+ax press Настройки AXButton "Выполнить замену из источника"
+ax wait Настройки AXStaticText "Выполнить решение конфликта?"
+ax alert Настройки "Заменить файл"
+wait_for 20 cmp -s "$SSRC/u.txt" "$SDST/u.txt" || fail "the confirmed scheduled decision did not replace the file"
+wait_for 20 bash -c "[[ \$(sqlite3 '$DATA/jobs.sqlite3' \"select count(*) from jobs where state='waiting_for_decision'\") == 0 ]]" \
+  || fail "the schedule coordinator still waits after the decision: $(jobs_sql "select id, state from jobs where state='waiting_for_decision'" | tr '\n' ' ')"
+
+step "Schedule: a paused Scenario does not run its slot, also after resume"
+printf 'paused new\n' > "$SSRC/paused.txt"
+open_schedules "E2E schedule"
+ax toggle Настройки "Приостановить автоматические триггеры"
+sleep 1
+[[ "$(registry_sql "select locally_paused from scenario_automation where scenario_id=(select id from scenarios where name='E2E schedule')")" == 1 ]] \
+  || fail "the pause switch did not save the paused state"
+add_next_slot
+ax close Настройки
+sleep 150
+[[ ! -e "$SDST/paused.txt" ]] || fail "a paused Scenario ran its slot"
+ax menu Window Настройки
+ax wait Настройки AXStaticText "Сценарии" 10
+open_schedules "E2E schedule"
+ax toggle Настройки "Приостановить автоматические триггеры"
+sleep 70
+[[ ! -e "$SDST/paused.txt" ]] || fail "a slot missed while paused ran after resume"
+
+step "Schedule: a disabled connection fails the slot before any effect"
+add_next_slot
+regtool local-enabled false
+UNKNOWN_BEFORE="$(jobs_sql "select count(*) from jobs where state='unknown'")"
+FAILED_BEFORE="$(jobs_sql "select count(*) from jobs where state='failed'")"
+wait_for 240 bash -c "(( \$(sqlite3 '$DATA/jobs.sqlite3' \"select count(*) from jobs where state='failed'\") > $FAILED_BEFORE ))" \
+  || fail "the slot with a disabled connection did not settle as failed"
+[[ ! -e "$SDST/paused.txt" ]] || fail "a disabled connection wrote a file"
+[[ "$(jobs_sql "select count(*) from jobs where state='unknown'")" == "$UNKNOWN_BEFORE" ]] || fail "a disabled connection left an UNKNOWN Job"
+[[ "$(jobs_sql "select count(*) from jobs where state='running'")" == 0 ]] || fail "a Job stays running"
+regtool local-enabled true
 fi
 
 echo "Settings native E2E passed"

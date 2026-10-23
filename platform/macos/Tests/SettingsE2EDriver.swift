@@ -17,6 +17,9 @@ import ApplicationServices
 //   close WINDOW                     press the window close button
 //   pick WINDOW POPUP INDEX ITEM     choose ITEM in the INDEX-th popup menu with label POPUP
 //   within WINDOW ANCHOR ROLE LABEL  press LABEL in the nearest container that shows ANCHOR
+//   date WINDOW INDEX SECONDS        set the INDEX-th date field to now + SECONDS
+//   activate                         bring the app under test to the front
+//   toggle WINDOW ANCHOR             press the switch or checkbox nearest to ANCHOR
 
 let arguments = CommandLine.arguments
 guard arguments.count >= 3, let pid = pid_t(arguments[1]) else {
@@ -189,6 +192,36 @@ case "within":
         if role(container) == "AXWindow" { break }
     }
     fail("\(rest[2]) '\(rest[3])' not found near '\(rest[1])'")
+case "date":
+    let fields = descendants(requireWindow(rest[0])).filter { role($0) == "AXDateTimeArea" }
+    let index = Int(rest[1])!
+    guard fields.count > index else { fail("date field not found (\(fields.count) fields)") }
+    let target = Date().addingTimeInterval(Double(rest[2])!) as CFDate
+    let result = AXUIElementSetAttributeValue(fields[index], kAXValueAttribute as CFString, target)
+    guard result == .success else { fail("date value change returned \(result.rawValue)") }
+    print(attribute(fields[index], kAXValueAttribute).map { "\($0)" } ?? "no value")
+case "activate":
+    // The Finder open panel is a sheet on the key window. It needs the app
+    // under test to be active.
+    guard NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateAllWindows]) == true else {
+        fail("cannot activate the app under test")
+    }
+    usleep(500_000)
+case "toggle":
+    let root = requireWindow(rest[0])
+    guard let anchor = descendants(root).first(where: { label($0).contains(rest[1]) }) else {
+        fail("anchor not found: \(rest[1])")
+    }
+    var container = anchor
+    while let parent = attribute(container, kAXParentAttribute) {
+        container = parent as! AXUIElement
+        if let target = descendants(container).first(where: { ["AXCheckBox", "AXSwitch"].contains(role($0)) }) {
+            press(target)
+            exit(0)
+        }
+        if role(container) == "AXWindow" { break }
+    }
+    fail("no switch near '\(rest[1])'")
 default:
     fail("unknown command \(command)")
 }

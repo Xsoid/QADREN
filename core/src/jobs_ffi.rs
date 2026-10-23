@@ -87,7 +87,7 @@ pub unsafe extern "C" fn qadren_jobs_reconcile_local_file_copy(
             response(json!({"ok":true,"data":{"status":"unknown","reconciled":false}}))
         }
         Ok(crate::job_execution::LocalFileCopyReconciliationStatus::Existing(state)) => response(
-            json!({"ok":true,"data":{"status":format!("{:?}", state).to_ascii_lowercase(),"existing":true,"reconciled":false}}),
+            json!({"ok":true,"data":{"status":crate::jobs::state_label(state),"existing":true,"reconciled":false}}),
         ),
         Err(crate::job_execution::LocalFileCopyError::InvalidRequest) => {
             response(json!({"ok":false,"error":"invalid_request"}))
@@ -168,7 +168,7 @@ pub unsafe extern "C" fn qadren_jobs_list(path: *const c_char) -> *mut c_char {
             "ok": true,
             "data": jobs.into_iter().map(|job| json!({
                 "id": job.id,
-                "state": format!("{:?}", job.state).to_ascii_lowercase(),
+                "state": crate::jobs::state_label(job.state),
                 "scenario_id": job.scenario_id,
                 "scenario_revision": job.scenario_revision,
             })).collect::<Vec<_>>()
@@ -230,7 +230,7 @@ pub unsafe extern "C" fn qadren_jobs_run_mock_create(
             response(json!({"ok": true, "data": {"status": "completed"}}))
         }
         Ok(crate::job_execution::MockCreateStatus::Existing(state)) => response(
-            json!({"ok": true, "data": {"status": format!("{:?}", state).to_ascii_lowercase(), "existing": true}}),
+            json!({"ok": true, "data": {"status": crate::jobs::state_label(state), "existing": true}}),
         ),
         Err(crate::job_execution::MockCreateError::ConsentRequired) => {
             response(json!({"ok": false, "error": "consent_required"}))
@@ -329,7 +329,7 @@ pub unsafe extern "C" fn qadren_jobs_run_local_directory_create(
             response(json!({"ok": true, "data": {"status": "completed"}}))
         }
         Ok(crate::job_execution::LocalDirectoryCreateStatus::Existing(state)) => response(
-            json!({"ok": true, "data": {"status": format!("{:?}", state).to_ascii_lowercase(), "existing": true}}),
+            json!({"ok": true, "data": {"status": crate::jobs::state_label(state), "existing": true}}),
         ),
         Err(crate::job_execution::LocalDirectoryCreateError::InvalidRequest) => {
             response(json!({"ok": false, "error": "invalid_request"}))
@@ -414,7 +414,7 @@ pub unsafe extern "C" fn qadren_jobs_run_local_file_copy(
             response(json!({"ok":true,"data":{"status":"completed"}}))
         }
         Ok(crate::job_execution::LocalFileCopyStatus::Existing(state)) => response(
-            json!({"ok":true,"data":{"status":format!("{:?}", state).to_ascii_lowercase(),"existing":true}}),
+            json!({"ok":true,"data":{"status":crate::jobs::state_label(state),"existing":true}}),
         ),
         // `run_local_file_copy` has no consent gate. Keep this exhaustive arm
         // fail-closed if a future regression returns the shared error variant.
@@ -521,7 +521,7 @@ pub unsafe extern "C" fn qadren_jobs_run_local_file_replace(
             response(json!({"ok":true,"data":{"status":"completed"}}))
         }
         Ok(crate::job_execution::LocalFileCopyStatus::Existing(state)) => response(
-            json!({"ok":true,"data":{"status":format!("{:?}", state).to_ascii_lowercase(),"existing":true}}),
+            json!({"ok":true,"data":{"status":crate::jobs::state_label(state),"existing":true}}),
         ),
         Err(crate::job_execution::LocalFileCopyError::ConsentRequired) => {
             response(json!({"ok":false,"error":"consent_required"}))
@@ -631,7 +631,7 @@ pub unsafe extern "C" fn qadren_jobs_run_local_scenario_file_copy(
             response(json!({"ok":true,"data":{"status":"completed"}}))
         }
         Ok(crate::job_execution::LocalFileCopyStatus::Existing(state)) => response(
-            json!({"ok":true,"data":{"status":format!("{:?}", state).to_ascii_lowercase(),"existing":true}}),
+            json!({"ok":true,"data":{"status":crate::jobs::state_label(state),"existing":true}}),
         ),
         // Scenario create-copy has no consent gate. Keep this exhaustive arm
         // fail-closed if a future regression returns the shared error variant.
@@ -744,7 +744,7 @@ pub unsafe extern "C" fn qadren_jobs_run_local_scenario_file_replace(
             response(json!({"ok":true,"data":{"status":"completed"}}))
         }
         Ok(crate::job_execution::LocalFileCopyStatus::Existing(state)) => response(
-            json!({"ok":true,"data":{"status":format!("{:?}", state).to_ascii_lowercase(),"existing":true}}),
+            json!({"ok":true,"data":{"status":crate::jobs::state_label(state),"existing":true}}),
         ),
         Err(crate::job_execution::LocalFileCopyError::ConsentRequired) => {
             response(json!({"ok":false,"error":"consent_required"}))
@@ -821,7 +821,7 @@ pub unsafe extern "C" fn qadren_jobs_run_local_scenario_conflict_replace(
             response(json!({"ok":true,"data":{"status":"completed"}}))
         }
         Ok(crate::job_execution::LocalFileCopyStatus::Existing(state)) => response(
-            json!({"ok":true,"data":{"status":format!("{:?}", state).to_ascii_lowercase(),"existing":true}}),
+            json!({"ok":true,"data":{"status":crate::jobs::state_label(state),"existing":true}}),
         ),
         Err(crate::job_execution::LocalFileCopyError::ConflictStale) => {
             response(json!({"ok":false,"error":"conflict_stale"}))
@@ -872,7 +872,7 @@ pub unsafe extern "C" fn qadren_jobs_run_local_scenario_conflict_delete(
             response(json!({"ok":true,"data":{"status":"completed"}}))
         }
         Ok(crate::job_execution::LocalFileCopyStatus::Existing(state)) => response(
-            json!({"ok":true,"data":{"status":format!("{:?}", state).to_ascii_lowercase(),"existing":true}}),
+            json!({"ok":true,"data":{"status":crate::jobs::state_label(state),"existing":true}}),
         ),
         Err(crate::job_execution::LocalFileCopyError::ConflictStale) => {
             response(json!({"ok":false,"error":"conflict_stale"}))
@@ -937,7 +937,7 @@ pub unsafe extern "C" fn qadren_jobs_reconcile_local_directory_create(
             response(json!({"ok": true, "data": {"status": "unknown", "reconciled": false}}))
         }
         Ok(crate::job_execution::LocalDirectoryReconciliationStatus::Existing(state)) => response(
-            json!({"ok": true, "data": {"status": format!("{:?}", state).to_ascii_lowercase(), "existing": true, "reconciled": false}}),
+            json!({"ok": true, "data": {"status": crate::jobs::state_label(state), "existing": true, "reconciled": false}}),
         ),
         Err(crate::job_execution::LocalDirectoryCreateError::InvalidRequest) => {
             response(json!({"ok": false, "error": "invalid_request"}))
@@ -1037,7 +1037,7 @@ pub unsafe extern "C" fn qadren_jobs_reconcile_mock_create(
             response(json!({"ok": true, "data": {"status": "unknown", "reconciled": false}}))
         }
         Ok(crate::job_execution::MockReconciliationStatus::Existing(state)) => response(
-            json!({"ok": true, "data": {"status": format!("{:?}", state).to_ascii_lowercase(), "existing": true, "reconciled": false}}),
+            json!({"ok": true, "data": {"status": crate::jobs::state_label(state), "existing": true, "reconciled": false}}),
         ),
         Err(crate::job_execution::MockCreateError::InvalidJobId) => {
             response(json!({"ok": false, "error": "invalid_request"}))
@@ -1075,7 +1075,7 @@ pub unsafe extern "C" fn qadren_jobs_queue_mock_create(
             response(json!({"ok": true, "data": {"status": "queued"}}))
         }
         Ok(crate::job_execution::MockCreateStatus::Existing(state)) => response(
-            json!({"ok": true, "data": {"status": format!("{:?}", state).to_ascii_lowercase(), "existing": true}}),
+            json!({"ok": true, "data": {"status": crate::jobs::state_label(state), "existing": true}}),
         ),
         Ok(crate::job_execution::MockCreateStatus::Completed) => {
             response(json!({"ok": false, "error": "invalid_state"}))
@@ -1194,6 +1194,50 @@ pub unsafe extern "C" fn qadren_jobs_free_string(pointer: *mut c_char) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn job_list_uses_snake_case_state_names() {
+        let path = std::env::temp_dir().join(format!(
+            "qadren-ffi-state-names-{}-{}.sqlite3",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        {
+            let mut store = JobStore::open(&path).unwrap();
+            store.enqueue("waiting", None).unwrap();
+            store
+                .advance(
+                    "waiting",
+                    crate::model::JobState::Queued,
+                    crate::model::JobState::Running,
+                    crate::confirmation::Confirmation::Unknown,
+                )
+                .unwrap();
+            store
+                .advance(
+                    "waiting",
+                    crate::model::JobState::Running,
+                    crate::model::JobState::WaitingForDecision,
+                    crate::confirmation::Confirmation::Unknown,
+                )
+                .unwrap();
+        }
+        let c_path = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        let pointer = unsafe { qadren_jobs_list(c_path.as_ptr()) };
+        let text = unsafe { std::ffi::CStr::from_ptr(pointer) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        unsafe { qadren_jobs_free_string(pointer) };
+        assert!(text.contains(r#""state":"waiting_for_decision""#), "{text}");
+        std::fs::remove_file(&path).unwrap();
+        let mut lock = path.as_os_str().to_os_string();
+        lock.push(".owner.sqlite");
+        std::fs::remove_file(std::path::Path::new(&lock)).unwrap();
+    }
     use super::*;
     use crate::{confirmation::Confirmation, model::JobState};
     use std::fs;
