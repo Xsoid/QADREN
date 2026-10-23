@@ -741,6 +741,9 @@ struct LocalCopyPreviewRequest: Equatable {
         let pointer = root.withCString { root in relative.withCString { relative in operation(root, relative) } }
         guard let pointer else { throw StorageError.operation("Local filesystem unavailable") }; defer { localFree(pointer) }
         let envelope = try JSONDecoder().decode(LocalEnvelope<T>.self, from: Data(String(cString: pointer).utf8))
-        guard envelope.ok, let data = envelope.data else { throw StorageError.operation(envelope.error ?? "Local filesystem request failed") }; return data
+        guard envelope.ok, let data = envelope.data else {
+            throw StorageError.operation(QADRENUserMessage.text(for: envelope.error ?? "Local filesystem request failed"))
+        }
+        return data
     }
 }

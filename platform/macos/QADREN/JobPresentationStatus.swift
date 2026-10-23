@@ -3,6 +3,8 @@ import Foundation
 /// Presentation-only summary of the read-only Rust JobStore inventory. It does
 /// not authorize, submit, retry, or reconcile Jobs.
 enum JobPresentationStatus: Equatable {
+    /// The JobStore was read and holds no Jobs. This is not "queued".
+    case empty
     case ready
     case active
     case waiting
@@ -28,7 +30,7 @@ enum JobPresentationStatus: Equatable {
 
     static func aggregate(_ states: [String], inventoryFailed: Bool) -> JobPresentationStatus {
         if inventoryFailed { return .failed }
-        guard !states.isEmpty else { return .waiting }
+        guard !states.isEmpty else { return .empty }
         let presentations = states.map(JobPresentationStatus.init(state:))
         if presentations.contains(.failed) { return .failed }
         if presentations.contains(.unknown) { return .unknown }
@@ -41,6 +43,7 @@ enum JobPresentationStatus: Equatable {
 
     var title: String {
         switch self {
+        case .empty: "Нет заданий"
         case .ready: "Готово"
         case .active: "Выполняется"
         case .waiting: "В очереди"

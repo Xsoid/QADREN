@@ -99,7 +99,8 @@ struct MainView: View {
                     .accessibilityElement(children: .combine)
                 }
 
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 270), spacing: 10)], spacing: 10) {
+                // Top alignment: widgets of different heights start on one line.
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 270), spacing: 10, alignment: .top)], spacing: 10) {
                     ForEach(dashboardLayout.widgets) { widget in
                         monitoringWidget(widget)
                     }
@@ -150,7 +151,7 @@ struct MainView: View {
                 if widget.density == .compact {
                     QDMetric(value: "\(visibleJobs.count)", label: "в инвентаре", provenance: "локальный JobStore")
                 } else if visibleJobs.isEmpty {
-                    QDEmptyState(title: "Заданий нет", detail: "История появится после безопасного выполнения через общий Job Engine.", symbol: "tray")
+                    QDEmptyState(title: "Заданий нет", detail: "Задания появятся, когда Worker выполнит сценарий по вашему запросу или по расписанию.", symbol: "tray")
                 } else {
                     JobList(jobs: visibleJobs)
                 }
@@ -550,6 +551,7 @@ private struct JobList: View {
 
 private func jobStatusKind(for status: JobPresentationStatus) -> QDStatusKind {
     switch status {
+    case .empty: .ready
     case .ready: .ready
     case .active: .active
     case .waiting: .waiting
