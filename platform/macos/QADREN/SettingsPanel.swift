@@ -962,6 +962,9 @@ private struct ScenarioDryRunView: View {
             batchProgressTask = Task {
                 while !Task.isCancelled {
                     try? await Task.sleep(for: .milliseconds(200))
+                    // Cancellation ends the sleep early. Do not write progress
+                    // after the batch completion cleared it.
+                    guard !Task.isCancelled else { return }
                     guard let receipt = try? StorageRegistryBridge.scenarioCreateBatch(id: receiptID) else {
                         continue
                     }
@@ -977,37 +980,20 @@ private struct ScenarioDryRunView: View {
                 }
             }
             batchTask = Task.detached(priority: .userInitiated) {
+                var failure: String?
                 do {
                     _ = try WorkerIPC.executeScenarioCreateBatch(receiptID: receiptID)
-                    let receipt = try? StorageRegistryBridge.scenarioCreateBatch(id: receiptID)
-                    await MainActor.run {
-                        let completed = receipt?.children.filter { $0.state == "completed" }.count ?? 0
-                        let failures = receipt?.children.filter { $0.state != "completed" }.count ?? 0
-                        activeBatch = ScenarioBatchProgress(
-                            total: items.count, processed: completed, failures: failures,
-                            currentPath: items.last?.relative_path ?? "", cancellationRequested: false
-                        )
-                        if failures > 0 {
-                            let failedPaths = receipt?.children
-                                .filter { $0.state != "completed" }
-                                .map(\.relative_path)
-                                .joined(separator: ", ") ?? ""
-                            self.error = "Worker зафиксировал незавершённые элементы пакета: \(failedPaths). Они не будут автоматически повторены."
-                        }
-                    }
                 } catch {
-                    let message = error.localizedDescription
-                    let receipt = try? StorageRegistryBridge.scenarioCreateBatch(id: receiptID)
-                    await MainActor.run {
-                        let failedPaths = receipt?.children
-                            .filter { $0.state != "completed" }
-                            .map(\.relative_path)
-                            .joined(separator: ", ") ?? ""
-                        self.error = failedPaths.isEmpty
-                            ? "Worker не подтвердил завершение пакета: \(message)"
-                            : "Worker зафиксировал незавершённые элементы пакета: \(failedPaths). Они не будут автоматически повторены."
-                    }
+                    failure = error.localizedDescription
                 }
+                let receipt = try? StorageRegistryBridge.scenarioCreateBatch(id: receiptID)
+                let failedPaths = receipt?.children
+                    .filter { $0.state != "completed" }
+                    .map(\.relative_path)
+                    .joined(separator: ", ") ?? ""
+                let outcome: String? = !failedPaths.isEmpty
+                    ? "Worker зафиксировал незавершённые элементы пакета: \(failedPaths). Они не будут автоматически повторены."
+                    : failure.map { "Worker не подтвердил завершение пакета: \($0)" }
                 await MainActor.run {
                     batchProgressTask?.cancel()
                     batchProgressTask = nil
@@ -1015,6 +1001,9 @@ private struct ScenarioDryRunView: View {
                     batchTask = nil
                     workerOwnedCreateBatch = false
                     loadPlan()
+                    // loadPlan() clears the previous notice. Show the batch
+                    // outcome after it, so a failed file stays visible.
+                    if let outcome { error = outcome }
                 }
             }
             return
@@ -1057,12 +1046,12 @@ private struct ScenarioDryRunView: View {
                 activeBatch = nil
                 batchTask = nil
                 workerOwnedCreateBatch = false
+                loadPlan()
                 if wasCancelled {
                     error = "Пакет остановлен после обработанных файлов: \(processedCount) из \(total). Незавершённые файлы не запускались."
                 } else if !finishedFailures.isEmpty {
                     error = "Не удалось выполнить файлов: \(finishedFailures.joined(separator: ", ")). Остальные элементы пакета были обработаны."
                 }
-                loadPlan()
             }
         }
     }
@@ -1552,8 +1541,8 @@ private enum ScenarioEndpointSide: String, Identifiable {
 
     var title: String {
         switch self {
-        case .source: "папка-источник"
-        case .destination: "папка-назначение"
+        case .source: "папку-источник"
+        case .destination: "папку-назначение"
         }
     }
 }
@@ -1706,7 +1695,7 @@ private struct ScenarioFolderBrowserSheet: View {
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
         panel.prompt = "Открыть в браузере"
-        panel.message = "Выберите начальную папку для \(role)."
+        panel.message = "Выберите начальную папку. Затем в QADREN можно перейти в подкаталог."
         guard let window = NSApp.keyWindow ?? NSApp.mainWindow else { return }
         panel.beginSheetModal(for: window) { response in
             guard response == .OK, let url = panel.url else { return }

@@ -1175,6 +1175,25 @@ fn run_local_file_copy_inner(
         store.fail_attempt_before_effect(job_id, &attempt_id)?;
         return Err(LocalFileCopyError::ConnectionUnavailable);
     }
+    // A Scenario file can be in a folder that does not exist yet in the
+    // destination. Create only the missing parent folders, inside the
+    // prepared attempt. Existing entries are never replaced. A failure
+    // before any folder is created closes the attempt as not applied.
+    if let Some(parent) = destination_relative
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        match destination.create_directory_tree(parent) {
+            Ok(_) => {}
+            Err(error @ LocalError::OutcomeUnknown(_)) => {
+                return Err(LocalFileCopyError::OutcomeUnknown(error))
+            }
+            Err(error) => {
+                store.fail_attempt_before_effect(job_id, &attempt_id)?;
+                return Err(LocalFileCopyError::Local(error));
+            }
+        }
+    }
     let copy_result = if replace_existing {
         source.copy_file_to_replace(source_relative, &destination, destination_relative)
     } else {
@@ -1946,6 +1965,68 @@ mod tests {
             Some(JobState::Completed)
         );
         assert!(store.unresolved_attempts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn local_file_copy_creates_missing_destination_parents_without_unknown() {
+        let (database, registry_path, source_root, source_connection) =
+            local_fixture("copy-nested");
+        let destination_root = source_root.parent().unwrap().join("nested-destination");
+        fs::create_dir_all(source_root.join("sub/deeper")).unwrap();
+        fs::create_dir(&destination_root).unwrap();
+        fs::write(source_root.join("sub/deeper/c.txt"), b"nested").unwrap();
+        fs::write(source_root.join("blocked.txt"), b"blocked").unwrap();
+        let registry = Registry::open(&registry_path).unwrap();
+        let destination_connection = registry
+            .add("local_filesystem", "Nested Destination")
+            .unwrap();
+
+        assert_eq!(
+            run_local_file_copy(
+                &database,
+                &registry_path,
+                &source_root,
+                &source_connection,
+                Path::new("sub/deeper/c.txt"),
+                &destination_root,
+                &destination_connection,
+                Path::new("sub/deeper/c.txt"),
+                "local-copy-nested",
+            )
+            .unwrap(),
+            LocalFileCopyStatus::Completed
+        );
+        assert_eq!(
+            fs::read(destination_root.join("sub/deeper/c.txt")).unwrap(),
+            b"nested"
+        );
+
+        // A file where a parent folder must be is a failure before any
+        // effect: the Job fails and does not become UNKNOWN.
+        fs::write(destination_root.join("file-parent"), b"keep").unwrap();
+        assert!(matches!(
+            run_local_file_copy(
+                &database,
+                &registry_path,
+                &source_root,
+                &source_connection,
+                Path::new("blocked.txt"),
+                &destination_root,
+                &destination_connection,
+                Path::new("file-parent/blocked.txt"),
+                "local-copy-file-parent",
+            ),
+            Err(LocalFileCopyError::Local(_))
+        ));
+        assert_eq!(
+            fs::read(destination_root.join("file-parent")).unwrap(),
+            b"keep"
+        );
+        let state = JobStore::open(&database)
+            .unwrap()
+            .state("local-copy-file-parent")
+            .unwrap();
+        assert_ne!(state, Some(JobState::Unknown));
     }
 
     #[test]

@@ -91,13 +91,7 @@ enum WorkerIPC {
     }
 
     static func defaultSocketPath() throws -> String {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("QADREN", isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: base, withIntermediateDirectories: true,
-            attributes: [.posixPermissions: NSNumber(value: 0o700)]
-        )
-        return base.appendingPathComponent("worker.sock").path
+        try QADRENDataLocation.baseDirectory().appendingPathComponent("worker.sock").path
     }
 
     static func executeScenarioCreate(

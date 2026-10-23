@@ -255,16 +255,35 @@ enum StorageError: Error, LocalizedError {
         return nil
     }
 }
+/// One owner for the app data directory. Registry, JobStore, and the Worker
+/// socket live here. `QADREN_DATA_ROOT` moves all three to an absolute test
+/// directory, so native E2E runs never touch the user's real state.
+enum QADRENDataLocation {
+    static let overrideVariable = "QADREN_DATA_ROOT"
+
+    static func baseDirectory(environment: [String: String] = ProcessInfo.processInfo.environment) throws -> URL {
+        let base: URL
+        if let override = environment[overrideVariable], !override.isEmpty {
+            guard override.hasPrefix("/") else {
+                throw StorageError.operation("QADREN_DATA_ROOT must be an absolute path")
+            }
+            base = URL(fileURLWithPath: override, isDirectory: true)
+        } else {
+            base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("QADREN", isDirectory: true)
+        }
+        try FileManager.default.createDirectory(
+            at: base, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: NSNumber(value: 0o700)]
+        )
+        return base
+    }
+}
+
 enum StorageRegistryBridge {
     private static var path: String {
         get throws {
-            let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent("QADREN", isDirectory: true)
-            try FileManager.default.createDirectory(
-                at: base, withIntermediateDirectories: true,
-                attributes: [.posixPermissions: NSNumber(value: 0o700)]
-            )
-            return base.appendingPathComponent("connections.sqlite3").path
+            try QADRENDataLocation.baseDirectory().appendingPathComponent("connections.sqlite3").path
         }
     }
 

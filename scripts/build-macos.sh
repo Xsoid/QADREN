@@ -26,6 +26,10 @@ mkdir -p "$APP/Contents/Library/LaunchAgents"
 cp platform/macos/Info.plist "$APP/Contents/Info.plist"
 cp assets/qadren.icns "$APP/Contents/Resources/qadren.icns"
 cp assets/qadren-logo.png "$APP/Contents/Resources/qadren-logo.png"
+# Replace the executable with a new inode. An in-place overwrite keeps the old
+# code-signature cache for the inode, and the kernel then kills the new Worker
+# with SIGKILL at launch.
+rm -f "$APP/Contents/Resources/qadren-worker"
 cp "$ROOT/core/target/$TARGET/release/qadren-worker" "$APP/Contents/Resources/qadren-worker"
 cp platform/macos/LaunchAgents/dev.qadren.worker.plist "$APP/Contents/Library/LaunchAgents/dev.qadren.worker.plist"
 # Embed public OAuth Client ID from an untracked local build config.

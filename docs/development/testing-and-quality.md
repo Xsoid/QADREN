@@ -25,7 +25,9 @@ bash scripts/test-core.sh
 bash scripts/build-macos.sh
 ```
 
-Use the relevant `scripts/test-macos-*.sh` command for changed macOS, Worker, storage, schedule, Keychain, or Scenario behavior. Run `python3 -m json.tool docs/design/tokens.json >/dev/null` when the token file changes. Native checks require a supported Mac.
+Use the relevant `scripts/test-macos-*.sh` command for changed macOS, Worker, storage, schedule, Keychain, or Scenario behavior.
+
+`scripts/test-macos-settings-e2e.sh` drives the rendered Settings window through macOS Accessibility. It starts the built app and a local Worker on a disposable data root. The app reads the data root from the `QADREN_DATA_ROOT` environment variable, so the run does not change the user's Registry, JobStore, or files. The script needs a logged-in session and Accessibility permission for the process that runs it. Do not use the Mac while the script runs: a click or key press in a test window changes the result. Without Accessibility permission the script exits with status 77 (`BLOCKED`). Run `python3 -m json.tool docs/design/tokens.json >/dev/null` when the token file changes. Native checks require a supported Mac.
 
 ## Publication and release evidence
 

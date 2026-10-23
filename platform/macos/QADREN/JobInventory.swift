@@ -64,9 +64,7 @@ private struct ConnectionAttemptEnvelope: Decodable {
 /// Read-only representation: Rust owns JobStore and all execution transitions.
 enum JobInventory {
     static func paths() throws -> (database: String, mockStorage: String) {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("QADREN", isDirectory: true)
-        return try paths(in: base)
+        try paths(in: QADRENDataLocation.baseDirectory())
     }
 
     /// Keeps the Rust-owned inventory relocatable for native bridge tests.
