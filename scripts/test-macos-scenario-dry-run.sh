@@ -11,6 +11,12 @@ if rg -q 'Разрешить загрузку и создание копии|З�
   echo "Scenario Create still contains an obsolete ordinary-read confirmation" >&2
   exit 1
 fi
+# The owner removed the standalone file-manager window. Local folder selection
+# stays in Scenario Settings through LocalWorkspace.
+if rg -q 'file-manager|FileManagerPane|filesWorkspace' platform/macos/QADREN; then
+  echo "The removed standalone file-manager window is back" >&2
+  exit 1
+fi
 rg -q 'Button\("Создать копию"\) \{ executeCreate\(item\) \}' \
   platform/macos/QADREN/SettingsPanel.swift
 rg -Fq 'Button("Создать все: \(creates.count)") {' \

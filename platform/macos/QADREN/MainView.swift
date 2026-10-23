@@ -4,8 +4,6 @@ struct MainView: View {
     @Environment(\.openWindow) private var openWindow
     @Environment(\.colorScheme) private var colorScheme
     @StateObject private var connections = StorageConnections()
-    @StateObject private var localWorkspace = LocalWorkspace()
-    @StateObject private var rightLocalWorkspace = LocalWorkspace()
     @StateObject private var dashboardLayout = DashboardLayoutStore()
     @SceneStorage("qadren.monitoring.panel-id") private var monitoringPanelID = ""
     @StateObject private var feed = MonitoringFeed()
@@ -21,7 +19,6 @@ struct MainView: View {
             switch workspace {
             case .monitoring: monitoringWorkspace
             case .scenarios: scenarioSettingsWorkspace
-            case .files: filesWorkspace
             }
         }
         .qadrenAccessibilityPresentation()
@@ -38,7 +35,6 @@ struct MainView: View {
                 Menu {
                     Button("Контрольная панель") { openWindow(id: "monitoring") }
                     Button("Настройки") { openWindow(id: "scenario-settings") }
-                    Button("Файловый менеджер") { openWindow(id: "file-manager") }
                 } label: {
                     Label("Пространство", systemImage: "rectangle.3.group")
                 }
@@ -284,37 +280,6 @@ struct MainView: View {
         SettingsPanelView(connections: connections)
     }
 
-    private var filesWorkspace: some View {
-        VStack(spacing: 0) {
-            WorkspaceHeader(title: "Файловый менеджер", subtitle: "Две локальные панели только для чтения") { EmptyView() }
-                .padding(.horizontal, 28).padding(.vertical, 18)
-            HStack(spacing: 0) {
-                FileManagerPane(
-                    title: "Левая панель", workspace: localWorkspace,
-                    localConnections: localConnections,
-                    addLocalComputer: connections.addLocalComputer,
-                    setLocalConnectionEnabled: connections.setEnabled,
-                    connectionError: connections.error
-                )
-                Divider()
-                FileManagerPane(
-                    title: "Правая панель", workspace: rightLocalWorkspace,
-                    localConnections: localConnections,
-                    addLocalComputer: connections.addLocalComputer,
-                    setLocalConnectionEnabled: connections.setEnabled,
-                    connectionError: connections.error
-                )
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            Notice(text: "Экран читает только имена, типы и размеры. Изменение файлов доступно только через Сценарии и Worker.", symbol: "eye")
-                .padding(16)
-        }
-    }
-
-    private var localConnections: [StorageEntry] {
-        connections.entries.filter { $0.adapter == "local_filesystem" }
-    }
-
     private func refreshCurrentWorkspace() {
         switch workspace {
         case .monitoring:
@@ -322,10 +287,6 @@ struct MainView: View {
             connections.refresh()
         case .scenarios:
             connections.refresh()
-        case .files:
-            connections.refresh()
-            localWorkspace.refresh()
-            rightLocalWorkspace.refresh()
         }
     }
 
@@ -428,13 +389,13 @@ struct MainView: View {
 }
 
 enum DispatcherSection: String, CaseIterable, Hashable, Identifiable {
-    case monitoring, scenarios, files
+    case monitoring, scenarios
     var id: Self { self }
     var title: String {
-        switch self { case .monitoring: "Контрольная панель"; case .scenarios: "Настройки"; case .files: "Файловый менеджер" }
+        switch self { case .monitoring: "Контрольная панель"; case .scenarios: "Настройки" }
     }
     var symbol: String {
-        switch self { case .monitoring: "rectangle.3.group"; case .scenarios: "slider.horizontal.3"; case .files: "rectangle.split.2x1" }
+        switch self { case .monitoring: "rectangle.3.group"; case .scenarios: "slider.horizontal.3" }
     }
 }
 
@@ -566,116 +527,6 @@ private func jobStatusKind(for status: JobPresentationStatus) -> QDStatusKind {
     case .unknown: .unknown
     case .completed: .ready
     case .cancelled: .paused
-    }
-}
-
-private struct FileManagerPane: View {
-    let title: String
-    @ObservedObject var workspace: LocalWorkspace
-    let localConnections: [StorageEntry]
-    let addLocalComputer: () -> String?
-    let setLocalConnectionEnabled: (String, Bool) -> Bool
-    let connectionError: String?
-    @State private var selectedConnectionID = ""
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text(title).font(.headline)
-                Picker("Подключение", selection: $selectedConnectionID) {
-                    Text("Выберите подключение").tag("")
-                    ForEach(localConnections) { connection in
-                        Text(connection.name).tag(connection.id)
-                    }
-                }
-                .frame(maxWidth: 220)
-                .onChange(of: selectedConnectionID) { connectionID in
-                    workspace.bind(connectionID: connectionID)
-                }
-                Spacer()
-                Button(folderButtonTitle) { chooseFolder() }
-                Button("Обновить", systemImage: "arrow.clockwise") { workspace.refresh() }
-                    .disabled(workspace.root == nil)
-            }
-            .padding(.horizontal, 18).padding(.top, 16)
-            .onAppear { selectFirstAvailableConnectionIfNeeded() }
-            .onChange(of: localConnections.map(\.id)) { _ in selectFirstAvailableConnectionIfNeeded() }
-
-            if let root = workspace.root {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(root).font(.caption).textSelection(.enabled)
-                    HStack {
-                        Button("Вверх", systemImage: "chevron.up") { workspace.up() }
-                            .disabled(workspace.relativePath.isEmpty)
-                        Text(workspace.relativePath.isEmpty ? "/" : "/" + workspace.relativePath)
-                            .font(.caption.monospaced()).textSelection(.enabled)
-                        Spacer()
-                    }
-                }
-                .padding(.horizontal, 18)
-                List(workspace.entries) { entry in
-                    Button {
-                        guard entry.is_directory else { return }
-                        workspace.open(entry)
-                    } label: {
-                        HStack {
-                            Image(systemName: entry.is_directory ? "folder.fill" : "doc")
-                                .foregroundStyle(entry.is_directory ? Color.accentColor : Color.secondary)
-                            Text(entry.name)
-                            Spacer()
-                            if !entry.is_directory {
-                                Text(ByteCountFormatter.string(fromByteCount: Int64(clamping: entry.size), countStyle: .file))
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!entry.is_directory)
-                }
-                .listStyle(.inset)
-            } else {
-                EmptyWorkspaceState(title: "Выберите папку", detail: "Эта панель читает только имена, типы и размеры.", symbol: "folder")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-            if let error = workspace.error { Notice(text: error, symbol: "exclamationmark.triangle").padding(12) }
-            if let connectionError { Notice(text: connectionError, symbol: "exclamationmark.triangle").padding(12) }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-    }
-
-    private var folderButtonTitle: String {
-        guard let connection = selectedConnection else { return "Добавить подключение и выбрать папку" }
-        return connection.enabled ? "Выбрать папку" : "Включить и выбрать папку"
-    }
-
-    private var selectedConnection: StorageEntry? {
-        localConnections.first { $0.id == selectedConnectionID }
-    }
-
-    private func selectFirstAvailableConnectionIfNeeded() {
-        guard selectedConnection == nil,
-              let connection = localConnections.first(where: \.enabled) ?? localConnections.first
-        else { return }
-        selectedConnectionID = connection.id
-        workspace.bind(connectionID: connection.id)
-    }
-
-    private func chooseFolder() {
-        if selectedConnection?.enabled == true {
-            workspace.chooseRoot(for: selectedConnectionID)
-            return
-        }
-        if let connection = selectedConnection {
-            guard setLocalConnectionEnabled(connection.id, true) else { return }
-            selectedConnectionID = connection.id
-            workspace.bind(connectionID: connection.id)
-            workspace.chooseRoot(for: connection.id)
-            return
-        }
-        guard let connectionID = addLocalComputer() else { return }
-        selectedConnectionID = connectionID
-        workspace.bind(connectionID: connectionID)
-        workspace.chooseRoot(for: connectionID)
     }
 }
 
