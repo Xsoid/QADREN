@@ -4,7 +4,21 @@
 use crate::model::{
     ConfirmedFileVersion, FileSyncState, ScenarioDraft, ScenarioReference, SyncDirection,
 };
+use icu_normalizer::ComposingNormalizerBorrowed;
 use std::collections::{BTreeMap, BTreeSet};
+
+/// Reason for paths that differ by bytes but can name the same file on a
+/// case-insensitive or Unicode-normalizing volume, such as APFS.
+pub const NAME_COLLISION_REASON: &str =
+    "names differ only by letter case or Unicode form and can name the same file";
+
+/// Conservative comparison key: NFC form and lowercase. A false match only
+/// makes a path non-executable; it never authorizes an effect.
+pub fn name_key(path: &str) -> String {
+    ComposingNormalizerBorrowed::new_nfc()
+        .normalize(path)
+        .to_lowercase()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservedFile {
@@ -269,6 +283,10 @@ pub fn plan(
         .chain(right.keys())
         .copied()
         .collect::<BTreeSet<_>>();
+    let mut variants: BTreeMap<String, usize> = BTreeMap::new();
+    for path in &paths {
+        *variants.entry(name_key(path)).or_default() += 1;
+    }
     Ok(paths
         .into_iter()
         .map(|path| {
@@ -277,23 +295,30 @@ pub fn plan(
             let right_file = right.get(path).copied();
             let left_change = delta(left_file, state.and_then(|entry| entry.left.as_ref()));
             let right_change = delta(right_file, state.and_then(|entry| entry.right.as_ref()));
-            let action = match scenario.direction {
-                SyncDirection::LeftToRight => directional_action(
-                    left_change,
-                    right_change,
-                    left_file.is_some(),
-                    right_file.is_some(),
-                    true,
-                ),
-                SyncDirection::RightToLeft => directional_action(
-                    right_change,
-                    left_change,
-                    right_file.is_some(),
-                    left_file.is_some(),
-                    false,
-                ),
-                SyncDirection::Bidirectional => {
-                    bidirectional_action(left_change, right_change, left_file, right_file)
+            let collides = variants.get(&name_key(path)).copied().unwrap_or(0) > 1;
+            let action = if collides {
+                PlanAction::NeedsVerification {
+                    reason: NAME_COLLISION_REASON,
+                }
+            } else {
+                match scenario.direction {
+                    SyncDirection::LeftToRight => directional_action(
+                        left_change,
+                        right_change,
+                        left_file.is_some(),
+                        right_file.is_some(),
+                        true,
+                    ),
+                    SyncDirection::RightToLeft => directional_action(
+                        right_change,
+                        left_change,
+                        right_file.is_some(),
+                        left_file.is_some(),
+                        false,
+                    ),
+                    SyncDirection::Bidirectional => {
+                        bidirectional_action(left_change, right_change, left_file, right_file)
+                    }
                 }
             };
             PlanItem {
@@ -351,6 +376,40 @@ mod tests {
             object_revision: version.object_revision.clone(),
             size: version.size,
             checksum_md5: version.checksum_md5.clone(),
+        }
+    }
+
+    #[test]
+    fn case_and_unicode_name_collisions_are_never_executable() {
+        for direction in [SyncDirection::LeftToRight, SyncDirection::Bidirectional] {
+            let items = plan(
+                &scenario(direction),
+                &reference(),
+                &[],
+                &[
+                    file("Report.txt", "l1", None),
+                    file("caf\u{e9}.txt", "l2", None),
+                    file("Dir/inner.txt", "l3", None),
+                    file("plain.txt", "l4", None),
+                ],
+                &[
+                    file("report.txt", "r1", None),
+                    file("cafe\u{301}.txt", "r2", None),
+                    file("dir/inner.txt", "r3", None),
+                ],
+            )
+            .unwrap();
+            assert_eq!(items.len(), 7);
+            for item in &items {
+                let expected = if item.relative_path == "plain.txt" {
+                    PlanAction::Create { from_left: true }
+                } else {
+                    PlanAction::NeedsVerification {
+                        reason: NAME_COLLISION_REASON,
+                    }
+                };
+                assert_eq!(item.action, expected, "{}", item.relative_path);
+            }
         }
     }
 

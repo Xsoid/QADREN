@@ -28,6 +28,10 @@ pub enum RegistryError {
     InsufficientEvidence,
     PlanningFailed,
     ConnectionReferencedByScenario,
+    /// One Scenario root is the same as, or inside, the other root.
+    ScenarioRootsOverlap,
+    /// A request uses a Scenario revision that is no longer current.
+    StaleScenarioRevision,
 }
 impl From<rusqlite::Error> for RegistryError {
     fn from(error: rusqlite::Error) -> Self {
@@ -603,6 +607,42 @@ impl Registry {
             .map_err(Into::into)
     }
 
+    /// Both endpoints are Local Filesystem roots on this Mac and one root is
+    /// the same as, or inside, the other. Provider paths are never compared.
+    fn local_roots_overlap(
+        &self,
+        left_connection_id: &str,
+        left_root: &str,
+        right_connection_id: &str,
+        right_root: &str,
+    ) -> Result<bool> {
+        let adapter = |id: &str| -> Result<Option<String>> {
+            self.db
+                .query_row(
+                    "SELECT adapter FROM storage_connections WHERE id=?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(Into::into)
+        };
+        let local = Some("local_filesystem".to_owned());
+        Ok(adapter(left_connection_id)? == local
+            && adapter(right_connection_id)? == local
+            && scenario_roots_overlap(left_root, right_root))
+    }
+
+    /// Return true when `revision` is the current revision of the Scenario.
+    pub fn is_current_scenario_revision(&self, id: &str, revision: u64) -> Result<bool> {
+        let current: Option<i64> = self
+            .db
+            .query_row("SELECT revision FROM scenarios WHERE id=?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        Ok(current == Some(revision as i64))
+    }
+
     pub fn create_scenario(
         &self,
         name: &str,
@@ -623,6 +663,14 @@ impl Registry {
             )
         {
             return Err(RegistryError::InvalidName);
+        }
+        if self.local_roots_overlap(
+            left_connection_id,
+            left_root,
+            right_connection_id,
+            right_root,
+        )? {
+            return Err(RegistryError::ScenarioRootsOverlap);
         }
         let id: String = self
             .db
@@ -1098,6 +1146,9 @@ impl Registry {
         {
             return Err(RegistryError::InvalidSyncState);
         }
+        if !self.is_current_scenario_revision(&scenario.scenario_id, scenario.revision)? {
+            return Err(RegistryError::StaleScenarioRevision);
+        }
         let transaction = self.db.transaction()?;
         let exists: Option<i64> = transaction
             .query_row(
@@ -1406,6 +1457,14 @@ impl Registry {
             )
         {
             return Err(RegistryError::InvalidName);
+        }
+        if self.local_roots_overlap(
+            update.left_connection_id,
+            update.left_root,
+            update.right_connection_id,
+            update.right_root,
+        )? {
+            return Err(RegistryError::ScenarioRootsOverlap);
         }
         let transaction = self.db.unchecked_transaction()?;
         let changed = transaction.execute(
@@ -1857,6 +1916,25 @@ impl Registry {
     }
 }
 
+/// Lexical overlap check for two absolute Local roots: equal roots, or one root
+/// inside the other. Components compare without letter case and Unicode form,
+/// as on APFS. Relative or provider roots never overlap here; executors still
+/// check the opened directories.
+pub fn scenario_roots_overlap(left: &str, right: &str) -> bool {
+    if !left.starts_with('/') || !right.starts_with('/') {
+        return false;
+    }
+    let parts = |root: &str| -> Vec<String> {
+        root.split('/')
+            .filter(|part| !part.is_empty() && *part != ".")
+            .map(crate::scenario_planner::name_key)
+            .collect()
+    };
+    let (left, right) = (parts(left), parts(right));
+    let shared = left.len().min(right.len());
+    left[..shared] == right[..shared]
+}
+
 fn valid_name(name: &str) -> bool {
     let trimmed = name.trim();
     !trimmed.is_empty() && trimmed.chars().count() <= 120 && !trimmed.chars().any(char::is_control)
@@ -2073,7 +2151,14 @@ mod tests {
         let left = db.add("local_filesystem", "Left").unwrap();
         let right = db.add("local_filesystem", "Right").unwrap();
         let id = db
-            .create_scenario("Documents", &left, "/", &right, "/archive", "left_to_right")
+            .create_scenario(
+                "Documents",
+                &left,
+                "/documents",
+                &right,
+                "/archive",
+                "left_to_right",
+            )
             .unwrap();
         let scenario = db.list_scenarios().unwrap().pop().unwrap();
         assert_eq!(scenario.id, id);
@@ -2093,7 +2178,14 @@ mod tests {
         let left = db.add("local_filesystem", "Left").unwrap();
         let right = db.add("local_filesystem", "Right").unwrap();
         let scenario_id = db
-            .create_scenario("Documents", &left, "/", &right, "/archive", "left_to_right")
+            .create_scenario(
+                "Documents",
+                &left,
+                "/documents",
+                &right,
+                "/archive",
+                "left_to_right",
+            )
             .unwrap();
         let reference = ScenarioReference {
             scenario_id: scenario_id.clone(),
@@ -2135,7 +2227,7 @@ mod tests {
             ScenarioUpdate {
                 name: "Documents v2",
                 left_connection_id: &left,
-                left_root: "/",
+                left_root: "/documents",
                 right_connection_id: &right,
                 right_root: "/archive",
                 direction: "left_to_right",
@@ -2155,7 +2247,14 @@ mod tests {
         let left = db.add("local_filesystem", "Left").unwrap();
         let right = db.add("local_filesystem", "Right").unwrap();
         let scenario_id = db
-            .create_scenario("Documents", &left, "/", &right, "/archive", "bidirectional")
+            .create_scenario(
+                "Documents",
+                &left,
+                "/documents",
+                &right,
+                "/archive",
+                "bidirectional",
+            )
             .unwrap();
         let reference = ScenarioReference {
             scenario_id,
@@ -2228,7 +2327,14 @@ mod tests {
         let left = db.add("local_filesystem", "Left").unwrap();
         let right = db.add("local_filesystem", "Right").unwrap();
         let scenario_id = db
-            .create_scenario("Documents", &left, "/", &right, "/archive", "bidirectional")
+            .create_scenario(
+                "Documents",
+                &left,
+                "/documents",
+                &right,
+                "/archive",
+                "bidirectional",
+            )
             .unwrap();
         let reference = ScenarioReference {
             scenario_id,
@@ -2480,7 +2586,14 @@ mod tests {
         let left = db.add("local_filesystem", "Left").unwrap();
         let right = db.add("local_filesystem", "Right").unwrap();
         let scenario = db
-            .create_scenario("Documents", &left, "/", &right, "/archive", "left_to_right")
+            .create_scenario(
+                "Documents",
+                &left,
+                "/documents",
+                &right,
+                "/archive",
+                "left_to_right",
+            )
             .unwrap();
         assert_eq!(
             db.request_scenario_automatic_run(&scenario, false).unwrap(),
@@ -2526,7 +2639,14 @@ mod tests {
         let left = db.add("local_filesystem", "Left").unwrap();
         let right = db.add("local_filesystem", "Right").unwrap();
         let scenario = db
-            .create_scenario("Documents", &left, "/", &right, "/archive", "left_to_right")
+            .create_scenario(
+                "Documents",
+                &left,
+                "/documents",
+                &right,
+                "/archive",
+                "left_to_right",
+            )
             .unwrap();
         db.create_scenario_schedule(&scenario, "Europe/Samara", 0, 9, 30)
             .unwrap();
@@ -2574,7 +2694,14 @@ mod tests {
         let left = db.add("local_filesystem", "Left").unwrap();
         let right = db.add("local_filesystem", "Right").unwrap();
         let scenario = db
-            .create_scenario("Documents", &left, "/", &right, "/archive", "left_to_right")
+            .create_scenario(
+                "Documents",
+                &left,
+                "/documents",
+                &right,
+                "/archive",
+                "left_to_right",
+            )
             .unwrap();
         let schedule = db
             .create_scenario_schedule(&scenario, "Europe/Berlin", 6, 2, 30)
@@ -2795,6 +2922,94 @@ mod tests {
             db.schedule_observed_through().unwrap(),
             Some(schedule_utc("2026-10-19T09:01:00Z"))
         );
+    }
+
+    #[test]
+    fn local_scenario_roots_must_not_overlap_and_stale_revisions_are_refused() {
+        assert!(scenario_roots_overlap("/data", "/data"));
+        assert!(scenario_roots_overlap("/data/", "/data/inner"));
+        assert!(scenario_roots_overlap(
+            "/Data/Caf\u{e9}",
+            "/data/cafe\u{301}/x"
+        ));
+        assert!(!scenario_roots_overlap("/data", "/database"));
+        assert!(!scenario_roots_overlap("/data/a", "/data/b"));
+
+        let db = Registry::in_memory().unwrap();
+        let left = db.add("local_filesystem", "Left").unwrap();
+        let right = db.add("local_filesystem", "Right").unwrap();
+        let cloud = db.add("yandex_disk", "Cloud").unwrap();
+        assert!(matches!(
+            db.create_scenario(
+                "Nested",
+                &left,
+                "/data",
+                &right,
+                "/data/inner",
+                "left_to_right"
+            ),
+            Err(RegistryError::ScenarioRootsOverlap)
+        ));
+        // Provider paths are not paths on this Mac.
+        db.create_scenario("Cloud", &left, "/data", &cloud, "/data", "left_to_right")
+            .unwrap();
+        let id = db
+            .create_scenario(
+                "Plain",
+                &left,
+                "/data/a",
+                &right,
+                "/data/b",
+                "left_to_right",
+            )
+            .unwrap();
+        assert!(matches!(
+            db.update_scenario(
+                &id,
+                ScenarioUpdate {
+                    name: "Plain",
+                    left_connection_id: &left,
+                    left_root: "/data/a",
+                    right_connection_id: &right,
+                    right_root: "/data/a/copy",
+                    direction: "left_to_right",
+                },
+            ),
+            Err(RegistryError::ScenarioRootsOverlap)
+        ));
+        assert!(db.is_current_scenario_revision(&id, 1).unwrap());
+        db.update_scenario(
+            &id,
+            ScenarioUpdate {
+                name: "Plain",
+                left_connection_id: &left,
+                left_root: "/data/a",
+                right_connection_id: &right,
+                right_root: "/data/c",
+                direction: "left_to_right",
+            },
+        )
+        .unwrap();
+        assert!(!db.is_current_scenario_revision(&id, 1).unwrap());
+        let mut db = db;
+        assert!(matches!(
+            db.create_scenario_create_batch(
+                &ScenarioReference {
+                    scenario_id: id.clone(),
+                    revision: 1,
+                },
+                &[("file.txt".into(), true)],
+            ),
+            Err(RegistryError::StaleScenarioRevision)
+        ));
+        db.create_scenario_create_batch(
+            &ScenarioReference {
+                scenario_id: id,
+                revision: 2,
+            },
+            &[("file.txt".into(), true)],
+        )
+        .unwrap();
     }
 
     #[test]

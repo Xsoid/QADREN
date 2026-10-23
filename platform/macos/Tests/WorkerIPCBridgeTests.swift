@@ -273,30 +273,35 @@ struct WorkerIPCBridgeTests {
         let nestedOverlapRoot = overlapRoot.appendingPathComponent("nested", isDirectory: true)
         try FileManager.default.createDirectory(at: nestedOverlapRoot, withIntermediateDirectories: true)
         try Data("must not copy".utf8).write(to: overlapRoot.appendingPathComponent("report.txt"))
-        let overlapScenario = try createScenario(
-            database: registry, leftID: left, leftRoot: overlapRoot.path,
-            rightID: right, rightRoot: nestedOverlapRoot.path
-        )
+        // The Registry refuses nested Local roots when the Scenario is saved,
+        // so no executor request can be built for them.
         let jobsBeforeOverlap = try JobInventory.list(databasePath: jobs).count
         do {
-            _ = try WorkerIPC.executeScenarioCreate(WorkerScenarioCreateRequest(
-                scenario_id: overlapScenario, scenario_revision: 1,
-                source_root: overlapRoot.path, source_connection_id: left,
-                source_relative_path: "report.txt", destination_root: nestedOverlapRoot.path,
-                destination_connection_id: right, destination_relative_path: "report.txt",
-                job_id: "swift-worker-ipc-overlap"
-            ), socketPath: socket)
-            fatalError("Worker Scenario Create accepted overlapping roots")
-        } catch WorkerIPCError.rejected("invalid_request") {
+            _ = try createScenario(
+                database: registry, leftID: left, leftRoot: overlapRoot.path,
+                rightID: right, rightRoot: nestedOverlapRoot.path
+            )
+            fatalError("Registry saved a Scenario with overlapping Local roots")
+        } catch StorageError.operation("scenario_roots_overlap") {
             check(
                 !FileManager.default.fileExists(atPath: nestedOverlapRoot.appendingPathComponent("report.txt").path),
-                "Worker overlapping roots do not write the nested destination"
+                "refused overlapping roots do not write the nested destination"
             )
         }
         let jobsAfterOverlap = try JobInventory.list(databasePath: jobs).count
         check(jobsAfterOverlap == jobsBeforeOverlap, "Worker overlapping roots create no Job")
 
         try Data("Worker IPC replacement".utf8).write(to: sourceRoot.appendingPathComponent("report.txt"))
+        func planned(_ root: URL, _ connection: String) throws -> WorkerExpectedFileVersion {
+            guard let item = try StorageRegistryBridge.localScenarioSnapshot(
+                root: root.path, connectionID: connection, databasePath: registry
+            ).first(where: { $0.relative_path == "report.txt" }) else {
+                throw StorageError.operation("missing planned file")
+            }
+            return WorkerExpectedFileVersion(object_revision: item.object_revision, size: item.size)
+        }
+        let plannedSource = try planned(sourceRoot, left)
+        let plannedDestination = try planned(destinationRoot, right)
         let declinedReplacement = WorkerScenarioReplaceRequest(
             scenario_id: scenario,
             scenario_revision: 1,
@@ -307,7 +312,9 @@ struct WorkerIPCBridgeTests {
             destination_connection_id: right,
             destination_relative_path: "report.txt",
             job_id: "swift-worker-ipc-replace-declined",
-            replacement_consent: false
+            replacement_consent: false,
+            expected_source: plannedSource,
+            expected_destination: plannedDestination
         )
         do {
             _ = try WorkerIPC.executeScenarioReplace(declinedReplacement, socketPath: socket)
@@ -330,7 +337,9 @@ struct WorkerIPCBridgeTests {
             destination_connection_id: right,
             destination_relative_path: "report.txt",
             job_id: "swift-worker-ipc-replace-confirmed",
-            replacement_consent: true
+            replacement_consent: true,
+            expected_source: plannedSource,
+            expected_destination: plannedDestination
         )
         let replacementStatus = try WorkerIPC.executeScenarioReplace(confirmedReplacement, socketPath: socket)
         check(replacementStatus == "completed", "Worker returns completed Scenario Update status")

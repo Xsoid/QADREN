@@ -94,7 +94,14 @@ mod tests {
         let left = registry.add("local_filesystem", "Left").unwrap();
         let right = registry.add("local_filesystem", "Right").unwrap();
         let scenario = registry
-            .create_scenario("Documents", &left, "/", &right, "/archive", "left_to_right")
+            .create_scenario(
+                "Documents",
+                &left,
+                "/documents",
+                &right,
+                "/archive",
+                "left_to_right",
+            )
             .unwrap();
         registry
             .create_scenario_schedule(&scenario, "UTC", 0, 9, 30)
@@ -137,7 +144,14 @@ mod tests {
         let left = registry.add("local_filesystem", "Left").unwrap();
         let right = registry.add("local_filesystem", "Right").unwrap();
         let scenario = registry
-            .create_scenario("Documents", &left, "/", &right, "/archive", "left_to_right")
+            .create_scenario(
+                "Documents",
+                &left,
+                "/documents",
+                &right,
+                "/archive",
+                "left_to_right",
+            )
             .unwrap();
         registry
             .create_scenario_schedule(&scenario, "UTC", 0, 9, 30)

@@ -215,7 +215,14 @@ struct ScenarioPlanItem: Decodable, Identifiable {
     let left: String
     let right: String
     let action: ScenarioPlanAction
-    var id: String { relative_path }
+    /// Byte-exact identity. Swift String equality treats NFC and NFD names as
+    /// equal, but the file system can hold both as different entries.
+    var id: [UInt8] { Array(relative_path.utf8) }
+}
+
+extension String {
+    /// Byte-exact path comparison for Scenario rows and snapshots.
+    func samePathBytes(_ other: String) -> Bool { utf8.elementsEqual(other.utf8) }
 }
 
 struct ScenarioCreateBatchReceipt: Decodable {
@@ -259,6 +266,31 @@ enum StorageError: Error, LocalizedError {
         return nil
     }
 }
+/// Russian text for stable Core and Worker error codes. An unknown code stays
+/// visible as is, so the user and the logs keep the exact reason.
+enum QADRENUserMessage {
+    static func text(for code: String) -> String {
+        switch code {
+        case "scenario_roots_overlap":
+            "Папки сценария пересекаются: одна совпадает с другой или находится внутри неё. Выберите папки, которые не вложены друг в друга."
+        case "scenario_revision_stale":
+            "Сценарий изменён после построения плана. Вернитесь к списку сценариев и проверьте план заново."
+        case "target_exists":
+            "Файл назначения уже существует. QADREN не перезаписывает его без отдельного решения."
+        case "local_connection_unavailable":
+            "Подключение выключено или недоступно. Включите его в разделе «Подключения»."
+        case "plan_stale":
+            "Файлы изменились после построения плана. Замена не выполнена. Проверьте план заново."
+        case "plan_snapshot_required":
+            "Нет метаданных плана для этого файла. Проверьте план заново."
+        case "conflict_stale":
+            "Файлы изменились после создания задачи конфликта. Обновите снимок конфликта."
+        default:
+            code
+        }
+    }
+}
+
 /// One owner for the app data directory. Registry, JobStore, and the Worker
 /// socket live here. `QADREN_DATA_ROOT` moves all three to an absolute test
 /// directory, so native E2E runs never touch the user's real state.
@@ -301,7 +333,7 @@ enum StorageRegistryBridge {
         let message = String(cString: pointer)
         let response = try JSONDecoder().decode(RegistryEnvelope<T>.self, from: Data(message.utf8))
         guard response.ok, let result = response.data else {
-            throw StorageError.operation(response.error ?? "Registry request failed")
+            throw StorageError.operation(QADRENUserMessage.text(for: response.error ?? "Registry request failed"))
         }
         let database = try databasePath ?? path
         try? FileManager.default.setAttributes(
@@ -654,10 +686,22 @@ enum StorageRegistryBridge {
 
     /// Submit one `update` proposal after explicit replacement confirmation.
     /// Rust binds the replacement to this immutable Scenario revision.
+    /// Sends a confirmed Update with the plan metadata of both files. The
+    /// Worker refuses it if either file changed after planning.
     static func executeScenarioUpdate(
-        scenario: ScenarioEntry, item: ScenarioPlanItem
+        scenario: ScenarioEntry, item: ScenarioPlanItem,
+        plannedSource: ScenarioSnapshotItem?, plannedDestination: ScenarioSnapshotItem?
     ) throws {
-        let request = try scenarioReplaceRequest(scenario: scenario, item: item, consent: true)
+        guard let plannedSource, let plannedDestination else {
+            throw StorageError.operation("plan_snapshot_required")
+        }
+        var request = try scenarioReplaceRequest(scenario: scenario, item: item, consent: true)
+        request.expected_source = WorkerExpectedFileVersion(
+            object_revision: plannedSource.object_revision, size: plannedSource.size
+        )
+        request.expected_destination = WorkerExpectedFileVersion(
+            object_revision: plannedDestination.object_revision, size: plannedDestination.size
+        )
         _ = try WorkerIPC.executeScenarioReplace(request)
     }
 

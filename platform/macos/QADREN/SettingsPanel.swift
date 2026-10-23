@@ -726,10 +726,12 @@ private struct ScenarioDryRunView: View {
                             Spacer()
                             Text(actionTitle(item.action)).font(.caption.weight(.semibold))
                         }
-                        Text("Источник: \(sideTitle(item.left)) · Назначение: \(sideTitle(item.right))")
+                        Text(scenario.direction == "bidirectional"
+                            ? "Слева: \(sideTitle(item.left)) · Справа: \(sideTitle(item.right))"
+                            : "Источник: \(sideTitle(item.left)) · Назначение: \(sideTitle(item.right))")
                             .font(.caption).foregroundStyle(.secondary)
                         if let reason = item.action.reason {
-                            Text(reason).font(.caption).foregroundStyle(.orange)
+                            Text(reasonTitle(reason)).font(.caption).foregroundStyle(.orange)
                         }
                         if item.action.kind == "create" {
                             Button("Создать копию") { executeCreate(item) }
@@ -830,6 +832,13 @@ private struct ScenarioDryRunView: View {
         error = nil
         defer { isLoading = false; hasRequestedPreview = true }
         do {
+            // A plan for a superseded revision must not offer actions.
+            if let current = try StorageRegistryBridge.listScenarios().first(where: { $0.id == scenario.id }),
+               current.revision != scenario.revision {
+                plan = []
+                error = "Сценарий изменён (ревизия \(current.revision)). Этот план построен для ревизии \(scenario.revision). Вернитесь к списку сценариев и откройте план заново."
+                return
+            }
             try StorageRegistryBridge.dispatchPendingScenarioCopyBaselines()
             let left = try StorageRegistryBridge.localScenarioSnapshot(
                 root: scenario.left_root, connectionID: scenario.left_connection_id
@@ -854,8 +863,8 @@ private struct ScenarioDryRunView: View {
         do {
             _ = try StorageRegistryBridge.queueScenarioConflict(
                 scenario: scenario, relativePath: item.relative_path, kind: kind,
-                left: leftSnapshot.first { $0.relative_path == item.relative_path },
-                right: rightSnapshot.first { $0.relative_path == item.relative_path }
+                left: leftSnapshot.first { $0.relative_path.samePathBytes(item.relative_path) },
+                right: rightSnapshot.first { $0.relative_path.samePathBytes(item.relative_path) }
             )
             loadConflictTasks()
         } catch {
@@ -890,8 +899,8 @@ private struct ScenarioDryRunView: View {
         do {
             _ = try StorageRegistryBridge.queueScenarioConflict(
                 scenario: scenario, relativePath: task.relative_path, kind: task.kind,
-                left: leftSnapshot.first { $0.relative_path == task.relative_path },
-                right: rightSnapshot.first { $0.relative_path == task.relative_path }
+                left: leftSnapshot.first { $0.relative_path.samePathBytes(task.relative_path) },
+                right: rightSnapshot.first { $0.relative_path.samePathBytes(task.relative_path) }
             )
             loadConflictTasks()
         } catch {
@@ -938,6 +947,10 @@ private struct ScenarioDryRunView: View {
         pendingBatchKind = nil
         guard !items.isEmpty, (kind == "create" || kind == "update") else { return }
         let batchScenario = scenario
+        // Capture the plan metadata now. The Worker compares it with the files.
+        let plannedSnapshots = Dictionary(
+            items.map { ($0.id, plannedSnapshots(for: $0)) }, uniquingKeysWith: { first, _ in first }
+        )
         activeBatch = ScenarioBatchProgress(
             total: items.count, processed: 0, failures: 0, currentPath: items[0].relative_path,
             cancellationRequested: false
@@ -1019,7 +1032,11 @@ private struct ScenarioDryRunView: View {
                     if kind == "create" {
                         try StorageRegistryBridge.executeScenarioCreate(scenario: batchScenario, item: item)
                     } else {
-                        try StorageRegistryBridge.executeScenarioUpdate(scenario: batchScenario, item: item)
+                        let planned = plannedSnapshots[item.id]
+                        try StorageRegistryBridge.executeScenarioUpdate(
+                            scenario: batchScenario, item: item,
+                            plannedSource: planned?.source, plannedDestination: planned?.destination
+                        )
                     }
                 } catch {
                     failures.append(item.relative_path)
@@ -1157,11 +1174,24 @@ private struct ScenarioDryRunView: View {
         guard let item = pendingUpdate else { return }
         pendingUpdate = nil
         do {
-            try StorageRegistryBridge.executeScenarioUpdate(scenario: scenario, item: item)
+            let planned = plannedSnapshots(for: item)
+            try StorageRegistryBridge.executeScenarioUpdate(
+                scenario: scenario, item: item,
+                plannedSource: planned.source, plannedDestination: planned.destination
+            )
             loadPlan()
         } catch {
             self.error = "Не удалось обновить файл по сценарию: " + error.localizedDescription
         }
+    }
+
+    /// Plan metadata of the source and destination file for one plan row.
+    private func plannedSnapshots(
+        for item: ScenarioPlanItem
+    ) -> (source: ScenarioSnapshotItem?, destination: ScenarioSnapshotItem?) {
+        let left = leftSnapshot.first { $0.relative_path.samePathBytes(item.relative_path) }
+        let right = rightSnapshot.first { $0.relative_path.samePathBytes(item.relative_path) }
+        return item.action.from_left == false ? (right, left) : (left, right)
     }
 
     private func sideTitle(_ value: String) -> String {
@@ -1171,6 +1201,25 @@ private struct ScenarioDryRunView: View {
         case "removed": "отсутствует"
         case "changed": "изменён"
         default: "требует проверки"
+        }
+    }
+
+    /// Core reasons are stable English codes. Show known reasons in Russian
+    /// and keep an unknown reason visible instead of hiding it.
+    private func reasonTitle(_ reason: String) -> String {
+        switch reason {
+        case "destination changed since the confirmed baseline":
+            "Файл назначения изменился после последней подтверждённой синхронизации."
+        case "both endpoints changed or lack a shared confirmed content identity":
+            "Файл изменён с обеих сторон, или у сторон нет общей подтверждённой версии."
+        case "metadata does not prove the confirmed object identity":
+            "По метаданным нельзя доказать, что это тот же подтверждённый файл."
+        case "source observation is incomplete":
+            "Метаданные источника неполные."
+        case "names differ only by letter case or Unicode form and can name the same file":
+            "Имена отличаются только регистром букв или формой Unicode. На этом Mac они могут означать один и тот же файл, поэтому QADREN не копирует их автоматически."
+        default:
+            reason
         }
     }
 

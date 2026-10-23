@@ -138,7 +138,17 @@ where
     }
     match Registry::open(Path::new(&path)).and_then(|registry| action(&registry)) {
         Ok(value) => output(json!({"ok":true,"data":value})),
-        Err(_) => output(json!({"ok":false,"error":"registry_error"})),
+        Err(error) => output(json!({"ok":false,"error":registry_error_code(&error)})),
+    }
+}
+
+/// Stable error codes that the UI explains to the user. Other errors stay
+/// generic so that no SQLite or path detail reaches the interface.
+fn registry_error_code(error: &RegistryError) -> &'static str {
+    match error {
+        RegistryError::ScenarioRootsOverlap => "scenario_roots_overlap",
+        RegistryError::StaleScenarioRevision => "scenario_revision_stale",
+        _ => "registry_error",
     }
 }
 
@@ -265,7 +275,7 @@ pub extern "C" fn qadren_scenario_create_batch(
         Ok(receipt) => output(
             json!({"ok":true,"data":{"id":receipt.id,"cancellation_requested":receipt.cancellation_requested,"children":receipt.children}}),
         ),
-        Err(_) => output(json!({"ok":false,"error":"registry_error"})),
+        Err(error) => output(json!({"ok":false,"error":registry_error_code(&error)})),
     }
 }
 
@@ -1318,7 +1328,8 @@ mod tests {
         let left_id = CString::new(left["data"]["id"].as_str().unwrap()).unwrap();
         let right_id = CString::new(right["data"]["id"].as_str().unwrap()).unwrap();
         let name = CString::new("Dry run").unwrap();
-        let root = CString::new("/").unwrap();
+        let root = CString::new("/left").unwrap();
+        let right_root = CString::new("/right").unwrap();
         let direction = CString::new("left_to_right").unwrap();
         let created = qadren_scenarios_create(
             database.as_ptr(),
@@ -1326,7 +1337,7 @@ mod tests {
             left_id.as_ptr(),
             root.as_ptr(),
             right_id.as_ptr(),
-            root.as_ptr(),
+            right_root.as_ptr(),
             direction.as_ptr(),
         );
         let scenario: Value =
@@ -1406,7 +1417,14 @@ mod tests {
         let left = registry.add("local_filesystem", "Left").unwrap();
         let right = registry.add("local_filesystem", "Right").unwrap();
         let scenario_id = registry
-            .create_scenario("Documents", &left, "/", &right, "/", "bidirectional")
+            .create_scenario(
+                "Documents",
+                &left,
+                "/left",
+                &right,
+                "/right",
+                "bidirectional",
+            )
             .unwrap();
         drop(registry);
         let database = CString::new(file.to_str().unwrap()).unwrap();
@@ -1487,7 +1505,14 @@ mod tests {
         let left = registry.add("local_filesystem", "Left").unwrap();
         let right = registry.add("local_filesystem", "Right").unwrap();
         let scenario = registry
-            .create_scenario("Documents", &left, "/", &right, "/archive", "left_to_right")
+            .create_scenario(
+                "Documents",
+                &left,
+                "/documents",
+                &right,
+                "/archive",
+                "left_to_right",
+            )
             .unwrap();
         registry
             .create_scenario_schedule(&scenario, "UTC", 0, 9, 30)
@@ -1548,7 +1573,14 @@ mod tests {
         let left = registry.add("local_filesystem", "Left").unwrap();
         let right = registry.add("local_filesystem", "Right").unwrap();
         registry
-            .create_scenario("Documents", &left, "/", &right, "/archive", "left_to_right")
+            .create_scenario(
+                "Documents",
+                &left,
+                "/documents",
+                &right,
+                "/archive",
+                "left_to_right",
+            )
             .unwrap();
         registry.set_enabled(&left, false).unwrap();
         drop(registry);

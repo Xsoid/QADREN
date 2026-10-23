@@ -7,11 +7,11 @@
 use qadren_core::confirmation::{Confirmation, EvidenceLevel};
 use qadren_core::job_execution::{
     local_directory_reconciliation_candidates, local_file_copy_reconciliation_candidates,
-    reconcile_local_directory_create, reconcile_local_file_copy, run_local_directory_create,
-    run_local_file_copy, run_local_file_replace, run_local_scenario_conflict_delete,
-    run_local_scenario_conflict_replace, run_local_scenario_file_copy,
-    run_local_scenario_file_replace, LocalFileCopyError, LocalFileCopyReconciliationStatus,
-    LocalFileCopyStatus,
+    reconcile_local_directory_create, reconcile_local_file_copy, require_current_scenario_revision,
+    run_local_directory_create, run_local_file_copy, run_local_file_replace,
+    run_local_scenario_conflict_delete, run_local_scenario_conflict_replace,
+    run_local_scenario_file_copy, run_local_scenario_file_replace_planned, LocalFileCopyError,
+    LocalFileCopyReconciliationStatus, LocalFileCopyStatus,
 };
 use qadren_core::jobs::JobStore;
 use qadren_core::local_fs::LocalFilesystem;
@@ -86,6 +86,24 @@ impl WorkerLock {
     }
 }
 
+/// File metadata that the user saw in a plan. Size and the endpoint-local
+/// object revision must still match before a replacement starts.
+#[derive(Debug, Deserialize)]
+struct ExpectedFileVersion {
+    object_revision: Option<String>,
+    size: u64,
+}
+
+impl ExpectedFileVersion {
+    fn confirmed(&self) -> ConfirmedFileVersion {
+        ConfirmedFileVersion {
+            object_revision: self.object_revision.clone(),
+            size: self.size,
+            checksum_md5: None,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct Request {
     command: String,
@@ -109,6 +127,11 @@ struct Request {
     job_id: Option<String>,
     #[serde(default)]
     replacement_consent: Option<bool>,
+    /// Plan metadata for a Scenario Update. Required by `execute_replace`.
+    #[serde(default)]
+    expected_source: Option<ExpectedFileVersion>,
+    #[serde(default)]
+    expected_destination: Option<ExpectedFileVersion>,
     #[serde(default)]
     conflict_id: Option<String>,
     #[serde(default)]
@@ -558,6 +581,14 @@ fn execute_create(paths: &WorkerPaths, request: &Request) -> Result<&'static str
     else {
         return Err("invalid_request");
     };
+    if let Err(error) =
+        require_current_scenario_revision(&paths.registry, scenario_id, scenario_revision)
+    {
+        return Err(match error {
+            LocalFileCopyError::ScenarioRevisionStale => "scenario_revision_stale",
+            _ => "scenario_unavailable",
+        });
+    }
     match run_local_scenario_file_copy(
         &paths.jobs,
         &paths.registry,
@@ -719,7 +750,23 @@ fn execute_replace(paths: &WorkerPaths, request: &Request) -> Result<&'static st
     else {
         return Err("invalid_request");
     };
-    match run_local_scenario_file_replace(
+    if let Err(error) =
+        require_current_scenario_revision(&paths.registry, scenario_id, scenario_revision)
+    {
+        return Err(match error {
+            LocalFileCopyError::ScenarioRevisionStale => "scenario_revision_stale",
+            _ => "scenario_unavailable",
+        });
+    }
+    // Fail closed: a replacement without the planned metadata could overwrite
+    // a file that changed after the user confirmed.
+    let (Some(expected_source), Some(expected_destination)) = (
+        request.expected_source.as_ref(),
+        request.expected_destination.as_ref(),
+    ) else {
+        return Err("plan_snapshot_required");
+    };
+    match run_local_scenario_file_replace_planned(
         &paths.jobs,
         &paths.registry,
         scenario_id,
@@ -732,7 +779,10 @@ fn execute_replace(paths: &WorkerPaths, request: &Request) -> Result<&'static st
         Path::new(destination_relative_path),
         job_id,
         request.replacement_consent.unwrap_or(false),
+        &expected_source.confirmed(),
+        &expected_destination.confirmed(),
     ) {
+        Err(LocalFileCopyError::ConflictStale) => Err("plan_stale"),
         Ok(LocalFileCopyStatus::Completed) => Ok("completed"),
         Ok(LocalFileCopyStatus::Existing(_)) => Ok("existing"),
         Err(LocalFileCopyError::ConsentRequired) => Err("consent_required"),
@@ -991,6 +1041,10 @@ fn execute_conflict(
             // The coordinator then stays waiting and is never shown as done.
             let _ = complete_ready_schedule_jobs(paths, conflict_id);
             Err("conflict_stale")
+        }
+        Err(LocalFileCopyError::ScenarioRevisionStale) => {
+            let _ = complete_ready_schedule_jobs(paths, conflict_id);
+            Err("scenario_revision_stale")
         }
         Err(LocalFileCopyError::ConflictUnavailable) => Err("conflict_unavailable"),
         Err(LocalFileCopyError::CapabilityUnavailable) => Err("local_capability_unavailable"),
@@ -2471,6 +2525,37 @@ mod tests {
             b"worker content"
         );
         fs::write(source_root.join("report.txt"), b"replacement content").unwrap();
+        // The UI sends the metadata that the user saw in the plan.
+        let planned = |root: &Path| {
+            let entry = LocalFilesystem::open(root)
+                .unwrap()
+                .stat(Path::new("report.txt"))
+                .unwrap();
+            serde_json::json!({"object_revision": entry.object_revision, "size": entry.size})
+        };
+        let expected_source = planned(&source_root);
+        let expected_destination = planned(&destination_root);
+        let missing_plan = serde_json::json!({
+            "command":"execute_replace",
+            "scenario_id":scenario,
+            "scenario_revision":1,
+            "source_root":source_root,
+            "source_connection_id":left,
+            "source_relative_path":"report.txt",
+            "destination_root":destination_root,
+            "destination_connection_id":right,
+            "destination_relative_path":"report.txt",
+            "job_id":"worker-scenario-replace-no-plan",
+            "replacement_consent":true
+        });
+        let mut stream = UnixStream::connect(&socket).unwrap();
+        writeln!(stream, "{missing_plan}").unwrap();
+        response.clear();
+        BufReader::new(stream).read_line(&mut response).unwrap();
+        assert!(
+            response.contains(r#""status":"plan_snapshot_required""#),
+            "replacement without plan metadata must fail closed: {response}"
+        );
         let declined_replace = serde_json::json!({
             "command":"execute_replace",
             "scenario_id":scenario,
@@ -2482,7 +2567,9 @@ mod tests {
             "destination_connection_id":right,
             "destination_relative_path":"report.txt",
             "job_id":"worker-scenario-replace-declined",
-            "replacement_consent":false
+            "replacement_consent":false,
+            "expected_source":expected_source,
+            "expected_destination":expected_destination
         });
         let mut stream = UnixStream::connect(&socket).unwrap();
         writeln!(stream, "{declined_replace}").unwrap();
@@ -2507,7 +2594,9 @@ mod tests {
             "destination_connection_id":right,
             "destination_relative_path":"report.txt",
             "job_id":"worker-scenario-replace-confirmed",
-            "replacement_consent":true
+            "replacement_consent":true,
+            "expected_source":expected_source,
+            "expected_destination":expected_destination
         });
         let mut stream = UnixStream::connect(&socket).unwrap();
         writeln!(stream, "{confirmed_replace}").unwrap();
@@ -2520,6 +2609,39 @@ mod tests {
         assert_eq!(
             fs::read(destination_root.join("report.txt")).unwrap(),
             b"replacement content"
+        );
+        // The destination changes after the plan: the old consent is refused.
+        fs::write(
+            destination_root.join("report.txt"),
+            b"edited after planning",
+        )
+        .unwrap();
+        let stale_replace = serde_json::json!({
+            "command":"execute_replace",
+            "scenario_id":scenario,
+            "scenario_revision":1,
+            "source_root":source_root,
+            "source_connection_id":left,
+            "source_relative_path":"report.txt",
+            "destination_root":destination_root,
+            "destination_connection_id":right,
+            "destination_relative_path":"report.txt",
+            "job_id":"worker-scenario-replace-stale",
+            "replacement_consent":true,
+            "expected_source":planned(&source_root),
+            "expected_destination":expected_destination
+        });
+        let mut stream = UnixStream::connect(&socket).unwrap();
+        writeln!(stream, "{stale_replace}").unwrap();
+        response.clear();
+        BufReader::new(stream).read_line(&mut response).unwrap();
+        assert!(
+            response.contains(r#""status":"plan_stale""#),
+            "a destination changed after planning must not be replaced: {response}"
+        );
+        assert_eq!(
+            fs::read(destination_root.join("report.txt")).unwrap(),
+            b"edited after planning"
         );
         assert_eq!(
             JobStore::open(&root.join("jobs.sqlite3"))
@@ -2598,6 +2720,8 @@ mod tests {
             destination_relative_path: None,
             job_id: Some("worker-conflict-delete-declined".into()),
             replacement_consent: None,
+            expected_source: None,
+            expected_destination: None,
             conflict_id: Some(conflict.clone()),
             destructive_consent: Some(false),
             locally_paused: None,
@@ -2654,6 +2778,8 @@ mod tests {
             destination_relative_path: None,
             job_id: None,
             replacement_consent: None,
+            expected_source: None,
+            expected_destination: None,
             conflict_id: None,
             destructive_consent: None,
             source_is_left: None,

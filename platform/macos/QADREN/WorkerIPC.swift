@@ -36,6 +36,15 @@ struct WorkerScenarioReplaceRequest: Encodable {
     let destination_relative_path: String
     let job_id: String
     let replacement_consent: Bool
+    /// Metadata that the user saw in the plan. The Worker refuses the
+    /// replacement if either file changed after planning.
+    var expected_source: WorkerExpectedFileVersion?
+    var expected_destination: WorkerExpectedFileVersion?
+}
+
+struct WorkerExpectedFileVersion: Encodable {
+    let object_revision: String?
+    let size: UInt64
 }
 
 struct WorkerManualCopyRequest: Encodable {
@@ -79,7 +88,9 @@ enum WorkerIPCError: Error, LocalizedError {
         switch self {
         case .unavailable: return "Local Worker is unavailable"
         case .invalidResponse: return "Local Worker returned an invalid response"
-        case let .rejected(status): return "Local Worker rejected the operation: \(status)"
+        case let .rejected(status):
+            let text = QADRENUserMessage.text(for: status)
+            return text == status ? "Local Worker rejected the operation: \(status)" : text
         }
     }
 }

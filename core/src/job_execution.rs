@@ -122,10 +122,31 @@ pub enum LocalFileCopyError {
     ScenarioScopeMismatch,
     ConflictUnavailable,
     ConflictStale,
+    /// An interactive request was planned for a Scenario revision that is no
+    /// longer current. The user must check the plan again.
+    ScenarioRevisionStale,
     VerificationFailed,
     OutcomeUnknown(LocalError),
     Local(LocalError),
     Store(JobStoreError),
+}
+
+/// Refuse a new interactive Job for a superseded Scenario revision. Staged
+/// schedule Jobs and confirmed batch receipts keep their pinned revision and do
+/// not call this check.
+pub fn require_current_scenario_revision(
+    registry_path: &Path,
+    scenario_id: &str,
+    revision: u64,
+) -> Result<(), LocalFileCopyError> {
+    let current = Registry::open(registry_path)
+        .and_then(|registry| registry.is_current_scenario_revision(scenario_id, revision))
+        .map_err(|_| LocalFileCopyError::ScenarioUnavailable)?;
+    if current {
+        Ok(())
+    } else {
+        Err(LocalFileCopyError::ScenarioRevisionStale)
+    }
 }
 
 fn matches_conflict_snapshot(
@@ -698,6 +719,44 @@ pub fn run_local_scenario_file_replace(
     )
 }
 
+/// Execute one confirmed replacement only if both files still match the
+/// metadata the user saw in the plan. A change after planning returns
+/// `ConflictStale` before any Job or attempt exists, so new data on either
+/// side is never overwritten by an older consent.
+#[allow(clippy::too_many_arguments)]
+pub fn run_local_scenario_file_replace_planned(
+    database_path: &Path,
+    registry_path: &Path,
+    scenario_id: &str,
+    scenario_revision: u64,
+    source_root: &Path,
+    source_connection_id: &str,
+    source_relative: &Path,
+    destination_root: &Path,
+    destination_connection_id: &str,
+    destination_relative: &Path,
+    job_id: &str,
+    consent: bool,
+    expected_source: &ConfirmedFileVersion,
+    expected_destination: &ConfirmedFileVersion,
+) -> Result<LocalFileCopyStatus, LocalFileCopyError> {
+    run_local_scenario_file_replace_checked(
+        database_path,
+        registry_path,
+        scenario_id,
+        scenario_revision,
+        source_root,
+        source_connection_id,
+        source_relative,
+        destination_root,
+        destination_connection_id,
+        destination_relative,
+        job_id,
+        consent,
+        Some((expected_source, expected_destination)),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_local_scenario_file_replace_checked(
     database_path: &Path,
@@ -784,6 +843,20 @@ pub fn run_local_scenario_conflict_replace(
     else {
         return Err(LocalFileCopyError::ConflictUnavailable);
     };
+    if let Err(error) = require_current_scenario_revision(
+        registry_path,
+        &task.scenario.scenario_id,
+        task.scenario.revision,
+    ) {
+        if matches!(error, LocalFileCopyError::ScenarioRevisionStale) {
+            // The task describes a superseded revision. Make it stale, so the
+            // user builds a new task from the current plan.
+            registry
+                .mark_conflict_task_stale(conflict_id)
+                .map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
+        }
+        return Err(error);
+    }
     let scenario = registry
         .get_scenario_revision(&task.scenario.scenario_id, task.scenario.revision)
         .map_err(|_| LocalFileCopyError::ConflictUnavailable)?
@@ -917,6 +990,20 @@ pub fn run_local_scenario_conflict_delete(
     let source_is_left = task
         .source_is_left
         .ok_or(LocalFileCopyError::ConflictUnavailable)?;
+    if let Err(error) = require_current_scenario_revision(
+        registry_path,
+        &task.scenario.scenario_id,
+        task.scenario.revision,
+    ) {
+        if matches!(error, LocalFileCopyError::ScenarioRevisionStale) {
+            // The task describes a superseded revision. Make it stale, so the
+            // user builds a new task from the current plan.
+            registry
+                .mark_conflict_task_stale(conflict_id)
+                .map_err(|_| LocalFileCopyError::ConflictUnavailable)?;
+        }
+        return Err(error);
+    }
     let scenario = registry
         .get_scenario_revision(&task.scenario.scenario_id, task.scenario.revision)
         .map_err(|_| LocalFileCopyError::ConflictUnavailable)?

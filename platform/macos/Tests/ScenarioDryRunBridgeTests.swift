@@ -528,11 +528,16 @@ struct ScenarioDryRunBridgeTests {
             ),
             databasePath: database
         )
-        guard let caseCreate = casePlan.first(where: {
-            $0.relative_path == "report.txt" && $0.action.kind == "create"
-        }) else {
-            fatalError("case collision did not retain the source create proposal")
-        }
+        check(
+            casePlan.count == 2 && casePlan.allSatisfy { $0.action.kind == "needs_verification" },
+            "case collision is marked for verification and offers no Create"
+        )
+        // Defense in depth: a forged Create row for the colliding name must
+        // still fail in the executor without a Job or a write.
+        let caseCreate = try JSONDecoder().decode(ScenarioPlanItem.self, from: Data(#"""
+        {"relative_path":"report.txt","left":"added","right":"unchanged",
+         "action":{"kind":"create","from_left":true}}
+        """#.utf8))
         let jobsBeforeCaseCollision = try JobInventory.list(databasePath: jobs).count
         do {
             try StorageRegistryBridge.executeScenarioCreate(
@@ -559,40 +564,15 @@ struct ScenarioDryRunBridgeTests {
         let nestedOverlapRoot = overlapRoot.appendingPathComponent("nested", isDirectory: true)
         try FileManager.default.createDirectory(at: nestedOverlapRoot, withIntermediateDirectories: true)
         try Data("must not copy".utf8).write(to: overlapRoot.appendingPathComponent("report.txt"))
-        let overlapScenarioID = try createScenario(
-            database: database, leftID: leftID, leftRoot: overlapRoot.path,
-            rightID: rightID, rightRoot: nestedOverlapRoot.path
-        )
-        let overlapScenario = ScenarioEntry(
-            id: overlapScenarioID,
-            name: "Overlapping roots",
-            left_connection_id: leftID,
-            left_root: overlapRoot.path,
-            right_connection_id: rightID,
-            right_root: nestedOverlapRoot.path,
-            direction: "left_to_right",
-            enabled: true,
-            revision: 1
-        )
-        let overlapPlan = try StorageRegistryBridge.dryRunScenario(
-            id: overlapScenarioID, revision: 1,
-            left: try StorageRegistryBridge.localScenarioSnapshot(
-                root: overlapRoot.path, connectionID: leftID, databasePath: database
-            ),
-            right: try StorageRegistryBridge.localScenarioSnapshot(
-                root: nestedOverlapRoot.path, connectionID: rightID, databasePath: database
-            ),
-            databasePath: database
-        )
-        check(overlapPlan.count == 1 && overlapPlan[0].action.kind == "create", "overlap starts as a create proposal")
         let jobsBeforeOverlap = try JobInventory.list(databasePath: jobs).count
         do {
-            try StorageRegistryBridge.executeScenarioCreate(
-                scenario: overlapScenario, item: overlapPlan[0], registryPath: database, jobsPath: jobs
+            _ = try createScenario(
+                database: database, leftID: leftID, leftRoot: overlapRoot.path,
+                rightID: rightID, rightRoot: nestedOverlapRoot.path
             )
-            fatalError("overlapping Scenario roots started a copy")
+            fatalError("Registry saved overlapping Scenario roots")
         } catch {
-            // The pinned Local roots reject a recursive scope before a Job is created.
+            // The Registry refuses nested Local roots when the Scenario is saved.
         }
         check(
             !FileManager.default.fileExists(atPath: nestedOverlapRoot.appendingPathComponent("report.txt").path),

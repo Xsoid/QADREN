@@ -21,6 +21,9 @@ ui-test-fixtures = []
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 chrono-tz = "0.10"
+# Already in the dependency tree through reqwest/url/idna. Used to detect
+# names that APFS treats as the same file (Unicode form).
+icu_normalizer = { version = "2", default-features = false, features = ["compiled_data"] }
 libc = "0.2"
 md5 = "0.7"
 rusqlite = { version = "0.32", features = ["bundled"] }

@@ -436,6 +436,9 @@ pub unsafe extern "C" fn qadren_jobs_run_local_file_copy(
         Err(crate::job_execution::LocalFileCopyError::ConflictStale) => {
             response(json!({"ok":false,"error":"conflict_stale"}))
         }
+        Err(crate::job_execution::LocalFileCopyError::ScenarioRevisionStale) => {
+            response(json!({"ok":false,"error":"scenario_revision_stale"}))
+        }
         Err(crate::job_execution::LocalFileCopyError::CapabilityUnavailable) => {
             response(json!({"ok":false,"error":"local_capability_unavailable"}))
         }
@@ -537,6 +540,9 @@ pub unsafe extern "C" fn qadren_jobs_run_local_file_replace(
         }
         Err(crate::job_execution::LocalFileCopyError::ConflictStale) => {
             response(json!({"ok":false,"error":"conflict_stale"}))
+        }
+        Err(crate::job_execution::LocalFileCopyError::ScenarioRevisionStale) => {
+            response(json!({"ok":false,"error":"scenario_revision_stale"}))
         }
         Err(crate::job_execution::LocalFileCopyError::CapabilityUnavailable) => {
             response(json!({"ok":false,"error":"local_capability_unavailable"}))
@@ -647,6 +653,9 @@ pub unsafe extern "C" fn qadren_jobs_run_local_scenario_file_copy(
         Err(crate::job_execution::LocalFileCopyError::ConflictStale) => {
             response(json!({"ok":false,"error":"conflict_stale"}))
         }
+        Err(crate::job_execution::LocalFileCopyError::ScenarioRevisionStale) => {
+            response(json!({"ok":false,"error":"scenario_revision_stale"}))
+        }
         Err(crate::job_execution::LocalFileCopyError::CapabilityUnavailable) => {
             response(json!({"ok":false,"error":"local_capability_unavailable"}))
         }
@@ -755,6 +764,9 @@ pub unsafe extern "C" fn qadren_jobs_run_local_scenario_file_replace(
         Err(crate::job_execution::LocalFileCopyError::ConflictStale) => {
             response(json!({"ok":false,"error":"conflict_stale"}))
         }
+        Err(crate::job_execution::LocalFileCopyError::ScenarioRevisionStale) => {
+            response(json!({"ok":false,"error":"scenario_revision_stale"}))
+        }
         Err(crate::job_execution::LocalFileCopyError::CapabilityUnavailable) => {
             response(json!({"ok":false,"error":"local_capability_unavailable"}))
         }
@@ -811,6 +823,9 @@ pub unsafe extern "C" fn qadren_jobs_run_local_scenario_conflict_replace(
         Err(crate::job_execution::LocalFileCopyError::ConflictStale) => {
             response(json!({"ok":false,"error":"conflict_stale"}))
         }
+        Err(crate::job_execution::LocalFileCopyError::ScenarioRevisionStale) => {
+            response(json!({"ok":false,"error":"scenario_revision_stale"}))
+        }
         Err(crate::job_execution::LocalFileCopyError::ConflictUnavailable) => {
             response(json!({"ok":false,"error":"conflict_unavailable"}))
         }
@@ -858,6 +873,9 @@ pub unsafe extern "C" fn qadren_jobs_run_local_scenario_conflict_delete(
         ),
         Err(crate::job_execution::LocalFileCopyError::ConflictStale) => {
             response(json!({"ok":false,"error":"conflict_stale"}))
+        }
+        Err(crate::job_execution::LocalFileCopyError::ScenarioRevisionStale) => {
+            response(json!({"ok":false,"error":"scenario_revision_stale"}))
         }
         Err(crate::job_execution::LocalFileCopyError::ConflictUnavailable) => {
             response(json!({"ok":false,"error":"conflict_unavailable"}))

@@ -32,6 +32,13 @@ For scheduled or unattended work, carry out ordinary reads and unambiguously saf
 - After a failure, automatically check whether the previous effect occurred, using non-mutating reconciliation before considering a possibly destructive retry.
 - When cleaning user history, do not delete information required for incomplete tasks, synchronization control, and action confirmation.
 
+## Plan Freshness and Name Identity
+
+- A confirmed replacement carries the metadata of both files from the plan that the user saw. The Worker refuses the replacement, before it creates a Job, if either file changed after planning. The user must check the plan again and give a new consent.
+- An interactive request for a superseded Scenario revision is refused. Staged schedule Jobs and confirmed batch receipts keep their pinned revision.
+- Two Local Filesystem roots of one Scenario must not be the same folder or be inside each other. The Registry refuses such a Scenario when it is saved. Executors still check the opened folders.
+- Paths that differ only by letter case or Unicode form can name the same file on APFS. The plan marks them as "needs verification" and offers no Create or Update for them.
+
 ## Main MacBook Limitations
 
 Follow the [content-read policy](local-downloads.md): file content needed by a requested/configured operation may be read without a separate prompt, including possible macOS File Provider materialization. This does not permit unrelated automatic mirroring or unsolicited prefetch. Do not interfere with native iCloud/macOS or other applications.
