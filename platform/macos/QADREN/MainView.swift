@@ -28,6 +28,11 @@ struct MainView: View {
         .tint(QDTheme.color(.focus, for: colorScheme))
         .navigationTitle(workspace.title)
         .background(TitlebarLogoAccessory().frame(width: 0, height: 0))
+        .background {
+            if workspace == .monitoring {
+                InitialFocusReset().frame(width: 0, height: 0)
+            }
+        }
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Menu {
