@@ -16,6 +16,7 @@ Recommended 2-column layout: a narrow permanent navigation with sections on the 
 | Policies | Conflicts, deletions, scoped consents, space thresholds, event retention | Do not add false protection features or backup versions |
 | Node and Service | Local Worker, start/pause, independent service status, launch management | Show unavailable signs if there is no independent service |
 | Interface | Theme, window zoom, default density, panel restoration | Compatible with locally saved layouts |
+| About | Last block of Application Settings: app version and build, Core version, author (Xsoid), and a link to the developer site https://xsoid.net | Values come from `Info.plist` and the Core library |
 
 These are not six independent app windows: this is the structure of **one** settings panel. Deep-link points have `section`, `entityID`, and `editorSubsection` with validation of the entity existence.
 

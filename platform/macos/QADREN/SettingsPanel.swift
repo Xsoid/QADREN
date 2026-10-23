@@ -2064,9 +2064,25 @@ struct ApplicationSettingsView: View {
                 LabeledContent("Настройки", value: "Отдельное окно")
                 LabeledContent("Выполнение сценариев", value: "Local Filesystem · Local Worker")
             }
+            Section("О приложении") {
+                LabeledContent("Версия", value: appVersion)
+                LabeledContent("Core", value: CoreBridge.version)
+                LabeledContent("Автор", value: "Xsoid")
+                LabeledContent("Сайт разработчика") {
+                    Link("xsoid.net", destination: URL(string: "https://xsoid.net")!)
+                }
+            }
         }
         .formStyle(.grouped)
         .padding(20)
         .navigationTitle("Настройки приложения")
+    }
+
+    /// Marketing version and build number from Info.plist.
+    private var appVersion: String {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "—"
+        let build = info?["CFBundleVersion"] as? String ?? "—"
+        return "\(version) (сборка \(build))"
     }
 }
