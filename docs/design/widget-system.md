@@ -2,9 +2,9 @@
 
 ## 1. Product Contract
 
-Monitoring is **not a list of sections**, but several independent local dashboard windows. Each window contains a set of standard interactive widgets. There is no permanent Sidebar, no right-side palette, and no permanently visible catalog. The user configures the panel, and then only observes and performs contextual actions. General filters are available from a compact header popover. Problems are displayed independently of filters.
+Monitoring is **not a list of sections**. It is a local dashboard window with a set of standard interactive widgets. Release 1 has one monitoring window with one local layout, as [monitoring](monitoring.md) specifies. Several independent dashboard windows are **Deferred**. The panel model below keeps `panelID` so that a later decision can add more windows without a layout migration. There is no permanent Sidebar, no right-side palette, and no permanently visible catalog. The user configures the panel, and then only observes and performs contextual actions. General filters are available from a compact header popover. Problems are displayed independently of filters.
 
-Do not duplicate an instance of one `typeID` **within one panel**; the same type is permissible in another panel with a different configuration. Within a composite `Connection` type, you may show several connections or one selected connection—without adding a second identical widget type to the same panel.
+Do not duplicate an instance of one `typeID` **within one panel**. When several panels are available, the same type is permissible in another panel with a different configuration. Within a composite `Connection` type, you may show several connections or one selected connection—without adding a second identical widget type to the same panel.
 
 ## 2. Saved Representation Model
 

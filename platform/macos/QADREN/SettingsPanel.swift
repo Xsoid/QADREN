@@ -480,7 +480,7 @@ private struct ScenariosSettingsView: View {
             if scenarios.entries.isEmpty {
                 SettingsEmptyState(
                     title: "Сценариев пока нет",
-                    detail: "Выберите источники, каталоги и направление обмена. Планирование и запуск появятся после готовности Core.",
+                    detail: "Выберите подключения, каталоги и направление обмена. После создания сценария можно просмотреть план, запустить его и настроить расписание.",
                     symbol: "arrow.triangle.branch"
                 ) {
                         Button("Создать сценарий", action: createScenario)

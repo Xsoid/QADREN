@@ -57,6 +57,10 @@ struct WorkerConflictRequest: Encodable {
     let destructive_consent: Bool
 }
 
+struct WorkerStatusRequest: Encodable {
+    let command = "status"
+}
+
 struct WorkerRegistryControlRequest: Encodable {
     let command: String
     let scenario_id: String?
@@ -195,12 +199,22 @@ enum WorkerIPC {
         }
     }
 
-    private static func send(_ payload: Data, socketPath: String) throws -> Response {
+    /// Sends the non-mutating `status` request. A short timeout keeps the
+    /// monitoring refresh responsive while the Worker runs a long effect.
+    static func probeStatus(socketPath: String? = nil, timeoutSeconds: Int = 1) throws {
+        let payload = try JSONEncoder().encode(WorkerStatusRequest()) + Data([0x0a])
+        let response = try send(
+            payload, socketPath: socketPath ?? defaultSocketPath(), timeoutSeconds: timeoutSeconds
+        )
+        guard response.ok, response.status == "running" else { throw WorkerIPCError.invalidResponse }
+    }
+
+    private static func send(_ payload: Data, socketPath: String, timeoutSeconds: Int = 5) throws -> Response {
         let descriptor = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard descriptor >= 0 else { throw WorkerIPCError.unavailable }
         defer { Darwin.close(descriptor) }
 
-        var timeout = timeval(tv_sec: 5, tv_usec: 0)
+        var timeout = timeval(tv_sec: timeoutSeconds, tv_usec: 0)
         guard setsockopt(
             descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size)
         ) == 0,

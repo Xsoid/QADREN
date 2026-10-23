@@ -8,9 +8,8 @@ struct MainView: View {
     @StateObject private var rightLocalWorkspace = LocalWorkspace()
     @StateObject private var dashboardLayout = DashboardLayoutStore()
     @SceneStorage("qadren.monitoring.panel-id") private var monitoringPanelID = ""
+    @StateObject private var feed = MonitoringFeed()
     @State private var isEditingLayout = false
-    @State private var jobs: [JobRow] = []
-    @State private var jobError: String?
     let workspace: DispatcherSection
 
     init(workspace: DispatcherSection = .monitoring) {
@@ -65,9 +64,10 @@ struct MainView: View {
                 let panelID = monitoringPanelID.isEmpty ? UUID().uuidString : monitoringPanelID
                 monitoringPanelID = panelID
                 dashboardLayout.load(panelID: panelID)
+                feed.start()
             }
-            refreshJobs()
         }
+        .onDisappear { feed.stop() }
         .onReceive(NotificationCenter.default.publisher(for: .qadrenStorageConnectionsDidChange)) { _ in
             connections.refresh()
         }
@@ -106,12 +106,14 @@ struct MainView: View {
                 }
                 .padding(12)
 
-                HStack(spacing: 8) {
-                    QDStatusLabel(kind: workerStatusKind, text: "Worker: \(workerStatus)")
-                    Divider().frame(height: 14)
-                    Text("Состояние из локального Core").font(.caption).foregroundStyle(.secondary)
-                    Spacer()
-                    QDStatusLabel(kind: workerStatusKind, text: "Локальные операции выполняет Worker")
+                TimelineView(.periodic(from: .now, by: MonitoringFeed.refreshInterval)) { context in
+                    HStack(spacing: 8) {
+                        QDStatusLabel(kind: workerStatusKind, text: workerStatus)
+                        Divider().frame(height: 14)
+                        Text("Служба: \(LocalWorkerController.statusText)").font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        freshnessLabel(now: context.date)
+                    }
                 }
                 .padding(.horizontal, 12).padding(.bottom, 8)
             }
@@ -130,7 +132,7 @@ struct MainView: View {
                     QDStatusLabel(kind: workerStatusKind, text: workerStatus)
                     LabeledContent("Ядро", value: coreStatus)
                     if widget.density != .compact {
-                        Text("Источник: локальный Core; содержимое файлов не читается.")
+                        Text("Источник: запрос status к Worker и локальный JobStore; содержимое файлов не читается.")
                             .font(.caption2).foregroundStyle(.secondary)
                     }
                     if widget.density == .expanded {
@@ -310,7 +312,7 @@ struct MainView: View {
     private func refreshCurrentWorkspace() {
         switch workspace {
         case .monitoring:
-            refreshJobs()
+            Task { await feed.refresh() }
             connections.refresh()
         case .scenarios:
             connections.refresh()
@@ -321,18 +323,36 @@ struct MainView: View {
         }
     }
 
+    private var jobs: [JobRow] { feed.jobs }
+    private var jobError: String? { feed.jobError }
+
+    /// Worker state comes only from the IPC `status` request. The in-process
+    /// Core library cannot see the separate Worker process.
     private var workerStatus: String {
-        switch CoreBridge.workerStatus {
-        case "Idle", "Idle Worker": "Worker простаивает"
-        default: CoreBridge.workerStatus
-        }
+        guard let checked = feed.lastWorkerCheck else { return feed.worker.title }
+        return "\(feed.worker.title) · \(checked.formatted(date: .omitted, time: .standard))"
     }
     private var workerStatusKind: QDStatusKind {
-        switch CoreBridge.workerStatus {
-        case "Idle", "Idle Worker": .ready
-        case "Busy": .active
-        case "Unavailable": .unsupported
-        default: .unknown
+        switch feed.worker {
+        case .unchecked: .unknown
+        case .responding: .ready
+        case .notResponding: .needsAction
+        case .unavailable: .offline
+        }
+    }
+
+    @ViewBuilder
+    private func freshnessLabel(now: Date) -> some View {
+        switch MonitoringFreshness.evaluate(
+            lastSuccess: feed.lastInventoryRead, now: now, interval: MonitoringFeed.refreshInterval
+        ) {
+        case .never:
+            QDStatusLabel(kind: .unknown, text: "Данные ещё не прочитаны")
+        case let .fresh(date):
+            Text("Обновлено \(date.formatted(date: .omitted, time: .standard))")
+                .font(.caption).foregroundStyle(.secondary)
+        case let .stale(date):
+            QDStatusLabel(kind: .needsAction, text: "Данные устарели: последнее чтение \(date.formatted(date: .omitted, time: .standard))")
         }
     }
     private var jobPresentationStatus: JobPresentationStatus {
@@ -388,16 +408,12 @@ struct MainView: View {
     }
     private var coreStatus: String {
         switch CoreBridge.status {
-        case "ready - worker idle", "Core ready - worker idle": "Готово — Worker простаивает"
+        case "ready - worker idle", "Core ready - worker idle": "Библиотека Core загружена"
         default: CoreBridge.status
         }
     }
     private func adapterTitle(_ adapter: String) -> String { adapter == "yandex_disk" ? "Яндекс Диск" : adapter }
 
-    private func refreshJobs() {
-        do { jobs = try JobInventory.list(); jobError = nil }
-        catch { jobError = error.localizedDescription }
-    }
     /// `g1-*` is a test-only durable fixture created by the early mock runner.
     /// It is retained for safe diagnostics, but is never product queue data.
     private var visibleJobs: [JobRow] {

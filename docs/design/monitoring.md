@@ -12,6 +12,8 @@ Existing entry points in `QADRENApp.swift`: one `Window("Контрольная 
 2. **Canvas**: scrollable adaptive grid without a sidebar. All widget types reside here. Navigation is handled via context within a widget, an inspector, or a temporary separate window.
 3. **Status bar**: one line containing the local Worker, service status, last update, and the number of unresolved critical conditions. Use values with provenance and freshness. Do not simulate "running in background" until the lifecycle is complete.
 
+The Worker value comes only from the IPC `status` request to the local Worker socket. A registered service or the in-process Core library is not proof that the Worker responds. The panel reads the JobStore inventory and sends the `status` request every 5 seconds while the monitoring window is open. Both reads are non-mutating. If no inventory read succeeds for three intervals, the status bar marks the data as stale and shows the time of the last good read.
+
 ### Composition scheme (structure, not pixel dimensions)
 
 | 12-column wide (conditional areas) | Content |
