@@ -1546,11 +1546,19 @@ fn parse_paths() -> (WorkerPaths, bool) {
     }
     match (socket, registry, jobs) {
         (None, None, None) => {
-            let home = env::var_os("HOME").unwrap_or_else(|| usage());
-            let base = PathBuf::from(home)
-                .join("Library")
-                .join("Application Support")
-                .join("QADREN");
+            // QADREN_DATA_ROOT moves the app and the Worker to the same
+            // disposable data directory for native tests. It must be absolute.
+            let base = match env::var_os("QADREN_DATA_ROOT").filter(|root| !root.is_empty()) {
+                Some(root) if Path::new(&root).is_absolute() => PathBuf::from(root),
+                Some(_) => usage(),
+                None => {
+                    let home = env::var_os("HOME").unwrap_or_else(|| usage());
+                    PathBuf::from(home)
+                        .join("Library")
+                        .join("Application Support")
+                        .join("QADREN")
+                }
+            };
             (
                 WorkerPaths {
                     socket: base.join("worker.sock"),

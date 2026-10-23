@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-for cmd in cargo xcrun plutil; do
+for cmd in cargo xcrun plutil codesign; do
   command -v "$cmd" >/dev/null || { echo "Missing build tool: $cmd" >&2; exit 1; }
 done
 
@@ -59,9 +59,17 @@ xcrun swiftc -O -target "$ARCH-apple-macos13.0" \
   "$ROOT/core/target/$TARGET/release/libqadren_core.a" \
   -o "$APP/Contents/MacOS/QADREN"
 
+# Seal the bundle with an ad-hoc signature. Without a sealed bundle macOS does
+# not accept Contents/Library/LaunchAgents as part of the app, and
+# SMAppService reports the Worker service as not found. Sign the nested Worker
+# first, then the app. This is an internal build, not a Developer ID release.
+codesign --force --sign - --identifier dev.qadren.worker "$APP/Contents/Resources/qadren-worker"
+codesign --force --sign - --identifier "$(plutil -extract CFBundleIdentifier raw "$APP/Contents/Info.plist")" "$APP"
+codesign --verify --strict "$APP"
+
 # Finder uses the bundle directory modification date to invalidate its icon cache.
 touch "$APP"
 
 echo "Built $APP"
 echo "Run: open '$APP'"
-echo "Unsigned local developer build; no iCloud entitlement is configured."
+echo "Ad-hoc signed local developer build (not Developer ID); no iCloud entitlement is configured."

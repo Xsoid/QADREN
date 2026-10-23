@@ -22,6 +22,8 @@ After an unclean exit, the Worker performs read-only reconciliation for ambiguou
 
 ## Lifecycle
 
+The app registers the bundled Worker as a LaunchAgent through `SMAppService` (`Contents/Library/LaunchAgents/dev.qadren.worker.plist`). launchd starts it at load and restarts it after any unsuccessful exit, including a kill by a signal. Quitting the UI does not stop it. The menu offers "Остановить фоновую службу…" with a warning, which unregisters the service, and "Запустить фоновую службу". A stop by the user is durable: the app does not register the service again silently. A test instance with `QADREN_DATA_ROOT` registers the service only when `QADREN_REGISTER_AGENT=1` is set, and the Worker honors the same `QADREN_DATA_ROOT`.
+
 Closing the UI disconnects the controller. It does not silently stop active Worker work. An explicit stop requests a controlled Worker stop and preserves queued and uncertain Jobs. The UI reports only a confirmed response or persisted state.
 
 The selected distribution method determines signing, service registration, and restart evidence. Those are release validation requirements, not proof of a separate Worker architecture.

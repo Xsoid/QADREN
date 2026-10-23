@@ -47,11 +47,17 @@ private struct MenuBarWorkspaceMenu: View {
         Button("Настройки") { open(id: "scenario-settings") }
         Button("Файловый менеджер") { open(id: "file-manager") }
         Divider()
-        Button("Выйти из QADREN") { NSApp.terminate(nil) }
+        if LocalWorkerController.isRegistered {
+            Button("Остановить фоновую службу…") { LocalWorkerController.confirmAndStop() }
+        } else {
+            Button("Запустить фоновую службу") { LocalWorkerController.register() }
+        }
+        // Quitting the UI does not stop the registered background Worker.
+        Button("Выйти из QADREN (служба продолжит работу)") { NSApp.terminate(nil) }
     }
 
     private var coreStatus: String {
-        LocalWorkerController.statusText
+        "Служба: " + LocalWorkerController.statusText
     }
 
     private func open(id: String) {

@@ -10,7 +10,7 @@ bash scripts/build-macos.sh
 open dist/QADREN.app
 ```
 
-`scripts/build-macos.sh` creates an unsigned developer bundle at `dist/QADREN.app`. Use `./script/build_and_run.sh` to rebuild and start that bundle. Its `--verify` option checks the started process. These commands do not prove release readiness.
+`scripts/build-macos.sh` creates an ad-hoc signed developer bundle at `dist/QADREN.app`. The ad-hoc signature seals the bundle, so `SMAppService` accepts the bundled Worker LaunchAgent. It is not a Developer ID signature and not notarized. Use `./script/build_and_run.sh` to rebuild and start that bundle. Its `--verify` option checks the started process. These commands do not prove release readiness.
 
 The developer machine needs Rust and Xcode. The user distribution must include its Rust components and must not require Rust, Swift, Cargo, Xcode, Node, Python, or Docker.
 

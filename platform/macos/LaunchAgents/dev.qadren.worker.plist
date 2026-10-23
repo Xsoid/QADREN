@@ -10,6 +10,10 @@
     <true/>
     <key>KeepAlive</key>
     <dict>
+        <!-- Restart after any unsuccessful exit, including a kill by a signal.
+             A clean exit (the explicit IPC stop) is not restarted. -->
+        <key>SuccessfulExit</key>
+        <false/>
         <key>Crashed</key>
         <true/>
     </dict>
