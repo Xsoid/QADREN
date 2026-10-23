@@ -7,12 +7,12 @@
 use qadren_core::confirmation::{Confirmation, EvidenceLevel};
 use qadren_core::job_execution::{
     local_directory_reconciliation_candidates, local_file_copy_reconciliation_candidates,
-    reconcile_local_directory_create, reconcile_local_file_copy, remove_interrupted_staging,
-    require_current_scenario_revision, run_local_directory_create, run_local_file_copy,
-    run_local_file_replace, run_local_scenario_conflict_delete,
+    reconcile_local_directory_create, reconcile_local_file_copy, reconcile_local_rule_delete,
+    remove_interrupted_staging, require_current_scenario_revision, run_local_directory_create,
+    run_local_file_copy, run_local_file_replace, run_local_scenario_conflict_delete,
     run_local_scenario_conflict_replace, run_local_scenario_file_copy,
-    run_local_scenario_file_replace_planned, LocalFileCopyError, LocalFileCopyReconciliationStatus,
-    LocalFileCopyStatus,
+    run_local_scenario_file_replace_planned, run_local_scenario_rule_delete, LocalFileCopyError,
+    LocalFileCopyReconciliationStatus, LocalFileCopyStatus, LocalRuleDeleteStatus,
 };
 use qadren_core::jobs::JobStore;
 use qadren_core::local_fs::LocalFilesystem;
@@ -168,6 +168,7 @@ fn dispatch_due(paths: &WorkerPaths) -> Result<(usize, usize), String> {
     let registry =
         Registry::open(&paths.registry).map_err(|_| "registry_unavailable".to_string())?;
     reconcile_unknown_scenario_creates(paths, &registry)?;
+    reconcile_unknown_rule_deletes(paths);
     resume_pending_scenario_create_batches(paths, &registry);
     let staged = registry
         .stage_schedule_catch_up(through, overlap)
@@ -189,6 +190,115 @@ fn resume_pending_scenario_create_batches(paths: &WorkerPaths, registry: &Regist
     };
     for batch_id in batch_ids {
         let _ = execute_create_batch_id(paths, &batch_id);
+    }
+}
+
+/// Reconcile UNKNOWN deletions made under a simple deletion rule (D-019).
+/// This is read-only: an object that is still at its path keeps the Job
+/// UNKNOWN, and the deletion is never repeated.
+fn reconcile_unknown_rule_deletes(paths: &WorkerPaths) {
+    let Ok(attempts) = JobStore::open(&paths.jobs).and_then(|store| store.unresolved_attempts())
+    else {
+        return;
+    };
+    for attempt in attempts.into_iter().filter(|attempt| {
+        attempt.status == "unknown"
+            && matches!(
+                attempt.operation_kind.as_deref(),
+                Some("local_rule_trash" | "local_rule_delete")
+            )
+    }) {
+        // One unresolvable Job must not stop the other checks.
+        let _ = reconcile_local_rule_delete(&paths.jobs, &paths.registry, &attempt.job_id);
+    }
+}
+
+/// Run every deletion that the plan of `reference` marks as covered by the
+/// simple deletion rule. The plan applies the mass-deletion threshold, so a
+/// caller cannot exceed it by asking for single paths. Child Job identities
+/// are stable per path, so a repeated request does not repeat an effect.
+fn run_rule_deletions(
+    paths: &WorkerPaths,
+    reference: &ScenarioReference,
+    plan: &[qadren_core::scenario_planner::PlanItem],
+    child_job_id: &dyn Fn(&str) -> Result<String, String>,
+) -> Result<usize, String> {
+    let mut done = 0;
+    for item in plan {
+        let PlanAction::Delete { on_left } = item.action else {
+            continue;
+        };
+        let job_id = child_job_id(&item.relative_path)?;
+        match run_local_scenario_rule_delete(
+            &paths.jobs,
+            &paths.registry,
+            &reference.scenario_id,
+            reference.revision,
+            &item.relative_path,
+            on_left,
+            &job_id,
+        ) {
+            Ok(LocalRuleDeleteStatus::MovedToTrash | LocalRuleDeleteStatus::DeletedPermanently)
+            | Ok(LocalRuleDeleteStatus::Existing(JobState::Completed)) => done += 1,
+            Ok(LocalRuleDeleteStatus::Existing(_)) => {
+                return Err("rule_delete_not_completed".to_string())
+            }
+            Err(LocalFileCopyError::OutcomeUnknown(_)) => {
+                return Err("outcome_unknown".to_string())
+            }
+            Err(LocalFileCopyError::ConflictStale) => return Err("plan_stale".to_string()),
+            Err(_) => return Err("rule_delete_failed".to_string()),
+        }
+    }
+    Ok(done)
+}
+
+/// IPC: run the rule deletions of the current revision of one Scenario.
+fn execute_rule_deletions(
+    paths: &WorkerPaths,
+    request: &Request,
+) -> Result<(&'static str, usize), &'static str> {
+    let (Some(scenario_id), Some(revision), Some(batch_id)) = (
+        request.scenario_id.as_deref(),
+        request.scenario_revision,
+        request.batch_id.as_deref(),
+    ) else {
+        return Err("invalid_request");
+    };
+    if let Err(error) = require_current_scenario_revision(&paths.registry, scenario_id, revision) {
+        return Err(match error {
+            LocalFileCopyError::ScenarioRevisionStale => "scenario_revision_stale",
+            _ => "scenario_unavailable",
+        });
+    }
+    let registry = Registry::open(&paths.registry).map_err(|_| "registry_unavailable")?;
+    let scenario = registry
+        .get_scenario_revision(scenario_id, revision)
+        .ok()
+        .flatten()
+        .ok_or("scenario_unavailable")?;
+    enabled_local_connection(&registry, &scenario.left_connection_id)
+        .and_then(|()| enabled_local_connection(&registry, &scenario.right_connection_id))
+        .map_err(|_| "local_connection_unavailable")?;
+    let (left, skipped_left) =
+        observed_files(Path::new(&scenario.left_root)).map_err(|_| "scan_unavailable")?;
+    let (right, skipped_right) =
+        observed_files(Path::new(&scenario.right_root)).map_err(|_| "scan_unavailable")?;
+    let reference = ScenarioReference {
+        scenario_id: scenario_id.to_owned(),
+        revision,
+    };
+    let plan = registry
+        .plan_scenario_dry_run_with_skipped(&reference, &left, &right, &skipped_left, &skipped_right)
+        .map_err(|_| "plan_unavailable")?;
+    let child = |path: &str| Ok(format!("{batch_id}-{:x}", md5::compute(path.as_bytes())));
+    match run_rule_deletions(paths, &reference, &plan, &child) {
+        Ok(done) => Ok(("completed", done)),
+        Err(error) => Err(match error.as_str() {
+            "outcome_unknown" => "outcome_unknown",
+            "plan_stale" => "plan_stale",
+            _ => "rule_delete_failed",
+        }),
     }
 }
 
@@ -558,6 +668,25 @@ fn execute_schedule_job(
                     .link_schedule_conflict(schedule_job_id, &conflict_id)
                     .map_err(|_| "schedule_conflict_unavailable".to_string())?;
                 waiting_for_decision = true;
+            }
+            PlanAction::Delete { .. } => {
+                let child = |path: &str| {
+                    registry
+                        .reserve_schedule_child_job_id(schedule_job_id, path)
+                        .map_err(|_| "schedule_child_identity_unavailable".to_string())
+                };
+                match run_rule_deletions(
+                    paths,
+                    reference,
+                    std::slice::from_ref(&item),
+                    &child,
+                ) {
+                    Ok(_) => {}
+                    Err(error) if error == "outcome_unknown" => {
+                        return Err("schedule_outcome_unknown".to_string())
+                    }
+                    Err(_) => return Err("schedule_rule_delete_unavailable".to_string()),
+                }
             }
             PlanAction::NeedsVerification { .. } => {
                 return Err("schedule_metadata_needs_verification".to_string())
@@ -1287,6 +1416,26 @@ fn handle_client(mut stream: UnixStream, paths: &WorkerPaths, stop: &mut bool) {
                     status,
                     staged: None,
                     dispatched: None,
+                },
+            ),
+            Err(status) => respond(
+                &mut stream,
+                &Response {
+                    ok: false,
+                    status,
+                    staged: None,
+                    dispatched: None,
+                },
+            ),
+        },
+        "execute_rule_deletions" => match execute_rule_deletions(paths, &request) {
+            Ok((status, done)) => respond(
+                &mut stream,
+                &Response {
+                    ok: true,
+                    status,
+                    staged: None,
+                    dispatched: Some(done),
                 },
             ),
             Err(status) => respond(

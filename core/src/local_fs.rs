@@ -250,6 +250,7 @@ impl LocalFilesystem {
                 streaming: cfg!(unix),
                 create_directory: cfg!(unix),
                 delete: cfg!(unix),
+                trash: cfg!(target_os = "macos"),
                 ..Operations::default()
             },
             prerequisites_verified: cfg!(unix),
@@ -1244,6 +1245,50 @@ impl LocalFilesystem {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    fn trash_directory(&self, path: &Path) -> Result<Option<File>> {
+        let identity = secure::file_identity(&self.root_fd, path)?;
+        #[cfg(test)]
+        if let Some(directory) = tests::TEST_TRASH.with(|value| value.borrow().clone()) {
+            return secure::root(&directory).map(Some);
+        }
+        secure::system_trash_directory(&self.root_fd, identity.device)
+    }
+
+    /// Whether the volume of this regular file has a usable system Trash.
+    /// This has no effect on the file; `trash_file` checks it again.
+    pub fn trash_available(&self, path: &Path) -> Result<bool> {
+        Self::relative(path)?;
+        #[cfg(target_os = "macos")]
+        {
+            Ok(self.trash_directory(path)?.is_some())
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = path;
+            Ok(false)
+        }
+    }
+
+    /// Move one checked regular file into the system Trash of its volume.
+    /// Returns `Ok(false)` before any effect when this volume has no usable
+    /// Trash; the caller then decides whether a permanent delete is allowed.
+    pub fn trash_file(&self, path: &Path) -> Result<bool> {
+        Self::relative(path)?;
+        #[cfg(target_os = "macos")]
+        {
+            match self.trash_directory(path)? {
+                Some(trash) => secure::trash_file_into(&self.root_fd, path, &trash).map(|()| true),
+                None => Ok(false),
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = path;
+            Ok(false)
+        }
+    }
+
     /// Creates one child directory; fails closed on unsupported platforms.
     pub fn create_directory(&self, path: &Path) -> Result<()> {
         Self::relative(path)?;
@@ -1410,7 +1455,14 @@ impl LocalFilesystem {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    // Unit tests must never move files into the real Trash of the user.
+    #[cfg(target_os = "macos")]
+    thread_local! {
+        pub(crate) static TEST_TRASH: std::cell::RefCell<Option<std::path::PathBuf>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
     use super::*;
     use std::io::{Cursor, Read};
 
@@ -3124,6 +3176,44 @@ mod tests {
         adapter.delete_file(Path::new("file.bin")).unwrap();
         assert!(!root.join("file.bin").exists());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn trash_moves_a_file_without_replacing_an_existing_trash_entry() {
+        let root = sandbox();
+        let trash_root = sandbox();
+        fs::write(root.join("a.txt"), b"new").unwrap();
+        fs::write(trash_root.join("a.txt"), b"older trash entry").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let trash = secure::root(&trash_root).unwrap();
+        secure::trash_file_into(&adapter.root_fd, Path::new("a.txt"), &trash).unwrap();
+        assert!(!root.join("a.txt").exists());
+        assert_eq!(fs::read(trash_root.join("a.txt")).unwrap(), b"older trash entry");
+        assert_eq!(fs::read(trash_root.join("a 2.txt")).unwrap(), b"new");
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(trash_root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn trash_rejects_links_and_traversal_without_an_effect() {
+        let root = sandbox();
+        let trash_root = sandbox();
+        fs::write(root.join("target.txt"), b"keep").unwrap();
+        std::os::unix::fs::symlink(root.join("target.txt"), root.join("link")).unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let trash = secure::root(&trash_root).unwrap();
+        assert!(secure::trash_file_into(&adapter.root_fd, Path::new("link"), &trash).is_err());
+        assert!(matches!(
+            adapter.trash_file(Path::new("../target.txt")),
+            Err(LocalError::InvalidPath)
+        ));
+        assert!(root.join("link").symlink_metadata().is_ok());
+        assert_eq!(fs::read(root.join("target.txt")).unwrap(), b"keep");
+        assert_eq!(fs::read_dir(&trash_root).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(trash_root).unwrap();
     }
 
     #[cfg(unix)]

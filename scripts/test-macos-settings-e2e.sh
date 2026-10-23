@@ -71,25 +71,20 @@ wait_for() {
 
 # Choose a folder through the in-app browser and the Finder open panel.
 choose_folder() {
-  local index="$1" folder="$2"
-  defaults write "$BUNDLE_ID" "$NAV_KEY" "$folder"
-  ax press Настройки AXButton "Открыть браузер папок" "$index"
-  ax wait Настройки AXButton "Выбрать папку в Finder"
-  ax activate
-  ax press Настройки AXButton "Выбрать папку в Finder"
-  # The system open panel sometimes appears slowly; retry the request once.
-  if ! "$DRIVER" "$APP_PID" wait Настройки AXButton "OKButton" 20 2>/dev/null; then
-    echo "   WARNING: the Finder panel did not appear; requesting it again" >&2
-    ax activate
-    ax press Настройки AXButton "Выбрать папку в Finder"
-    ax wait Настройки AXButton "OKButton" 30
-  fi
-  ax press Настройки AXButton "OKButton"
-  # A provider folder can show a one-time macOS access prompt; the owner
+  # The Scenario editor has one inline folder browser per endpoint. Open the
+  # path field of panel $index, go to the folder, and make it the root. The
+  # browser does not follow symbolic links, so use the physical path.
+  local index="$1" folder
+  folder="$(cd "$2" && pwd -P)"
+  ax press Настройки AXButton "Перейти к папке" "$index"
+  ax wait Настройки AXTextField "Путь к папке"
+  ax set Настройки AXTextField "Путь к папке" "$folder"
+  ax press Настройки AXButton "Открыть путь" 0
+  ax gone Настройки AXTextField "Путь к папке"
+  ax press Настройки AXButton "Выбрать эту папку" "$index"
+  # A protected folder can show a one-time macOS access prompt; the owner
   # answers it. Wait long enough for that answer.
   ax wait Настройки AXStaticText "$folder" 120
-  ax press Настройки AXButton "Использовать эту папку"
-  ax gone Настройки AXButton "Использовать эту папку"
 }
 
 # Create a Scenario in the open Scenario list. $4=two_way selects both directions.

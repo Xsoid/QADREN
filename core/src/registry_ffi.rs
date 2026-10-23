@@ -2,7 +2,7 @@
 //! Inputs are UTF-8 owned by the caller; JSON output is caller-freed.
 //! No OAuth tokens or file contents are persisted by these methods.
 use crate::jobs::JobStore;
-use crate::model::ScenarioReference;
+use crate::model::{DeletionMode, ScenarioReference, ScenarioScope};
 use crate::registry::{Registry, RegistryError, ScenarioUpdate};
 use crate::scenario_planner::{ObservedFile, PlanAction, PlanItem, SideChange};
 use crate::schedule_dispatch::dispatch_pending_schedule_jobs;
@@ -14,6 +14,9 @@ use std::path::Path;
 
 const MAX_DRY_RUN_SNAPSHOT_BYTES: usize = 1_048_576;
 const MAX_DRY_RUN_SNAPSHOT_ENTRIES: usize = 10_000;
+/// Upper bound for one Scenario selection. The interface selects objects in
+/// one visible folder, so a real selection is far smaller.
+const MAX_SELECTED_PATHS: usize = 10_000;
 
 fn input(ptr: *const c_char) -> Option<String> {
     if ptr.is_null() {
@@ -96,6 +99,7 @@ fn plan_action_value(value: PlanAction) -> Value {
         PlanAction::DeleteRequiresDecision { on_left } => {
             json!({"kind":"delete_requires_decision", "on_left":on_left})
         }
+        PlanAction::Delete { on_left } => json!({"kind":"delete", "on_left":on_left}),
         PlanAction::Conflict { reason } => json!({"kind":"conflict", "reason":reason}),
         PlanAction::NeedsVerification { reason } => {
             json!({"kind":"needs_verification", "reason":reason})
@@ -160,6 +164,7 @@ fn registry_error_code(error: &RegistryError) -> &'static str {
     match error {
         RegistryError::ScenarioRootsOverlap => "scenario_roots_overlap",
         RegistryError::StaleScenarioRevision => "scenario_revision_stale",
+        RegistryError::InvalidSelection => "invalid_selection",
         _ => "registry_error",
     }
 }
@@ -189,16 +194,18 @@ pub extern "C" fn qadren_registry_list(path: *const c_char) -> *mut c_char {
 #[no_mangle]
 pub extern "C" fn qadren_scenarios_list(path: *const c_char) -> *mut c_char {
     with_registry(path, |db| {
-        Ok(json!(db
-            .list_scenarios()?
-            .into_iter()
-            .map(|item| json!({
+        let mut entries = Vec::new();
+        for item in db.list_scenarios()? {
+            let scope = db.get_scenario_revision_scope(&item.id, item.revision)?;
+            entries.push(json!({
                 "id": item.id, "name": item.name, "left_connection_id": item.left_connection_id,
                 "left_root": item.left_root, "right_connection_id": item.right_connection_id,
                 "right_root": item.right_root, "direction": item.direction, "enabled": item.enabled,
-                "revision": item.revision
-            }))
-            .collect::<Vec<Value>>()))
+                "revision": item.revision, "selected_paths": scope.selected_paths,
+                "deletion_mode": scope.deletion_mode.as_str()
+            }));
+        }
+        Ok(json!(entries))
     })
 }
 
@@ -234,6 +241,121 @@ pub extern "C" fn qadren_scenarios_create(
         Ok(
             json!({"id": db.create_scenario(&name, &left_id, &left_root, &right_id, &right_root, &direction)?}),
         )
+    })
+}
+
+/// The selection and deletion rule of a new revision, as JSON:
+/// `{"selected_paths":["Docs"],"deletion_mode":"paranoid"|"simple"}`.
+#[derive(Deserialize)]
+struct ScopeInput {
+    #[serde(default)]
+    selected_paths: Vec<String>,
+    deletion_mode: String,
+}
+
+fn scope_input(value: &str) -> Option<ScenarioScope> {
+    let input = serde_json::from_str::<ScopeInput>(value).ok()?;
+    if input.selected_paths.len() > MAX_SELECTED_PATHS {
+        return None;
+    }
+    Some(ScenarioScope {
+        selected_paths: input.selected_paths,
+        deletion_mode: DeletionMode::parse(&input.deletion_mode)?,
+    })
+}
+
+/// Like `qadren_scenarios_create`, with the selection and deletion rule of
+/// the first revision (D-019).
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn qadren_scenarios_create_scoped(
+    path: *const c_char,
+    name: *const c_char,
+    left_id: *const c_char,
+    left_root: *const c_char,
+    right_id: *const c_char,
+    right_root: *const c_char,
+    direction: *const c_char,
+    scope_json: *const c_char,
+) -> *mut c_char {
+    let (
+        Some(name),
+        Some(left_id),
+        Some(left_root),
+        Some(right_id),
+        Some(right_root),
+        Some(direction),
+        Some(scope),
+    ) = (
+        input(name),
+        input(left_id),
+        input(left_root),
+        input(right_id),
+        input(right_root),
+        input(direction),
+        input(scope_json).as_deref().and_then(scope_input),
+    )
+    else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    with_registry(path, |db| {
+        Ok(json!({"id": db.create_scenario_with_scope(
+            &name, &left_id, &left_root, &right_id, &right_root, &direction, &scope
+        )?}))
+    })
+}
+
+/// Like `qadren_scenarios_update`, with the selection and deletion rule of
+/// the new revision (D-019).
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn qadren_scenarios_update_scoped(
+    path: *const c_char,
+    id: *const c_char,
+    name: *const c_char,
+    left_id: *const c_char,
+    left_root: *const c_char,
+    right_id: *const c_char,
+    right_root: *const c_char,
+    direction: *const c_char,
+    scope_json: *const c_char,
+) -> *mut c_char {
+    let (
+        Some(id),
+        Some(name),
+        Some(left_id),
+        Some(left_root),
+        Some(right_id),
+        Some(right_root),
+        Some(direction),
+        Some(scope),
+    ) = (
+        input(id),
+        input(name),
+        input(left_id),
+        input(left_root),
+        input(right_id),
+        input(right_root),
+        input(direction),
+        input(scope_json).as_deref().and_then(scope_input),
+    )
+    else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    with_registry(path, |db| {
+        db.update_scenario_with_scope(
+            &id,
+            ScenarioUpdate {
+                name: &name,
+                left_connection_id: &left_id,
+                left_root: &left_root,
+                right_connection_id: &right_id,
+                right_root: &right_root,
+                direction: &direction,
+            },
+            &scope,
+        )?;
+        Ok(json!(true))
     })
 }
 

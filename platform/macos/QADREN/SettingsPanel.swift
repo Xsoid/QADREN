@@ -21,7 +21,8 @@ final class ScenarioSettings: ObservableObject {
         leftRoot: String,
         rightID: String,
         rightRoot: String,
-        direction: String
+        direction: String,
+        scope: ScenarioScopeDraft = ScenarioScopeDraft()
     ) -> String? {
         do {
             _ = try StorageRegistryBridge.createScenario(
@@ -30,7 +31,9 @@ final class ScenarioSettings: ObservableObject {
                 leftRoot: leftRoot,
                 rightID: rightID,
                 rightRoot: rightRoot,
-                direction: direction
+                direction: direction,
+                selectedPaths: scope.selectedPaths.sorted(),
+                deletionMode: scope.deletionMode
             )
             refresh()
             return nil
@@ -56,7 +59,8 @@ final class ScenarioSettings: ObservableObject {
         leftRoot: String,
         rightID: String,
         rightRoot: String,
-        direction: String
+        direction: String,
+        scope: ScenarioScopeDraft = ScenarioScopeDraft()
     ) -> String? {
         do {
             try StorageRegistryBridge.updateScenario(
@@ -66,7 +70,9 @@ final class ScenarioSettings: ObservableObject {
                 leftRoot: leftRoot,
                 rightID: rightID,
                 rightRoot: rightRoot,
-                direction: direction
+                direction: direction,
+                selectedPaths: scope.selectedPaths.sorted(),
+                deletionMode: scope.deletionMode
             )
             refresh()
             return nil
@@ -274,7 +280,8 @@ struct SettingsPanelView: View {
 
     private func saveScenario(
         _ name: String, _ leftID: String, _ leftRoot: String,
-        _ rightID: String, _ rightRoot: String, _ direction: String
+        _ rightID: String, _ rightRoot: String, _ direction: String,
+        _ scope: ScenarioScopeDraft
     ) -> String? {
         do {
             let localID: String?
@@ -291,12 +298,14 @@ struct SettingsPanelView: View {
                 result = scenarios.update(
                     id: editedScenario.id, name: name,
                     leftID: resolvedLeftID, leftRoot: leftRoot,
-                    rightID: resolvedRightID, rightRoot: rightRoot, direction: direction
+                    rightID: resolvedRightID, rightRoot: rightRoot, direction: direction,
+                    scope: scope
                 )
             } else {
                 result = scenarios.create(
                     name: name, leftID: resolvedLeftID, leftRoot: leftRoot,
-                    rightID: resolvedRightID, rightRoot: rightRoot, direction: direction
+                    rightID: resolvedRightID, rightRoot: rightRoot, direction: direction,
+                    scope: scope
                 )
             }
             if result == nil {
@@ -528,6 +537,9 @@ private struct ScenariosSettingsView: View {
                             connection: connectionName(scenario.right_connection_id),
                             root: scenario.right_root
                         )
+                        Text(scenarioScopeSummary(scenario))
+                            .font(.caption).foregroundStyle(.secondary)
+                            .help(scenario.selected_paths.joined(separator: "\n"))
                         Text(scenarioStatus(scenario))
                             .font(.caption).foregroundStyle(.secondary)
                     }
@@ -555,6 +567,16 @@ private struct ScenariosSettingsView: View {
         return endpointIDs.allSatisfy { id in
             connections.first(where: { $0.id == id })?.adapter == "local_filesystem"
         }
+    }
+
+    private func scenarioScopeSummary(_ scenario: ScenarioEntry) -> String {
+        let objects = scenario.selected_paths.isEmpty
+            ? "Вся папка"
+            : "Выбрано объектов: \(scenario.selected_paths.count)"
+        let deletions = scenario.deletion_mode == ScenarioDeletionMode.simple.rawValue
+            ? "удаления: простая синхронизация"
+            : "удаления: параноик"
+        return objects + " · " + deletions
     }
 
     private func scenarioStatus(_ scenario: ScenarioEntry) -> String {
@@ -653,8 +675,23 @@ private struct ScenarioDryRunView: View {
             } else {
                 let creates = plan.filter { $0.action.kind == "create" }
                 let updates = plan.filter { $0.action.kind == "update" }
-                if !creates.isEmpty || !updates.isEmpty {
+                let ruleDeletes = plan.filter { $0.action.kind == "delete" }
+                if scenario.deletion_mode == ScenarioDeletionMode.simple.rawValue,
+                   plan.contains(where: { $0.action.kind == "delete_requires_decision" }) {
+                    SettingsNotice(
+                        text: "В плане больше 20 удалений. Простая синхронизация не выполняет массовое удаление сама: решите по каждому удалению отдельно.",
+                        symbol: "exclamationmark.triangle"
+                    )
+                }
+                if !creates.isEmpty || !updates.isEmpty || !ruleDeletes.isEmpty {
                     HStack {
+                        if !ruleDeletes.isEmpty {
+                            Button("Удалить по правилу: \(ruleDeletes.count)", role: .destructive) {
+                                executeRuleDeletions()
+                            }
+                            .disabled(activeBatch != nil || !resumedCreateBatches.isEmpty)
+                            .help("Файлы, удалённые в источнике, переносятся в Корзину. На томе без Корзины удаление безвозвратное.")
+                        }
                         if !creates.isEmpty {
                             Button("Создать все: \(creates.count)") {
                                 executeCreateBatch(creates)
@@ -1179,6 +1216,23 @@ private struct ScenarioDryRunView: View {
         }
     }
 
+    /// The Worker plans again and deletes only what the simple rule covers.
+    private func executeRuleDeletions() {
+        do {
+            _ = try WorkerIPC.executeScenarioRuleDeletions(
+                WorkerScenarioRuleDeletionsRequest(
+                    scenario_id: scenario.id,
+                    scenario_revision: scenario.revision,
+                    batch_id: "scenario-rule-delete-" + UUID().uuidString.lowercased()
+                )
+            )
+            loadPlan()
+        } catch {
+            self.error = "Удаление по правилу не выполнено: " + error.localizedDescription
+            loadPlan()
+        }
+    }
+
     private func executeCreate(_ item: ScenarioPlanItem) {
         do {
             try StorageRegistryBridge.executeScenarioCreate(scenario: scenario, item: item)
@@ -1257,6 +1311,7 @@ private struct ScenarioDryRunView: View {
         case "create": return action.from_left == true ? "создать справа" : "создать слева"
         case "update": return action.from_left == true ? "обновить справа" : "обновить слева"
         case "delete_requires_decision": return "нужно отдельное решение"
+        case "delete": return action.on_left == true ? "удалить слева по правилу" : "удалить справа по правилу"
         case "conflict": return "конфликт"
         case "needs_verification": return "нужна проверка"
         default: return "без действия"
@@ -1526,16 +1581,18 @@ private struct ScenarioSchedulesView: View {
 private struct ScenarioEditorView: View {
     let connections: [StorageEntry]
     let scenario: ScenarioEntry?
-    let saveScenario: (String, String, String, String, String, String) -> String?
+    let saveScenario: (String, String, String, String, String, String, ScenarioScopeDraft) -> String?
     let cancel: () -> Void
     @State private var name = ""
     @State private var leftID = ""
-    @State private var leftRoot = "/"
+    /// An empty root means that the user has not chosen a folder yet.
+    @State private var leftRoot = ""
     @State private var rightID = ""
-    @State private var rightRoot = "/"
+    @State private var rightRoot = ""
     @State private var direction = "left_to_right"
+    @State private var scope = ScenarioScopeDraft()
+    @State private var confirmSimpleDeletions = false
     @State private var error: String?
-    @State private var folderSelection: ScenarioEndpointSide?
 
     var body: some View {
         ScrollView {
@@ -1544,7 +1601,7 @@ private struct ScenarioEditorView: View {
                     Button("Назад", systemImage: "chevron.left", action: cancel)
                     VStack(alignment: .leading, spacing: 3) {
                         Text(scenario == nil ? "Новый сценарий" : "Изменить сценарий").font(.largeTitle.bold())
-                        Text("Сценарий хранит обе папки, направление и будущие правила обмена.")
+                        Text("Сценарий хранит обе папки, выбранные объекты, направление и правило удалений.")
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -1563,23 +1620,42 @@ private struct ScenarioEditorView: View {
                         }
                         .pickerStyle(.segmented)
                         Text(direction == "bidirectional"
-                            ? "QADREN будет требовать явный выбор источника для конфликтов."
+                            ? "QADREN будет требовать явный выбор источника для конфликтов. Выбор объектов действует на обе папки."
                             : "Перенос идёт из источника в назначение.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
                 HStack(alignment: .top, spacing: 16) {
-                    ScenarioEndpointPicker(
-                        role: "Источник", symbol: "arrow.right.circle",
-                        connections: connections, selection: $leftID, root: $leftRoot,
-                        chooseFolder: { folderSelection = .source }
+                    ScenarioFolderPanel(
+                        role: direction == "bidirectional" ? "Левая папка" : "Источник",
+                        symbol: "arrow.right.circle",
+                        connections: connections,
+                        connectionID: $leftID,
+                        root: $leftRoot,
+                        selection: $scope.selectedPaths,
+                        showsSelection: true
                     )
-                    ScenarioEndpointPicker(
-                        role: "Назначение", symbol: "arrow.left.circle",
-                        connections: connections, selection: $rightID, root: $rightRoot,
-                        chooseFolder: { folderSelection = .destination }
+                    ScenarioFolderPanel(
+                        role: direction == "bidirectional" ? "Правая папка" : "Назначение",
+                        symbol: "arrow.left.circle",
+                        connections: connections,
+                        connectionID: $rightID,
+                        root: $rightRoot,
+                        selection: .constant([]),
+                        showsSelection: false
                     )
                 }
+                ScenarioDeletionModeBox(
+                    mode: scope.deletionMode,
+                    bidirectional: direction == "bidirectional",
+                    choose: { mode in
+                        if mode == .simple && scope.deletionMode != .simple {
+                            confirmSimpleDeletions = true
+                        } else {
+                            scope.deletionMode = mode
+                        }
+                    }
+                )
                 Text("Создание сохраняет только конфигурацию. Передача файлов начинается позднее, только из проверенного плана и после отдельного подтверждения.")
                     .font(.caption).foregroundStyle(.secondary)
                 if let error {
@@ -1596,85 +1672,139 @@ private struct ScenarioEditorView: View {
                 rightID = scenario.right_connection_id
                 rightRoot = scenario.right_root
                 direction = scenario.direction
+                scope = ScenarioScopeDraft(
+                    selectedPaths: Set(scenario.selected_paths),
+                    deletionMode: ScenarioDeletionMode(rawValue: scenario.deletion_mode) ?? .paranoid
+                )
             } else if let first = connections.first {
                 leftID = first.id
                 rightID = first.id
             }
         }
-        .sheet(item: $folderSelection) { side in
-            ScenarioFolderBrowserSheet(
-                role: side.title,
-                initialRoot: side == .source ? leftRoot : rightRoot
-            ) { selectedRoot in
-                switch side {
-                case .source: leftRoot = selectedRoot
-                case .destination: rightRoot = selectedRoot
-                }
-            }
+        .alert("Включить простую синхронизацию?", isPresented: $confirmSimpleDeletions) {
+            Button("Отмена", role: .cancel) {}
+            Button("Включить", role: .destructive) { scope.deletionMode = .simple }
+        } message: {
+            Text("Если файл удалён в источнике, QADREN удалит его и в назначении без отдельного вопроса. Это действует только для уже синхронизированных файлов, которые не менялись после синхронизации. Файл переносится в Корзину; на томе без Корзины удаление безвозвратное. Если в одном плане больше 20 удалений, QADREN всё равно попросит решения.")
         }
     }
 
     private var canCreate: Bool {
         !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !leftID.isEmpty && !rightID.isEmpty
-            && !leftRoot.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !rightRoot.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !leftRoot.isEmpty && !rightRoot.isEmpty
             && (leftID != rightID || leftRoot != rightRoot)
     }
     private func save() {
-        error = saveScenario(name, leftID, leftRoot, rightID, rightRoot, direction)
+        error = saveScenario(name, leftID, leftRoot, rightID, rightRoot, direction, scope)
     }
 }
 
-private enum ScenarioEndpointSide: String, Identifiable {
-    case source, destination
+/// The deletion rule of a Scenario revision (D-019).
+private struct ScenarioDeletionModeBox: View {
+    let mode: ScenarioDeletionMode
+    let bidirectional: Bool
+    let choose: (ScenarioDeletionMode) -> Void
 
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .source: "папку-источник"
-        case .destination: "папку-назначение"
+    var body: some View {
+        GroupBox("Удаления") {
+            VStack(alignment: .leading, spacing: 10) {
+                Picker("Удаления", selection: Binding(get: { mode }, set: choose)) {
+                    Text("Параноик").tag(ScenarioDeletionMode.paranoid)
+                    Text("Простая синхронизация").tag(ScenarioDeletionMode.simple)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                switch mode {
+                case .paranoid:
+                    Text("Каждое удаление ждёт вашего решения и подтверждения.")
+                        .font(.caption).foregroundStyle(.secondary)
+                case .simple:
+                    Text(bidirectional
+                        ? "Если уже синхронизированный файл удалён в одной папке и не менялся в другой, QADREN удалит его и там."
+                        : "Если уже синхронизированный файл удалён в источнике и не менялся в назначении, QADREN удалит его и в назначении.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Label("Файл переносится в Корзину. На томе без Корзины удаление безвозвратное. Больше 20 удалений в одном плане требуют решения.", systemImage: "trash")
+                        .font(.caption).foregroundStyle(.orange)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }
 
-private struct ScenarioEndpointPicker: View {
+/// Inline, metadata-only browser of one Scenario endpoint. The user moves
+/// through folders with breadcrumbs, makes the visible folder the root, and,
+/// in the source panel, selects objects inside the root with checkboxes.
+private struct ScenarioFolderPanel: View {
     let role: String
     let symbol: String
     let connections: [StorageEntry]
-    @Binding var selection: String
+    @Binding var connectionID: String
     @Binding var root: String
-    let chooseFolder: () -> Void
+    @Binding var selection: Set<String>
+    let showsSelection: Bool
+    @StateObject private var browser = ScenarioFolderBrowser()
+    @State private var showsPathField = false
+    @State private var pathDraft = ""
 
     private var selectedConnection: StorageEntry? {
-        connections.first { $0.id == selection }
+        connections.first { $0.id == connectionID }
     }
 
     var body: some View {
         GroupBox {
-            VStack(alignment: .leading, spacing: 14) {
-                Label(role, systemImage: symbol).font(.headline)
-                Picker("Подключение", selection: $selection) {
-                    ForEach(connections) { entry in
-                        Text(entry.name).tag(entry.id)
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Label(role, systemImage: symbol).font(.headline).lineLimit(1)
+                    Spacer(minLength: 8)
+                    Picker("Подключение", selection: $connectionID) {
+                        ForEach(connections) { entry in
+                            Text(entry.name).tag(entry.id)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .fixedSize()
+                    .help("Подключение")
+                    .onChange(of: connectionID) { _ in
+                        root = ""
+                        selection = []
                     }
                 }
-                .pickerStyle(.menu)
-                .onChange(of: selection) { _ in
-                    root = "/"
+                breadcrumbs
+                if showsPathField {
+                    HStack {
+                        TextField("Путь к папке", text: $pathDraft, prompt: Text("/Users/имя/Documents"))
+                            .textFieldStyle(.roundedBorder)
+                            .font(.callout.monospaced())
+                            .accessibilityLabel("Путь к папке")
+                            .onSubmit(openDraftPath)
+                        Button("Открыть путь", action: openDraftPath)
+                            .disabled(!pathDraft.hasPrefix("/") && !pathDraft.hasPrefix("~"))
+                    }
                 }
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("Корневая папка").font(.caption).foregroundStyle(.secondary)
-                    Text(root)
-                        .font(.caption.monospaced())
-                        .textSelection(.enabled)
-                        .lineLimit(2)
-                        .help(root)
+                Divider()
+                if let error = browser.error {
+                    SettingsNotice(text: error, symbol: "exclamationmark.triangle")
+                        .frame(height: 280, alignment: .top)
+                } else {
+                    List(browser.entries) { entry in
+                        row(entry)
+                    }
+                    .listStyle(.inset(alternatesRowBackgrounds: true))
+                    .frame(height: 280)
+                    .overlay {
+                        if browser.entries.isEmpty {
+                            Text("Папка пуста").foregroundStyle(.secondary)
+                        }
+                    }
                 }
-                Button("Открыть браузер папок", systemImage: "folder") { chooseFolder() }
-                Text("Файлы не читаются и не передаются при выборе папки.")
-                    .font(.caption).foregroundStyle(.secondary)
+                Divider()
+                rootLine
+                if showsSelection {
+                    selectionSummary
+                }
                 if selectedConnection?.enabled == false {
                     Text("Подключение выключено. Сценарий можно сохранить, но проверка плана и перенос станут доступны только после включения подключения.")
                         .font(.caption).foregroundStyle(.orange)
@@ -1682,116 +1812,167 @@ private struct ScenarioEndpointPicker: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .onAppear { browser.open(root.isEmpty ? NSHomeDirectory() : root) }
     }
-}
 
-private struct ScenarioFolderBrowserSheet: View {
-    let role: String
-    let initialRoot: String
-    let select: (String) -> Void
-    @Environment(\.dismiss) private var dismiss
-    @StateObject private var workspace = LocalWorkspace()
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Выберите \(role)").font(.title2.bold())
-                    Text("Этот браузер читает только имена, типы и размеры. Файлы не открываются.")
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button("Отмена", role: .cancel) { dismiss() }
-                Button("Использовать эту папку") {
-                    guard let selectedDirectory = workspace.selectedDirectory else { return }
-                    select(selectedDirectory)
-                    dismiss()
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(workspace.selectedDirectory == nil)
+    private var breadcrumbs: some View {
+        HStack(spacing: 6) {
+            Button("Вверх", systemImage: "chevron.up") { browser.up() }
+                .labelStyle(.iconOnly)
+                .disabled(!browser.canGoUp)
+                .help("На уровень выше")
+            Button("Домой", systemImage: "house") { browser.open(NSHomeDirectory()) }
+                .labelStyle(.iconOnly)
+                .help("Домашняя папка")
+            Button("Перейти к папке", systemImage: "text.cursor") {
+                pathDraft = browser.path
+                showsPathField.toggle()
             }
-            .padding(20)
+            .labelStyle(.iconOnly)
+            .help("Ввести путь к папке")
+            // A long path folds its first crumbs into a "…" menu, so the
+            // visible folder always stays visible.
+            ViewThatFits(in: .horizontal) {
+                crumbRow(hiding: 0)
+                crumbRow(hiding: max(0, browser.crumbs.count - 3))
+                crumbRow(hiding: max(0, browser.crumbs.count - 2))
+                crumbRow(hiding: max(0, browser.crumbs.count - 1))
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
 
-            Divider()
-
-            HStack(spacing: 10) {
-                Button("Вверх", systemImage: "chevron.up") { workspace.up() }
-                    .disabled(workspace.relativePath.isEmpty)
-                Text(workspace.selectedDirectory ?? initialRoot)
-                    .font(.callout.monospaced())
+    private func crumbRow(hiding hidden: Int) -> some View {
+        let crumbs = browser.crumbs
+        return HStack(spacing: 2) {
+            if hidden > 0 {
+                Menu("…") {
+                    ForEach(crumbs.prefix(hidden)) { crumb in
+                        Button(crumb.title) { browser.open(crumb.path) }
+                    }
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("Папки выше")
+            }
+            ForEach(Array(crumbs.dropFirst(hidden).enumerated()), id: \.element.id) { index, crumb in
+                if index > 0 || hidden > 0 {
+                    Image(systemName: "chevron.compact.right").foregroundStyle(.tertiary)
+                }
+                Button(crumb.title) { browser.open(crumb.path) }
+                    .buttonStyle(.borderless)
+                    .fontWeight(crumb.path == browser.path ? .semibold : .regular)
+                    .foregroundStyle(crumb.path == browser.path ? .primary : .secondary)
                     .lineLimit(1)
+                    .fixedSize()
+                    .help(crumb.path)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func row(_ entry: LocalWorkspaceEntry) -> some View {
+        let absolute = ScenarioFolderBrowser.join(browser.path, entry.name)
+        let relative = ScenarioFolderBrowser.relative(absolute, to: root)
+        HStack(spacing: 8) {
+            if showsSelection {
+                if let relative {
+                    let implied = ScenarioFolderBrowser.isImplied(relative, by: selection)
+                    Toggle(isOn: Binding(
+                        get: { implied || selection.contains(relative) },
+                        set: { isOn in
+                            if isOn { selection.insert(relative) } else { selection.remove(relative) }
+                        }
+                    )) { EmptyView() }
+                        .toggleStyle(.checkbox)
+                        .labelsHidden()
+                        .accessibilityLabel("Выбрать " + entry.name)
+                        .disabled(implied)
+                        .help(implied ? "Входит в выбранную папку" : "Синхронизировать этот объект")
+                } else {
+                    // Keeps the names aligned outside the root.
+                    Color.clear.frame(width: 14, height: 14)
+                }
+            }
+            Image(systemName: entry.is_directory ? "folder.fill" : "doc")
+                .foregroundStyle(entry.is_directory ? Color.accentColor : Color.secondary)
+            Text(entry.name).lineLimit(1).truncationMode(.middle)
+            if absolute == root {
+                Text("корень").font(.caption2.weight(.semibold))
+                    .padding(.horizontal, 6).padding(.vertical, 1)
+                    .background(.tint.opacity(0.18), in: Capsule())
+            }
+            Spacer(minLength: 8)
+            if entry.is_directory {
+                Button("Открыть", systemImage: "chevron.right") { browser.openChild(entry.name) }
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.borderless)
+                    .help("Открыть папку")
+            } else {
+                Text(ByteCountFormatter.string(fromByteCount: Int64(clamping: entry.size), countStyle: .file))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) {
+            if entry.is_directory { browser.openChild(entry.name) }
+        }
+    }
+
+    private func openDraftPath() {
+        let path = (pathDraft.trimmingCharacters(in: .whitespaces) as NSString).expandingTildeInPath
+        guard path.hasPrefix("/") else { return }
+        browser.open(path.count > 1 && path.hasSuffix("/") ? String(path.dropLast()) : path)
+        showsPathField = false
+    }
+
+    private var rootLine: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Корневая папка").font(.caption).foregroundStyle(.secondary)
+                Text(root.isEmpty ? "не выбрана" : root)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(root.isEmpty ? .secondary : .primary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
                     .textSelection(.enabled)
-                Spacer()
-                Text("Выберите текущую папку после перехода в неё.")
+                    .help(root)
+            }
+            Spacer()
+            Button("Выбрать эту папку", systemImage: "checkmark.circle") {
+                root = browser.path
+                selection = []
+            }
+            .disabled(browser.path == root)
+            .help("Сделать открытую папку корнем сценария")
+        }
+    }
+
+    @ViewBuilder
+    private var selectionSummary: some View {
+        if root.isEmpty {
+            Text("Откройте нужную папку и нажмите «Выбрать эту папку». Файлы не читаются и не передаются при выборе.")
+                .font(.caption).foregroundStyle(.secondary)
+        } else if selection.isEmpty {
+            Text("Синхронизируется вся корневая папка. Отметьте объекты, чтобы синхронизировать только их.")
+                .font(.caption).foregroundStyle(.secondary)
+        } else {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Выбрано объектов: \(selection.count)").font(.caption.weight(.semibold))
+                    Spacer()
+                    Button("Снять выбор") { selection = [] }
+                        .buttonStyle(.borderless)
+                        .font(.caption)
+                }
+                Text(selection.sorted().prefix(4).joined(separator: ", ") + (selection.count > 4 ? " …" : ""))
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                Text("Новые объекты в выбранных папках входят в сценарий. Переименованный объект и новые объекты рядом с выбранными не входят.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 20).padding(.vertical, 12)
-
-            if workspace.root == nil {
-                SettingsEmptyState(
-                    title: "Сначала выберите начальную папку",
-                    detail: "Откроется стандартный Finder. Затем этот браузер позволит перейти в нужный подкаталог.",
-                    symbol: "folder"
-                ) {
-                    Button("Выбрать папку в Finder…", systemImage: "folder") { chooseRootInFinder() }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                List(workspace.entries) { entry in
-                    Button {
-                        guard entry.is_directory else { return }
-                        workspace.open(entry)
-                    } label: {
-                        HStack(spacing: 10) {
-                            Image(systemName: entry.is_directory ? "folder.fill" : "doc")
-                                .foregroundStyle(entry.is_directory ? Color.accentColor : Color.secondary)
-                            Text(entry.name)
-                            Spacer()
-                            if !entry.is_directory {
-                                Text(ByteCountFormatter.string(fromByteCount: Int64(clamping: entry.size), countStyle: .file))
-                                    .foregroundStyle(.secondary)
-                            } else {
-                                Image(systemName: "chevron.right").foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!entry.is_directory)
-                }
-                .listStyle(.inset)
-                .overlay {
-                    if workspace.entries.isEmpty && workspace.error == nil {
-                        SettingsEmptyState(
-                            title: "Папка пуста",
-                            detail: "Выберите эту папку или перейдите выше.",
-                            symbol: "folder"
-                        )
-                    }
-                }
-            }
-
-            if let error = workspace.error {
-                SettingsNotice(text: error, symbol: "exclamationmark.triangle")
-                    .padding(16)
-            }
-        }
-        .frame(minWidth: 820, minHeight: 560)
-        .onAppear {
-            if initialRoot != "/" { workspace.selectRoot(initialRoot) }
-        }
-    }
-
-    private func chooseRootInFinder() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        panel.prompt = "Открыть в браузере"
-        panel.message = "Выберите начальную папку. Затем в QADREN можно перейти в подкаталог."
-        guard let window = NSApp.keyWindow ?? NSApp.mainWindow else { return }
-        panel.beginSheetModal(for: window) { response in
-            guard response == .OK, let url = panel.url else { return }
-            workspace.selectRoot(url.path)
         }
     }
 }

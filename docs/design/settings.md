@@ -46,7 +46,17 @@ For deletion or disabling: provide explicit information that provider files are 
 6. Trigger schedules (multiple timezone-aware) and destination Worker;
 7. Summary, **dry-run metadata diff** on request, revision creation/saving.
 
-Creation does not open a small sheet: the editor occupies the detail zone of the "Settings" window. The name, two exchange points, and synchronization type are at the top. After selecting the points, two equal panels show the metadata-only tree of each source; the user selects the root directory in each panel. "This Mac" is available directly in the point selection: when saving a scenario, a separate `local_filesystem` `StorageConnection` is created or reused. Selection of a local folder is requested via a system picker; cloud viewing is limited to directory metadata and does not download content.
+Creation does not open a small sheet: the editor occupies the detail zone of the "Settings" window. The name, two exchange points, and synchronization type are at the top. Below them, two equal panels show the folder structure of each endpoint connection directly in the editor (D-019). There is no separate folder window and no system picker step.
+
+Each panel has:
+- the connection picker;
+- breadcrumbs from "Этот Mac" to the visible folder, with "up", "home", and "go to path" buttons;
+- a list in the style of a two-pane file manager: icon, name, size; a double click or the chevron opens a folder;
+- the "Выбрать эту папку" button, which makes the visible folder the Scenario root.
+
+The source panel (the left panel in a two-way Scenario) has a checkbox before each object inside the root. Checked objects are the Scenario selection; an empty selection is the full root. A summary under the panel shows the selected objects and the selection rules. The browser reads names, types, and sizes only; it hides hidden entries and skips links. "This Mac" is available directly in the point selection: when saving a scenario, a separate `local_filesystem` `StorageConnection` is created or reused. Cloud viewing is limited to directory metadata and does not download content.
+
+A "Удаления" box selects the deletion mode: "Параноик" or "Простая синхронизация". Selecting Simple synchronization shows one confirmation with its consequences: Trash or permanent deletion, and the 20-deletion threshold. The Scenario list shows the selection and the deletion mode of each Scenario. The plan shows rule deletions and one "Удалить по правилу" action; the Worker plans again before it deletes.
 
 Show the consequences of changes: current Jobs use the old revision, new Jobs use the new revision. `Run now` creates a new Job only through Core with correct permissions; settings do not copy files themselves.
 

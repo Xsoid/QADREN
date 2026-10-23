@@ -453,6 +453,174 @@ pub fn delete_file(root: &File, target: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The system Trash directory for files on device `device`, or `None` when
+/// that volume has no usable Trash. This never creates `.Trashes` itself:
+/// only the per-user directory inside an existing `.Trashes` or the home
+/// `.Trash`. The result is a pinned directory owned by this user.
+#[cfg(target_os = "macos")]
+pub fn system_trash_directory(near: &File, device: u64) -> Result<Option<File>> {
+    let uid = unsafe { libc::getuid() };
+    let owned_on_device = |directory: &File| -> Result<bool> {
+        let metadata = directory.metadata()?;
+        Ok(metadata.is_dir() && metadata.dev() == device && metadata.uid() == uid)
+    };
+    let child = |parent: &File, leaf: &str, create: bool| -> Result<Option<File>> {
+        let leaf = name(std::ffi::OsStr::new(leaf))?;
+        let open = || unsafe {
+            openat(
+                parent.as_raw_fd(),
+                leaf.as_ptr(),
+                RDONLY | DIRECTORY | NOFOLLOW | CLOEXEC,
+            )
+        };
+        let mut fd = open();
+        if fd < 0 && io::Error::last_os_error().kind() == io::ErrorKind::NotFound {
+            if !create {
+                return Ok(None);
+            }
+            if unsafe { mkdirat(parent.as_raw_fd(), leaf.as_ptr(), 0o700) } != 0
+                && io::Error::last_os_error().kind() != io::ErrorKind::AlreadyExists
+            {
+                return Err(LocalError::Io(io::Error::last_os_error()));
+            }
+            fd = open();
+        }
+        opened(fd).map(Some)
+    };
+
+    // The home Trash serves the volume of the home folder.
+    let mut buffer = vec![0 as c_char; 16 * 1024];
+    let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
+    let mut found: *mut libc::passwd = std::ptr::null_mut();
+    let status = unsafe {
+        libc::getpwuid_r(
+            uid,
+            entry.as_mut_ptr(),
+            buffer.as_mut_ptr(),
+            buffer.len(),
+            &mut found,
+        )
+    };
+    if status == 0 && !found.is_null() {
+        let home = unsafe { CStr::from_ptr((*found).pw_dir) };
+        let home = Path::new(std::ffi::OsStr::from_bytes(home.to_bytes()));
+        if let Ok(home) = root(home) {
+            if home.metadata()?.dev() == device {
+                return match child(&home, ".Trash", true)? {
+                    Some(trash) if owned_on_device(&trash)? => Ok(Some(trash)),
+                    _ => Ok(None),
+                };
+            }
+        }
+    }
+
+    // Another volume uses <mount point>/.Trashes/<uid>.
+    let mut info = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    if unsafe { libc::fstatfs(near.as_raw_fd(), info.as_mut_ptr()) } != 0 {
+        return Err(LocalError::Io(io::Error::last_os_error()));
+    }
+    let info = unsafe { info.assume_init() };
+    let mount = unsafe { CStr::from_ptr(info.f_mntonname.as_ptr()) };
+    let mount = root(Path::new(std::ffi::OsStr::from_bytes(mount.to_bytes())))?;
+    let Some(trashes) = child(&mount, ".Trashes", false)? else {
+        return Ok(None);
+    };
+    match child(&trashes, &uid.to_string(), true)? {
+        Some(trash) if owned_on_device(&trash)? => Ok(Some(trash)),
+        _ => Ok(None),
+    }
+}
+
+/// Candidate names in a Trash directory: `a.txt`, `a 2.txt`, `a 3.txt`, ...
+fn trash_name(leaf: &CStr, attempt: usize) -> Result<CString> {
+    if attempt == 0 {
+        return Ok(leaf.to_owned());
+    }
+    let bytes = leaf.to_bytes();
+    let split = bytes
+        .iter()
+        .rposition(|byte| *byte == b'.')
+        .filter(|index| *index > 0)
+        .unwrap_or(bytes.len());
+    let mut candidate = bytes[..split].to_vec();
+    candidate.extend_from_slice(format!(" {}", attempt + 1).as_bytes());
+    candidate.extend_from_slice(&bytes[split..]);
+    CString::new(candidate).map_err(|_| LocalError::InvalidPath)
+}
+
+/// Move one checked regular entry into `trash`, which must be on the same
+/// volume. A name in the Trash is never replaced. The caller must persist an
+/// attempt first. An interrupted or unconfirmed move is UNKNOWN.
+#[cfg(target_os = "macos")]
+pub fn trash_file_into(root: &File, target: &Path, trash: &File) -> Result<()> {
+    let (directory, leaf) = parent(root, target)?;
+    let source = file_identity(root, target)?;
+    let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            leaf.as_ptr(),
+            info.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return Err(LocalError::Io(io::Error::last_os_error()));
+    }
+    let info = unsafe { info.assume_init() };
+    reject_dataless_mutation(&info)?;
+    if info.st_mode & libc::S_IFMT != libc::S_IFREG
+        || info.st_dev as u64 != source.device
+        || info.st_ino != source.inode
+        || trash.metadata()?.dev() != source.device
+    {
+        return Err(LocalError::UnsafeEntry);
+    }
+    for attempt in 0..100 {
+        let candidate = trash_name(&leaf, attempt)?;
+        let outcome = unsafe {
+            libc::renameatx_np(
+                directory.as_raw_fd(),
+                leaf.as_ptr(),
+                trash.as_raw_fd(),
+                candidate.as_ptr(),
+                libc::RENAME_EXCL,
+            )
+        };
+        if outcome != 0 {
+            match rename_failure(io::Error::last_os_error()) {
+                LocalError::AlreadyExists => continue,
+                error => return Err(error),
+            }
+        }
+        let mut moved = std::mem::MaybeUninit::<libc::stat>::uninit();
+        let status = unsafe {
+            libc::fstatat(
+                trash.as_raw_fd(),
+                candidate.as_ptr(),
+                moved.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        let unconfirmed = || {
+            LocalError::OutcomeUnknown(io::Error::other(
+                "the Trash entry identity differs from preflight",
+            ))
+        };
+        if status != 0 {
+            return Err(unconfirmed());
+        }
+        let moved = unsafe { moved.assume_init() };
+        if moved.st_dev as u64 != source.device || moved.st_ino != source.inode {
+            return Err(unconfirmed());
+        }
+        directory.sync_all().map_err(LocalError::OutcomeUnknown)?;
+        trash.sync_all().map_err(LocalError::OutcomeUnknown)?;
+        return Ok(());
+    }
+    Err(LocalError::AlreadyExists)
+}
+
 /// Inspect an inode relative to the pinned root without opening content.
 pub fn file_identity(root: &File, target: &Path) -> Result<LocalFileIdentity> {
     let (directory, leaf) = parent(root, target)?;

@@ -16,6 +16,8 @@ pub struct Operations {
     pub streaming: bool,
     pub create_directory: bool,
     pub delete: bool,
+    /// Deletion can move an object into a recoverable Trash of the storage.
+    pub trash: bool,
     pub rename: bool,
     pub remote_checksum: bool,
     pub change_listing: bool,

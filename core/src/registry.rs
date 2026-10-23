@@ -3,8 +3,8 @@
 use crate::automation::{AutomaticTriggerResult, ScenarioAutomationState};
 use crate::confirmation::{Confirmation, EvidenceLevel};
 use crate::model::{
-    ConfirmedFileVersion, FileSyncState, ScenarioDraft, ScenarioFilters, ScenarioPolicies,
-    ScenarioReference, StorageEndpoint, SyncDirection,
+    ConfirmedFileVersion, DeletionMode, FileSyncState, ScenarioDraft, ScenarioFilters,
+    ScenarioPolicies, ScenarioReference, ScenarioScope, StorageEndpoint, SyncDirection,
 };
 use crate::scenario_planner::{self, ObservedFile, PlanItem};
 use crate::scheduler::{OccurrenceKey, WeeklySchedule};
@@ -32,6 +32,8 @@ pub enum RegistryError {
     ScenarioRootsOverlap,
     /// A request uses a Scenario revision that is no longer current.
     StaleScenarioRevision,
+    /// A selected path is empty, absolute, or leaves the Scenario root.
+    InvalidSelection,
 }
 impl From<rusqlite::Error> for RegistryError {
     fn from(error: rusqlite::Error) -> Self {
@@ -181,7 +183,7 @@ impl Registry {
         }
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 16 {
+        if version > 17 {
             return Err(RegistryError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -444,6 +446,28 @@ impl Registry {
                  COMMIT;",
             )?;
         }
+        if version <= 16 {
+            // D-019: the selected objects and the deletion rule belong to the
+            // immutable revision. Existing revisions keep the complete root
+            // and the paranoid deletion rule.
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE scenarios ADD COLUMN deletion_mode TEXT NOT NULL DEFAULT 'paranoid'
+                   CHECK(deletion_mode IN ('paranoid','simple'));
+                 ALTER TABLE scenario_revisions ADD COLUMN deletion_mode TEXT NOT NULL DEFAULT 'paranoid'
+                   CHECK(deletion_mode IN ('paranoid','simple'));
+                 CREATE TABLE scenario_revision_selection (
+                    scenario_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL CHECK(revision > 0),
+                    relative_path TEXT NOT NULL,
+                    PRIMARY KEY(scenario_id,revision,relative_path),
+                    FOREIGN KEY(scenario_id,revision)
+                      REFERENCES scenario_revisions(scenario_id,revision) ON DELETE RESTRICT
+                 );
+                 PRAGMA user_version = 17;
+                 COMMIT;",
+            )?;
+        }
         Ok(Self { db })
     }
 
@@ -652,6 +676,32 @@ impl Registry {
         right_root: &str,
         direction: &str,
     ) -> Result<String> {
+        self.create_scenario_with_scope(
+            name,
+            left_connection_id,
+            left_root,
+            right_connection_id,
+            right_root,
+            direction,
+            &ScenarioScope::default(),
+        )
+    }
+
+    /// Create a Scenario whose first revision has the given selection and
+    /// deletion rule. The selection is normalized before it is stored.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_scenario_with_scope(
+        &self,
+        name: &str,
+        left_connection_id: &str,
+        left_root: &str,
+        right_connection_id: &str,
+        right_root: &str,
+        direction: &str,
+        scope: &ScenarioScope,
+    ) -> Result<String> {
+        let selection = ScenarioScope::normalized_selection(&scope.selected_paths)
+            .map_err(|_| RegistryError::InvalidSelection)?;
         if !valid_name(name)
             || left_connection_id.is_empty()
             || right_connection_id.is_empty()
@@ -677,14 +727,14 @@ impl Registry {
             .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
         let transaction = self.db.unchecked_transaction()?;
         transaction.execute(
-            "INSERT INTO scenarios(id,name,left_connection_id,left_root,right_connection_id,right_root,direction) VALUES(?1,?2,?3,?4,?5,?6,?7)",
-            params![id, name.trim(), left_connection_id, left_root, right_connection_id, right_root, direction],
+            "INSERT INTO scenarios(id,name,left_connection_id,left_root,right_connection_id,right_root,direction,deletion_mode) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![id, name.trim(), left_connection_id, left_root, right_connection_id, right_root, direction, scope.deletion_mode.as_str()],
         )?;
         transaction.execute(
             "INSERT INTO scenario_revisions(
                 scenario_id,revision,name,left_connection_id,left_root,
-                right_connection_id,right_root,direction
-             ) VALUES(?1,1,?2,?3,?4,?5,?6,?7)",
+                right_connection_id,right_root,direction,deletion_mode
+             ) VALUES(?1,1,?2,?3,?4,?5,?6,?7,?8)",
             params![
                 id,
                 name.trim(),
@@ -692,9 +742,11 @@ impl Registry {
                 left_root,
                 right_connection_id,
                 right_root,
-                direction
+                direction,
+                scope.deletion_mode.as_str()
             ],
         )?;
+        insert_revision_selection(&transaction, &id, 1, &selection)?;
         transaction.commit()?;
         Ok(id)
     }
@@ -1446,6 +1498,19 @@ impl Registry {
     /// for future Jobs. Existing Jobs must continue to use their pinned
     /// revision; this Registry never rewrites their identity.
     pub fn update_scenario(&self, id: &str, update: ScenarioUpdate<'_>) -> Result<()> {
+        self.update_scenario_with_scope(id, update, &ScenarioScope::default())
+    }
+
+    /// Like `update_scenario`, with the selection and deletion rule of the
+    /// new revision. Older revisions keep their own selection and rule.
+    pub fn update_scenario_with_scope(
+        &self,
+        id: &str,
+        update: ScenarioUpdate<'_>,
+        scope: &ScenarioScope,
+    ) -> Result<()> {
+        let selection = ScenarioScope::normalized_selection(&scope.selected_paths)
+            .map_err(|_| RegistryError::InvalidSelection)?;
         if !valid_name(update.name)
             || update.left_connection_id.is_empty()
             || update.right_connection_id.is_empty()
@@ -1471,8 +1536,8 @@ impl Registry {
             "UPDATE scenarios
              SET name=?1,left_connection_id=?2,left_root=?3,
                  right_connection_id=?4,right_root=?5,direction=?6,
-                 revision=revision+1
-             WHERE id=?7",
+                 deletion_mode=?7,revision=revision+1
+             WHERE id=?8",
             params![
                 update.name.trim(),
                 update.left_connection_id,
@@ -1480,6 +1545,7 @@ impl Registry {
                 update.right_connection_id,
                 update.right_root,
                 update.direction,
+                scope.deletion_mode.as_str(),
                 id
             ],
         )?;
@@ -1489,13 +1555,18 @@ impl Registry {
         transaction.execute(
             "INSERT INTO scenario_revisions(
                 scenario_id,revision,name,left_connection_id,left_root,
-                right_connection_id,right_root,direction
+                right_connection_id,right_root,direction,deletion_mode
              )
              SELECT id,revision,name,left_connection_id,left_root,
-                    right_connection_id,right_root,direction
+                    right_connection_id,right_root,direction,deletion_mode
              FROM scenarios WHERE id=?1",
             [id],
         )?;
+        let revision: i64 =
+            transaction.query_row("SELECT revision FROM scenarios WHERE id=?1", [id], |row| {
+                row.get(0)
+            })?;
+        insert_revision_selection(&transaction, id, revision as u64, &selection)?;
         transaction.commit()?;
         Ok(())
     }
@@ -1525,6 +1596,52 @@ impl Registry {
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    /// The selection and deletion rule of an exact revision. A missing
+    /// revision is `NotFound`; it never falls back to the current row.
+    pub fn get_scenario_revision_scope(&self, id: &str, revision: u64) -> Result<ScenarioScope> {
+        let mode: Option<String> = self
+            .db
+            .query_row(
+                "SELECT deletion_mode FROM scenario_revisions WHERE scenario_id=?1 AND revision=?2",
+                params![id, revision as i64],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let deletion_mode = DeletionMode::parse(&mode.ok_or(RegistryError::NotFound)?)
+            .ok_or(RegistryError::IntegrityFailed)?;
+        let mut statement = self.db.prepare(
+            "SELECT relative_path FROM scenario_revision_selection
+             WHERE scenario_id=?1 AND revision=?2 ORDER BY relative_path",
+        )?;
+        let selected_paths = statement
+            .query_map(params![id, revision as i64], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<String>, _>>()?;
+        Ok(ScenarioScope {
+            selected_paths,
+            deletion_mode,
+        })
+    }
+
+    /// Remove the confirmed baseline of one path after an executor verified
+    /// that the object is absent on both sides. A later plan then treats the
+    /// path as never synchronized instead of as a deletion on both sides.
+    pub fn forget_confirmed_file_state(
+        &self,
+        reference: &ScenarioReference,
+        relative_path: &str,
+    ) -> Result<()> {
+        self.db.execute(
+            "DELETE FROM file_sync_states
+             WHERE scenario_id=?1 AND scenario_revision=?2 AND relative_path=?3",
+            params![
+                reference.scenario_id,
+                reference.revision as i64,
+                relative_path
+            ],
+        )?;
+        Ok(())
     }
 
     /// Persist one last-confirmed state only after an executor has independently
@@ -1908,8 +2025,9 @@ impl Registry {
             filters: ScenarioFilters::default(),
             policies: ScenarioPolicies::default(),
         };
+        let scope = self.get_scenario_revision_scope(&reference.scenario_id, reference.revision)?;
         let baseline = self.list_confirmed_file_states(reference)?;
-        scenario_planner::plan_with_skipped(
+        scenario_planner::plan_scoped(
             &scenario,
             reference,
             &baseline,
@@ -1917,6 +2035,7 @@ impl Registry {
             right_snapshot,
             skipped_left,
             skipped_right,
+            &scope,
         )
         .map_err(|_| RegistryError::PlanningFailed)
     }
@@ -1947,6 +2066,24 @@ pub fn scenario_roots_overlap(left: &str, right: &str) -> bool {
     let (left, right) = (parts(left), parts(right));
     let shared = left.len().min(right.len());
     left[..shared] == right[..shared]
+}
+
+/// Store a normalized selection for one revision. An empty selection stores
+/// no rows and means the complete root.
+fn insert_revision_selection(
+    transaction: &rusqlite::Transaction<'_>,
+    id: &str,
+    revision: u64,
+    selection: &[String],
+) -> Result<()> {
+    for path in selection {
+        transaction.execute(
+            "INSERT INTO scenario_revision_selection(scenario_id,revision,relative_path)
+             VALUES(?1,?2,?3)",
+            params![id, revision as i64, path],
+        )?;
+    }
+    Ok(())
 }
 
 fn valid_name(name: &str) -> bool {
@@ -2586,6 +2723,87 @@ mod tests {
         assert_eq!(revision_two.name, "Updated documents");
         assert_eq!(revision_two.left_root, "/source");
         assert_eq!(revision_two.direction, "right_to_left");
+    }
+
+    #[test]
+    fn selection_and_deletion_rule_belong_to_each_revision() {
+        let db = Registry::in_memory().unwrap();
+        let left = db.add("local_filesystem", "Left").unwrap();
+        let right = db.add("local_filesystem", "Right").unwrap();
+        let scope = ScenarioScope {
+            selected_paths: vec!["Docs/a.txt".into(), "Docs".into(), "Photos".into()],
+            deletion_mode: DeletionMode::Simple,
+        };
+        let id = db
+            .create_scenario_with_scope(
+                "Documents",
+                &left,
+                "/source",
+                &right,
+                "/target",
+                "left_to_right",
+                &scope,
+            )
+            .unwrap();
+        assert_eq!(
+            db.get_scenario_revision_scope(&id, 1).unwrap(),
+            ScenarioScope {
+                selected_paths: vec!["Docs".into(), "Photos".into()],
+                deletion_mode: DeletionMode::Simple,
+            }
+        );
+
+        db.update_scenario_with_scope(
+            &id,
+            ScenarioUpdate {
+                name: "Documents",
+                left_connection_id: &left,
+                left_root: "/source",
+                right_connection_id: &right,
+                right_root: "/target",
+                direction: "left_to_right",
+            },
+            &ScenarioScope::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            db.get_scenario_revision_scope(&id, 2).unwrap(),
+            ScenarioScope::default()
+        );
+        assert_eq!(
+            db.get_scenario_revision_scope(&id, 1).unwrap().deletion_mode,
+            DeletionMode::Simple
+        );
+        assert!(matches!(
+            db.get_scenario_revision_scope(&id, 3),
+            Err(RegistryError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn unsafe_selection_is_refused_without_a_new_scenario() {
+        let db = Registry::in_memory().unwrap();
+        let left = db.add("local_filesystem", "Left").unwrap();
+        let right = db.add("local_filesystem", "Right").unwrap();
+        for path in ["../outside", "/absolute", ""] {
+            let scope = ScenarioScope {
+                selected_paths: vec![path.into()],
+                deletion_mode: DeletionMode::Paranoid,
+            };
+            assert!(matches!(
+                db.create_scenario_with_scope(
+                    "Documents",
+                    &left,
+                    "/source",
+                    &right,
+                    "/target",
+                    "left_to_right",
+                    &scope,
+                ),
+                Err(RegistryError::InvalidSelection)
+            ));
+        }
+        assert!(db.list_scenarios().unwrap().is_empty());
     }
 
     #[test]

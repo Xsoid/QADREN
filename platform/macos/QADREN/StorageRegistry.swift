@@ -5,12 +5,12 @@ import Security
 private func registryList(_ path: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_scenarios_list")
 private func scenarioList(_ path: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
-@_silgen_name("qadren_scenarios_create")
+@_silgen_name("qadren_scenarios_create_scoped")
 private func scenarioCreate(
     _ path: UnsafePointer<CChar>?, _ name: UnsafePointer<CChar>?,
     _ leftID: UnsafePointer<CChar>?, _ leftRoot: UnsafePointer<CChar>?,
     _ rightID: UnsafePointer<CChar>?, _ rightRoot: UnsafePointer<CChar>?,
-    _ direction: UnsafePointer<CChar>?
+    _ direction: UnsafePointer<CChar>?, _ scope: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_scenarios_set_enabled")
 private func scenarioSetEnabled(
@@ -120,12 +120,12 @@ private func scenarioSchedulesSetEnabled(
 private func scenarioSchedulesRemove(
     _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?, _ scheduleID: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
-@_silgen_name("qadren_scenarios_update")
+@_silgen_name("qadren_scenarios_update_scoped")
 private func scenarioUpdate(
     _ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ name: UnsafePointer<CChar>?,
     _ leftID: UnsafePointer<CChar>?, _ leftRoot: UnsafePointer<CChar>?,
     _ rightID: UnsafePointer<CChar>?, _ rightRoot: UnsafePointer<CChar>?,
-    _ direction: UnsafePointer<CChar>?
+    _ direction: UnsafePointer<CChar>?, _ scope: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_add")
 private func registryAdd(_ path: UnsafePointer<CChar>?, _ adapter: UnsafePointer<CChar>?, _ name: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
@@ -168,6 +168,27 @@ struct ScenarioEntry: Decodable, Identifiable {
     let direction: String
     let enabled: Bool
     let revision: UInt64
+    /// Relative paths of the selected objects. Empty means the full root.
+    var selected_paths: [String] = []
+    /// `paranoid` or `simple` (D-019).
+    var deletion_mode: String = ScenarioDeletionMode.paranoid.rawValue
+}
+
+/// How a Scenario revision treats a deletion after a confirmed synchronization.
+enum ScenarioDeletionMode: String, CaseIterable, Identifiable {
+    /// Every deletion waits for an explicit decision.
+    case paranoid
+    /// The other side deletes the same unchanged object. A plan with more
+    /// than 20 deletions still waits for an explicit decision.
+    case simple
+    var id: String { rawValue }
+}
+
+/// JSON for the `scope_json` argument of the scoped Scenario FFI.
+private func scenarioScopeJSON(selectedPaths: [String], deletionMode: ScenarioDeletionMode) throws -> String {
+    let object: [String: Any] = ["selected_paths": selectedPaths, "deletion_mode": deletionMode.rawValue]
+    let data = try JSONSerialization.data(withJSONObject: object)
+    return String(decoding: data, as: UTF8.self)
 }
 struct ScenarioScheduleEntry: Decodable, Identifiable {
     let id: String
@@ -294,6 +315,14 @@ enum QADRENUserMessage {
             "Под этим именем находится символическая ссылка или специальный файл. QADREN такие объекты не синхронизирует, поэтому действий с этим путём нет."
         case "conflict_stale":
             "Файлы изменились после создания задачи конфликта. Обновите снимок конфликта."
+        case "invalid_selection":
+            "Выбранный объект находится вне корневой папки сценария. Выберите объекты заново."
+        case "the name differs from a selected object only by letter case or Unicode form":
+            "Имя отличается от выбранного объекта только регистром букв или формой Unicode. QADREN не выполняет действий с таким путём."
+        case "rule_delete_failed":
+            "Удаление по правилу сценария не выполнено. Файлы не изменены. Проверьте план заново."
+        case "outcome_unknown":
+            "Результат операции не подтверждён. Повтор не выполнен. QADREN проверит результат автоматически."
         default:
             code
         }
@@ -367,9 +396,12 @@ enum StorageRegistryBridge {
         leftRoot: String,
         rightID: String,
         rightRoot: String,
-        direction: String
+        direction: String,
+        selectedPaths: [String] = [],
+        deletionMode: ScenarioDeletionMode = .paranoid
     ) throws -> String {
         let database = try path
+        let scope = try scenarioScopeJSON(selectedPaths: selectedPaths, deletionMode: deletionMode)
         let result: NewConnection = try database.withCString { db in
             try name.withCString { name in
                 try leftID.withCString { leftID in
@@ -377,10 +409,12 @@ enum StorageRegistryBridge {
                         try rightID.withCString { rightID in
                             try rightRoot.withCString { rightRoot in
                                 try direction.withCString { direction in
-                                    try unwrap(
-                                        scenarioCreate(db, name, leftID, leftRoot, rightID, rightRoot, direction),
-                                        as: NewConnection.self
-                                    )
+                                    try scope.withCString { scope in
+                                        try unwrap(
+                                            scenarioCreate(db, name, leftID, leftRoot, rightID, rightRoot, direction, scope),
+                                            as: NewConnection.self
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -889,9 +923,12 @@ enum StorageRegistryBridge {
         leftRoot: String,
         rightID: String,
         rightRoot: String,
-        direction: String
+        direction: String,
+        selectedPaths: [String] = [],
+        deletionMode: ScenarioDeletionMode = .paranoid
     ) throws {
         let database = try path
+        let scope = try scenarioScopeJSON(selectedPaths: selectedPaths, deletionMode: deletionMode)
         let _: Bool = try database.withCString { db in
             try id.withCString { id in
                 try name.withCString { name in
@@ -900,12 +937,14 @@ enum StorageRegistryBridge {
                             try rightID.withCString { rightID in
                                 try rightRoot.withCString { rightRoot in
                                     try direction.withCString { direction in
-                                        try unwrap(
-                                            scenarioUpdate(
-                                                db, id, name, leftID, leftRoot, rightID, rightRoot, direction
-                                            ),
-                                            as: Bool.self
-                                        )
+                                        try scope.withCString { scope in
+                                            try unwrap(
+                                                scenarioUpdate(
+                                                    db, id, name, leftID, leftRoot, rightID, rightRoot, direction, scope
+                                                ),
+                                                as: Bool.self
+                                            )
+                                        }
                                     }
                                 }
                             }

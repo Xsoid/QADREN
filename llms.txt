@@ -29,6 +29,7 @@ QADREN is a cross-platform file transfer and synchronization system. Rust owns c
 - Before a modifying external effect, save a durable attempt. Check capability, exact scope, destination state, no-overwrite for new files, and required destructive consent.
 - If effect proof is lost, reconcile without mutation. Persist a verified outcome only when evidence is sufficient. Otherwise retain `UNKNOWN`.
 - A Local Filesystem update can replace an existing destination only through the approved replacement protocol.
+- A Scenario revision has selected objects and a deletion mode: Paranoid (every deletion asks) or Simple synchronization (an approved rule, Trash first, 20-deletion threshold). See `docs/decisions/D-019-scenario-selection-and-deletion-modes.md`.
 
 ## Documentation
 

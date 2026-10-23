@@ -19,6 +19,16 @@ struct WorkerScenarioCreateBatchRequest: Encodable {
     let batch_id: String
 }
 
+/// Run every deletion that the simple deletion rule of the current revision
+/// covers. The Worker builds the plan itself, so it applies the selection and
+/// the mass-deletion threshold. `batch_id` makes child Job IDs stable.
+struct WorkerScenarioRuleDeletionsRequest: Encodable {
+    let command = "execute_rule_deletions"
+    let scenario_id: String
+    let scenario_revision: UInt64
+    let batch_id: String
+}
+
 struct WorkerScenarioCreateBatchCancellationRequest: Encodable {
     let command = "cancel_create_batch"
     let batch_id: String
@@ -99,6 +109,7 @@ enum WorkerIPC {
     private struct Response: Decodable {
         let ok: Bool
         let status: String
+        var dispatched: Int?
     }
 
     static func defaultSocketPath() throws -> String {
@@ -139,6 +150,21 @@ enum WorkerIPC {
     }
 
     static let batchAnswerTimeoutSeconds = 6 * 60 * 60
+
+    /// Returns the number of objects that the rule deleted or moved to Trash.
+    static func executeScenarioRuleDeletions(
+        _ request: WorkerScenarioRuleDeletionsRequest, socketPath: String? = nil
+    ) throws -> Int {
+        let payload = try JSONEncoder().encode(request) + Data([0x0a])
+        let response = try send(
+            payload, socketPath: socketPath ?? defaultSocketPath(), timeoutSeconds: batchAnswerTimeoutSeconds
+        )
+        guard response.ok else { throw WorkerIPCError.rejected(response.status) }
+        guard response.status == "completed", let done = response.dispatched else {
+            throw WorkerIPCError.invalidResponse
+        }
+        return done
+    }
 
     static func cancelScenarioCreateBatch(receiptID: String, socketPath: String? = nil) throws {
         let payload = try JSONEncoder().encode(

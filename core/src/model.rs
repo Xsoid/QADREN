@@ -57,6 +57,118 @@ pub struct ScenarioFilters {
     pub excluded_patterns: Vec<String>,
 }
 
+/// How a Scenario revision treats a deletion that one side made after a
+/// confirmed synchronization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DeletionMode {
+    /// Every deletion waits for an explicit user decision and consent.
+    #[default]
+    Paranoid,
+    /// The user approved one durable rule: delete the same confirmed,
+    /// unchanged object on the other side. A plan with more deletions than
+    /// `MASS_DELETION_THRESHOLD` still waits for an explicit decision.
+    Simple,
+}
+
+impl DeletionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Paranoid => "paranoid",
+            Self::Simple => "simple",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "paranoid" => Some(Self::Paranoid),
+            "simple" => Some(Self::Simple),
+            _ => None,
+        }
+    }
+}
+
+/// A plan with more automatic deletions than this is a mass deletion. All of
+/// its deletions then require an explicit decision (owner decision D-019).
+pub const MASS_DELETION_THRESHOLD: usize = 20;
+
+/// The objects of a Scenario revision and its deletion rule. An empty
+/// selection means the complete root folder on both sides.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ScenarioScope {
+    /// Relative paths under each root. A directory includes all its content.
+    pub selected_paths: Vec<String>,
+    pub deletion_mode: DeletionMode,
+}
+
+/// The relation of one relative path to a Scenario selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeMatch {
+    Inside,
+    /// The path is outside by bytes, but on a case-insensitive or
+    /// Unicode-normalizing volume it can name a selected object.
+    NameVariant,
+    Outside,
+}
+
+fn valid_relative_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+        && !path.chars().any(char::is_control)
+}
+
+fn is_inside(path: &str, selected: &str) -> bool {
+    path == selected
+        || (path.len() > selected.len()
+            && path.starts_with(selected)
+            && path.as_bytes()[selected.len()] == b'/')
+}
+
+impl ScenarioScope {
+    /// Validate and normalize a selection: sorted, without duplicates, and
+    /// without paths that a selected ancestor directory already includes.
+    pub fn normalized_selection(paths: &[String]) -> Result<Vec<String>, ValidationError> {
+        if paths.iter().any(|path| !valid_relative_path(path)) {
+            return Err(ValidationError::InvalidSelection);
+        }
+        let mut sorted = paths.to_vec();
+        sorted.sort();
+        sorted.dedup();
+        let mut result: Vec<String> = Vec::new();
+        for path in sorted {
+            if !result.iter().any(|kept| is_inside(&path, kept)) {
+                result.push(path);
+            }
+        }
+        Ok(result)
+    }
+
+    /// Classify a relative path. `name_key` is the conservative comparison
+    /// key of the planner (NFC and lowercase).
+    pub fn classify(&self, path: &str, name_key: impl Fn(&str) -> String) -> ScopeMatch {
+        if self.selected_paths.is_empty()
+            || self
+                .selected_paths
+                .iter()
+                .any(|selected| is_inside(path, selected))
+        {
+            return ScopeMatch::Inside;
+        }
+        let key = name_key(path);
+        if self
+            .selected_paths
+            .iter()
+            .any(|selected| is_inside(&key, &name_key(selected)))
+        {
+            ScopeMatch::NameVariant
+        } else {
+            ScopeMatch::Outside
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConflictPolicy {
     RequireDecision,
@@ -89,6 +201,7 @@ pub enum ValidationError {
     EmptyRoot,
     IdenticalEndpoints,
     InvalidFilter,
+    InvalidSelection,
 }
 
 impl ScenarioDraft {
@@ -322,5 +435,54 @@ mod tests {
         };
         assert_eq!(manual.scenario, None);
         assert_eq!(planned.scenario.unwrap().revision, 3);
+    }
+
+    #[test]
+    fn selection_is_normalized_and_rejects_unsafe_paths() {
+        let paths = vec![
+            "Docs/a.txt".to_owned(),
+            "Docs".to_owned(),
+            "Photos/2026".to_owned(),
+            "Docs".to_owned(),
+            "Docsy".to_owned(),
+        ];
+        assert_eq!(
+            ScenarioScope::normalized_selection(&paths),
+            Ok(vec!["Docs".to_owned(), "Docsy".to_owned(), "Photos/2026".to_owned()])
+        );
+        for unsafe_path in ["", "/abs", "a/../b", "a//b", "./a", "a\u{7}b"] {
+            assert_eq!(
+                ScenarioScope::normalized_selection(&[unsafe_path.to_owned()]),
+                Err(ValidationError::InvalidSelection),
+                "{unsafe_path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn selection_classifies_inside_name_variant_and_outside_paths() {
+        let key = |value: &str| value.to_lowercase();
+        let all = ScenarioScope::default();
+        assert_eq!(all.classify("any/file", key), ScopeMatch::Inside);
+        let scope = ScenarioScope {
+            selected_paths: vec!["Docs".to_owned(), "notes.txt".to_owned()],
+            deletion_mode: DeletionMode::Simple,
+        };
+        assert_eq!(scope.classify("Docs", key), ScopeMatch::Inside);
+        assert_eq!(scope.classify("Docs/a/b.txt", key), ScopeMatch::Inside);
+        assert_eq!(scope.classify("notes.txt", key), ScopeMatch::Inside);
+        assert_eq!(scope.classify("docs/a.txt", key), ScopeMatch::NameVariant);
+        assert_eq!(scope.classify("Docsy/a.txt", key), ScopeMatch::Outside);
+        assert_eq!(scope.classify("notes.txt.bak", key), ScopeMatch::Outside);
+        assert_eq!(scope.classify("other", key), ScopeMatch::Outside);
+    }
+
+    #[test]
+    fn deletion_mode_round_trips_and_defaults_to_paranoid() {
+        assert_eq!(DeletionMode::default(), DeletionMode::Paranoid);
+        for mode in [DeletionMode::Paranoid, DeletionMode::Simple] {
+            assert_eq!(DeletionMode::parse(mode.as_str()), Some(mode));
+        }
+        assert_eq!(DeletionMode::parse("auto"), None);
     }
 }

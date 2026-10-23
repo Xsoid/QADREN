@@ -2,7 +2,8 @@
 //! No adapter I/O, Job submission, content reads or FileSyncState writes occur
 //! here. Callers must supply already-authorized metadata snapshots.
 use crate::model::{
-    ConfirmedFileVersion, FileSyncState, ScenarioDraft, ScenarioReference, SyncDirection,
+    ConfirmedFileVersion, DeletionMode, FileSyncState, ScenarioDraft, ScenarioReference,
+    ScenarioScope, ScopeMatch, SyncDirection, MASS_DELETION_THRESHOLD,
 };
 use icu_normalizer::ComposingNormalizerBorrowed;
 use std::collections::{BTreeMap, BTreeSet};
@@ -17,6 +18,11 @@ pub const NAME_COLLISION_REASON: &str =
 /// be planned as a Create, an Update, or a deletion.
 pub const SKIPPED_ENTRY_REASON: &str =
     "a symbolic link or special file has this name; QADREN does not synchronize it";
+
+/// Reason for a path that is outside the selection by bytes, but can name a
+/// selected object on a case-insensitive or Unicode-normalizing volume.
+pub const SELECTION_NAME_VARIANT_REASON: &str =
+    "the name differs from a selected object only by letter case or Unicode form";
 
 /// Conservative comparison key: NFC form and lowercase. A false match only
 /// makes a path non-executable; it never authorizes an effect.
@@ -53,8 +59,14 @@ pub enum PlanAction {
     Update {
         from_left: bool,
     },
-    /// Planner never authorizes deletion; a scoped policy decision is required.
+    /// A scoped policy decision is required before this deletion.
     DeleteRequiresDecision {
+        on_left: bool,
+    },
+    /// The revision's approved simple deletion rule covers this deletion:
+    /// the object was confirmed, is unchanged on `on_left`'s side, and the
+    /// plan is not a mass deletion. The executor rechecks all of this.
+    Delete {
         on_left: bool,
     },
     Conflict {
@@ -265,6 +277,40 @@ pub fn plan_with_skipped(
     skipped_left: &[String],
     skipped_right: &[String],
 ) -> Result<Vec<PlanItem>, PlannerError> {
+    plan_scoped(
+        scenario,
+        reference,
+        baseline,
+        left_snapshot,
+        right_snapshot,
+        skipped_left,
+        skipped_right,
+        &ScenarioScope::default(),
+    )
+}
+
+/// Like `plan_with_skipped`, limited to the revision's selected objects and
+/// with its deletion rule. A path outside the selection is not in the plan.
+/// A name variant of a selected object is never executable. The simple rule
+/// makes a deletion executable only when the plan has at most
+/// `MASS_DELETION_THRESHOLD` deletions; otherwise all of them need a decision.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_scoped(
+    scenario: &ScenarioDraft,
+    reference: &ScenarioReference,
+    baseline: &[FileSyncState],
+    left_snapshot: &[ObservedFile],
+    right_snapshot: &[ObservedFile],
+    skipped_left: &[String],
+    skipped_right: &[String],
+    scope: &ScenarioScope,
+) -> Result<Vec<PlanItem>, PlannerError> {
+    let selected_paths = ScenarioScope::normalized_selection(&scope.selected_paths)
+        .map_err(|_| PlannerError::InvalidScenario)?;
+    let scope = ScenarioScope {
+        selected_paths,
+        deletion_mode: scope.deletion_mode,
+    };
     let skipped = skipped_left
         .iter()
         .chain(skipped_right)
@@ -317,12 +363,13 @@ pub fn plan_with_skipped(
         .chain(left.keys())
         .chain(right.keys())
         .copied()
+        .filter(|path| scope.classify(path, name_key) != ScopeMatch::Outside)
         .collect::<BTreeSet<_>>();
     let mut variants: BTreeMap<String, usize> = BTreeMap::new();
     for path in &paths {
         *variants.entry(name_key(path)).or_default() += 1;
     }
-    Ok(paths
+    let mut items = paths
         .into_iter()
         .map(|path| {
             let state = confirmed.get(path).copied();
@@ -331,7 +378,11 @@ pub fn plan_with_skipped(
             let left_change = delta(left_file, state.and_then(|entry| entry.left.as_ref()));
             let right_change = delta(right_file, state.and_then(|entry| entry.right.as_ref()));
             let collides = variants.get(&name_key(path)).copied().unwrap_or(0) > 1;
-            let action = if skipped.contains(path.as_str()) {
+            let action = if scope.classify(path, name_key) == ScopeMatch::NameVariant {
+                PlanAction::NeedsVerification {
+                    reason: SELECTION_NAME_VARIANT_REASON,
+                }
+            } else if skipped.contains(path.as_str()) {
                 PlanAction::NeedsVerification {
                     reason: SKIPPED_ENTRY_REASON,
                 }
@@ -367,7 +418,21 @@ pub fn plan_with_skipped(
                 action,
             }
         })
-        .collect())
+        .collect::<Vec<_>>();
+    if scope.deletion_mode == DeletionMode::Simple {
+        let deletions = items
+            .iter()
+            .filter(|item| matches!(item.action, PlanAction::DeleteRequiresDecision { .. }))
+            .count();
+        if deletions <= MASS_DELETION_THRESHOLD {
+            for item in &mut items {
+                if let PlanAction::DeleteRequiresDecision { on_left } = item.action {
+                    item.action = PlanAction::Delete { on_left };
+                }
+            }
+        }
+    }
+    Ok(items)
 }
 
 #[cfg(test)]
@@ -613,5 +678,146 @@ mod tests {
             plan(&filtered, &reference(), &[], &[], &[]),
             Err(PlannerError::UnsupportedFilters)
         );
+    }
+
+    fn deleted_on_left(count: usize) -> (Vec<FileSyncState>, Vec<ObservedFile>) {
+        (0..count)
+            .map(|index| {
+                let old = file(&format!("gone-{index:03}.txt"), "old", None);
+                (
+                    FileSyncState {
+                        scenario: reference(),
+                        relative_path: old.relative_path.clone(),
+                        left: Some(confirmed(&old)),
+                        right: Some(confirmed(&old)),
+                    },
+                    old,
+                )
+            })
+            .unzip()
+    }
+
+    fn simple(selected_paths: &[&str]) -> ScenarioScope {
+        ScenarioScope {
+            selected_paths: selected_paths.iter().map(|path| (*path).to_owned()).collect(),
+            deletion_mode: DeletionMode::Simple,
+        }
+    }
+
+    #[test]
+    fn selection_removes_outside_paths_from_the_plan() {
+        let scope = ScenarioScope {
+            selected_paths: vec!["Docs".into(), "notes.txt".into()],
+            deletion_mode: DeletionMode::Paranoid,
+        };
+        let left = [
+            file("Docs/a.txt", "a", None),
+            file("Docsy/b.txt", "b", None),
+            file("notes.txt", "n", None),
+            file("other.txt", "o", None),
+        ];
+        let items = plan_scoped(
+            &scenario(SyncDirection::LeftToRight),
+            &reference(),
+            &[],
+            &left,
+            &[],
+            &[],
+            &[],
+            &scope,
+        )
+        .unwrap();
+        let paths = items
+            .iter()
+            .map(|item| item.relative_path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(paths, ["Docs/a.txt", "notes.txt"]);
+        assert!(items
+            .iter()
+            .all(|item| item.action == PlanAction::Create { from_left: true }));
+    }
+
+    #[test]
+    fn a_name_variant_of_a_selected_object_is_never_executable() {
+        let items = plan_scoped(
+            &scenario(SyncDirection::LeftToRight),
+            &reference(),
+            &[],
+            &[file("docs/a.txt", "a", None)],
+            &[],
+            &[],
+            &[],
+            &simple(&["Docs"]),
+        )
+        .unwrap();
+        assert_eq!(
+            items[0].action,
+            PlanAction::NeedsVerification {
+                reason: SELECTION_NAME_VARIANT_REASON
+            }
+        );
+    }
+
+    #[test]
+    fn simple_rule_makes_deletions_executable_up_to_the_threshold() {
+        let (baseline, right) = deleted_on_left(MASS_DELETION_THRESHOLD);
+        let items = plan_scoped(
+            &scenario(SyncDirection::LeftToRight),
+            &reference(),
+            &baseline,
+            &[],
+            &right,
+            &[],
+            &[],
+            &simple(&[]),
+        )
+        .unwrap();
+        assert_eq!(items.len(), MASS_DELETION_THRESHOLD);
+        assert!(items
+            .iter()
+            .all(|item| item.action == PlanAction::Delete { on_left: false }));
+    }
+
+    #[test]
+    fn a_mass_deletion_needs_a_decision_even_with_the_simple_rule() {
+        let (baseline, right) = deleted_on_left(MASS_DELETION_THRESHOLD + 1);
+        let items = plan_scoped(
+            &scenario(SyncDirection::LeftToRight),
+            &reference(),
+            &baseline,
+            &[],
+            &right,
+            &[],
+            &[],
+            &simple(&[]),
+        )
+        .unwrap();
+        assert!(items
+            .iter()
+            .all(|item| item.action == PlanAction::DeleteRequiresDecision { on_left: false }));
+    }
+
+    #[test]
+    fn simple_rule_never_deletes_an_object_changed_on_the_other_side() {
+        let old = file("gone.txt", "old", None);
+        let changed = file("gone.txt", "new", None);
+        let baseline = FileSyncState {
+            scenario: reference(),
+            relative_path: "gone.txt".into(),
+            left: Some(confirmed(&old)),
+            right: Some(confirmed(&old)),
+        };
+        let items = plan_scoped(
+            &scenario(SyncDirection::LeftToRight),
+            &reference(),
+            &[baseline],
+            &[],
+            &[changed],
+            &[],
+            &[],
+            &simple(&[]),
+        )
+        .unwrap();
+        assert!(matches!(items[0].action, PlanAction::Conflict { .. }));
     }
 }
