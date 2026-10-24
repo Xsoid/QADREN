@@ -4,7 +4,7 @@
 
 **Separate "Settings" window**, called from MenuBarExtra, widget inspector, and system menus. Navigation **is permitted here**; it DOES NOT become the monitoring panel Sidebar. Window id `scenario-settings` is kept for deep links. "Application Settings" is one section of the left menu, not a separate window.
 
-The sidebar button has one fixed place: in the titlebar, right after the QADREN mark. It hides and shows the section sidebar and does not move when the sidebar is hidden. The system sidebar toggle is removed, because it moves between the sidebar and the toolbar and can fall into the toolbar overflow menu. Opening the window does not put the keyboard focus on a control. The titlebar has one solid fill across the full width in both sidebar states, and scrolled content never shows through the window title (hard top scroll edge). The window keeps the sidebar state.
+The sidebar button has one fixed place: in the titlebar, right after the QADREN mark. It hides and shows the section sidebar and does not move when the sidebar is hidden. The system sidebar toggle is removed, because it moves between the sidebar and the toolbar and can fall into the toolbar overflow menu. Opening the window does not put the keyboard focus on a control. The Settings window has no toolbar actions: each action lives in the section that it changes ("Добавить подключение", "Создать сценарий"), and lists refresh when a section opens and after each action. The titlebar has one plain fill in both sidebar states: the detail content is clipped below the titlebar, without the scroll edge effect or the toolbar background separator. The window keeps the sidebar state.
 
 Recommended 2-column layout: a narrow permanent navigation with sections on the left, and a list + inspector or a specific entity editor on the right. For small widths, use a navigation stack without two nested permanently visible sidebars. On macOS, use native `NavigationSplitView`, `Form`, `Table/List`, `Toolbar`, and native fields styled with semantic tokens; do not change panels into a glowing HUD.
 
@@ -24,7 +24,7 @@ These are not six independent app windows: this is the structure of **one** sett
 
 ## 3. Connections
 
-The main area is a flat list; do not group by provider as if there is only one connection. Two Yandex accounts can have the same displayName and **different** `connection_id`. A card contains: name, provider, enable/disable, auth state, metadata only upon explicit refresh, last status, and full paths/permissions. The inspector shows capabilities, settings, and the linked Job queue, but **not** secrets.
+The main area is a flat list of connection cards; do not group by provider as if there is only one connection. Each card has a visible boundary (a border and a left edge in the connector color), the connector icon and name, the connection name, a short ID, a status label ("Включено", "Выключено", "Заморожено"), the name field, the on/off switch, and only the actions that the connector supports now. "Этот Mac" exists automatically and exactly once; it has no removal action (D-020). The "Добавить подключение" button in the section header opens the connector list with the state of each connector. Two Yandex accounts can have the same displayName and **different** `connection_id`. A card contains: name, provider, enable/disable, auth state, metadata only upon explicit refresh, last status, and full paths/permissions. The inspector shows capabilities, settings, and the linked Job queue, but **not** secrets.
 
 ### Addition (wizard)
 

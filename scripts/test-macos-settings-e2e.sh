@@ -147,11 +147,15 @@ done
 [[ -n "$APP_PID" ]] || fail "test app did not start"
 ax wait monitoring AXStaticText "Worker отвечает" 15
 
-step "Add a Local connection in Settings"
+step "This Mac exists by default, and no second one can be added"
 ax menu Window Настройки
-ax wait Настройки AXButton "Добавить этот Mac"
-ax press Настройки AXButton "Добавить этот Mac"
 ax wait Настройки AXTextField "Этот Mac"
+[[ "$(sqlite3 "$DATA/connections.sqlite3" "select count(*) from storage_connections where adapter='local_filesystem'")" == 1 ]] \
+  || fail "This Mac is not exactly one Local Filesystem connection"
+ax press Настройки AXButton "Добавить подключение"
+ax wait Настройки AXStaticText "Уже подключён" 5
+ax press Настройки AXButton "Закрыть"
+ax gone Настройки AXStaticText "Уже подключён" 5
 
 if section one_way; then
 step "Create a one-way Scenario in Settings"
@@ -494,15 +498,14 @@ regtool_build
 to_scenario_list
 create_scenario "E2E lifecycle" "$LSRC" "$LDST"
 
-step "Lifecycle: a connection used by a Scenario cannot be removed"
+step "Lifecycle: This Mac offers no removal"
+# D-020: the single This Mac connection always exists. Rust tests cover the
+# Registry refusal to remove a connection that a Scenario uses.
 ax select Настройки "Подключения"
-ax wait Настройки AXButton "Удалить"
-ax press Настройки AXButton "Удалить" 0
-ax wait Настройки AXButton "Удалить подключение"
-ax alert Настройки "Удалить подключение"
-ax wait Настройки AXStaticText "Нельзя удалить подключение" 10
+ax wait Настройки AXTextField "Этот Mac"
+ax gone Настройки AXButton "Удалить подключение" 3
 [[ "$(registry_sql "select count(*) from storage_connections where adapter='local_filesystem' and enabled=1")" == 1 ]] \
-  || fail "a refused removal removed or disabled the connection"
+  || fail "This Mac is missing or disabled"
 
 step "Lifecycle: disabling the connection during a batch stops new files"
 to_scenario_list

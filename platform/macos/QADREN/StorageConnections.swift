@@ -17,6 +17,9 @@ final class StorageConnections: ObservableObject {
 
     func refresh() {
         do {
+            // "This Mac" always exists (D-020). This creates it on first use
+            // and is a no-op afterwards.
+            _ = try StorageRegistryBridge.ensureLocalComputer()
             entries = try StorageRegistryBridge.list()
             hasLegacyYandexToken = (try YandexKeychain.read("default")) != nil
             error = nil
@@ -38,7 +41,7 @@ final class StorageConnections: ObservableObject {
     @discardableResult
     func addLocalComputer() -> String? {
         do {
-            let connectionID = try StorageRegistryBridge.addLocalComputer()
+            let connectionID = try StorageRegistryBridge.ensureLocalComputer()
             refresh()
             publishChange()
             return connectionID
@@ -93,6 +96,12 @@ final class StorageConnections: ObservableObject {
                 try StorageRegistryBridge.removeAfterJobGate(
                     id: id, jobsDatabasePath: JobInventory.paths().database
                 )
+            }
+            // "This Mac" always exists (D-020). Only an extra record from
+            // older data can be removed, never the last one.
+            if entry.adapter == "local_filesystem",
+               try StorageRegistryBridge.list().filter({ $0.adapter == "local_filesystem" }).count < 2 {
+                throw StorageError.operation(QADRENUserMessage.text(for: "this_mac_required"))
             }
             switch entry.adapter {
             case "yandex_disk":

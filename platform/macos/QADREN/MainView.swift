@@ -36,13 +36,15 @@ struct MainView: View {
         .background(InitialFocusReset().frame(width: 0, height: 0))
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
-                Menu {
-                    Button("Контрольная панель") { openWindow(id: "monitoring") }
-                    Button("Настройки") { openWindow(id: "scenario-settings") }
-                } label: {
-                    Label("Пространство", systemImage: "rectangle.3.group")
-                }
+                // The Settings window has no toolbar actions: each action
+                // lives in the section that it changes.
                 if workspace == .monitoring {
+                    Menu {
+                        Button("Контрольная панель") { openWindow(id: "monitoring") }
+                        Button("Настройки") { openWindow(id: "scenario-settings") }
+                    } label: {
+                        Label("Пространство", systemImage: "rectangle.3.group")
+                    }
                     Button("Обновить", systemImage: "arrow.clockwise") { refreshCurrentWorkspace() }
                     if workspace == .monitoring {
                         Button(isEditingLayout ? "Готово" : "Компоновка", systemImage: "rectangle.3.group.bubble") {

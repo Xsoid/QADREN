@@ -234,26 +234,9 @@ struct SettingsPanelView: View {
                 }
             }
             .frame(minWidth: 560, minHeight: 500)
-            .hardTopScrollEdge()
+            .contentBelowTitlebar()
         }
-        .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                switch selection ?? .connections {
-                case .connections:
-                    Button("Добавить этот Mac", systemImage: "plus") { connections.addLocalComputer() }
-                case .scenarios:
-                    if schedulesScenario == nil {
-                        Button("Создать сценарий", systemImage: "plus", action: beginScenarioCreation)
-                    }
-                case .application:
-                    EmptyView()
-                }
-                Button("Обновить", systemImage: "arrow.clockwise") {
-                    connections.refresh()
-                    scenarios.refresh()
-                }
-            }
-        }
+
         .onAppear {
             connections.refresh()
             scenarios.refresh()
@@ -292,7 +275,7 @@ struct SettingsPanelView: View {
             let localID: String?
             if leftID == "local-computer" || rightID == "local-computer" {
                 localID = try (connections.entries.first { $0.adapter == "local_filesystem" && $0.enabled }?.id
-                    ?? StorageRegistryBridge.addLocalComputer())
+                    ?? StorageRegistryBridge.ensureLocalComputer())
             } else {
                 localID = nil
             }
@@ -325,16 +308,62 @@ struct SettingsPanelView: View {
     }
 }
 
+/// Storage connectors that the product knows (D-020). A connector is the
+/// kind of storage; a connection is one configured record of it.
+enum StorageConnector: String, CaseIterable, Identifiable {
+    case thisMac = "local_filesystem"
+    case yandexDisk = "yandex_disk"
+
+    var id: String { rawValue }
+
+    init?(adapter: String) {
+        self.init(rawValue: adapter)
+    }
+
+    var title: String {
+        switch self {
+        case .thisMac: "Этот Mac"
+        case .yandexDisk: "Яндекс.Диск"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .thisMac: "laptopcomputer"
+        case .yandexDisk: "cloud"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .thisMac: QDTheme.cyan
+        case .yandexDisk: QDTheme.warning
+        }
+    }
+
+    var summary: String {
+        switch self {
+        case .thisMac: "Папки и диски этого Mac. Одно подключение на Mac, создаётся автоматически."
+        case .yandexDisk: "Облачное хранилище. Подключений может быть сколько угодно."
+        }
+    }
+}
+
 private struct ConnectionsSettingsView: View {
     @ObservedObject var connections: StorageConnections
+    @State private var showsAddConnection = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Подключения").font(.largeTitle.bold())
-                    Text("Независимые точки синхронизации и их локальные полномочия")
-                        .foregroundStyle(.secondary)
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Подключения").font(.largeTitle.bold())
+                        Text("Хранилища, с которыми работают сценарии. Каждое подключение относится к одному коннектору.")
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Добавить подключение", systemImage: "plus") { showsAddConnection = true }
                 }
                 if connections.hasLegacyYandexToken {
                     SettingsNotice(
@@ -347,123 +376,230 @@ private struct ConnectionsSettingsView: View {
                 if let error = connections.error {
                     SettingsNotice(text: error, symbol: "exclamationmark.triangle")
                 }
-                if connections.entries.isEmpty && !connections.hasLegacyYandexToken {
-                    SettingsEmptyState(
-                        title: "Подключений пока нет",
-                    detail: "Добавьте этот Mac как отдельную локальную точку синхронизации. Яндекс Диск отложен до P3.",
-                        symbol: "externaldrive.badge.plus"
+                if connections.entries.filter({ $0.adapter == StorageConnector.thisMac.rawValue }).count > 1 {
+                    SettingsNotice(
+                        text: "Найдено несколько подключений «Этот Mac» из старых данных. Нужно одно: удалите лишние. Подключение, которое используют сценарии, удалить нельзя.",
+                        symbol: "square.on.square"
                     )
-                    .frame(maxWidth: .infinity, minHeight: 280)
                 }
                 ForEach(connections.entries) { entry in
-                    GroupBox {
-                        if entry.adapter == "yandex_disk" {
-                            ParkedYandexConnectionCard(
-                                entry: entry,
-                                onRemove: { connections.remove(entry.id) },
-                                onRename: { connections.rename(entry.id, name: $0) },
-                                onSetEnabled: { connections.setEnabled(entry.id, enabled: $0) }
-                            )
-                            .id(entry.id + (entry.enabled ? ":enabled" : ":disabled"))
-                        } else if entry.adapter == "local_filesystem" {
-                            LocalConnectionCard(
-                                entry: entry,
-                                onRemove: { connections.remove(entry.id) },
-                                onRename: { connections.rename(entry.id, name: $0) },
-                                onSetEnabled: { connections.setEnabled(entry.id, enabled: $0) }
-                            )
-                        } else {
-                            LabeledContent("Адаптер", value: entry.adapter)
-                            Text("Недоступно в активном Release 1; QADREN не выполняет для него I/O.")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                    } label: {
-                        Label(entry.name, systemImage: "externaldrive")
-                    }
+                    ConnectionCard(
+                        entry: entry,
+                        canRemove: canRemove(entry),
+                        onRemove: { connections.remove(entry.id) },
+                        onRename: { connections.rename(entry.id, name: $0) },
+                        onSetEnabled: { connections.setEnabled(entry.id, enabled: $0) }
+                    )
+                    .id(entry.id + (entry.enabled ? ":enabled" : ":disabled") + ":" + entry.name)
                 }
-                Text("Удаление меняет только локальную запись QADREN и её credential; объекты в облаке не удаляются.")
+                Text("Удаление подключения меняет только локальную запись QADREN и её ключ в Keychain. Файлы в хранилище не удаляются.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             .frame(maxWidth: 900, alignment: .leading)
             .padding(24)
         }
+        .sheet(isPresented: $showsAddConnection) {
+            AddConnectionSheet(connections: connections.entries)
+        }
+        .onAppear {
+            connections.refresh()
+            // The cards load after the window cleared its initial focus.
+            // Opening the section must not select a name field.
+            DispatchQueue.main.async { NSApp.keyWindow?.makeFirstResponder(nil) }
+        }
+    }
+
+    /// "This Mac" always exists. Only an extra Local record from older data
+    /// can be removed.
+    private func canRemove(_ entry: StorageEntry) -> Bool {
+        guard entry.adapter == StorageConnector.thisMac.rawValue else { return true }
+        return connections.entries.filter { $0.adapter == entry.adapter }.count > 1
     }
 }
 
-/// D-018 parks Yandex work through P2. Existing local records and Keychain
-/// credentials remain manageable, but this screen must not offer OAuth or API
-/// calls as a current local-release capability.
-private struct ParkedYandexConnectionCard: View {
+/// One connection with a visible boundary: connector icon and color, name,
+/// status, and the actions that the connector supports now.
+private struct ConnectionCard: View {
     let entry: StorageEntry
+    let canRemove: Bool
     let onRemove: () -> Void
     let onRename: (String) -> Void
     let onSetEnabled: (Bool) -> Void
     @State private var name: String
     @State private var confirmRemoval = false
 
-    init(entry: StorageEntry, onRemove: @escaping () -> Void, onRename: @escaping (String) -> Void, onSetEnabled: @escaping (Bool) -> Void) {
+    init(
+        entry: StorageEntry, canRemove: Bool, onRemove: @escaping () -> Void,
+        onRename: @escaping (String) -> Void, onSetEnabled: @escaping (Bool) -> Void
+    ) {
         self.entry = entry
+        self.canRemove = canRemove
         self.onRemove = onRemove
         self.onRename = onRename
         self.onSetEnabled = onSetEnabled
         _name = State(initialValue: entry.name)
     }
 
+    private var connector: StorageConnector? { StorageConnector(adapter: entry.adapter) }
+    private var tint: Color { connector?.tint ?? .secondary }
+    private var parked: Bool { connector == .yandexDisk }
+    private var nameChanged: Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmed.isEmpty && trimmed != entry.name
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Яндекс Диск · подключение " + String(entry.id.prefix(8)))
-                .font(.caption).foregroundStyle(.secondary)
-            HStack {
-                TextField("Название подключения", text: $name)
-                Button("Переименовать") { onRename(name) }
-                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || name == entry.name)
-                Toggle("Включено", isOn: Binding(get: { entry.enabled }, set: { onSetEnabled($0) }))
+        let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
+        VStack(alignment: .leading, spacing: 14) {
+            header
+            Divider()
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 10) {
+                GridRow {
+                    Text("Название").foregroundStyle(.secondary)
+                    HStack {
+                        TextField("Название подключения", text: $name)
+                            .textFieldStyle(.roundedBorder)
+                            .onSubmit { if nameChanged { onRename(name) } }
+                        Button("Сохранить") { onRename(name) }
+                            .disabled(!nameChanged)
+                    }
+                }
+                GridRow {
+                    Text("Работа").foregroundStyle(.secondary)
+                    Toggle(entry.enabled ? "Включено" : "Выключено", isOn: Binding(
+                        get: { entry.enabled }, set: { onSetEnabled($0) }
+                    ))
+                    .toggleStyle(.switch)
+                    .disabled(parked && !entry.enabled)
+                }
             }
-            SettingsNotice(
-                text: "Интеграция Яндекс Диска отложена до P3. QADREN сохраняет локальную запись и Keychain credential, но не запускает OAuth или API-вызовы из этого окна.",
-                symbol: "pause.circle"
-            )
-            Button("Удалить локальное подключение", role: .destructive) { confirmRemoval = true }
+            if parked {
+                SettingsNotice(
+                    text: "Коннектор заморожен до P3. QADREN хранит запись и ключ в Keychain, но не запускает OAuth и API-вызовы.",
+                    symbol: "snowflake"
+                )
+            } else {
+                Text(entry.enabled
+                    ? "Папки выбираются в редакторе сценария. До подтверждённой операции QADREN не передаёт и не удаляет файлы."
+                    : "Подключение выключено: сценарии с ним не строят план и не переносят файлы.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if canRemove {
+                Button("Удалить подключение", systemImage: "trash", role: .destructive) { confirmRemoval = true }
+            }
         }
-        .confirmationDialog("Удалить это локальное подключение QADREN?", isPresented: $confirmRemoval) {
+        .padding(16)
+        .background(tint.opacity(0.05), in: shape)
+        .overlay(shape.strokeBorder(tint.opacity(0.45), lineWidth: 1))
+        .overlay(alignment: .leading) {
+            // The connector color marks the left edge of the card.
+            UnevenRoundedRectangle(topLeadingRadius: 10, bottomLeadingRadius: 10)
+                .fill(tint)
+                .frame(width: 4)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(entry.name), \(connector?.title ?? entry.adapter)")
+        .confirmationDialog("Удалить подключение «\(entry.name)»?", isPresented: $confirmRemoval) {
             Button("Удалить подключение", role: .destructive, action: onRemove)
         } message: {
-            Text("Будут удалены только локальная запись QADREN и её Keychain credential. Файлы на Яндекс Диске не изменятся.")
+            Text(parked
+                ? "Будут удалены только локальная запись QADREN и её ключ в Keychain. Файлы на Яндекс.Диске не изменятся."
+                : "Будет удалена только лишняя локальная запись QADREN. Файлы на этом Mac не изменятся.")
+        }
+    }
+
+    private var header: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Image(systemName: connector?.symbol ?? "externaldrive")
+                .font(.title2)
+                .foregroundStyle(tint)
+                .frame(width: 44, height: 44)
+                .background(tint.opacity(0.15), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(entry.name).font(.title3.weight(.semibold)).lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(connector?.title ?? entry.adapter)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(tint)
+                        .padding(.horizontal, 7).padding(.vertical, 2)
+                        .background(tint.opacity(0.15), in: Capsule())
+                    Text("ID " + String(entry.id.prefix(8)))
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .help(entry.id)
+                }
+            }
+            Spacer()
+            if parked {
+                QDStatusLabel(kind: .paused, text: "Заморожено")
+            } else if entry.enabled {
+                QDStatusLabel(kind: .ready, text: "Включено")
+            } else {
+                QDStatusLabel(kind: .offline, text: "Выключено")
+            }
         }
     }
 }
 
-private struct LocalConnectionCard: View {
-    let entry: StorageEntry
-    let onRemove: () -> Void
-    let onRename: (String) -> Void
-    let onSetEnabled: (Bool) -> Void
-    @State private var name: String
-    @State private var confirmRemoval = false
-
-    init(entry: StorageEntry, onRemove: @escaping () -> Void, onRename: @escaping (String) -> Void, onSetEnabled: @escaping (Bool) -> Void) {
-        self.entry = entry; self.onRemove = onRemove; self.onRename = onRename; self.onSetEnabled = onSetEnabled
-        _name = State(initialValue: entry.name)
-    }
+/// The connectors that the user can add now (D-020). "This Mac" exists once
+/// and is created automatically; Yandex Disk is parked until P3.
+private struct AddConnectionSheet: View {
+    let connections: [StorageEntry]
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Локальное подключение · " + String(entry.id.prefix(8)))
-                .font(.caption).foregroundStyle(.secondary)
-            HStack {
-                TextField("Название подключения", text: $name)
-                Button("Переименовать") { onRename(name) }
-                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || name == entry.name)
-                Toggle("Включено", isOn: Binding(get: { entry.enabled }, set: { onSetEnabled($0) }))
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Добавить подключение").font(.title2.bold())
+                Text("Выберите коннектор — тип хранилища.").foregroundStyle(.secondary)
             }
-            Text("Выберите корневые папки, направление и правила обмена в редакторе сценария. До подтверждённой операции QADREN не передаёт и не удаляет файлы.")
-                .font(.caption).foregroundStyle(.secondary)
-            Button("Удалить", role: .destructive) { confirmRemoval = true }
+            ForEach(StorageConnector.allCases) { connector in
+                row(connector)
+            }
+            HStack {
+                Spacer()
+                Button("Закрыть") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+            }
         }
-        .confirmationDialog("Удалить локальное подключение QADREN?", isPresented: $confirmRemoval) {
-            Button("Удалить подключение", role: .destructive, action: onRemove)
-        } message: {
-            Text("Будет удалена только локальная запись QADREN. Файлы на этом Mac не изменятся.")
+        .padding(24)
+        .frame(width: 520)
+        .background(InitialFocusReset().frame(width: 0, height: 0))
+    }
+
+    private func row(_ connector: StorageConnector) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
+        let state = availability(connector)
+        return HStack(alignment: .center, spacing: 12) {
+            Image(systemName: connector.symbol)
+                .font(.title2)
+                .foregroundStyle(connector.tint)
+                .frame(width: 44, height: 44)
+                .background(connector.tint.opacity(0.15), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(connector.title).font(.headline)
+                Text(connector.summary).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                QDStatusLabel(kind: state.kind, text: state.text)
+            }
+            Spacer(minLength: 12)
+            Button("Подключить") {}
+                .disabled(true)
+                .help(state.text)
+        }
+        .padding(12)
+        .background(connector.tint.opacity(0.05), in: shape)
+        .overlay(shape.strokeBorder(connector.tint.opacity(0.35), lineWidth: 1))
+    }
+
+    private func availability(_ connector: StorageConnector) -> (kind: QDStatusKind, text: String) {
+        switch connector {
+        case .thisMac:
+            let name = connections.first { $0.adapter == connector.rawValue }?.name ?? connector.title
+            return (.ready, "Уже подключён как «\(name)». Второе подключение не нужно.")
+        case .yandexDisk:
+            return (.paused, "Заморожен до P3. Новые подключения сейчас не создаются.")
         }
     }
 }
@@ -2198,15 +2334,19 @@ struct ApplicationSettingsView: View {
 }
 
 private extension View {
-    /// Content that scrolls under the titlebar must not show through the
-    /// window title. A hard edge gives the titlebar one solid fill across the
-    /// full width, also when the sidebar is hidden (a soft edge was inset).
+    /// Content never scrolls under the titlebar. The macOS scroll edge
+    /// effect is drawn only as wide as the scroll view, so it stopped short
+    /// of the window edges and changed when the scroller appeared on hover.
+    /// Without it, with clipping, and without the toolbar background and its
+    /// separator line, the titlebar has one plain fill.
     @ViewBuilder
-    func hardTopScrollEdge() -> some View {
+    func contentBelowTitlebar() -> some View {
         if #available(macOS 26.0, *) {
-            scrollEdgeEffectStyle(.hard, for: .top)
+            scrollEdgeEffectHidden(true, for: .top)
+                .clipped()
+                .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         } else {
-            self
+            clipped()
         }
     }
 

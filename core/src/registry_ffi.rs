@@ -912,6 +912,19 @@ pub extern "C" fn qadren_registry_add(
     with_registry(path, |db| Ok(json!({"id":db.add(&adapter, &name)?})))
 }
 
+/// Return the ID of the single "This Mac" connection, created when missing
+/// (D-020). The product never adds a second Local Filesystem connection.
+#[no_mangle]
+pub extern "C" fn qadren_registry_ensure_local_computer(
+    path: *const c_char,
+    name: *const c_char,
+) -> *mut c_char {
+    let Some(name) = input(name) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    with_registry(path, |db| Ok(json!({"id": db.ensure_local_computer(&name)?})))
+}
+
 #[no_mangle]
 pub extern "C" fn qadren_registry_remove(path: *const c_char, id: *const c_char) -> *mut c_char {
     let (Some(_path), Some(_id)) = (input(path), input(id)) else {

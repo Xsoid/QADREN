@@ -22,6 +22,7 @@ Baseline date: **2026-10-08**. Records list agreements. They do not prove the fe
 | D-016 | Accepted (2026-10-08) | Unlimited number of independent StorageConnection per adapter and account. Do not confuse source/destination roles with Controller/Worker. See [ADR](D-016-multiple-connections.md). |
 | D-018 | Accepted (2026-10-14) | [Local-first Release 1: P0 UI, P1 Local FS controller, P2 autonomous product; Yandex post-release P3, iCloud postponed](D-018-local-first-priorities.md) |
 | D-017 | Accepted, partially revised D-018 | [iCloud future-only; historical cloud scope is replaced by local-first Release 1](D-017-defer-icloud.md) |
+| D-020 | Accepted (2026-10-24) | [One automatic "This Mac" connection per Mac; connector list in "Добавить подключение"; revises D-016 for `local_filesystem` only](D-020-single-this-mac-connection.md) |
 | D-019 | Accepted (2026-10-23) | [Inline Scenario folder browser, selected objects, and Paranoid / Simple synchronization deletion modes with a 20-deletion threshold](D-019-scenario-selection-and-deletion-modes.md) |
 
 ## Revision 2026-10-09 — specification v0.2

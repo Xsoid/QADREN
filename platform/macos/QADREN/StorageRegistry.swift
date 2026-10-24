@@ -129,6 +129,8 @@ private func scenarioUpdate(
 ) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_add")
 private func registryAdd(_ path: UnsafePointer<CChar>?, _ adapter: UnsafePointer<CChar>?, _ name: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_registry_ensure_local_computer")
+private func registryEnsureLocalComputer(_ path: UnsafePointer<CChar>?, _ name: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_rename")
 private func registryRename(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ name: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_set_enabled")
@@ -315,6 +317,8 @@ enum QADRENUserMessage {
             "Под этим именем находится символическая ссылка или специальный файл. QADREN такие объекты не синхронизирует, поэтому действий с этим путём нет."
         case "conflict_stale":
             "Файлы изменились после создания задачи конфликта. Обновите снимок конфликта."
+        case "this_mac_required":
+            "Подключение «Этот Mac» есть всегда, его нельзя удалить. Его можно переименовать или выключить."
         case "invalid_selection":
             "Выбранный объект находится вне корневой папки сценария. Выберите объекты заново."
         case "the name differs from a selected object only by letter case or Unicode form":
@@ -967,6 +971,21 @@ enum StorageRegistryBridge {
         return result.id
     }
 
+    /// The single "This Mac" connection (D-020): the existing record, or a new
+    /// one when none exists. The product uses only this path.
+    static func ensureLocalComputer(name: String = "Этот Mac", databasePath: String? = nil) throws -> String {
+        let database = try databasePath ?? path
+        let result: NewConnection = try database.withCString { db in
+            try name.withCString { label in
+                try unwrap(registryEnsureLocalComputer(db, label), as: NewConnection.self)
+            }
+        }
+        return result.id
+    }
+
+    /// Adds a new Local Filesystem record without the single-record rule.
+    /// Tests use it to model two independent local endpoints; the product
+    /// calls `ensureLocalComputer`.
     static func addLocalComputer(name: String = "Этот Mac", databasePath: String? = nil) throws -> String {
         let database = try databasePath ?? path
         let result: NewConnection = try database.withCString { db in

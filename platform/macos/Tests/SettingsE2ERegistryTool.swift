@@ -23,7 +23,7 @@ struct SettingsE2ERegistryTool {
         guard arguments.count >= 3 else { throw StorageError.operation("usage: settings-e2e-registry COMMAND NAME ...") }
         if arguments[1] == "setup-scheduled", arguments.count == 9 {
             // One Local connection, a one-way Scenario, and one weekly slot.
-            let connection = try StorageRegistryBridge.addLocalComputer()
+            let connection = try StorageRegistryBridge.ensureLocalComputer()
             let scenario = try StorageRegistryBridge.createScenario(
                 name: arguments[2], leftID: connection, leftRoot: arguments[3],
                 rightID: connection, rightRoot: arguments[4], direction: "left_to_right"

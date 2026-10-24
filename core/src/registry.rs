@@ -488,6 +488,43 @@ impl Registry {
         Ok(id)
     }
 
+    /// Return the "This Mac" connection, and create it when it is missing.
+    /// The product has exactly one Local Filesystem connection per Mac
+    /// (D-020). The check and the insert are one immediate transaction, so a
+    /// Worker and the interface cannot create two. When older data already
+    /// has more than one, the oldest record is returned and nothing changes.
+    pub fn ensure_local_computer(&self, name: &str) -> Result<String> {
+        if !valid_name(name) {
+            return Err(RegistryError::InvalidName);
+        }
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let existing: Option<String> = transaction
+            .query_row(
+                "SELECT id FROM storage_connections WHERE adapter='local_filesystem'
+                 ORDER BY rowid LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let id = match existing {
+            Some(id) => id,
+            None => {
+                let id: String = transaction
+                    .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
+                transaction.execute(
+                    "INSERT INTO storage_connections(id,adapter,name) VALUES (?1,'local_filesystem',?2)",
+                    params![id, name.trim()],
+                )?;
+                id
+            }
+        };
+        transaction.commit()?;
+        Ok(id)
+    }
+
     pub fn list(&self) -> Result<Vec<StorageConnection>> {
         let mut stmt = self.db.prepare(
             "SELECT id,adapter,name,enabled,status,credential_ref,last_checked_at,diagnosis,provider_account_id
@@ -2723,6 +2760,23 @@ mod tests {
         assert_eq!(revision_two.name, "Updated documents");
         assert_eq!(revision_two.left_root, "/source");
         assert_eq!(revision_two.direction, "right_to_left");
+    }
+
+    #[test]
+    fn this_mac_connection_is_created_once_and_then_reused() {
+        let db = Registry::in_memory().unwrap();
+        let first = db.ensure_local_computer("Этот Mac").unwrap();
+        let again = db.ensure_local_computer("Другое имя").unwrap();
+        assert_eq!(first, again);
+        let local = db
+            .list()
+            .unwrap()
+            .into_iter()
+            .filter(|connection| connection.adapter == "local_filesystem")
+            .collect::<Vec<_>>();
+        assert_eq!(local.len(), 1);
+        assert_eq!(local[0].name, "Этот Mac");
+        assert!(matches!(db.ensure_local_computer("  "), Err(RegistryError::InvalidName)));
     }
 
     #[test]

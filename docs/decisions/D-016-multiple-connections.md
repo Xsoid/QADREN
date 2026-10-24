@@ -1,6 +1,6 @@
 # D-016 — Unlimited number of independent connections to one adapter
 
-Status: **accepted**, 2026-10-08.
+Status: **accepted**, 2026-10-08. **Revised by [D-020](D-020-single-this-mac-connection.md)** for `local_filesystem`: each Mac has exactly one "This Mac" connection. The rule below stays in force for every other adapter.
 
 ## Solution
 One adapter type (`yandex_disk`, `s3`, `webdav`, `icloud_documents`, etc.) can be used by **an unlimited number of independent connection instances** (`StorageConnection`) within the limits of the specific provider/OS. You must not introduce artificial limits, singletons, or uniqueness constraints based on adapter type or account.
