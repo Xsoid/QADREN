@@ -81,7 +81,7 @@ choose_folder() {
   ax set Настройки AXTextField "Путь к папке" "$folder"
   ax press Настройки AXButton "Открыть путь" 0
   ax gone Настройки AXTextField "Путь к папке"
-  ax press Настройки AXButton "Выбрать эту папку" "$index"
+  ax press Настройки AXButton "Сделать корнем" "$index"
   # A protected folder can show a one-time macOS access prompt; the owner
   # answers it. Wait long enough for that answer.
   ax wait Настройки AXStaticText "$folder" 120
@@ -93,7 +93,7 @@ create_scenario() {
   ax press Настройки AXButton "Создать сценарий" 0
   ax wait Настройки AXTextField "Название сценария"
   ax set Настройки AXTextField "Название сценария" "$name"
-  [[ "$mode" == "two_way" ]] && ax press Настройки AXRadioButton "В обе стороны"
+  [[ "$mode" == "two_way" ]] && ax press Настройки AXButton "В обе стороны"
   choose_folder 0 "$left"
   choose_folder 1 "$right"
   ax press Настройки AXButton "Создать сценарий" 0

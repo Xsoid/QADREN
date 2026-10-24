@@ -4,7 +4,7 @@
 
 **Separate "Settings" window**, called from MenuBarExtra, widget inspector, and system menus. Navigation **is permitted here**; it DOES NOT become the monitoring panel Sidebar. Window id `scenario-settings` is kept for deep links. "Application Settings" is one section of the left menu, not a separate window.
 
-The sidebar button has one fixed place: in the titlebar, right after the QADREN mark. It hides and shows the section sidebar and does not move when the sidebar is hidden. The system sidebar toggle is removed, because it moves between the sidebar and the toolbar and can fall into the toolbar overflow menu. Opening the window does not put the keyboard focus on a control. The titlebar has one plain background in both sidebar states; the window keeps the sidebar state.
+The sidebar button has one fixed place: in the titlebar, right after the QADREN mark. It hides and shows the section sidebar and does not move when the sidebar is hidden. The system sidebar toggle is removed, because it moves between the sidebar and the toolbar and can fall into the toolbar overflow menu. Opening the window does not put the keyboard focus on a control. The titlebar has one solid fill across the full width in both sidebar states, and scrolled content never shows through the window title (hard top scroll edge). The window keeps the sidebar state.
 
 Recommended 2-column layout: a narrow permanent navigation with sections on the left, and a list + inspector or a specific entity editor on the right. For small widths, use a navigation stack without two nested permanently visible sidebars. On macOS, use native `NavigationSplitView`, `Form`, `Table/List`, `Toolbar`, and native fields styled with semantic tokens; do not change panels into a glowing HUD.
 
@@ -55,11 +55,11 @@ Each panel has:
 - the connection picker;
 - breadcrumbs from "Этот Mac" to the visible folder, with "up", "home", and "go to path" buttons;
 - a list in the style of a two-pane file manager: icon, name, size; a double click or the chevron opens a folder;
-- the "Выбрать эту папку" button, which makes the visible folder the Scenario root.
+- the "Сделать корнем «folder»" button, which makes the visible folder the Scenario root. "Отменить" restores the previous root and selection, "Сбросить" clears the root, and "Показать корень" opens it.
 
 The source panel (the left panel in a two-way Scenario) has a checkbox before each object inside the root. Checked objects are the Scenario selection; an empty selection is the full root. A summary under the panel shows the selected objects and the selection rules. The browser reads names, types, and sizes only; it hides hidden entries and skips links. "This Mac" is available directly in the point selection: when saving a scenario, a separate `local_filesystem` `StorageConnection` is created or reused. Cloud viewing is limited to directory metadata and does not download content.
 
-A "Удаления" box selects the deletion mode: "Параноик" or "Простая синхронизация". Selecting Simple synchronization shows one confirmation with its consequences: Trash or permanent deletion, and the 20-deletion threshold. The Scenario list shows the selection and the deletion mode of each Scenario. The plan shows rule deletions and one "Удалить по правилу" action; the Worker plans again before it deletes.
+Direction and deletion mode use choice cards (icon, title, one short line, accent border on the selected card), not segmented controls. A "Удаления" box selects the deletion mode: "Параноик" or "Простая синхронизация". Selecting Simple synchronization shows one confirmation with its consequences: Trash or permanent deletion, and the 20-deletion threshold. The Scenario list shows the selection and the deletion mode of each Scenario. The plan shows rule deletions and one "Удалить по правилу" action; the Worker plans again before it deletes.
 
 Show the consequences of changes: current Jobs use the old revision, new Jobs use the new revision. `Run now` creates a new Job only through Core with correct permissions; settings do not copy files themselves.
 

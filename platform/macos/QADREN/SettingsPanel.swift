@@ -234,6 +234,7 @@ struct SettingsPanelView: View {
                 }
             }
             .frame(minWidth: 560, minHeight: 500)
+            .hardTopScrollEdge()
         }
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
@@ -253,7 +254,6 @@ struct SettingsPanelView: View {
                 }
             }
         }
-        .uniformTitlebar()
         .onAppear {
             connections.refresh()
             scenarios.refresh()
@@ -1619,15 +1619,16 @@ private struct ScenarioEditorView: View {
                         TextField("Например, «Документы → Архив»", text: $name)
                             .textFieldStyle(.roundedBorder)
                             .accessibilityLabel("Название сценария")
-                        Picker("Направление", selection: $direction) {
-                            Text("В одну сторону").tag("left_to_right")
-                            Text("В обе стороны").tag("bidirectional")
-                        }
-                        .pickerStyle(.segmented)
-                        Text(direction == "bidirectional"
-                            ? "QADREN будет требовать явный выбор источника для конфликтов. Выбор объектов действует на обе папки."
-                            : "Перенос идёт из источника в назначение.")
-                            .font(.caption).foregroundStyle(.secondary)
+                        ChoiceCards(
+                            options: [
+                                .init(value: "left_to_right", title: "В одну сторону",
+                                      detail: "Из источника в назначение.", symbol: "arrow.right"),
+                                .init(value: "bidirectional", title: "В обе стороны",
+                                      detail: "Конфликты — только с вашим решением.", symbol: "arrow.left.arrow.right"),
+                            ],
+                            selection: direction,
+                            choose: { direction = $0 }
+                        )
                     }
                 }
                 HStack(alignment: .top, spacing: 16) {
@@ -1690,7 +1691,7 @@ private struct ScenarioEditorView: View {
             Button("Отмена", role: .cancel) {}
             Button("Включить", role: .destructive) { scope.deletionMode = .simple }
         } message: {
-            Text("Если файл удалён в источнике, QADREN удалит его и в назначении без отдельного вопроса. Это действует только для уже синхронизированных файлов, которые не менялись после синхронизации. Файл переносится в Корзину; на томе без Корзины удаление безвозвратное. Если в одном плане больше 20 удалений, QADREN всё равно попросит решения.")
+            Text("Файлы, удалённые в источнике, будут удаляться и в назначении без вопроса — если они уже синхронизированы и не менялись. Удаление идёт в Корзину, без Корзины — навсегда. Больше 20 удалений — только с подтверждением.")
         }
     }
 
@@ -1714,23 +1715,22 @@ private struct ScenarioDeletionModeBox: View {
     var body: some View {
         GroupBox("Удаления") {
             VStack(alignment: .leading, spacing: 10) {
-                Picker("Удаления", selection: Binding(get: { mode }, set: choose)) {
-                    Text("Параноик").tag(ScenarioDeletionMode.paranoid)
-                    Text("Простая синхронизация").tag(ScenarioDeletionMode.simple)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                switch mode {
-                case .paranoid:
-                    Text("Каждое удаление ждёт вашего решения и подтверждения.")
+                ChoiceCards(
+                    options: [
+                        .init(value: ScenarioDeletionMode.paranoid, title: "Параноик",
+                              detail: "Каждое удаление — с вашим подтверждением.", symbol: "hand.raised"),
+                        .init(value: ScenarioDeletionMode.simple, title: "Простая синхронизация",
+                              detail: bidirectional
+                                  ? "Удалено в одной папке — удаляется и в другой."
+                                  : "Удалено в источнике — удаляется в назначении.",
+                              symbol: "trash"),
+                    ],
+                    selection: mode,
+                    choose: choose
+                )
+                if mode == .simple {
+                    Label("В Корзину; без Корзины — навсегда. Больше 20 удалений — только с подтверждением.", systemImage: "info.circle")
                         .font(.caption).foregroundStyle(.secondary)
-                case .simple:
-                    Text(bidirectional
-                        ? "Если уже синхронизированный файл удалён в одной папке и не менялся в другой, QADREN удалит его и там."
-                        : "Если уже синхронизированный файл удалён в источнике и не менялся в назначении, QADREN удалит его и в назначении.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Label("Файл переносится в Корзину. На томе без Корзины удаление безвозвратное. Больше 20 удалений в одном плане требуют решения.", systemImage: "trash")
-                        .font(.caption).foregroundStyle(.orange)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1752,6 +1752,10 @@ private struct ScenarioFolderPanel: View {
     @StateObject private var browser = ScenarioFolderBrowser()
     @State private var showsPathField = false
     @State private var pathDraft = ""
+    @State private var shownConnectionID = ""
+    @State private var showedInitialRoot = false
+    /// One undo step for the root and its selection.
+    @State private var previousRoot: (root: String, selection: Set<String>)?
 
     private var selectedConnection: StorageEntry? {
         connections.first { $0.id == connectionID }
@@ -1772,9 +1776,15 @@ private struct ScenarioFolderPanel: View {
                     .labelsHidden()
                     .fixedSize()
                     .help("Подключение")
-                    .onChange(of: connectionID) { _ in
-                        root = ""
-                        selection = []
+                    .onChange(of: connectionID) { newID in
+                        // The editor fills the connection of an existing
+                        // Scenario after this panel appears. Only a change
+                        // from one chosen connection to another resets the
+                        // root, which belongs to the old connection.
+                        if !shownConnectionID.isEmpty && shownConnectionID != newID {
+                            changeRoot(to: "")
+                        }
+                        shownConnectionID = newID
                     }
                 }
                 breadcrumbs
@@ -1818,6 +1828,13 @@ private struct ScenarioFolderPanel: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .onAppear { browser.open(root.isEmpty ? NSHomeDirectory() : root) }
+        .onChange(of: root) { newRoot in
+            // The root of an existing Scenario arrives after onAppear.
+            if !showedInitialRoot, !newRoot.isEmpty, browser.path != newRoot {
+                browser.open(newRoot)
+            }
+            showedInitialRoot = true
+        }
     }
 
     private var breadcrumbs: some View {
@@ -1920,9 +1937,11 @@ private struct ScenarioFolderPanel: View {
             }
         }
         .contentShape(Rectangle())
-        .onTapGesture(count: 2) {
+        // Simultaneous: a plain double-tap gesture makes every single click,
+        // including the checkbox, wait for the double-click interval.
+        .simultaneousGesture(TapGesture(count: 2).onEnded {
             if entry.is_directory { browser.openChild(entry.name) }
-        }
+        })
     }
 
     private func openDraftPath() {
@@ -1933,31 +1952,64 @@ private struct ScenarioFolderPanel: View {
     }
 
     private var rootLine: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
                 Text("Корневая папка").font(.caption).foregroundStyle(.secondary)
-                Text(root.isEmpty ? "не выбрана" : root)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(root.isEmpty ? .secondary : .primary)
+                Spacer()
+                if let previous = previousRoot {
+                    Button("Отменить", systemImage: "arrow.uturn.backward") {
+                        root = previous.root
+                        selection = previous.selection
+                        previousRoot = nil
+                        if !previous.root.isEmpty { browser.open(previous.root) }
+                    }
+                    .help("Вернуть прежнюю корневую папку и выбор")
+                }
+                if !root.isEmpty {
+                    Button("Показать корень", systemImage: "scope") { browser.open(root) }
+                        .disabled(browser.path == root)
+                    Button("Сбросить", systemImage: "xmark.circle") { changeRoot(to: "") }
+                        .help("Убрать корневую папку")
+                }
+            }
+            .buttonStyle(.borderless)
+            .labelStyle(.titleAndIcon)
+            .font(.caption)
+            Text(root.isEmpty ? "не выбрана" : root)
+                .font(.caption.monospaced())
+                .foregroundStyle(root.isEmpty ? .secondary : .primary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+                .help(root)
+            Button {
+                changeRoot(to: browser.path)
+            } label: {
+                Label("Сделать корнем «\(folderTitle(browser.path))»", systemImage: "folder.badge.checkmark")
                     .lineLimit(1)
                     .truncationMode(.middle)
-                    .textSelection(.enabled)
-                    .help(root)
-            }
-            Spacer()
-            Button("Выбрать эту папку", systemImage: "checkmark.circle") {
-                root = browser.path
-                selection = []
             }
             .disabled(browser.path == root)
-            .help("Сделать открытую папку корнем сценария")
+            .help("Открытая папка станет корневой папкой этой стороны сценария")
         }
+    }
+
+    /// Change the root and keep one undo step. The selection is relative to
+    /// the root, so a new root starts with an empty selection.
+    private func changeRoot(to newRoot: String) {
+        previousRoot = (root, selection)
+        root = newRoot
+        selection = []
+    }
+
+    private func folderTitle(_ path: String) -> String {
+        path == "/" ? "Этот Mac" : (path as NSString).lastPathComponent
     }
 
     @ViewBuilder
     private var selectionSummary: some View {
         if root.isEmpty {
-            Text("Откройте нужную папку и нажмите «Выбрать эту папку». Файлы не читаются и не передаются при выборе.")
+            Text("Откройте нужную папку и нажмите «Сделать корнем». Файлы не читаются и не передаются при выборе.")
                 .font(.caption).foregroundStyle(.secondary)
         } else if selection.isEmpty {
             Text("Синхронизируется вся корневая папка. Отметьте объекты, чтобы синхронизировать только их.")
@@ -1979,6 +2031,59 @@ private struct ScenarioFolderPanel: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
+    }
+}
+
+/// A choice between a few options as equal cards. The selected card has an
+/// accent border and a check mark; there is no filled segment.
+private struct ChoiceCards<Value: Hashable>: View {
+    struct Option: Identifiable {
+        let value: Value
+        let title: String
+        let detail: String
+        let symbol: String
+        var id: Value { value }
+    }
+
+    let options: [Option]
+    let selection: Value
+    let choose: (Value) -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            ForEach(options) { option in
+                card(option, selected: option.value == selection)
+            }
+        }
+    }
+
+    private func card(_ option: Option, selected: Bool) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+        return Button { choose(option.value) } label: {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: option.symbol)
+                    .font(.title3)
+                    .foregroundStyle(selected ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+                    .frame(width: 24)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(option.title).font(.headline)
+                    Text(option.detail)
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(selected ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(selected ? AnyShapeStyle(.tint.opacity(0.10)) : AnyShapeStyle(.quaternary.opacity(0.5)), in: shape)
+            .overlay(shape.strokeBorder(selected ? AnyShapeStyle(.tint) : AnyShapeStyle(.quaternary), lineWidth: 1))
+            .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(option.title)
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 
@@ -2093,13 +2198,13 @@ struct ApplicationSettingsView: View {
 }
 
 private extension View {
-    /// With a hidden sidebar, macOS draws the detail toolbar background with
-    /// side insets, and the titlebar looks broken. QADREN windows use one
-    /// plain titlebar, so hide that background in both sidebar states.
+    /// Content that scrolls under the titlebar must not show through the
+    /// window title. A hard edge gives the titlebar one solid fill across the
+    /// full width, also when the sidebar is hidden (a soft edge was inset).
     @ViewBuilder
-    func uniformTitlebar() -> some View {
-        if #available(macOS 15.0, *) {
-            toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
+    func hardTopScrollEdge() -> some View {
+        if #available(macOS 26.0, *) {
+            scrollEdgeEffectStyle(.hard, for: .top)
         } else {
             self
         }
