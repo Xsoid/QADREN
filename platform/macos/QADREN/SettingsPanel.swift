@@ -3249,13 +3249,22 @@ struct ApplicationSettingsView: View {
                 LabeledContent("Настройки", value: "Отдельное окно")
                 LabeledContent("Выполнение сценариев", value: "Local Filesystem · Local Worker")
             }
+            AppDataSection()
             Section("О приложении") {
-                LabeledContent("Версия", value: appVersion)
-                LabeledContent("Core", value: CoreBridge.version)
-                LabeledContent("Автор", value: "Xsoid")
-                LabeledContent("Сайт разработчика") {
+                HStack(spacing: 10) {
+                    Image(nsImage: NSApp.applicationIconImage)
+                        .resizable().frame(width: 28, height: 28)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("QADREN \(appVersion)").font(.body.weight(.medium))
+                        Text("Core \(CoreBridge.version) · автор Xsoid")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 8)
                     Link("xsoid.net", destination: URL(string: "https://xsoid.net")!)
+                        .font(.callout)
                 }
+                .textSelection(.enabled)
             }
         }
         .formStyle(.grouped)
@@ -3274,6 +3283,121 @@ struct ApplicationSettingsView: View {
         let version = info?["CFBundleShortVersionString"] as? String ?? "—"
         let build = info?["CFBundleVersion"] as? String ?? "—"
         return "\(version) (сборка \(build))"
+    }
+}
+
+/// Where QADREN keeps its own state on this Mac and how much it takes.
+/// Synchronized files are not counted.
+private struct AppDataSection: View {
+    @State private var locations: [AppDataLocation] = []
+    @State private var scanning = false
+
+    var body: some View {
+        Section {
+            if locations.isEmpty {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Считаю размер…").font(.callout).foregroundStyle(.secondary)
+                }
+            } else {
+                ForEach(locations) { location in
+                    AppDataRow(location: location)
+                }
+            }
+        } header: {
+            HStack(spacing: 6) {
+                Text("Служебные данные")
+                Spacer()
+                if !locations.isEmpty {
+                    Text("Всего \(AppDataFootprint.format(AppDataFootprint.total(locations)))")
+                        .monospacedDigit().foregroundStyle(.secondary)
+                }
+                Button {
+                    refresh()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .disabled(scanning)
+                .help("Пересчитать размер")
+            }
+        } footer: {
+            Text("Папки, которые QADREN создаёт для себя. Синхронизируемые файлы сюда не входят.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .onAppear(perform: refresh)
+    }
+
+    private func refresh() {
+        guard !scanning else { return }
+        scanning = true
+        Task {
+            let result = await Task.detached(priority: .utility) { AppDataFootprint.scan() }.value
+            locations = result
+            scanning = false
+        }
+    }
+}
+
+private struct AppDataRow: View {
+    let location: AppDataLocation
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: location.symbol)
+                .foregroundStyle(.secondary)
+                .frame(width: 16)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(location.title)
+                if let path = displayPath {
+                    Text(path)
+                        .font(.caption.monospaced()).foregroundStyle(.secondary)
+                        .lineLimit(1).truncationMode(.middle)
+                        .help(location.url?.path ?? "")
+                }
+                if let breakdown = location.breakdown {
+                    Text(breakdown).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        .help(breakdown)
+                }
+            }
+            .help(location.note ?? "")
+            Spacer(minLength: 8)
+            Text(sizeText)
+                .monospacedDigit()
+                .foregroundStyle(isMissing ? .tertiary : .secondary)
+            if let url = location.url {
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                } label: {
+                    Image(systemName: "arrow.up.forward.square")
+                }
+                .buttonStyle(.borderless)
+                .disabled(isMissing)
+                .help("Показать в Finder")
+            }
+        }
+        .contextMenu {
+            if let url = location.url {
+                Button("Скопировать путь") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(url.path, forType: .string)
+                }
+            }
+        }
+    }
+
+    private var displayPath: String? {
+        location.url.map { ($0.path as NSString).abbreviatingWithTildeInPath }
+    }
+
+    private var isMissing: Bool { location.size == .missing }
+
+    private var sizeText: String {
+        switch location.size {
+        case .bytes(let value): AppDataFootprint.format(value)
+        case .notCounted(let note): note
+        case .missing: "Не создано"
+        }
     }
 }
 

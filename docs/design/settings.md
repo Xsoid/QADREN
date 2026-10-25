@@ -19,7 +19,8 @@ Recommended 2-column layout: a narrow permanent navigation with sections on the 
 | Node and Service | Local Worker, start/pause, independent service status, launch management | Show unavailable signs if there is no independent service |
 | Interface | Theme, window zoom, default density, panel restoration | Compatible with locally saved layouts |
 | File transfer | Block of Application Settings: the switch "Повторять недоступные файлы до успеха" with a caption that states the retry schedule for the current value (D-024) | The value is in the Registry, so the Worker reads it; default on |
-| About | Last block of Application Settings: app version and build, Core version, author (Xsoid), and a link to the developer site https://xsoid.net | Values come from `Info.plist` and the Core library |
+| App data | Block of Application Settings before About: the locations that QADREN makes for its own state, one compact row each (title, path, size, "Показать в Finder", "Скопировать путь" in the context menu) and a total. Rows: data root with databases and the Worker log (with a size breakdown per database), SMB mount points (count of active mounts, no size), URL cache, HTTP storage and cookies, interface preferences, saved window state if present, and the Keychain (no size) | The scan reads names and allocated sizes only. It reads the mount table with `MNT_NOWAIT` and never enters a mount point, so a stalled share cannot block it. Synchronized files are not counted |
+| About | Last block of Application Settings, one row: app icon, app version and build, Core version, author (Xsoid), and a link to the developer site https://xsoid.net | Values come from `Info.plist` and the Core library |
 
 These are not six independent app windows: this is the structure of **one** settings panel. Deep-link points have `section`, `entityID`, and `editorSubsection` with validation of the entity existence.
 
