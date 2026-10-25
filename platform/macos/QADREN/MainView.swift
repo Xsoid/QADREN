@@ -356,16 +356,18 @@ struct MainView: View {
     }
 
     private func connectionStatusKind(for entry: StorageEntry) -> QDStatusKind {
-        statusKind(for: ConnectionPresentationStatus(enabled: entry.enabled, registryStatus: entry.status))
+        statusKind(for: ConnectionPresentationStatus(adapter: entry.adapter, enabled: entry.enabled, registryStatus: entry.status))
     }
 
     private func connectionStatusTitle(for entry: StorageEntry) -> String {
-        ConnectionPresentationStatus(enabled: entry.enabled, registryStatus: entry.status).title
+        ConnectionPresentationStatus(adapter: entry.adapter, enabled: entry.enabled, registryStatus: entry.status).title
     }
 
     private var connectionPresentationStatus: ConnectionPresentationStatus {
         ConnectionPresentationStatus.aggregate(
-            connections.entries.map { ConnectionPresentationStatus(enabled: $0.enabled, registryStatus: $0.status) },
+            connections.entries.map {
+                ConnectionPresentationStatus(adapter: $0.adapter, enabled: $0.enabled, registryStatus: $0.status)
+            },
             registryFailed: connections.error != nil
         )
     }
@@ -397,7 +399,7 @@ struct MainView: View {
         default: CoreBridge.status
         }
     }
-    private func adapterTitle(_ adapter: String) -> String { adapter == "yandex_disk" ? "Яндекс Диск" : adapter }
+    private func adapterTitle(_ adapter: String) -> String { StorageConnector(adapter: adapter)?.title ?? adapter }
 
     /// `g1-*` is a test-only durable fixture created by the early mock runner.
     /// It is retained for safe diagnostics, but is never product queue data.

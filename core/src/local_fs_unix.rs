@@ -151,8 +151,8 @@ pub fn rename_file_noreplace(root: &File, from: &Path, to: &Path) -> Result<()> 
             "source pathname was not confirmed absent after rename",
         )));
     }
-    source_dir.sync_all().map_err(LocalError::OutcomeUnknown)?;
-    target_dir.sync_all().map_err(LocalError::OutcomeUnknown)?;
+    sync(&source_dir).map_err(LocalError::OutcomeUnknown)?;
+    sync(&target_dir).map_err(LocalError::OutcomeUnknown)?;
     Ok(())
 }
 
@@ -227,7 +227,29 @@ pub fn rename_file_replace(root: &File, from: &Path, to: &Path) -> Result<()> {
     if outcome != 0 {
         return Err(rename_failure(io::Error::last_os_error()));
     }
-    if !matches!(file_identity(root, to), Ok(identity) if identity == source) {
+    let replaced = if inode_follows_name(&target_dir) {
+        // The inode number on this volume names the path, not the file.
+        // Size and modification time of the staged file are the evidence.
+        let mut after = std::mem::MaybeUninit::<libc::stat>::uninit();
+        let found = unsafe {
+            libc::fstatat(
+                target_dir.as_raw_fd(),
+                target_name.as_ptr(),
+                after.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } == 0;
+        found && {
+            let after = unsafe { after.assume_init() };
+            after.st_mode & libc::S_IFMT == libc::S_IFREG
+                && after.st_size == source_info.st_size
+                && after.st_mtime == source_info.st_mtime
+                && after.st_mtime_nsec == source_info.st_mtime_nsec
+        }
+    } else {
+        matches!(file_identity(root, to), Ok(identity) if identity == source)
+    };
+    if !replaced {
         return Err(LocalError::OutcomeUnknown(io::Error::other(
             "replaced destination identity differs from staged source",
         )));
@@ -235,8 +257,51 @@ pub fn rename_file_replace(root: &File, from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
+/// True on smbfs. There the inode number belongs to the path name: a file
+/// renamed over another name gets the inode number of that name (checked on
+/// 2026-10-25 on an SMB share). Inode checks then cannot tell one file from
+/// another at the same name, so callers use other evidence.
+#[cfg(target_os = "macos")]
+pub(super) fn inode_follows_name(directory: &File) -> bool {
+    let mut info = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    if unsafe { libc::fstatfs(directory.as_raw_fd(), info.as_mut_ptr()) } != 0 {
+        return false;
+    }
+    let info = unsafe { info.assume_init() };
+    unsafe { CStr::from_ptr(info.f_fstypename.as_ptr()) }.to_bytes() == b"smbfs"
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(super) fn inode_follows_name(_directory: &File) -> bool {
+    false
+}
+
 fn name(path: &std::ffi::OsStr) -> Result<CString> {
     CString::new(path.as_bytes()).map_err(|_| LocalError::InvalidPath)
+}
+
+/// NFC form of a name. Name comparisons use it, so one name in NFC and in
+/// NFD (as smbfs lists names) is one name.
+pub(super) fn nfc(name: &str) -> String {
+    icu_normalizer::ComposingNormalizerBorrowed::new_nfc()
+        .normalize(name)
+        .into_owned()
+}
+
+/// Flush a file or directory to stable storage. On macOS `sync_all` uses
+/// `F_FULLFSYNC`, which smbfs refuses with ENOTSUP (checked on 2026-10-25 on
+/// an SMB share). Then plain `fsync` is the strongest flush the volume offers.
+fn sync(file: &File) -> io::Result<()> {
+    match file.sync_all() {
+        Err(error) if matches!(error.raw_os_error(), Some(libc::ENOTSUP | libc::EOPNOTSUPP)) => {
+            if unsafe { libc::fsync(file.as_raw_fd()) } == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        }
+        other => other,
+    }
 }
 
 fn opened(fd: c_int) -> Result<File> {
@@ -614,8 +679,8 @@ pub fn trash_file_into(root: &File, target: &Path, trash: &File) -> Result<()> {
         if moved.st_dev as u64 != source.device || moved.st_ino != source.inode {
             return Err(unconfirmed());
         }
-        directory.sync_all().map_err(LocalError::OutcomeUnknown)?;
-        trash.sync_all().map_err(LocalError::OutcomeUnknown)?;
+        sync(&directory).map_err(LocalError::OutcomeUnknown)?;
+        sync(&trash).map_err(LocalError::OutcomeUnknown)?;
         return Ok(());
     }
     Err(LocalError::AlreadyExists)
@@ -814,7 +879,7 @@ pub fn has_case_collision(root: &File, relative: &Path, leaf: &str) -> Result<bo
         }
     }
     let stream = Stream(stream);
-    let expected = leaf.to_lowercase();
+    let expected = nfc(leaf).to_lowercase();
     loop {
         #[cfg(target_os = "macos")]
         let errno = unsafe { libc::__error() };
@@ -835,7 +900,7 @@ pub fn has_case_collision(root: &File, relative: &Path, leaf: &str) -> Result<bo
             continue;
         }
         let name = std::str::from_utf8(bytes).map_err(|_| LocalError::UnsafeEntry)?;
-        if name.to_lowercase() == expected {
+        if nfc(name).to_lowercase() == expected {
             return Ok(true);
         }
     }
@@ -874,7 +939,10 @@ pub fn has_exact_directory(root: &File, relative: &Path, leaf: &str) -> Result<b
             };
         }
         let raw = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
-        if raw == leaf.as_bytes() {
+        // Same spelling up to the Unicode form: smbfs lists names in NFD
+        // while QADREN and providers give NFC (checked on 2026-10-25).
+        if raw == leaf.as_bytes() || std::str::from_utf8(raw).is_ok_and(|raw| nfc(raw) == nfc(leaf))
+        {
             let leaf_name = name(std::ffi::OsStr::from_bytes(raw))?;
             let (is_directory, _, _) = leaf_metadata(&dir, leaf_name.as_c_str())?;
             return Ok(is_directory);
@@ -956,7 +1024,7 @@ pub(super) fn create_directory_with_post_mkdir_check<F: FnOnce() -> io::Result<(
         };
     }
     post_mkdir_check().map_err(LocalError::OutcomeUnknown)?;
-    directory.sync_all().map_err(LocalError::OutcomeUnknown)?;
+    sync(&directory).map_err(LocalError::OutcomeUnknown)?;
     Ok(())
 }
 
@@ -1042,7 +1110,7 @@ pub(super) fn link_file_new_with_post_link_check<F: FnOnce() -> io::Result<()>>(
             "source pathname changed during hard-link publication",
         )));
     }
-    target_dir.sync_all().map_err(LocalError::OutcomeUnknown)?;
+    sync(&target_dir).map_err(LocalError::OutcomeUnknown)?;
     let mut target_info = std::mem::MaybeUninit::<libc::stat>::uninit();
     if unsafe {
         libc::fstatat(
@@ -1099,6 +1167,88 @@ fn same_temporary_inode(
     same_device && info.st_ino == opened.ino() && (info.st_nlink as u64) == expected_links
 }
 
+/// Publish the synced `temporary` file as the new `destination` on a volume
+/// without hard links and without an exclusive rename. SMB shares can lack
+/// both (ENOTSUP for `linkat` and `RENAME_EXCL`, checked on 2026-10-25),
+/// while an `O_EXCL` create there still fails on an existing name, also for
+/// another letter case, and a plain rename replaces silently.
+///
+/// So an `O_EXCL` create first reserves the name. It fails on any existing
+/// file. Just before the rename, the reservation must still be our empty
+/// file; only then does the rename replace it. A name that another writer
+/// took is never replaced. The short time between that check and the rename
+/// is the remaining race; it can affect only the reserved name.
+fn publish_by_reservation(directory: &File, temporary: &CStr, destination: &CStr) -> Result<()> {
+    let reservation = opened(unsafe {
+        openat(
+            directory.as_raw_fd(),
+            destination.as_ptr(),
+            WRONLY | CREATE_FLAG | EXCLUSIVE_FLAG | NOFOLLOW | CLOEXEC,
+            0o600 as c_int,
+        )
+    })
+    .map_err(|error| match error {
+        LocalError::Io(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            LocalError::AlreadyExists
+        }
+        other => other,
+    })?;
+    let reserved = reservation.metadata().map_err(LocalError::OutcomeUnknown)?;
+    drop(reservation);
+    let still_reserved = || {
+        let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
+        if unsafe {
+            libc::fstatat(
+                directory.as_raw_fd(),
+                destination.as_ptr(),
+                info.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } != 0
+        {
+            return false;
+        }
+        let info = unsafe { info.assume_init() };
+        info.st_ino == reserved.ino()
+            && u64::try_from(info.st_dev).ok() == Some(reserved.dev())
+            && info.st_size == 0
+            && info.st_mode & libc::S_IFMT == libc::S_IFREG
+    };
+    // Remove our own empty reservation after a failure before publication.
+    // If it is not ours and empty any more, the outcome is not known.
+    let release = |error: io::Error| -> LocalError {
+        if still_reserved()
+            && unsafe { unlinkat(directory.as_raw_fd(), destination.as_ptr(), 0) } == 0
+        {
+            LocalError::Io(error)
+        } else {
+            LocalError::OutcomeUnknown(error)
+        }
+    };
+    if !still_reserved() {
+        return Err(LocalError::OutcomeUnknown(io::Error::other(
+            "destination reservation changed before publication",
+        )));
+    }
+    let renamed = unsafe {
+        libc::renameat(
+            directory.as_raw_fd(),
+            temporary.as_ptr(),
+            directory.as_raw_fd(),
+            destination.as_ptr(),
+        )
+    };
+    if renamed != 0 {
+        let error = io::Error::last_os_error();
+        return Err(if error.kind() == io::ErrorKind::Interrupted {
+            LocalError::OutcomeUnknown(error)
+        } else {
+            release(error)
+        });
+    }
+    Ok(())
+}
+
 pub fn create<R: Read>(root: &File, target: &Path, input: &mut R, serial: u64) -> Result<u64> {
     create_with_post_link_check(root, target, input, serial, || Ok(()))
 }
@@ -1143,10 +1293,13 @@ pub(super) fn create_with_post_link_check<R: Read, F: FnOnce() -> io::Result<()>
         )
     })?;
     let mut published = false;
+    // True when the staging file was renamed to the destination because the
+    // volume has no hard links (see `publish_by_reservation`).
+    let mut renamed = false;
     let result = (|| -> Result<u64> {
         let bytes = io::copy(input, &mut output)?;
         output.flush()?;
-        output.sync_all()?;
+        sync(&output)?;
         if !same_temporary_inode(
             &directory,
             &temporary,
@@ -1166,17 +1319,60 @@ pub(super) fn create_with_post_link_check<R: Read, F: FnOnce() -> io::Result<()>
         };
         if linked != 0 {
             let error = io::Error::last_os_error();
-            return if error.kind() == io::ErrorKind::AlreadyExists {
-                Err(LocalError::AlreadyExists)
-            } else {
-                Err(LocalError::Io(error))
-            };
+            if error.kind() == io::ErrorKind::AlreadyExists {
+                return Err(LocalError::AlreadyExists);
+            }
+            if !matches!(error.raw_os_error(), Some(libc::ENOTSUP | libc::EOPNOTSUPP)) {
+                return Err(LocalError::Io(error));
+            }
+            publish_by_reservation(&directory, &temporary, &destination)?;
+            renamed = true;
+            published = true;
+            post_link_check().map_err(LocalError::OutcomeUnknown)?;
+            sync(&directory).map_err(LocalError::OutcomeUnknown)?;
+            return Ok(bytes);
         }
         published = true;
         post_link_check().map_err(LocalError::OutcomeUnknown)?;
-        directory.sync_all().map_err(LocalError::OutcomeUnknown)?;
+        sync(&directory).map_err(LocalError::OutcomeUnknown)?;
         Ok(bytes)
     })();
+    if renamed {
+        // The staging name is gone. The destination must be our only link.
+        // On smbfs the inode number follows the name, so an open file and its
+        // new name can report different numbers; the size is the evidence.
+        let published_here = |bytes: u64| {
+            if !inode_follows_name(&directory) {
+                return same_temporary_inode(&directory, &destination, &output, 1);
+            }
+            let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
+            let found = unsafe {
+                libc::fstatat(
+                    directory.as_raw_fd(),
+                    destination.as_ptr(),
+                    info.as_mut_ptr(),
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            } == 0;
+            found && {
+                let info = unsafe { info.assume_init() };
+                info.st_mode & libc::S_IFMT == libc::S_IFREG
+                    && u64::try_from(info.st_size).ok() == Some(bytes)
+            }
+        };
+        return match result {
+            Ok(bytes) if published_here(bytes) => Ok(bytes),
+            Ok(_) => Err(LocalError::OutcomeUnknown(io::Error::other(
+                "destination file identity changed after publication",
+            ))),
+            Err(error) => Err(error),
+        };
+    }
+    // An interrupted reservation rename can have moved the staging file.
+    // Keep that UNKNOWN; staging cleanup handles a staging file left behind.
+    if !published && matches!(result, Err(LocalError::OutcomeUnknown(_))) {
+        return result;
+    }
     // Even after publication, never unlink a staging pathname replaced
     // by another writer. The published destination requires reconciliation.
     if !same_temporary_inode(
@@ -1212,7 +1408,7 @@ pub(super) fn create_with_post_link_check<R: Read, F: FnOnce() -> io::Result<()>
         return result;
     }
     if published {
-        directory.sync_all().map_err(LocalError::OutcomeUnknown)?;
+        sync(&directory).map_err(LocalError::OutcomeUnknown)?;
         // The staging link has been removed; the published name must now be
         // the sole link to our opened inode. A concurrent replacement after
         // cleanup cannot be reported as a confirmed successful creation.

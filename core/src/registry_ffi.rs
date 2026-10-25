@@ -142,6 +142,28 @@ fn conflict_task_value(task: crate::registry::ScenarioConflictTask) -> Value {
     })
 }
 
+/// An SMB root must be inside the QADREN mount of its connection (D-022).
+/// A Local Filesystem root is not restricted here.
+fn require_roots_belong(
+    db: &Registry,
+    path: *const c_char,
+    endpoints: [(&str, &str); 2],
+) -> crate::registry::Result<()> {
+    let registry_path = input(path).unwrap_or_default();
+    for (connection_id, root) in endpoints {
+        if let Some(connection) = db.get(connection_id)? {
+            if !crate::storage_access::root_belongs(
+                &connection,
+                Path::new(&registry_path),
+                Path::new(root),
+            ) {
+                return Err(RegistryError::RootOutsideConnection);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn with_registry<F>(path: *const c_char, action: F) -> *mut c_char
 where
     F: FnOnce(&Registry) -> crate::registry::Result<Value>,
@@ -165,6 +187,9 @@ fn registry_error_code(error: &RegistryError) -> &'static str {
         RegistryError::ScenarioRootsOverlap => "scenario_roots_overlap",
         RegistryError::StaleScenarioRevision => "scenario_revision_stale",
         RegistryError::InvalidSelection => "invalid_selection",
+        RegistryError::InvalidEndpoint => "invalid_smb_address",
+        RegistryError::RootOutsideConnection => "smb_root_outside_mount",
+        RegistryError::UnsupportedYandexScope => "yandex_source_only",
         _ => "registry_error",
     }
 }
@@ -183,7 +208,8 @@ pub extern "C" fn qadren_registry_list(path: *const c_char) -> *mut c_char {
                     "enabled": entry.enabled,
                     "status": entry.status,
                     "credential_ref": entry.credential_ref,
-                    "provider_account_id": entry.provider_account_id
+                    "provider_account_id": entry.provider_account_id,
+                    "endpoint_url": entry.endpoint_url
                 })
             })
             .collect();
@@ -238,6 +264,7 @@ pub extern "C" fn qadren_scenarios_create(
         return output(json!({"ok":false,"error":"invalid_input"}));
     };
     with_registry(path, |db| {
+        require_roots_belong(db, path, [(&left_id, &left_root), (&right_id, &right_root)])?;
         Ok(
             json!({"id": db.create_scenario(&name, &left_id, &left_root, &right_id, &right_root, &direction)?}),
         )
@@ -299,6 +326,7 @@ pub extern "C" fn qadren_scenarios_create_scoped(
         return output(json!({"ok":false,"error":"invalid_input"}));
     };
     with_registry(path, |db| {
+        require_roots_belong(db, path, [(&left_id, &left_root), (&right_id, &right_root)])?;
         Ok(json!({"id": db.create_scenario_with_scope(
             &name, &left_id, &left_root, &right_id, &right_root, &direction, &scope
         )?}))
@@ -343,6 +371,7 @@ pub extern "C" fn qadren_scenarios_update_scoped(
         return output(json!({"ok":false,"error":"invalid_input"}));
     };
     with_registry(path, |db| {
+        require_roots_belong(db, path, [(&left_id, &left_root), (&right_id, &right_root)])?;
         db.update_scenario_with_scope(
             &id,
             ScenarioUpdate {
@@ -407,7 +436,7 @@ pub extern "C" fn qadren_scenario_create_batch(
         )
     }) {
         Ok(receipt) => output(
-            json!({"ok":true,"data":{"id":receipt.id,"cancellation_requested":receipt.cancellation_requested,"children":receipt.children}}),
+            json!({"ok":true,"data":{"id":receipt.id,"cancellation_requested":receipt.cancellation_requested,"paused":receipt.paused,"children":receipt.children}}),
         ),
         Err(error) => output(json!({"ok":false,"error":registry_error_code(&error)})),
     }
@@ -425,7 +454,7 @@ pub extern "C" fn qadren_scenario_create_batch_get(
     match Registry::open(Path::new(&path)).and_then(|db| db.scenario_create_batch(&batch_id)) {
         Ok(Some(receipt)) => output(json!({
             "ok":true,
-            "data":{"id":receipt.id,"cancellation_requested":receipt.cancellation_requested,"children":receipt.children}
+            "data":{"id":receipt.id,"cancellation_requested":receipt.cancellation_requested,"paused":receipt.paused,"children":receipt.children}
         })),
         Ok(None) => output(json!({"ok":false,"error":"not_found"})),
         Err(_) => output(json!({"ok":false,"error":"registry_error"})),
@@ -460,6 +489,47 @@ pub extern "C" fn qadren_scenario_create_batch_request_cancellation(
     }
 }
 
+/// Settings that the app and the Worker share.
+#[no_mangle]
+pub extern "C" fn qadren_settings_get(path: *const c_char) -> *mut c_char {
+    with_registry(path, |db| {
+        Ok(json!({"retry_until_success": db.retry_until_success()?}))
+    })
+}
+
+/// Turn the "retry until success" mode of D-024 on (1) or off (0).
+#[no_mangle]
+pub extern "C" fn qadren_settings_set_retry_until_success(
+    path: *const c_char,
+    enabled: i32,
+) -> *mut c_char {
+    with_registry(path, |db| {
+        db.set_retry_until_success(enabled != 0)?;
+        Ok(json!({"retry_until_success": enabled != 0}))
+    })
+}
+
+/// Pause (`paused` = 1) or resume (`paused` = 0) a durable Create batch
+/// (D-024). The Worker starts no new child of a paused batch; the current
+/// child finishes.
+#[no_mangle]
+pub extern "C" fn qadren_scenario_create_batch_set_paused(
+    path: *const c_char,
+    batch_id: *const c_char,
+    paused: i32,
+) -> *mut c_char {
+    let (Some(path), Some(batch_id)) = (input(path), input(batch_id)) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    match Registry::open(Path::new(&path))
+        .and_then(|db| db.set_scenario_create_batch_paused(&batch_id, paused != 0))
+    {
+        Ok(()) => output(json!({"ok":true,"data":{"paused":paused != 0}})),
+        Err(RegistryError::NotFound) => output(json!({"ok":false,"error":"not_found"})),
+        Err(_) => output(json!({"ok":false,"error":"registry_error"})),
+    }
+}
+
 /// Return unfinished durable Create batches for one exact Scenario revision.
 /// This is read-only and does not submit work to the Worker.
 #[no_mangle]
@@ -481,7 +551,7 @@ pub extern "C" fn qadren_scenario_pending_create_batches(
             "ok":true,
             "data":receipts.into_iter().map(|receipt| json!({
                 "id":receipt.id,
-                "cancellation_requested":receipt.cancellation_requested,
+                "cancellation_requested":receipt.cancellation_requested,"paused":receipt.paused,
                 "children":receipt.children,
             })).collect::<Vec<_>>(),
         })),
@@ -885,6 +955,7 @@ pub extern "C" fn qadren_scenarios_update(
         return output(json!({"ok":false,"error":"invalid_input"}));
     };
     with_registry(path, |db| {
+        require_roots_belong(db, path, [(&left_id, &left_root), (&right_id, &right_root)])?;
         db.update_scenario(
             &id,
             ScenarioUpdate {
@@ -912,6 +983,35 @@ pub extern "C" fn qadren_registry_add(
     with_registry(path, |db| Ok(json!({"id":db.add(&adapter, &name)?})))
 }
 
+/// Add one SMB share connection (D-021). The address must not carry a login
+/// or a password; the platform keeps them in its credential store.
+#[no_mangle]
+pub extern "C" fn qadren_registry_add_smb_share(
+    path: *const c_char,
+    name: *const c_char,
+    url: *const c_char,
+) -> *mut c_char {
+    let (Some(name), Some(url)) = (input(name), input(url)) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    with_registry(path, |db| Ok(json!({"id": db.add_smb_share(&name, &url)?})))
+}
+
+#[no_mangle]
+pub extern "C" fn qadren_registry_set_smb_endpoint(
+    path: *const c_char,
+    id: *const c_char,
+    url: *const c_char,
+) -> *mut c_char {
+    let (Some(id), Some(url)) = (input(id), input(url)) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    with_registry(path, |db| {
+        db.set_smb_endpoint(&id, &url)?;
+        Ok(json!(true))
+    })
+}
+
 /// Return the ID of the single "This Mac" connection, created when missing
 /// (D-020). The product never adds a second Local Filesystem connection.
 #[no_mangle]
@@ -922,7 +1022,9 @@ pub extern "C" fn qadren_registry_ensure_local_computer(
     let Some(name) = input(name) else {
         return output(json!({"ok":false,"error":"invalid_input"}));
     };
-    with_registry(path, |db| Ok(json!({"id": db.ensure_local_computer(&name)?})))
+    with_registry(path, |db| {
+        Ok(json!({"id": db.ensure_local_computer(&name)?}))
+    })
 }
 
 #[no_mangle]

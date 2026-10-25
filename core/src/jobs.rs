@@ -4,7 +4,16 @@ use crate::confirmation::Confirmation;
 use crate::model::{ConfirmedFileVersion, JobState, ScenarioReference};
 use crate::policy::{Decision, OperationScope, ProtectedOperation};
 use rusqlite::{params, Connection, OptionalExtension};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+/// JobStores that this process owns for its lifetime (D-024): the canonical
+/// database path and its held owner lock. Only the Worker claims ownership.
+static PROCESS_OWNED: Mutex<Vec<(PathBuf, Connection)>> = Mutex::new(Vec::new());
+
+/// How long a connection of the owning process waits for another thread of
+/// the same process to finish a write transaction.
+const OWNER_THREAD_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Debug)]
 pub enum JobStoreError {
@@ -251,6 +260,21 @@ impl JobStore {
         }
         let mut lock_path = canonical.as_os_str().to_os_string();
         lock_path.push(".owner.sqlite");
+        // In the process that owns this JobStore, every thread opens its own
+        // connection. Only the claim applied the restart rule; applying it
+        // again here would mark the Jobs of other threads UNKNOWN.
+        let owned_here = PROCESS_OWNED
+            .lock()
+            .map_err(|_| JobStoreError::AlreadyOpen)?
+            .iter()
+            .any(|(owned, _)| *owned == canonical);
+        if owned_here {
+            let db = Connection::open(&canonical)?;
+            db.busy_timeout(OWNER_THREAD_BUSY_TIMEOUT)?;
+            let mut store = Self::initialize(db, None, false)?;
+            store.set_identity(&canonical, Path::new(&lock_path))?;
+            return Ok(store);
+        }
         let owner = Connection::open(Path::new(&lock_path))?;
         owner.busy_timeout(std::time::Duration::from_millis(0))?;
         match owner.execute_batch("BEGIN IMMEDIATE;") {
@@ -263,29 +287,60 @@ impl JobStore {
             }
             Err(error) => return Err(JobStoreError::Sqlite(error)),
         }
-        let mut store = Self::initialize(Connection::open(&canonical)?, Some(owner))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            let database_metadata = std::fs::metadata(&canonical)?;
-            let lock_metadata = std::fs::metadata(Path::new(&lock_path))?;
-            store.identity = Some(StoreIdentity {
-                database: canonical,
-                lock: Path::new(&lock_path).to_path_buf(),
-                database_device: database_metadata.dev(),
-                database_inode: database_metadata.ino(),
-                lock_device: lock_metadata.dev(),
-                lock_inode: lock_metadata.ino(),
-            });
-        }
+        let mut store = Self::initialize(Connection::open(&canonical)?, Some(owner), true)?;
+        store.set_identity(&canonical, Path::new(&lock_path))?;
         Ok(store)
     }
 
-    pub fn in_memory() -> Result<Self> {
-        Self::initialize(Connection::open_in_memory()?, None)
+    /// Make this process the owner of the JobStore at `path` until it exits
+    /// (D-024). The claim takes the owner lock and applies the restart rule
+    /// once. Later `open` calls in this process, from any thread, open a
+    /// plain connection: no lock and no restart rule. Another process still
+    /// gets `AlreadyOpen`. Only the Worker calls this.
+    pub fn claim_for_process(path: &Path) -> Result<()> {
+        let mut store = Self::open(path)?;
+        let Some(owner) = store._owner_lock.take() else {
+            // Already owned by this process.
+            return Ok(());
+        };
+        let canonical = std::fs::canonicalize(path)?;
+        PROCESS_OWNED
+            .lock()
+            .map_err(|_| JobStoreError::AlreadyOpen)?
+            .push((canonical, owner));
+        Ok(())
     }
 
-    fn initialize(db: Connection, owner_lock: Option<Connection>) -> Result<Self> {
+    #[cfg(unix)]
+    fn set_identity(&mut self, canonical: &Path, lock_path: &Path) -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        let database_metadata = std::fs::metadata(canonical)?;
+        let lock_metadata = std::fs::metadata(lock_path)?;
+        self.identity = Some(StoreIdentity {
+            database: canonical.to_path_buf(),
+            lock: lock_path.to_path_buf(),
+            database_device: database_metadata.dev(),
+            database_inode: database_metadata.ino(),
+            lock_device: lock_metadata.dev(),
+            lock_inode: lock_metadata.ino(),
+        });
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn set_identity(&mut self, _canonical: &Path, _lock_path: &Path) -> Result<()> {
+        Ok(())
+    }
+
+    pub fn in_memory() -> Result<Self> {
+        Self::initialize(Connection::open_in_memory()?, None, true)
+    }
+
+    fn initialize(
+        db: Connection,
+        owner_lock: Option<Connection>,
+        restart_rule: bool,
+    ) -> Result<Self> {
         let version: i32 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if version > 12 {
             return Err(JobStoreError::UnsupportedSchema(version));
@@ -553,14 +608,16 @@ impl JobStore {
         db.pragma_update(None, "foreign_keys", "ON")?;
         // A previous process may have written remote effects before dying.
         // Reconciliation is required; never resubmit these Jobs blindly.
-        db.execute_batch(
-            "BEGIN IMMEDIATE;
-             INSERT INTO job_events(job_id,state,kind)
-               SELECT id,'unknown','restart_uncertain' FROM jobs WHERE state='running';
-             UPDATE job_attempts SET status='unknown' WHERE status='active';
-             UPDATE jobs SET state='unknown' WHERE state='running';
-             COMMIT;",
-        )?;
+        if restart_rule {
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 INSERT INTO job_events(job_id,state,kind)
+                   SELECT id,'unknown','restart_uncertain' FROM jobs WHERE state='running';
+                 UPDATE job_attempts SET status='unknown' WHERE status='active';
+                 UPDATE jobs SET state='unknown' WHERE state='running';
+                 COMMIT;",
+            )?;
+        }
         Ok(Self {
             db,
             _owner_lock: owner_lock,
@@ -2152,7 +2209,7 @@ mod tests {
                  PRAGMA user_version = 1;",
             )
             .unwrap();
-        let store = JobStore::initialize(connection, None).unwrap();
+        let store = JobStore::initialize(connection, None, true).unwrap();
         let job = store.get("existing").unwrap().unwrap();
         assert_eq!(job.state, JobState::Unknown);
         assert_eq!(job.scenario_revision, Some(3));
@@ -2454,7 +2511,7 @@ mod tests {
                  PRAGMA user_version = 3;",
             )
             .unwrap();
-        let store = JobStore::initialize(connection, None).unwrap();
+        let store = JobStore::initialize(connection, None, true).unwrap();
         assert_eq!(store.state("j").unwrap(), Some(JobState::Unknown));
         let status: String = store
             .db
@@ -2511,7 +2568,7 @@ mod tests {
                  PRAGMA user_version = 6;",
             )
             .unwrap();
-        let mut store = JobStore::initialize(connection, None).unwrap();
+        let mut store = JobStore::initialize(connection, None, true).unwrap();
         assert_eq!(store.state("kept").unwrap(), Some(JobState::Queued));
         store.cancel("kept").unwrap();
         assert_eq!(store.state("kept").unwrap(), Some(JobState::Cancelled));
@@ -2593,7 +2650,7 @@ mod tests {
                  PRAGMA user_version = 3;",
             )
             .unwrap();
-        let mut db = JobStore::initialize(connection, None).unwrap();
+        let mut db = JobStore::initialize(connection, None, true).unwrap();
         let items = db.unresolved_attempts().unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(
@@ -2709,7 +2766,7 @@ mod tests {
                  PRAGMA user_version = 5;",
             )
             .unwrap();
-        let store = JobStore::initialize(connection, None).unwrap();
+        let store = JobStore::initialize(connection, None, true).unwrap();
         assert!(store.expected_metadata("job", "old").unwrap().is_none());
         let attempts = store.unresolved_attempts().unwrap();
         assert_eq!(attempts.len(), 1);
@@ -3190,7 +3247,7 @@ mod tests {
         let db = Connection::open_in_memory().unwrap();
         db.pragma_update(None, "user_version", 99).unwrap();
         assert!(matches!(
-            JobStore::initialize(db, None),
+            JobStore::initialize(db, None, true),
             Err(JobStoreError::UnsupportedSchema(99))
         ));
     }

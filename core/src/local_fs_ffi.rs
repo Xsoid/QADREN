@@ -118,7 +118,8 @@ pub unsafe extern "C" fn qadren_local_scenario_metadata_snapshot(
         }
         Err(_) => return response(json!({"ok":false,"error":"registry_unavailable"})),
     };
-    if connection.adapter != "local_filesystem" || !connection.enabled {
+    // An SMB root must be inside the present QADREN mount (D-022).
+    if !crate::storage_access::root_ready(&connection, Path::new(registry_path), Path::new(root)) {
         return response(json!({"ok":false,"error":"local_scenario_connection_unavailable"}));
     }
     match metadata_snapshot(root) {

@@ -7,7 +7,7 @@ This document defines the permanent implementation procedure for the QADREN Swif
 - Use the QADREN design tokens, components, widget contract, and approved logo.
 - Keep monitoring as a widget canvas without a permanent Sidebar. Settings can use navigation.
 - Present durable state and supported intents only. Do not create a second queue, registry, policy engine, or runtime history in SwiftUI.
-- Keep Yandex Disk and iCloud out of new Release 1 interface work.
+- Yandex Disk is a one-way Scenario source only ([D-023](../decisions/D-023-yandex-disk-to-mac.md)). Keep iCloud out of new interface work.
 - Do not present mock data, a failed read, or an unknown state as confirmed success.
 
 ## Safety UX

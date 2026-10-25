@@ -34,6 +34,15 @@ pub enum RegistryError {
     StaleScenarioRevision,
     /// A selected path is empty, absolute, or leaves the Scenario root.
     InvalidSelection,
+    /// An SMB share address is not `smb://host/share`, or it carries a
+    /// login, a password, a query, or a fragment.
+    InvalidEndpoint,
+    /// A Scenario root of an SMB share is outside the QADREN mount of that
+    /// connection (D-022).
+    RootOutsideConnection,
+    /// A Yandex Disk connection is not the source of a one-way Scenario
+    /// with a destination on this Mac (D-023, stage 1).
+    UnsupportedYandexScope,
 }
 impl From<rusqlite::Error> for RegistryError {
     fn from(error: rusqlite::Error) -> Self {
@@ -54,6 +63,9 @@ pub struct StorageConnection {
     pub credential_ref: Option<String>,
     pub last_checked_at: Option<i64>,
     pub diagnosis: Option<String>,
+    /// Network address of the storage, for example `smb://nas/share`. It
+    /// never contains a login or a password; those stay in the Keychain.
+    pub endpoint_url: Option<String>,
 }
 
 /// Persisted Scenario metadata. The row stores configuration only: never file
@@ -133,6 +145,8 @@ pub struct ScenarioCreateBatchReceipt {
     pub id: String,
     pub scenario: ScenarioReference,
     pub cancellation_requested: bool,
+    /// The Worker starts no new child while the batch is paused (D-024).
+    pub paused: bool,
     pub children: Vec<ScenarioBatchChild>,
 }
 
@@ -142,6 +156,24 @@ pub struct ScenarioBatchChild {
     pub source_is_left: bool,
     pub job_id: String,
     pub state: String,
+    /// Automatic retries already scheduled for this child (D-024).
+    pub retries: u32,
+    /// Unix seconds of the next retry of a `pending` child, if any.
+    pub next_retry_at: Option<i64>,
+    /// Stable code of the last failure, never a path or a secret.
+    pub last_error: Option<String>,
+}
+
+/// A batch child that the Worker can start now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DueBatchChild {
+    pub batch_id: String,
+    pub scenario: ScenarioReference,
+    pub relative_path: String,
+    pub source_is_left: bool,
+    pub job_id: String,
+    pub retries: u32,
+    pub cancellation_requested: bool,
 }
 
 /// A user-owned conflict task. It is Registry metadata, not a JobStore Job;
@@ -168,6 +200,9 @@ pub struct Registry {
 impl Registry {
     pub fn open(path: &Path) -> Result<Self> {
         let db = Connection::open(path)?;
+        // The app, the Worker IPC thread, and the Worker run thread write the
+        // Registry at the same time (D-024). Wait for a short write.
+        db.busy_timeout(std::time::Duration::from_secs(10))?;
         Self::initialize(db)
     }
 
@@ -183,7 +218,7 @@ impl Registry {
         }
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 17 {
+        if version > 20 {
             return Err(RegistryError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -468,6 +503,44 @@ impl Registry {
                  COMMIT;",
             )?;
         }
+        if version <= 17 {
+            // D-021: an SMB share connection keeps its address in the
+            // Registry. The login and the password stay in the Keychain.
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE storage_connections ADD COLUMN endpoint_url TEXT;
+                 PRAGMA user_version = 18;
+                 COMMIT;",
+            )?;
+        }
+        if version <= 18 {
+            // D-024: a batch can pause, and a child keeps its retry state.
+            // A child that waits for a retry stays 'pending' with a time.
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE scenario_create_batches
+                   ADD COLUMN paused INTEGER NOT NULL DEFAULT 0 CHECK(paused IN (0,1));
+                 ALTER TABLE scenario_create_batch_children
+                   ADD COLUMN retries INTEGER NOT NULL DEFAULT 0 CHECK(retries >= 0);
+                 ALTER TABLE scenario_create_batch_children ADD COLUMN next_retry_at INTEGER;
+                 ALTER TABLE scenario_create_batch_children ADD COLUMN last_error TEXT;
+                 PRAGMA user_version = 19;
+                 COMMIT;",
+            )?;
+        }
+        if version <= 19 {
+            // Settings that the app and the Worker share, for example the
+            // retry mode of D-024.
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE app_settings (
+                    key TEXT PRIMARY KEY NOT NULL,
+                    value TEXT NOT NULL
+                 );
+                 PRAGMA user_version = 20;
+                 COMMIT;",
+            )?;
+        }
         Ok(Self { db })
     }
 
@@ -512,8 +585,9 @@ impl Registry {
         let id = match existing {
             Some(id) => id,
             None => {
-                let id: String = transaction
-                    .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
+                let id: String =
+                    transaction
+                        .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
                 transaction.execute(
                     "INSERT INTO storage_connections(id,adapter,name) VALUES (?1,'local_filesystem',?2)",
                     params![id, name.trim()],
@@ -527,7 +601,7 @@ impl Registry {
 
     pub fn list(&self) -> Result<Vec<StorageConnection>> {
         let mut stmt = self.db.prepare(
-            "SELECT id,adapter,name,enabled,status,credential_ref,last_checked_at,diagnosis,provider_account_id
+            "SELECT id,adapter,name,enabled,status,credential_ref,last_checked_at,diagnosis,provider_account_id,endpoint_url
              FROM storage_connections ORDER BY name COLLATE NOCASE, id",
         )?;
         let rows = stmt.query_map([], Self::decode)?;
@@ -542,7 +616,7 @@ impl Registry {
         Ok(self
             .db
             .query_row(
-                "SELECT id,adapter,name,enabled,status,credential_ref,last_checked_at,diagnosis,provider_account_id
+                "SELECT id,adapter,name,enabled,status,credential_ref,last_checked_at,diagnosis,provider_account_id,endpoint_url
              FROM storage_connections WHERE id=?1",
                 [id],
                 Self::decode,
@@ -561,7 +635,37 @@ impl Registry {
             last_checked_at: row.get(6)?,
             diagnosis: row.get(7)?,
             provider_account_id: row.get(8)?,
+            endpoint_url: row.get(9)?,
         })
+    }
+
+    /// Add one SMB share connection (D-021). The address is normalized and
+    /// must not carry credentials. Any number of independent SMB connections
+    /// can exist, also to the same share (D-016).
+    pub fn add_smb_share(&self, name: &str, url: &str) -> Result<String> {
+        if !valid_name(name) {
+            return Err(RegistryError::InvalidName);
+        }
+        let url = normalized_smb_url(url).ok_or(RegistryError::InvalidEndpoint)?;
+        let id: String = self
+            .db
+            .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
+        self.db.execute(
+            "INSERT INTO storage_connections(id,adapter,name,endpoint_url)
+             VALUES (?1,'smb_share',?2,?3)",
+            params![id, name.trim(), url],
+        )?;
+        Ok(id)
+    }
+
+    /// Change the address of an SMB share connection. Other adapters have
+    /// no address and stay unchanged.
+    pub fn set_smb_endpoint(&self, id: &str, url: &str) -> Result<()> {
+        let url = normalized_smb_url(url).ok_or(RegistryError::InvalidEndpoint)?;
+        self.changed(self.db.execute(
+            "UPDATE storage_connections SET endpoint_url=?1 WHERE id=?2 AND adapter='smb_share'",
+            params![url, id],
+        )?)
     }
 
     /// Provider account ID may repeat; connections are never deduplicated by it.
@@ -687,10 +791,47 @@ impl Registry {
                 .optional()
                 .map_err(Into::into)
         };
-        let local = Some("local_filesystem".to_owned());
-        Ok(adapter(left_connection_id)? == local
-            && adapter(right_connection_id)? == local
+        // SMB roots are paths inside a QADREN mount on this Mac (D-022), so
+        // they compare as paths too.
+        let on_this_mac = |adapter: Option<String>| {
+            matches!(
+                adapter.as_deref(),
+                Some("local_filesystem") | Some("smb_share")
+            )
+        };
+        Ok(on_this_mac(adapter(left_connection_id)?)
+            && on_this_mac(adapter(right_connection_id)?)
             && scenario_roots_overlap(left_root, right_root))
+    }
+
+    /// Refuse a Yandex Disk endpoint that is not the source of a one-way
+    /// Scenario to this Mac (D-023, stage 1).
+    fn require_yandex_scope(
+        &self,
+        left_connection_id: &str,
+        right_connection_id: &str,
+        direction: &str,
+    ) -> Result<()> {
+        let adapter = |id: &str| -> Result<String> {
+            Ok(self
+                .db
+                .query_row(
+                    "SELECT adapter FROM storage_connections WHERE id=?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .unwrap_or_default())
+        };
+        if crate::storage_access::yandex_scope_allowed(
+            &adapter(left_connection_id)?,
+            &adapter(right_connection_id)?,
+            direction,
+        ) {
+            Ok(())
+        } else {
+            Err(RegistryError::UnsupportedYandexScope)
+        }
     }
 
     /// Return true when `revision` is the current revision of the Scenario.
@@ -751,6 +892,7 @@ impl Registry {
         {
             return Err(RegistryError::InvalidName);
         }
+        self.require_yandex_scope(left_connection_id, right_connection_id, direction)?;
         if self.local_roots_overlap(
             left_connection_id,
             left_root,
@@ -1271,6 +1413,9 @@ impl Registry {
                 source_is_left,
                 job_id,
                 state: "pending".into(),
+                retries: 0,
+                next_retry_at: None,
+                last_error: None,
             });
         }
         transaction.commit()?;
@@ -1278,6 +1423,7 @@ impl Registry {
             id,
             scenario: scenario.clone(),
             cancellation_requested: false,
+            paused: false,
             children: receipt_children,
         })
     }
@@ -1285,24 +1431,25 @@ impl Registry {
     /// Load a confirmed batch exactly as saved. This does not create Jobs or
     /// authorize an effect.
     pub fn scenario_create_batch(&self, id: &str) -> Result<Option<ScenarioCreateBatchReceipt>> {
-        let parent: Option<(ScenarioReference, bool)> = self
+        let parent: Option<(ScenarioReference, bool, bool)> = self
             .db
             .query_row(
-            "SELECT scenario_id,scenario_revision,cancellation_requested FROM scenario_create_batches WHERE id=?1",
+            "SELECT scenario_id,scenario_revision,cancellation_requested,paused FROM scenario_create_batches WHERE id=?1",
                 [id],
                 |row| {
                     Ok((ScenarioReference {
                         scenario_id: row.get(0)?,
                         revision: row.get::<_, i64>(1)? as u64,
-                    }, row.get::<_, bool>(2)?))
+                    }, row.get::<_, bool>(2)?, row.get::<_, bool>(3)?))
                 },
             )
             .optional()?;
-        let Some((scenario, cancellation_requested)) = parent else {
+        let Some((scenario, cancellation_requested, paused)) = parent else {
             return Ok(None);
         };
         let mut statement = self.db.prepare(
-            "SELECT relative_path,source_is_left,job_id,state FROM scenario_create_batch_children WHERE batch_id=?1 ORDER BY relative_path",
+            "SELECT relative_path,source_is_left,job_id,state,retries,next_retry_at,last_error
+             FROM scenario_create_batch_children WHERE batch_id=?1 ORDER BY relative_path",
         )?;
         let children = statement
             .query_map([id], |row| {
@@ -1311,6 +1458,9 @@ impl Registry {
                     source_is_left: row.get(1)?,
                     job_id: row.get(2)?,
                     state: row.get(3)?,
+                    retries: row.get(4)?,
+                    next_retry_at: row.get(5)?,
+                    last_error: row.get(6)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1318,6 +1468,7 @@ impl Registry {
             id: id.into(),
             scenario,
             cancellation_requested,
+            paused,
             children,
         }))
     }
@@ -1333,6 +1484,100 @@ impl Registry {
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into);
         result
+    }
+
+    /// Schedule an automatic retry of a child that failed before any effect
+    /// (D-024). The child stays `pending` and gets a new Job ID; the failed
+    /// Job stays in the JobStore as history. Only the current Job ID changes.
+    pub fn schedule_scenario_create_batch_child_retry(
+        &self,
+        batch_id: &str,
+        relative_path: &str,
+        failed_job_id: &str,
+        next_retry_at: i64,
+        error: &str,
+    ) -> Result<()> {
+        let changed = self.db.execute(
+            "UPDATE scenario_create_batch_children
+             SET retries=retries+1, next_retry_at=?4, last_error=?5,
+                 job_id='scenario-batch-copy-' || lower(hex(randomblob(16)))
+             WHERE batch_id=?1 AND relative_path=?2 AND job_id=?3 AND state='pending'",
+            params![batch_id, relative_path, failed_job_id, next_retry_at, error],
+        )?;
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err(RegistryError::NotFound)
+        }
+    }
+
+    /// Children that the Worker can start at `now`: `pending`, without a
+    /// retry time in the future, in a batch that is not paused. A cancelled
+    /// batch is included, so that the Worker records `cancelled`.
+    pub fn due_scenario_create_batch_children(&self, now: i64) -> Result<Vec<DueBatchChild>> {
+        let mut statement = self.db.prepare(
+            "SELECT c.batch_id,b.scenario_id,b.scenario_revision,c.relative_path,c.source_is_left,
+                    c.job_id,c.retries,b.cancellation_requested
+             FROM scenario_create_batch_children c
+             JOIN scenario_create_batches b ON b.id=c.batch_id
+             WHERE c.state='pending' AND b.paused=0
+               AND (c.next_retry_at IS NULL OR c.next_retry_at<=?1 OR b.cancellation_requested=1)
+             ORDER BY c.batch_id, c.relative_path",
+        )?;
+        let rows = statement
+            .query_map([now], |row| {
+                Ok(DueBatchChild {
+                    batch_id: row.get(0)?,
+                    scenario: ScenarioReference {
+                        scenario_id: row.get(1)?,
+                        revision: row.get::<_, i64>(2)? as u64,
+                    },
+                    relative_path: row.get(3)?,
+                    source_is_left: row.get(4)?,
+                    job_id: row.get(5)?,
+                    retries: row.get(6)?,
+                    cancellation_requested: row.get(7)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// When true, a batch child with a transient failure is retried every 24 h
+    /// after the D-024 retry schedule, until it succeeds or the user stops the
+    /// batch. The owner turned it on by default on 2026-10-25.
+    pub fn retry_until_success(&self) -> Result<bool> {
+        let value: Option<String> = self
+            .db
+            .query_row(
+                "SELECT value FROM app_settings WHERE key='retry_until_success'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(value.as_deref() != Some("0"))
+    }
+
+    pub fn set_retry_until_success(&self, enabled: bool) -> Result<()> {
+        self.db.execute(
+            "INSERT INTO app_settings(key,value) VALUES('retry_until_success',?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [if enabled { "1" } else { "0" }],
+        )?;
+        Ok(())
+    }
+
+    /// Pause or resume a batch. A pause takes effect before the next child.
+    pub fn set_scenario_create_batch_paused(&self, batch_id: &str, paused: bool) -> Result<()> {
+        let changed = self.db.execute(
+            "UPDATE scenario_create_batches SET paused=?2 WHERE id=?1",
+            params![batch_id, paused],
+        )?;
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err(RegistryError::NotFound)
+        }
     }
 
     /// Persist a stop request. The Worker reads it before each next child, so
@@ -1385,13 +1630,26 @@ impl Registry {
         relative_path: &str,
         state: &str,
     ) -> Result<()> {
+        self.finish_scenario_create_batch_child(batch_id, relative_path, state, None)
+    }
+
+    /// Like `set_scenario_create_batch_child_state`, with the stable code of
+    /// the failure. A finished child has no next retry.
+    pub fn finish_scenario_create_batch_child(
+        &self,
+        batch_id: &str,
+        relative_path: &str,
+        state: &str,
+        error: Option<&str>,
+    ) -> Result<()> {
         if !matches!(state, "completed" | "failed" | "cancelled" | "unknown") {
             return Err(RegistryError::InvalidSyncState);
         }
         let changed = self.db.execute(
             "UPDATE scenario_create_batch_children
-             SET state=?3 WHERE batch_id=?1 AND relative_path=?2 AND state='pending'",
-            params![batch_id, relative_path, state],
+             SET state=?3, next_retry_at=NULL, last_error=COALESCE(?4, last_error)
+             WHERE batch_id=?1 AND relative_path=?2 AND state='pending'",
+            params![batch_id, relative_path, state, error],
         )?;
         if changed == 1 {
             Ok(())
@@ -1560,6 +1818,11 @@ impl Registry {
         {
             return Err(RegistryError::InvalidName);
         }
+        self.require_yandex_scope(
+            update.left_connection_id,
+            update.right_connection_id,
+            update.direction,
+        )?;
         if self.local_roots_overlap(
             update.left_connection_id,
             update.left_root,
@@ -2127,6 +2390,45 @@ fn valid_name(name: &str) -> bool {
     let trimmed = name.trim();
     !trimmed.is_empty() && trimmed.chars().count() <= 120 && !trimmed.chars().any(char::is_control)
 }
+/// Return `smb://host[:port]/share[/path]` without a trailing slash, or
+/// `None`. An address with a login (`user@`), a domain (`domain;`), a query,
+/// a fragment, or a control character is refused, so that no credential can
+/// enter the Registry through the address.
+fn normalized_smb_url(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    if trimmed.chars().count() > 1024 || trimmed.chars().any(char::is_control) {
+        return None;
+    }
+    let scheme = trimmed.get(..6)?;
+    if !scheme.eq_ignore_ascii_case("smb://") {
+        return None;
+    }
+    let rest = &trimmed[6..];
+    if rest.contains(['@', ';', '?', '#', '\\']) {
+        return None;
+    }
+    let (authority, path) = rest.split_once('/')?;
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) if !host.contains(':') || host.ends_with(']') => (host, Some(port)),
+        _ => (authority, None),
+    };
+    // A Bonjour service host, such as `My NAS._smb._tcp.local`, can have
+    // spaces. It cannot start or end with one.
+    if host.is_empty() || host.trim() != host {
+        return None;
+    }
+    if let Some(port) = port {
+        if port.parse::<u16>().ok().filter(|port| *port > 0).is_none() {
+            return None;
+        }
+    }
+    let segments: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    if segments.is_empty() || segments.iter().any(|part| *part == "." || *part == "..") {
+        return None;
+    }
+    Some(format!("smb://{}/{}", authority, segments.join("/")))
+}
+
 fn valid_adapter(adapter: &str) -> bool {
     !adapter.is_empty()
         && adapter.len() <= 64
@@ -2244,6 +2546,63 @@ mod tests {
         assert_eq!(entry.provider_account_id.as_deref(), Some("account-a"));
         assert_eq!(entry.last_checked_at, None);
         assert_eq!(entry.diagnosis, None);
+    }
+
+    #[test]
+    fn smb_share_keeps_only_a_credential_free_address() {
+        let db = Registry::in_memory().unwrap();
+        let id = db
+            .add_smb_share(" NAS ", " SMB://nas.local/Media/Photos/ ")
+            .unwrap();
+        let entry = db.get(&id).unwrap().unwrap();
+        assert_eq!(entry.adapter, "smb_share");
+        assert_eq!(entry.name, "NAS");
+        assert_eq!(
+            entry.endpoint_url.as_deref(),
+            Some("smb://nas.local/Media/Photos")
+        );
+        assert_eq!(entry.credential_ref, None);
+        let second = db.add_smb_share("NAS 2", "smb://nas.local/Media").unwrap();
+        let bonjour = db
+            .add_smb_share("NAS 3", "smb://My NAS._smb._tcp.local/Общая папка")
+            .unwrap();
+        assert_eq!(
+            db.get(&bonjour).unwrap().unwrap().endpoint_url.as_deref(),
+            Some("smb://My NAS._smb._tcp.local/Общая папка")
+        );
+        assert_ne!(id, second);
+        for bad in [
+            "smb://user@nas/share",
+            "smb://user:secret@nas/share",
+            "smb://DOMAIN;user@nas/share",
+            "smb://nas",
+            "smb://nas/",
+            "smb://nas/share?password=x",
+            "smb://nas/share#x",
+            "smb://nas/../share",
+            "smb://nas:0/share",
+            "afp://nas/share",
+            "https://nas/share",
+        ] {
+            assert!(
+                matches!(
+                    db.add_smb_share("Bad", bad),
+                    Err(RegistryError::InvalidEndpoint)
+                ),
+                "{bad}"
+            );
+        }
+        db.set_smb_endpoint(&id, "smb://192.168.1.10:445/Backup")
+            .unwrap();
+        assert_eq!(
+            db.get(&id).unwrap().unwrap().endpoint_url.as_deref(),
+            Some("smb://192.168.1.10:445/Backup")
+        );
+        let local = db.add("local_filesystem", "Mac").unwrap();
+        assert!(matches!(
+            db.set_smb_endpoint(&local, "smb://nas/share"),
+            Err(RegistryError::NotFound)
+        ));
     }
 
     #[test]
@@ -2776,7 +3135,10 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(local.len(), 1);
         assert_eq!(local[0].name, "Этот Mac");
-        assert!(matches!(db.ensure_local_computer("  "), Err(RegistryError::InvalidName)));
+        assert!(matches!(
+            db.ensure_local_computer("  "),
+            Err(RegistryError::InvalidName)
+        ));
     }
 
     #[test]
@@ -2825,7 +3187,9 @@ mod tests {
             ScenarioScope::default()
         );
         assert_eq!(
-            db.get_scenario_revision_scope(&id, 1).unwrap().deletion_mode,
+            db.get_scenario_revision_scope(&id, 1)
+                .unwrap()
+                .deletion_mode,
             DeletionMode::Simple
         );
         assert!(matches!(

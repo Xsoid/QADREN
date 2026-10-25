@@ -699,7 +699,10 @@ mod tests {
 
     fn simple(selected_paths: &[&str]) -> ScenarioScope {
         ScenarioScope {
-            selected_paths: selected_paths.iter().map(|path| (*path).to_owned()).collect(),
+            selected_paths: selected_paths
+                .iter()
+                .map(|path| (*path).to_owned())
+                .collect(),
             deletion_mode: DeletionMode::Simple,
         }
     }

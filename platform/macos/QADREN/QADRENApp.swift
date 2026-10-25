@@ -6,6 +6,7 @@ struct QADRENApp: App {
 
     init() {
         LocalWorkerController.registerIfNeeded()
+        YandexScenarioAccess.startTokenDelivery()
     }
 
     var body: some Scene {

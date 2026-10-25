@@ -448,7 +448,11 @@ mod tests {
         ];
         assert_eq!(
             ScenarioScope::normalized_selection(&paths),
-            Ok(vec!["Docs".to_owned(), "Docsy".to_owned(), "Photos/2026".to_owned()])
+            Ok(vec![
+                "Docs".to_owned(),
+                "Docsy".to_owned(),
+                "Photos/2026".to_owned()
+            ])
         );
         for unsafe_path in ["", "/abs", "a/../b", "a//b", "./a", "a\u{7}b"] {
             assert_eq!(

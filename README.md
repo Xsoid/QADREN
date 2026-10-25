@@ -8,7 +8,7 @@ QADREN is a cross-platform system for file transfer and synchronization between 
 
 Release 1 is local-first. It uses Local Filesystem connections, one Rust JobStore, and a SwiftUI macOS control interface. A `Scenario` defines synchronization rules. A `Job` is one execution or one manual file operation.
 
-Yandex Disk and iCloud are post-release. Do not add their API, OAuth, transfer, entitlement, or live end-to-end work without a new owner decision. See [D-018](docs/decisions/D-018-local-first-priorities.md).
+Yandex Disk is a one-way Scenario source to a Mac folder ([D-023](docs/decisions/D-023-yandex-disk-to-mac.md)). iCloud is post-release ([D-017](docs/decisions/D-017-defer-icloud.md)).
 
 QADREN reads content needed by an enabled or requested operation without a separate prompt. A destructive replacement or deletion requires the policy-defined confirmation. After uncertain effects, QADREN performs non-mutating reconciliation and retains `UNKNOWN` when proof is insufficient.
 

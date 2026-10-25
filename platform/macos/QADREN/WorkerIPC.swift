@@ -12,11 +12,15 @@ struct WorkerScenarioCreateRequest: Encodable {
     let destination_connection_id: String
     let destination_relative_path: String
     let job_id: String
+    /// Yandex Disk source only (D-023). Never stored or logged.
+    var access_token: String? = nil
 }
 
 struct WorkerScenarioCreateBatchRequest: Encodable {
     let command = "execute_create_batch"
     let batch_id: String
+    /// Yandex Disk source only (D-023). Never stored or logged.
+    var access_token: String? = nil
 }
 
 /// Run every deletion that the simple deletion rule of the current revision
@@ -46,6 +50,8 @@ struct WorkerScenarioReplaceRequest: Encodable {
     let destination_relative_path: String
     let job_id: String
     let replacement_consent: Bool
+    /// Yandex Disk source only (D-023). Never stored or logged.
+    var access_token: String? = nil
     /// Metadata that the user saw in the plan. The Worker refuses the
     /// replacement if either file changed after planning.
     var expected_source: WorkerExpectedFileVersion?
@@ -109,6 +115,8 @@ enum WorkerIPC {
     private struct Response: Decodable {
         let ok: Bool
         let status: String
+        /// `status` only: batch files that run now (D-024).
+        var active: Int?
         var dispatched: Int?
     }
 
@@ -131,24 +139,35 @@ enum WorkerIPC {
     /// The Worker owns a confirmed batch receipt. The controller only sends
     /// its ID, so closing the settings window cannot cancel selected work.
     static func executeScenarioCreateBatch(
-        receiptID: String, socketPath: String? = nil
+        receiptID: String, accessToken: String? = nil, socketPath: String? = nil
     ) throws -> String {
         let payload = try JSONEncoder().encode(
-            WorkerScenarioCreateBatchRequest(batch_id: receiptID)
+            WorkerScenarioCreateBatchRequest(batch_id: receiptID, access_token: accessToken)
         ) + Data([0x0a])
-        // The Worker answers after the whole batch. The UI reads progress from
-        // the durable receipt, so wait for the answer instead of reporting a
-        // false failure after the default 5 s.
-        let response = try send(
-            payload, socketPath: socketPath ?? defaultSocketPath(), timeoutSeconds: batchAnswerTimeoutSeconds
-        )
+        // The Worker runs the batch on its run thread and answers at once
+        // (D-024). The UI reads progress from the durable receipt.
+        let response = try send(payload, socketPath: socketPath ?? defaultSocketPath())
         guard response.ok else { throw WorkerIPCError.rejected(response.status) }
-        guard ["completed", "existing"].contains(response.status) else {
-            throw WorkerIPCError.invalidResponse
-        }
+        guard response.status == "accepted" else { throw WorkerIPCError.invalidResponse }
         return response.status
     }
 
+    /// Give the Worker the Yandex Disk token of one connection. The Worker
+    /// keeps it in memory only, so a run waits after a Worker restart until
+    /// the app sends it again (D-024, stage A).
+    static func provideAccessToken(connectionID: String, token: String, socketPath: String? = nil) throws {
+        struct Request: Encodable {
+            let command = "provide_access_token"
+            let connection_id: String
+            let access_token: String
+        }
+        let payload = try JSONEncoder().encode(Request(connection_id: connectionID, access_token: token)) + Data([0x0a])
+        let response = try send(payload, socketPath: socketPath ?? defaultSocketPath(), timeoutSeconds: 2)
+        guard response.ok, response.status == "updated" else { throw WorkerIPCError.invalidResponse }
+    }
+
+    /// Rule deletions still run inside the IPC request, so wait long enough
+    /// for a large set instead of reporting a false failure after 5 s.
     static let batchAnswerTimeoutSeconds = 6 * 60 * 60
 
     /// Returns the number of objects that the rule deleted or moved to Trash.
@@ -245,6 +264,14 @@ enum WorkerIPC {
             payload, socketPath: socketPath ?? defaultSocketPath(), timeoutSeconds: timeoutSeconds
         )
         guard response.ok, response.status == "running" else { throw WorkerIPCError.invalidResponse }
+    }
+
+    /// Batch files that the Worker runs now, from the `status` request.
+    static func activeItems(socketPath: String? = nil) throws -> Int {
+        let payload = try JSONEncoder().encode(WorkerStatusRequest()) + Data([0x0a])
+        let response = try send(payload, socketPath: socketPath ?? defaultSocketPath(), timeoutSeconds: 2)
+        guard response.ok, response.status == "running" else { throw WorkerIPCError.invalidResponse }
+        return response.active ?? 0
     }
 
     private static func send(_ payload: Data, socketPath: String, timeoutSeconds: Int = 5) throws -> Response {

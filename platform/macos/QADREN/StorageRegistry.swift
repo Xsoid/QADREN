@@ -29,6 +29,14 @@ private func scenarioCreateBatchGet(
 private func requestScenarioCreateBatchCancellationFFI(
     _ path: UnsafePointer<CChar>?, _ batchID: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_settings_get")
+private func settingsGetFFI(_ path: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_settings_set_retry_until_success")
+private func settingsSetRetryUntilSuccessFFI(_ path: UnsafePointer<CChar>?, _ enabled: Int32) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_scenario_create_batch_set_paused")
+private func setScenarioCreateBatchPausedFFI(
+    _ path: UnsafePointer<CChar>?, _ batchID: UnsafePointer<CChar>?, _ paused: Int32
+) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_scenario_pending_create_batches")
 private func pendingScenarioCreateBatchesFFI(
     _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?, _ revision: UInt64
@@ -129,6 +137,10 @@ private func scenarioUpdate(
 ) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_add")
 private func registryAdd(_ path: UnsafePointer<CChar>?, _ adapter: UnsafePointer<CChar>?, _ name: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_registry_add_smb_share")
+private func registryAddSMBShare(_ path: UnsafePointer<CChar>?, _ name: UnsafePointer<CChar>?, _ url: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_registry_set_smb_endpoint")
+private func registrySetSMBEndpoint(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ url: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_ensure_local_computer")
 private func registryEnsureLocalComputer(_ path: UnsafePointer<CChar>?, _ name: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_rename")
@@ -159,6 +171,8 @@ struct StorageEntry: Decodable, Identifiable {
     let status: String
     let credential_ref: String?
     let provider_account_id: String?
+    /// SMB share address (D-021). It never contains a login or a password.
+    var endpoint_url: String?
 }
 struct ScenarioEntry: Decodable, Identifiable {
     let id: String
@@ -254,11 +268,24 @@ extension String {
 struct ScenarioCreateBatchReceipt: Decodable {
     let id: String
     let cancellation_requested: Bool
+    /// The Worker starts no new file of a paused batch (D-024).
+    var paused: Bool? = nil
     let children: [ScenarioCreateBatchChild]
 }
 struct ScenarioCreateBatchChild: Decodable {
     let relative_path: String
     let state: String
+    /// Automatic retries already scheduled (D-024).
+    var retries: Int? = nil
+    /// Unix seconds of the next retry of a `pending` file.
+    var next_retry_at: Int64? = nil
+    /// Stable code of the last failure.
+    var last_error: String? = nil
+
+    /// A `pending` file that waits for its automatic retry.
+    var waitsForRetry: Bool {
+        state == "pending" && (next_retry_at.map { TimeInterval($0) > Date().timeIntervalSince1970 } ?? false)
+    }
 }
 private struct ScenarioCreateBatchItem: Encodable {
     let relative_path: String
@@ -319,6 +346,8 @@ enum QADRENUserMessage {
             "Файлы изменились после создания задачи конфликта. Обновите снимок конфликта."
         case "this_mac_required":
             "Подключение «Этот Mac» есть всегда, его нельзя удалить. Его можно переименовать или выключить."
+        case "invalid_smb_address":
+            "Адрес сетевой папки должен иметь вид smb://сервер/папка. Логин и пароль в адрес не вписывайте: для них есть отдельные поля."
         case "invalid_selection":
             "Выбранный объект находится вне корневой папки сценария. Выберите объекты заново."
         case "the name differs from a selected object only by letter case or Unicode form":
@@ -327,9 +356,74 @@ enum QADRENUserMessage {
             "Удаление по правилу сценария не выполнено. Файлы не изменены. Проверьте план заново."
         case "outcome_unknown":
             "Результат операции не подтверждён. Повтор не выполнен. QADREN проверит результат автоматически."
+        case "yandex_source_only":
+            "Яндекс Диск пока может быть только источником сценария «В одну сторону», а назначением — этот Mac или сетевой диск."
+        case "yandex_deletions_unsupported":
+            "Удаления по сценарию с Яндекс Диска пока не выполняются. Файлы на Mac не изменены."
+        case "yandex_token_required", "yandex_invalid_token":
+            "Нет входа в Яндекс Диск для этого подключения. Войдите в аккаунт в разделе «Подключения»."
+        case "yandex_unauthorized":
+            "Яндекс отклонил вход. Войдите в аккаунт заново в разделе «Подключения»."
+        case "yandex_forbidden":
+            "У QADREN нет доступа к этой папке Яндекс Диска."
+        case "yandex_rate_limited":
+            "Яндекс Диск временно ограничил запросы. Повторите позже."
+        case "yandex_not_found":
+            "Файл или папка на Яндекс Диске не найдены. Проверьте план заново."
+        case "yandex_network_error":
+            "Нет связи с Яндекс Диском. Проверьте интернет и повторите."
+        case "yandex_content_mismatch":
+            "Скачанный файл не совпал с данными Яндекс Диска (размер или MD5). Файл не сохранён."
+        case "yandex_content_unavailable":
+            "Яндекс Диск сейчас не отдаёт содержимое файла (ошибка сервера хранения). Файл не скачан и остаётся в плане. Повторите позже."
+        case "yandex_snapshot_too_large":
+            "В папке Яндекс Диска слишком много объектов для одного сценария (больше 10 000). Выберите папку поменьше."
+        case "yandex_provider_error", "yandex_invalid_path":
+            "Яндекс Диск вернул ошибку. Повторите позже."
         default:
             code
         }
+    }
+}
+
+/// Yandex Disk to Mac Scenarios (D-023). The Worker needs the OAuth token of
+/// the Yandex Disk source for each request. The app reads it from the
+/// Keychain and sends it over the private Worker socket; nobody stores it.
+enum YandexScenarioAccess {
+    /// The Yandex Disk source connection of a one-way Scenario, or nil.
+    static func sourceConnectionID(_ scenario: ScenarioEntry, entries: [StorageEntry]? = nil) -> String? {
+        let id: String
+        switch scenario.direction {
+        case "left_to_right": id = scenario.left_connection_id
+        case "right_to_left": id = scenario.right_connection_id
+        default: return nil
+        }
+        let entries = entries ?? (try? StorageRegistryBridge.list()) ?? []
+        return entries.first { $0.id == id }?.adapter == "yandex_disk" ? id : nil
+    }
+
+    /// Give the Worker the tokens of all enabled Yandex Disk connections now
+    /// and every minute while the app runs. A Worker restart loses them; this
+    /// lets a waiting run continue as soon as the app is open (D-024 stage A).
+    static func startTokenDelivery() {
+        Task.detached(priority: .utility) {
+            while true {
+                for entry in (try? StorageRegistryBridge.list()) ?? []
+                where entry.adapter == "yandex_disk" && entry.enabled {
+                    guard let token = try? YandexKeychain.read(entry.id) else { continue }
+                    try? WorkerIPC.provideAccessToken(connectionID: entry.id, token: token)
+                }
+                try? await Task.sleep(for: .seconds(60))
+            }
+        }
+    }
+
+    static func token(for scenario: ScenarioEntry) throws -> String? {
+        guard let id = sourceConnectionID(scenario) else { return nil }
+        guard let token = try YandexKeychain.read(id) else {
+            throw StorageError.operation(QADRENUserMessage.text(for: "yandex_token_required"))
+        }
+        return token
     }
 }
 
@@ -664,6 +758,36 @@ enum StorageRegistryBridge {
         }
     }
 
+    /// Settings that the app and the Worker share (Registry).
+    struct SharedSettings: Decodable {
+        let retry_until_success: Bool
+    }
+
+    static func sharedSettings() throws -> SharedSettings {
+        let database = try path
+        return try database.withCString { try unwrap(settingsGetFFI($0), as: SharedSettings.self, databasePath: database) }
+    }
+
+    /// D-024: after the retry schedule, retry a temporarily unavailable file
+    /// every 24 h until it succeeds or the user stops the batch.
+    static func setRetryUntilSuccess(_ enabled: Bool) throws {
+        let database = try path
+        let _: SharedSettings = try database.withCString {
+            try unwrap(settingsSetRetryUntilSuccessFFI($0, enabled ? 1 : 0), as: SharedSettings.self, databasePath: database)
+        }
+    }
+
+    /// Pause or resume a Worker-owned batch (D-024). The current file ends.
+    static func setScenarioCreateBatchPaused(id: String, paused: Bool) throws {
+        struct Status: Decodable { let paused: Bool }
+        let database = try path
+        let _: Status = try database.withCString { path in
+            try id.withCString { id in
+                try unwrap(setScenarioCreateBatchPausedFFI(path, id, paused ? 1 : 0), as: Status.self, databasePath: database)
+            }
+        }
+    }
+
     /// Saves a durable cancellation request in the Registry. The Worker reads it
     /// before the next file, so the request works while the Worker is busy.
     static func requestScenarioCreateBatchCancellation(id: String) throws {
@@ -727,7 +851,8 @@ enum StorageRegistryBridge {
             destination_root: fromLeft ? scenario.right_root : scenario.left_root,
             destination_connection_id: fromLeft ? scenario.right_connection_id : scenario.left_connection_id,
             destination_relative_path: item.relative_path,
-            job_id: "scenario-copy-" + UUID().uuidString.lowercased()
+            job_id: "scenario-copy-" + UUID().uuidString.lowercased(),
+            access_token: try YandexScenarioAccess.token(for: scenario)
         )
     }
 
@@ -770,6 +895,20 @@ enum StorageRegistryBridge {
         )
     }
 
+    /// Metadata of a Yandex Disk Scenario root for the plan (D-023). The
+    /// token is read from the Keychain for this call only.
+    static func yandexScenarioSnapshot(
+        root: String, connectionID: String, selection: [String]
+    ) throws -> [ScenarioSnapshotItem] {
+        guard let token = try YandexKeychain.read(connectionID) else {
+            throw StorageError.operation(QADRENUserMessage.text(for: "yandex_token_required"))
+        }
+        return try DiskMetadataBridge.scenarioSnapshot(
+            registryPath: try path, connectionID: connectionID, root: root, selection: selection,
+            accessValue: token
+        )
+    }
+
     private static func scenarioReplaceRequest(
         scenario: ScenarioEntry, item: ScenarioPlanItem, consent: Bool
     ) throws -> WorkerScenarioReplaceRequest {
@@ -786,7 +925,8 @@ enum StorageRegistryBridge {
             destination_connection_id: fromLeft ? scenario.right_connection_id : scenario.left_connection_id,
             destination_relative_path: item.relative_path,
             job_id: "scenario-replace-" + UUID().uuidString.lowercased(),
-            replacement_consent: consent
+            replacement_consent: consent,
+            access_token: try YandexScenarioAccess.token(for: scenario)
         )
     }
 
@@ -969,6 +1109,31 @@ enum StorageRegistryBridge {
             }
         }
         return result.id
+    }
+
+    /// Adds one SMB share connection (D-021). Core validates the address and
+    /// refuses an address with a login or a password.
+    static func addSMBShare(name: String, address: String) throws -> String {
+        let database = try path
+        let result: NewConnection = try database.withCString { db in
+            try name.withCString { label in
+                try address.withCString { url in
+                    try unwrap(registryAddSMBShare(db, label, url), as: NewConnection.self)
+                }
+            }
+        }
+        return result.id
+    }
+
+    static func setSMBEndpoint(id: String, address: String) throws {
+        let database = try path
+        let _: Bool = try database.withCString { db in
+            try id.withCString { value in
+                try address.withCString { url in
+                    try unwrap(registrySetSMBEndpoint(db, value, url), as: Bool.self)
+                }
+            }
+        }
     }
 
     /// The single "This Mac" connection (D-020): the existing record, or a new

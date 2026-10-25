@@ -129,6 +129,8 @@ pub enum LocalFileCopyError {
     OutcomeUnknown(LocalError),
     Local(LocalError),
     Store(JobStoreError),
+    /// A Yandex Disk request failed before any local publish (D-023).
+    Remote(crate::yandex::YandexError),
 }
 
 /// Refuse a new interactive Job for a superseded Scenario revision. Staged
@@ -149,7 +151,7 @@ pub fn require_current_scenario_revision(
     }
 }
 
-fn matches_conflict_snapshot(
+pub(crate) fn matches_conflict_snapshot(
     entry: &crate::local_fs::LocalEntry,
     expected: &ConfirmedFileVersion,
 ) -> bool {
@@ -189,17 +191,19 @@ fn source_snapshot_is_newer(
     Some(local_snapshot_modified_at(source)? > local_snapshot_modified_at(destination)?)
 }
 
-fn enabled_local_connection(registry_path: &Path, connection_id: &str) -> bool {
+/// The connection is enabled and its files are reachable through the local
+/// filesystem now: "This Mac", or an SMB share whose QADREN mount is present
+/// (D-022). See `storage_access`.
+pub(crate) fn enabled_local_connection(registry_path: &Path, connection_id: &str) -> bool {
     let Ok(registry) = Registry::open(registry_path) else {
         return false;
     };
-    matches!(
-        registry.get(connection_id),
-        Ok(Some(connection)) if connection.adapter == "local_filesystem" && connection.enabled
-    )
+    crate::storage_access::connection_id_ready(&registry, registry_path, connection_id)
 }
 
-fn local_root_identity_key(local: &LocalFilesystem) -> Result<String, LocalDirectoryCreateError> {
+pub(crate) fn local_root_identity_key(
+    local: &LocalFilesystem,
+) -> Result<String, LocalDirectoryCreateError> {
     let identity = local
         .root_identity()
         .map_err(LocalDirectoryCreateError::Local)?;
@@ -236,7 +240,7 @@ enum MockFault {
     PartialWrite,
 }
 
-fn valid_job_id(job_id: &str) -> bool {
+pub(crate) fn valid_job_id(job_id: &str) -> bool {
     !job_id.is_empty()
         && job_id.len() <= 96
         && job_id
@@ -1244,8 +1248,16 @@ pub fn run_local_scenario_rule_delete(
         .find(|state| state.relative_path == relative_path)
         .ok_or(LocalFileCopyError::ConflictStale)?;
     let (Some(confirmed_target), Some(_)) = (
-        if on_left { &baseline.left } else { &baseline.right },
-        if on_left { &baseline.right } else { &baseline.left },
+        if on_left {
+            &baseline.left
+        } else {
+            &baseline.right
+        },
+        if on_left {
+            &baseline.right
+        } else {
+            &baseline.left
+        },
     ) else {
         return Err(LocalFileCopyError::ConflictStale);
     };
@@ -1348,8 +1360,12 @@ pub fn run_local_scenario_rule_delete(
     {
         return Err(LocalFileCopyError::VerificationFailed);
     }
-    let receipt =
-        VerifiedReceipt::metadata_verified(&attempt_id, operation_kind, target_connection, relative_path);
+    let receipt = VerifiedReceipt::metadata_verified(
+        &attempt_id,
+        operation_kind,
+        target_connection,
+        relative_path,
+    );
     store.complete_attempt(job_id, &attempt_id, &receipt)?;
     registry
         .forget_confirmed_file_state(&reference, relative_path)
@@ -1423,8 +1439,12 @@ pub fn reconcile_local_rule_delete(
         {
             return still_unknown;
         }
-        let receipt =
-            VerifiedReceipt::metadata_verified(&attempt.attempt_id, &kind, &connection, &relative_path);
+        let receipt = VerifiedReceipt::metadata_verified(
+            &attempt.attempt_id,
+            &kind,
+            &connection,
+            &relative_path,
+        );
         store.complete_attempt(job_id, &attempt.attempt_id, &receipt)?;
         registry
             .forget_confirmed_file_state(
@@ -1442,7 +1462,7 @@ pub fn reconcile_local_rule_delete(
 
 /// Refuse a Scenario effect on a path outside the revision's selection or on
 /// a name variant of a selected object. An empty selection is the full root.
-fn require_selected_path(
+pub(crate) fn require_selected_path(
     registry: &Registry,
     scenario_id: &str,
     scenario_revision: u64,
@@ -1451,7 +1471,9 @@ fn require_selected_path(
     let scope = registry
         .get_scenario_revision_scope(scenario_id, scenario_revision)
         .map_err(|_| LocalFileCopyError::ScenarioUnavailable)?;
-    let path = relative.to_str().ok_or(LocalFileCopyError::InvalidRequest)?;
+    let path = relative
+        .to_str()
+        .ok_or(LocalFileCopyError::InvalidRequest)?;
     if scope.classify(path, crate::scenario_planner::name_key) == ScopeMatch::Inside {
         Ok(())
     } else {
@@ -3400,7 +3422,13 @@ mod tests {
             Err(LocalFileCopyError::ScenarioScopeMismatch)
         ));
         assert!(right_root.join("report.txt").exists());
-        assert_eq!(JobStore::open(&database).unwrap().state("rule-delete-3").unwrap(), None);
+        assert_eq!(
+            JobStore::open(&database)
+                .unwrap()
+                .state("rule-delete-3")
+                .unwrap(),
+            None
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -3412,7 +3440,11 @@ mod tests {
         };
         let (database, registry_path, right_root, scenario_id, _) =
             rule_delete_fixture("rule-delete-changed", &scope);
-        fs::write(right_root.join("report.txt"), b"edited after the last synchronization").unwrap();
+        fs::write(
+            right_root.join("report.txt"),
+            b"edited after the last synchronization",
+        )
+        .unwrap();
         assert!(matches!(
             run_local_scenario_rule_delete(
                 &database,

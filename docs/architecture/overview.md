@@ -16,7 +16,7 @@ One application can combine Controller and Worker roles. A Controller never sile
 
 ## Release 1 boundary
 
-Release 1 is Local Filesystem only. It uses Rust Core, SQLite, narrow FFI, the macOS SwiftUI interface, and one Rust JobStore. Yandex Disk and iCloud are post-release. Remote Worker transport, discovery, trust, distributed locking, and Controller re-election are deferred.
+Release 1 uses Local Filesystem, SMB network drives through a QADREN mount (D-022), and Yandex Disk as a one-way Scenario source (D-023). It uses Rust Core, SQLite, narrow FFI, the macOS SwiftUI interface, and one Rust JobStore. iCloud is post-release. Remote Worker transport, discovery, trust, distributed locking, and Controller re-election are deferred.
 
 ## Execution contract
 

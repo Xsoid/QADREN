@@ -17,16 +17,22 @@ use qadren_core::job_execution::{
 use qadren_core::jobs::JobStore;
 use qadren_core::local_fs::LocalFilesystem;
 use qadren_core::model::{ConfirmedFileVersion, JobState, ScenarioReference};
-use qadren_core::registry::Registry;
+use qadren_core::registry::{DueBatchChild, Registry};
 use qadren_core::scenario_planner::{ObservedFile, PlanAction};
 use qadren_core::schedule_dispatch::dispatch_pending_schedule_jobs;
+use qadren_core::storage_access::YANDEX_DISK;
+use qadren_core::yandex::{YandexError, YandexMetadataClient};
+use qadren_core::yandex_execution::run_yandex_scenario_file_download;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -34,7 +40,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(60);
 const POLL_OVERLAP: Duration = Duration::from_secs(90);
 const MAX_SCHEDULE_SCAN_ENTRIES: usize = 10_000;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct WorkerPaths {
     socket: PathBuf,
     registry: PathBuf,
@@ -145,6 +151,91 @@ struct Request {
     decision: Option<String>,
     #[serde(default)]
     batch_id: Option<String>,
+    /// Yandex Disk OAuth token from the app Keychain for a Yandex Disk to Mac
+    /// Scenario (D-023). It lives in memory for this request only.
+    #[serde(default)]
+    access_token: Option<AccessToken>,
+    /// The connection of `provide_access_token`.
+    #[serde(default)]
+    connection_id: Option<String>,
+}
+
+/// A secret that never appears in `Debug` output or in a log.
+#[derive(Deserialize)]
+#[serde(transparent)]
+struct AccessToken(String);
+
+impl std::fmt::Debug for AccessToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AccessToken(<redacted>)")
+    }
+}
+
+/// True when the source of this Scenario revision is a Yandex Disk
+/// connection (D-023). Such a Scenario needs an access token from the app.
+fn yandex_source(registry: &Registry, scenario_id: &str, revision: u64) -> bool {
+    yandex_source_connection(registry, scenario_id, revision).is_some()
+}
+
+/// The Yandex Disk source connection of a one-way Scenario revision.
+fn yandex_source_connection(
+    registry: &Registry,
+    scenario_id: &str,
+    revision: u64,
+) -> Option<String> {
+    let scenario = registry
+        .get_scenario_revision(scenario_id, revision)
+        .ok()??;
+    let source = match scenario.direction.as_str() {
+        "left_to_right" => scenario.left_connection_id,
+        "right_to_left" => scenario.right_connection_id,
+        _ => return None,
+    };
+    matches!(registry.get(&source), Ok(Some(connection)) if connection.adapter == YANDEX_DISK)
+        .then_some(source)
+}
+
+/// Run one Yandex Disk to Mac download. `None` replacement is a Create.
+fn run_yandex_download(
+    paths: &WorkerPaths,
+    scenario_id: &str,
+    revision: u64,
+    relative_path: &str,
+    job_id: &str,
+    token: Option<&str>,
+    replacement: Option<(&ConfirmedFileVersion, &ConfirmedFileVersion, bool)>,
+) -> Result<LocalFileCopyStatus, LocalFileCopyError> {
+    let Some(token) = token else {
+        return Err(LocalFileCopyError::Remote(YandexError::InvalidToken));
+    };
+    let client = YandexMetadataClient::new().map_err(LocalFileCopyError::Remote)?;
+    run_yandex_scenario_file_download(
+        &paths.jobs,
+        &paths.registry,
+        scenario_id,
+        revision,
+        relative_path,
+        job_id,
+        token,
+        &client,
+        replacement,
+    )
+}
+
+/// Stable codes for a Yandex Disk failure. They never contain a path or a
+/// token.
+fn yandex_error_code(error: &YandexError) -> &'static str {
+    match error {
+        YandexError::InvalidToken => "yandex_token_required",
+        YandexError::Unauthorized => "yandex_unauthorized",
+        YandexError::Forbidden => "yandex_forbidden",
+        YandexError::RateLimited => "yandex_rate_limited",
+        YandexError::NotFound => "yandex_not_found",
+        YandexError::ContentMismatch => "yandex_content_mismatch",
+        YandexError::ContentUnavailable(_) => "yandex_content_unavailable",
+        YandexError::Transport(_) => "yandex_network_error",
+        _ => "yandex_provider_error",
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -168,8 +259,14 @@ fn dispatch_due(paths: &WorkerPaths) -> Result<(usize, usize), String> {
     let registry =
         Registry::open(&paths.registry).map_err(|_| "registry_unavailable".to_string())?;
     reconcile_unknown_scenario_creates(paths, &registry)?;
+    // D-024: the app cannot open the JobStore while the Worker owns it, so
+    // the Worker delivers pending copy baselines to the Registry itself.
+    if let Ok(mut jobs) = JobStore::open(&paths.jobs) {
+        let _ = qadren_core::scenario_copy_dispatch::dispatch_pending_scenario_copy_baselines(
+            &registry, &mut jobs,
+        );
+    }
     reconcile_unknown_rule_deletes(paths);
-    resume_pending_scenario_create_batches(paths, &registry);
     let staged = registry
         .stage_schedule_catch_up(through, overlap)
         .map_err(|_| "schedule_stage_unavailable".to_string())?;
@@ -179,18 +276,6 @@ fn dispatch_due(paths: &WorkerPaths) -> Result<(usize, usize), String> {
     drop(jobs);
     execute_queued_schedule_jobs(paths, &registry)?;
     Ok((staged, dispatched))
-}
-
-/// A confirmed Create receipt belongs to the Worker, not to a SwiftUI task.
-/// Resume only children that never reached an outcome. UNKNOWN is deliberately
-/// excluded: it must go through the normal non-mutating reconciliation path.
-fn resume_pending_scenario_create_batches(paths: &WorkerPaths, registry: &Registry) {
-    let Ok(batch_ids) = registry.pending_scenario_create_batch_ids() else {
-        return;
-    };
-    for batch_id in batch_ids {
-        let _ = execute_create_batch_id(paths, &batch_id);
-    }
 }
 
 /// Reconcile UNKNOWN deletions made under a simple deletion rule (D-019).
@@ -243,9 +328,7 @@ fn run_rule_deletions(
             Ok(LocalRuleDeleteStatus::Existing(_)) => {
                 return Err("rule_delete_not_completed".to_string())
             }
-            Err(LocalFileCopyError::OutcomeUnknown(_)) => {
-                return Err("outcome_unknown".to_string())
-            }
+            Err(LocalFileCopyError::OutcomeUnknown(_)) => return Err("outcome_unknown".to_string()),
             Err(LocalFileCopyError::ConflictStale) => return Err("plan_stale".to_string()),
             Err(_) => return Err("rule_delete_failed".to_string()),
         }
@@ -277,8 +360,15 @@ fn execute_rule_deletions(
         .ok()
         .flatten()
         .ok_or("scenario_unavailable")?;
-    enabled_local_connection(&registry, &scenario.left_connection_id)
-        .and_then(|()| enabled_local_connection(&registry, &scenario.right_connection_id))
+    // D-023 stage 1 copies from Yandex Disk only. A deletion on the Mac needs
+    // a provider check that the file is gone, which is not built yet.
+    if yandex_source(&registry, scenario_id, revision) {
+        return Err("yandex_deletions_unsupported");
+    }
+    enabled_local_connection(&registry, &paths.registry, &scenario.left_connection_id)
+        .and_then(|()| {
+            enabled_local_connection(&registry, &paths.registry, &scenario.right_connection_id)
+        })
         .map_err(|_| "local_connection_unavailable")?;
     let (left, skipped_left) =
         observed_files(Path::new(&scenario.left_root)).map_err(|_| "scan_unavailable")?;
@@ -289,7 +379,13 @@ fn execute_rule_deletions(
         revision,
     };
     let plan = registry
-        .plan_scenario_dry_run_with_skipped(&reference, &left, &right, &skipped_left, &skipped_right)
+        .plan_scenario_dry_run_with_skipped(
+            &reference,
+            &left,
+            &right,
+            &skipped_left,
+            &skipped_right,
+        )
         .map_err(|_| "plan_unavailable")?;
     let child = |path: &str| Ok(format!("{batch_id}-{:x}", md5::compute(path.as_bytes())));
     match run_rule_deletions(paths, &reference, &plan, &child) {
@@ -416,15 +512,20 @@ fn observed_files(root: &Path) -> Result<(Vec<ObservedFile>, Vec<String>), Strin
         })
 }
 
-fn enabled_local_connection(registry: &Registry, connection_id: &str) -> Result<(), String> {
+/// "This Mac", or an SMB share whose QADREN mount is present now (D-022).
+/// The Worker does not mount a share itself; an absent mount refuses the Job.
+fn enabled_local_connection(
+    registry: &Registry,
+    registry_path: &Path,
+    connection_id: &str,
+) -> Result<(), String> {
     let enabled = registry
         .list()
         .map_err(|_| "schedule_registry_unavailable".to_string())?
         .into_iter()
         .any(|connection| {
             connection.id == connection_id
-                && connection.enabled
-                && connection.adapter == "local_filesystem"
+                && qadren_core::storage_access::connection_ready(&connection, registry_path)
         });
     if enabled {
         Ok(())
@@ -520,8 +621,8 @@ fn execute_schedule_job(
         .get_scenario_revision(&reference.scenario_id, reference.revision)
         .map_err(|_| "schedule_scenario_unavailable".to_string())?
         .ok_or_else(|| "schedule_scenario_unavailable".to_string())?;
-    enabled_local_connection(registry, &scenario.left_connection_id)?;
-    enabled_local_connection(registry, &scenario.right_connection_id)?;
+    enabled_local_connection(registry, &paths.registry, &scenario.left_connection_id)?;
+    enabled_local_connection(registry, &paths.registry, &scenario.right_connection_id)?;
     let (left, skipped_left) = observed_files(Path::new(&scenario.left_root))?;
     let (right, skipped_right) = observed_files(Path::new(&scenario.right_root))?;
     let plan = registry
@@ -675,12 +776,7 @@ fn execute_schedule_job(
                         .reserve_schedule_child_job_id(schedule_job_id, path)
                         .map_err(|_| "schedule_child_identity_unavailable".to_string())
                 };
-                match run_rule_deletions(
-                    paths,
-                    reference,
-                    std::slice::from_ref(&item),
-                    &child,
-                ) {
+                match run_rule_deletions(paths, reference, std::slice::from_ref(&item), &child) {
                     Ok(_) => {}
                     Err(error) if error == "outcome_unknown" => {
                         return Err("schedule_outcome_unknown".to_string())
@@ -740,19 +836,37 @@ fn execute_create(paths: &WorkerPaths, request: &Request) -> Result<&'static str
             _ => "scenario_unavailable",
         });
     }
-    match run_local_scenario_file_copy(
-        &paths.jobs,
-        &paths.registry,
-        scenario_id,
-        scenario_revision,
-        Path::new(source_root),
-        source_connection_id,
-        Path::new(source_relative_path),
-        Path::new(destination_root),
-        destination_connection_id,
-        Path::new(destination_relative_path),
-        job_id,
-    ) {
+    let registry = Registry::open(&paths.registry).map_err(|_| "registry_unavailable")?;
+    let result = if yandex_source(&registry, scenario_id, scenario_revision) {
+        if source_relative_path != destination_relative_path {
+            return Err("invalid_request");
+        }
+        run_yandex_download(
+            paths,
+            scenario_id,
+            scenario_revision,
+            source_relative_path,
+            job_id,
+            request.access_token.as_ref().map(|token| token.0.as_str()),
+            None,
+        )
+    } else {
+        run_local_scenario_file_copy(
+            &paths.jobs,
+            &paths.registry,
+            scenario_id,
+            scenario_revision,
+            Path::new(source_root),
+            source_connection_id,
+            Path::new(source_relative_path),
+            Path::new(destination_root),
+            destination_connection_id,
+            Path::new(destination_relative_path),
+            job_id,
+        )
+    };
+    match result {
+        Err(LocalFileCopyError::Remote(error)) => Err(yandex_error_code(&error)),
         Ok(LocalFileCopyStatus::Completed) => Ok("completed"),
         Ok(LocalFileCopyStatus::Existing(_)) => Ok("existing"),
         Err(LocalFileCopyError::TargetExists) => Err("target_exists"),
@@ -769,129 +883,384 @@ fn execute_create(paths: &WorkerPaths, request: &Request) -> Result<&'static str
     }
 }
 
+/// The confirmed Create batches run on the background run thread (D-024).
+/// This request only stores the Yandex Disk token of the batch source in
+/// memory and answers at once.
 fn execute_create_batch(
     paths: &WorkerPaths,
     request: &Request,
 ) -> Result<&'static str, &'static str> {
-    let Some(batch_id) = request.batch_id.as_deref() else {
-        return Err("invalid_request");
-    };
-    execute_create_batch_id(paths, batch_id)
-}
-
-fn execute_create_batch_id(
-    paths: &WorkerPaths,
-    batch_id: &str,
-) -> Result<&'static str, &'static str> {
+    let batch_id = request.batch_id.as_deref().ok_or("invalid_request")?;
     let registry = Registry::open(&paths.registry).map_err(|_| "registry_unavailable")?;
     let receipt = registry
         .scenario_create_batch(batch_id)
         .map_err(|_| "batch_unavailable")?
         .ok_or("batch_unavailable")?;
-    let scenario = registry
-        .get_scenario_revision(&receipt.scenario.scenario_id, receipt.scenario.revision)
-        .map_err(|_| "batch_unavailable")?
-        .ok_or("batch_unavailable")?;
-    let mut had_failure = false;
-    for child in receipt
-        .children
-        .into_iter()
-        .filter(|child| child.state == "pending")
-    {
-        let cancellation_requested = registry
-            .scenario_create_batch(batch_id)
-            .map_err(|_| "batch_unavailable")?
-            .ok_or("batch_unavailable")?
-            .cancellation_requested;
-        if cancellation_requested {
-            registry
-                .set_scenario_create_batch_child_state(batch_id, &child.relative_path, "cancelled")
-                .map_err(|_| "batch_unavailable")?;
+    if let (Some(connection), Some(AccessToken(token))) = (
+        yandex_source_connection(
+            &registry,
+            &receipt.scenario.scenario_id,
+            receipt.scenario.revision,
+        ),
+        request.access_token.as_ref(),
+    ) {
+        runner().remember_token(&connection, token);
+    }
+    Ok("accepted")
+}
+
+/// Pauses before the automatic retries of a child (D-024): 1 min, 5 min,
+/// 30 min, 2 h, and 12 h.
+const RETRY_DELAYS: [i64; 5] = [60, 300, 1_800, 7_200, 43_200];
+/// Pause between the retries after the schedule when the "retry until
+/// success" setting is on.
+const RETRY_FOREVER_DELAY: i64 = 86_400;
+/// Parallel downloads for each Yandex Disk connection (D-024).
+const YANDEX_PARALLEL_DOWNLOADS: usize = 2;
+
+/// State of the run thread that the IPC thread can read (D-024).
+struct Runner {
+    /// Yandex Disk access tokens by connection ID, from the app. Memory only.
+    tokens: Mutex<HashMap<String, String>>,
+    /// Batch children that run now.
+    active: AtomicUsize,
+}
+
+impl Runner {
+    fn remember_token(&self, connection_id: &str, token: &str) {
+        if let Ok(mut tokens) = self.tokens.lock() {
+            tokens.insert(connection_id.to_owned(), token.to_owned());
+        }
+    }
+
+    fn token(&self, connection_id: &str) -> Option<String> {
+        self.tokens.lock().ok()?.get(connection_id).cloned()
+    }
+
+    fn forget_token(&self, connection_id: &str) {
+        if let Ok(mut tokens) = self.tokens.lock() {
+            tokens.remove(connection_id);
+        }
+    }
+}
+
+fn runner() -> &'static Runner {
+    static RUNNER: OnceLock<Runner> = OnceLock::new();
+    RUNNER.get_or_init(|| Runner {
+        tokens: Mutex::new(HashMap::new()),
+        active: AtomicUsize::new(0),
+    })
+}
+
+fn unix_now() -> i64 {
+    i64::try_from(log_time()).unwrap_or(i64::MAX)
+}
+
+/// The run thread: start due batch children until the Worker exits.
+fn run_batches_forever(paths: WorkerPaths) {
+    loop {
+        run_due_batch_children(&paths);
+        thread::sleep(Duration::from_secs(1));
+    }
+}
+
+/// One pass over the batch children that are due now. A Yandex Disk batch
+/// without a token waits until the app sends one.
+fn run_due_batch_children(paths: &WorkerPaths) {
+    let Ok(registry) = Registry::open(&paths.registry) else {
+        return;
+    };
+    let Ok(due) = registry.due_scenario_create_batch_children(unix_now()) else {
+        return;
+    };
+    let mut sources: HashMap<String, Option<String>> = HashMap::new();
+    let mut local = Vec::new();
+    let mut remote: HashMap<String, Vec<DueBatchChild>> = HashMap::new();
+    for child in due {
+        if child.cancellation_requested {
+            let _ = registry.finish_scenario_create_batch_child(
+                &child.batch_id,
+                &child.relative_path,
+                "cancelled",
+                None,
+            );
             continue;
         }
-        // A resumed child can already have a Job from before a crash. Report
-        // that Job's state; never start a second attempt for the same child.
-        let existing = JobStore::open(&paths.jobs)
-            .map_err(|_| "job_store_unavailable")?
-            .get(&child.job_id)
-            .map_err(|_| "job_store_unavailable")?
-            .map(|job| job.state);
-        if let Some(state) = existing {
-            let state = match state {
-                JobState::Completed => "completed",
-                JobState::Failed => "failed",
-                JobState::Cancelled => "cancelled",
-                _ => "unknown",
-            };
-            registry
-                .set_scenario_create_batch_child_state(batch_id, &child.relative_path, state)
-                .map_err(|_| "batch_unavailable")?;
-            if state != "completed" {
-                had_failure = true;
+        let source = sources
+            .entry(child.batch_id.clone())
+            .or_insert_with(|| {
+                yandex_source_connection(
+                    &registry,
+                    &child.scenario.scenario_id,
+                    child.scenario.revision,
+                )
+            })
+            .clone();
+        match source {
+            Some(connection) => remote.entry(connection).or_default().push(child),
+            None => local.push(child),
+        }
+    }
+    drop(registry);
+    for child in &local {
+        if still_due(paths, child) {
+            run_batch_child(paths, child, None);
+        }
+    }
+    for (connection, children) in remote {
+        if runner().token(&connection).is_none() {
+            continue;
+        }
+        let queue = Mutex::new(std::collections::VecDeque::from(children));
+        thread::scope(|scope| {
+            for _ in 0..YANDEX_PARALLEL_DOWNLOADS {
+                scope.spawn(|| loop {
+                    let Some(child) = queue.lock().ok().and_then(|mut queue| queue.pop_front())
+                    else {
+                        break;
+                    };
+                    // A 401 removes the token; the batch then waits.
+                    let Some(token) = runner().token(&connection) else {
+                        break;
+                    };
+                    if still_due(paths, &child) {
+                        run_batch_child(paths, &child, Some((&connection, &token)));
+                    }
+                });
             }
-            continue;
+        });
+    }
+}
+
+/// The child is still pending with the same Job ID and its batch is not
+/// paused. A pause or a stop takes effect before the next child.
+fn still_due(paths: &WorkerPaths, child: &DueBatchChild) -> bool {
+    let Ok(Some(receipt)) = Registry::open(&paths.registry)
+        .and_then(|registry| registry.scenario_create_batch(&child.batch_id))
+    else {
+        return false;
+    };
+    if receipt.cancellation_requested {
+        if let Ok(registry) = Registry::open(&paths.registry) {
+            let _ = registry.finish_scenario_create_batch_child(
+                &child.batch_id,
+                &child.relative_path,
+                "cancelled",
+                None,
+            );
         }
+        return false;
+    }
+    !receipt.paused
+        && receipt.children.iter().any(|current| {
+            current.relative_path == child.relative_path
+                && current.job_id == child.job_id
+                && current.state == "pending"
+        })
+}
+
+fn job_state(paths: &WorkerPaths, job_id: &str) -> Option<JobState> {
+    JobStore::open(&paths.jobs)
+        .ok()?
+        .get(job_id)
+        .ok()?
+        .map(|job| job.state)
+}
+
+/// Run one batch child and record its outcome, or schedule its retry.
+fn run_batch_child(paths: &WorkerPaths, child: &DueBatchChild, yandex: Option<(&str, &str)>) {
+    runner().active.fetch_add(1, Ordering::SeqCst);
+    let result = (|| {
+        // A resumed child can already have a Job from before a restart.
+        // Report that Job; never start a second attempt for the same Job ID.
+        if let Some(state) = job_state(paths, &child.job_id) {
+            return Ok(LocalFileCopyStatus::Existing(state));
+        }
+        if let Some((_, token)) = yandex {
+            return run_yandex_download(
+                paths,
+                &child.scenario.scenario_id,
+                child.scenario.revision,
+                &child.relative_path,
+                &child.job_id,
+                Some(token),
+                None,
+            );
+        }
+        let registry =
+            Registry::open(&paths.registry).map_err(|_| LocalFileCopyError::ScenarioUnavailable)?;
+        let scenario = registry
+            .get_scenario_revision(&child.scenario.scenario_id, child.scenario.revision)
+            .ok()
+            .flatten()
+            .ok_or(LocalFileCopyError::ScenarioUnavailable)?;
         let (source_root, source_connection, destination_root, destination_connection) =
             if child.source_is_left {
                 (
-                    &scenario.left_root,
-                    &scenario.left_connection_id,
-                    &scenario.right_root,
-                    &scenario.right_connection_id,
+                    scenario.left_root,
+                    scenario.left_connection_id,
+                    scenario.right_root,
+                    scenario.right_connection_id,
                 )
             } else {
                 (
-                    &scenario.right_root,
-                    &scenario.right_connection_id,
-                    &scenario.left_root,
-                    &scenario.left_connection_id,
+                    scenario.right_root,
+                    scenario.right_connection_id,
+                    scenario.left_root,
+                    scenario.left_connection_id,
                 )
             };
-        let result = run_local_scenario_file_copy(
+        run_local_scenario_file_copy(
             &paths.jobs,
             &paths.registry,
-            &receipt.scenario.scenario_id,
-            receipt.scenario.revision,
-            Path::new(source_root),
-            source_connection,
+            &child.scenario.scenario_id,
+            child.scenario.revision,
+            Path::new(&source_root),
+            &source_connection,
             Path::new(&child.relative_path),
-            Path::new(destination_root),
-            destination_connection,
+            Path::new(&destination_root),
+            &destination_connection,
             Path::new(&child.relative_path),
             &child.job_id,
-        );
-        if let Err(error) = &result {
-            // Diagnostics: the error kind only, never a path or content.
-            eprintln!(
-                "qadren-worker: batch child {} failed: {}",
-                child.job_id,
-                copy_error_kind(error)
-            );
+        )
+    })();
+    record_batch_child_outcome(
+        paths,
+        child,
+        yandex.map(|(connection, _)| connection),
+        result,
+    );
+    runner().active.fetch_sub(1, Ordering::SeqCst);
+}
+
+/// What the Worker does after one failed child (D-024 retry classes).
+enum Failure {
+    /// Before any effect, and it can pass later.
+    Transient,
+    /// It cannot pass without a change by the user.
+    Permanent,
+    /// The effect is not proven. Never retry; reconciliation decides.
+    Unproven,
+    /// Yandex refused the token: pause the batch until a new sign-in.
+    SignInRequired,
+}
+
+fn classify(error: &LocalFileCopyError) -> (Failure, String) {
+    use LocalFileCopyError as E;
+    match error {
+        E::Remote(remote) => {
+            let code = match remote {
+                YandexError::Provider(code) | YandexError::ContentUnavailable(code) => {
+                    format!("{}({code})", yandex_error_code(remote))
+                }
+                _ => yandex_error_code(remote).to_owned(),
+            };
+            let failure = match remote {
+                YandexError::Unauthorized => Failure::SignInRequired,
+                YandexError::Transport(_)
+                | YandexError::RateLimited
+                | YandexError::ContentUnavailable(_) => Failure::Transient,
+                YandexError::Provider(status) if *status >= 500 => Failure::Transient,
+                _ => Failure::Permanent,
+            };
+            (failure, code)
         }
-        let state = match result {
-            Ok(LocalFileCopyStatus::Completed)
-            | Ok(LocalFileCopyStatus::Existing(JobState::Completed)) => "completed",
-            Ok(LocalFileCopyStatus::Existing(JobState::Failed)) => "failed",
-            Ok(LocalFileCopyStatus::Existing(JobState::Cancelled)) => "cancelled",
-            Ok(LocalFileCopyStatus::Existing(_)) | Err(LocalFileCopyError::OutcomeUnknown(_)) => {
-                "unknown"
-            }
-            Err(LocalFileCopyError::TargetExists) | Err(_) => "failed",
-        };
-        if registry
-            .set_scenario_create_batch_child_state(batch_id, &child.relative_path, state)
-            .is_err()
-        {
-            return Err("batch_unavailable");
-        }
-        if state != "completed" {
-            had_failure = true;
-        }
+        E::OutcomeUnknown(_) => (Failure::Unproven, "outcome_unknown".into()),
+        E::VerificationFailed => (Failure::Unproven, "verification_failed".into()),
+        E::ConnectionUnavailable => (Failure::Transient, "local_connection_unavailable".into()),
+        E::Local(_) => (Failure::Transient, copy_error_kind(error)),
+        E::Store(_) => (Failure::Transient, "job_store_unavailable".into()),
+        E::TargetExists => (Failure::Permanent, "target_exists".into()),
+        E::ConflictStale => (Failure::Permanent, "plan_stale".into()),
+        E::ScenarioScopeMismatch => (Failure::Permanent, "scenario_scope_mismatch".into()),
+        E::ScenarioUnavailable => (Failure::Permanent, "scenario_unavailable".into()),
+        E::CapabilityUnavailable => (Failure::Permanent, "local_capability_unavailable".into()),
+        _ => (Failure::Permanent, copy_error_kind(error)),
     }
-    if had_failure {
-        Err("batch_child_failed")
-    } else {
-        Ok("completed")
+}
+
+fn record_batch_child_outcome(
+    paths: &WorkerPaths,
+    child: &DueBatchChild,
+    yandex_connection: Option<&str>,
+    result: Result<LocalFileCopyStatus, LocalFileCopyError>,
+) {
+    let Ok(registry) = Registry::open(&paths.registry) else {
+        return;
+    };
+    let finish = |state: &str, error: Option<&str>| {
+        let _ = registry.finish_scenario_create_batch_child(
+            &child.batch_id,
+            &child.relative_path,
+            state,
+            error,
+        );
+    };
+    let error = match result {
+        Ok(LocalFileCopyStatus::Completed)
+        | Ok(LocalFileCopyStatus::Existing(JobState::Completed)) => {
+            return finish("completed", None)
+        }
+        Ok(LocalFileCopyStatus::Existing(JobState::Cancelled)) => return finish("cancelled", None),
+        Ok(LocalFileCopyStatus::Existing(JobState::Failed)) => return finish("failed", None),
+        Ok(LocalFileCopyStatus::Existing(_)) => return finish("unknown", Some("outcome_unknown")),
+        Err(error) => error,
+    };
+    let (failure, code) = classify(&error);
+    // Diagnostics: the error kind only, never a path, a token, or a link.
+    eprintln!(
+        "qadren-worker: {} batch child {} failed: {code}",
+        log_time(),
+        child.job_id
+    );
+    // A retry needs proof that the failed Job made no effect: no Job, or a
+    // Job closed as failed before any effect.
+    let closed_before_effect = matches!(
+        job_state(paths, &child.job_id),
+        None | Some(JobState::Failed)
+    );
+    match failure {
+        Failure::Unproven => finish("unknown", Some(&code)),
+        Failure::Permanent => finish("failed", Some(&code)),
+        Failure::SignInRequired => {
+            if let Some(connection) = yandex_connection {
+                runner().forget_token(connection);
+            }
+            let _ = registry.set_scenario_create_batch_paused(&child.batch_id, true);
+            if closed_before_effect {
+                let _ = registry.schedule_scenario_create_batch_child_retry(
+                    &child.batch_id,
+                    &child.relative_path,
+                    &child.job_id,
+                    unix_now(),
+                    &code,
+                );
+            } else {
+                finish("unknown", Some(&code));
+            }
+        }
+        Failure::Transient => {
+            let attempt = child.retries as usize;
+            let delay = RETRY_DELAYS.get(attempt).copied().or_else(|| {
+                registry
+                    .retry_until_success()
+                    .unwrap_or(false)
+                    .then_some(RETRY_FOREVER_DELAY)
+            });
+            if let (true, Some(delay)) = (closed_before_effect, delay) {
+                let _ = registry.schedule_scenario_create_batch_child_retry(
+                    &child.batch_id,
+                    &child.relative_path,
+                    &child.job_id,
+                    unix_now() + delay,
+                    &code,
+                );
+            } else if closed_before_effect {
+                finish("failed", Some(&format!("{code}_after_retries")));
+            } else {
+                finish("unknown", Some(&code));
+            }
+        }
     }
 }
 
@@ -902,6 +1271,14 @@ fn copy_error_kind(error: &LocalFileCopyError) -> String {
             format!("outcome_unknown({})", local_error_kind(inner))
         }
         LocalFileCopyError::Local(inner) => format!("local({})", local_error_kind(inner)),
+        LocalFileCopyError::Remote(inner) => match inner {
+            YandexError::Provider(code)
+            | YandexError::UploadRejected(code)
+            | YandexError::ContentUnavailable(code) => {
+                format!("{}({code})", yandex_error_code(inner))
+            }
+            _ => yandex_error_code(inner).to_owned(),
+        },
         other => format!("{other:?}")
             .chars()
             .take_while(|c| *c != '(')
@@ -978,22 +1355,44 @@ fn execute_replace(paths: &WorkerPaths, request: &Request) -> Result<&'static st
     ) else {
         return Err("plan_snapshot_required");
     };
-    match run_local_scenario_file_replace_planned(
-        &paths.jobs,
-        &paths.registry,
-        scenario_id,
-        scenario_revision,
-        Path::new(source_root),
-        source_connection_id,
-        Path::new(source_relative_path),
-        Path::new(destination_root),
-        destination_connection_id,
-        Path::new(destination_relative_path),
-        job_id,
-        request.replacement_consent.unwrap_or(false),
-        &expected_source.confirmed(),
-        &expected_destination.confirmed(),
-    ) {
+    let registry = Registry::open(&paths.registry).map_err(|_| "registry_unavailable")?;
+    let result = if yandex_source(&registry, scenario_id, scenario_revision) {
+        if source_relative_path != destination_relative_path {
+            return Err("invalid_request");
+        }
+        run_yandex_download(
+            paths,
+            scenario_id,
+            scenario_revision,
+            source_relative_path,
+            job_id,
+            request.access_token.as_ref().map(|token| token.0.as_str()),
+            Some((
+                &expected_source.confirmed(),
+                &expected_destination.confirmed(),
+                request.replacement_consent.unwrap_or(false),
+            )),
+        )
+    } else {
+        run_local_scenario_file_replace_planned(
+            &paths.jobs,
+            &paths.registry,
+            scenario_id,
+            scenario_revision,
+            Path::new(source_root),
+            source_connection_id,
+            Path::new(source_relative_path),
+            Path::new(destination_root),
+            destination_connection_id,
+            Path::new(destination_relative_path),
+            job_id,
+            request.replacement_consent.unwrap_or(false),
+            &expected_source.confirmed(),
+            &expected_destination.confirmed(),
+        )
+    };
+    match result {
+        Err(LocalFileCopyError::Remote(error)) => Err(yandex_error_code(&error)),
         Err(LocalFileCopyError::ConflictStale) => Err("plan_stale"),
         Ok(LocalFileCopyStatus::Completed) => Ok("completed"),
         Ok(LocalFileCopyStatus::Existing(_)) => Ok("existing"),
@@ -1379,15 +1778,41 @@ fn handle_client(mut stream: UnixStream, paths: &WorkerPaths, stop: &mut bool) {
         return;
     };
     match request.command.as_str() {
-        "status" => respond(
-            &mut stream,
-            &Response {
-                ok: true,
-                status: "running",
-                staged: None,
-                dispatched: None,
-            },
-        ),
+        "status" => {
+            // `active` counts batch children that run now (D-024).
+            let _ = writeln!(
+                stream,
+                "{}",
+                serde_json::json!({
+                    "ok": true,
+                    "status": "running",
+                    "active": runner().active.load(Ordering::SeqCst),
+                })
+            );
+        }
+        "provide_access_token" => {
+            let ok = match (
+                request.connection_id.as_deref(),
+                request.access_token.as_ref(),
+            ) {
+                (Some(connection), Some(AccessToken(token)))
+                    if !connection.is_empty() && !token.is_empty() =>
+                {
+                    runner().remember_token(connection, token);
+                    true
+                }
+                _ => false,
+            };
+            respond(
+                &mut stream,
+                &Response {
+                    ok,
+                    status: if ok { "updated" } else { "invalid_request" },
+                    staged: None,
+                    dispatched: None,
+                },
+            );
+        }
         "poll" => match dispatch_due(paths) {
             Ok((staged, dispatched)) => respond(
                 &mut stream,
@@ -1681,9 +2106,26 @@ fn handle_client(mut stream: UnixStream, paths: &WorkerPaths, stop: &mut bool) {
 
 fn run(paths: WorkerPaths, once: bool) -> Result<(), String> {
     let _lock = WorkerLock::acquire(&paths.socket)?;
+    // D-024: this process owns the JobStore. The claim applies the restart
+    // rule once; the IPC thread and the run thread then share the store.
+    JobStore::claim_for_process(&paths.jobs).map_err(|_| "job_store_unavailable".to_string())?;
     if once {
         dispatch_due(&paths)?;
+        run_due_batch_children(&paths);
         return Ok(());
+    }
+    {
+        let paths = paths.clone();
+        thread::spawn(move || run_batches_forever(paths));
+    }
+    // D-024: the IPC thread answers at all times. Reconciliation and
+    // schedules can wait for a network drive, so they poll on their own thread.
+    {
+        let paths = paths.clone();
+        thread::spawn(move || loop {
+            let _ = dispatch_due(&paths);
+            thread::sleep(POLL_INTERVAL);
+        });
     }
     remove_stale_socket(&paths.socket)?;
     let listener =
@@ -1694,12 +2136,7 @@ fn run(paths: WorkerPaths, once: bool) -> Result<(), String> {
         .set_nonblocking(true)
         .map_err(|_| "worker_socket_unavailable".to_string())?;
     let mut stop = false;
-    let mut next_poll = SystemTime::now();
     while !stop {
-        if SystemTime::now() >= next_poll {
-            let _ = dispatch_due(&paths);
-            next_poll = SystemTime::now() + POLL_INTERVAL;
-        }
         match listener.accept() {
             Ok((stream, _)) => handle_client(stream, &paths, &mut stop),
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -1768,8 +2205,44 @@ fn parse_paths() -> (WorkerPaths, bool) {
     }
 }
 
+/// Under launchd the Worker has no terminal, and its error lines were lost.
+/// Write them to `worker.log` next to the JobStore. The lines hold error
+/// kinds and Job IDs only, never a path, a token, or a link. A log over
+/// 1 MB starts again empty.
+fn redirect_stderr_to_log(paths: &WorkerPaths) {
+    use std::os::fd::AsRawFd;
+    if unsafe { libc::isatty(2) } == 1 {
+        return;
+    }
+    let Some(directory) = paths.jobs.parent() else {
+        return;
+    };
+    let log = directory.join("worker.log");
+    if fs::metadata(&log).is_ok_and(|metadata| metadata.len() > 1_048_576) {
+        let _ = fs::remove_file(&log);
+    }
+    let Ok(file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(&log)
+    else {
+        return;
+    };
+    unsafe { libc::dup2(file.as_raw_fd(), 2) };
+}
+
+/// Seconds since 1970 for a log line.
+fn log_time() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
 fn main() {
     let (paths, once) = parse_paths();
+    redirect_stderr_to_log(&paths);
+    eprintln!("qadren-worker: {} started", log_time());
     if let Err(error) = run(paths, once) {
         eprintln!("qadren-worker: {error}");
         std::process::exit(1);
@@ -3038,6 +3511,8 @@ mod tests {
             source_is_left: None,
             decision: None,
             batch_id: None,
+            access_token: None,
+            connection_id: None,
         };
         assert_eq!(
             execute_conflict(&paths, &declined, true),
@@ -3095,6 +3570,8 @@ mod tests {
             source_is_left: None,
             decision: None,
             batch_id: None,
+            access_token: None,
+            connection_id: None,
         };
         assert_eq!(update_registry_control(&paths, &pause), Ok("updated"));
         assert!(

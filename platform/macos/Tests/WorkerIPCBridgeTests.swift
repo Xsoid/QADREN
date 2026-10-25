@@ -203,10 +203,18 @@ struct WorkerIPCBridgeTests {
             "reopened controller reports only durable pending children"
         )
         let batchStatus = try WorkerIPC.executeScenarioCreateBatch(receiptID: batchID, socketPath: socket)
-        check(batchStatus == "completed", "Worker accepts a confirmed Create batch receipt")
-        let pendingAfterTerminalOutcome = try StorageRegistryBridge.pendingScenarioCreateBatches(
+        check(batchStatus == "accepted", "Worker accepts a confirmed Create batch receipt")
+        // D-024: the Worker runs the batch on its run thread. Wait for it.
+        var pendingAfterTerminalOutcome = try StorageRegistryBridge.pendingScenarioCreateBatches(
             scenario: reopenedBatchScenario, databasePath: registry
         )
+        let batchDeadline = Date().addingTimeInterval(30)
+        while !pendingAfterTerminalOutcome.isEmpty && Date() < batchDeadline {
+            Thread.sleep(forTimeInterval: 0.2)
+            pendingAfterTerminalOutcome = try StorageRegistryBridge.pendingScenarioCreateBatches(
+                scenario: reopenedBatchScenario, databasePath: registry
+            )
+        }
         check(
             pendingAfterTerminalOutcome.isEmpty,
             "terminal batch is not restored as pending work"

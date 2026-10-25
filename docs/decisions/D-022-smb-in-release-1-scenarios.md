@@ -1,0 +1,27 @@
+# D-022 — SMB Network Drive in Release 1 Scenarios
+
+**Date:** 2026-10-24. **Status:** accepted. **Revises:** D-018 (Release 1 file operations are not Local Filesystem only) and the "Boundaries of this step" of [D-021](D-021-smb-network-drive-connector.md).
+
+## Decision
+
+1. **Scope.** In Release 1, a Scenario can use a "Сетевой диск (SMB)" connection as a source, a destination, or one side of a two-way Scenario. Plan, copy, replacement, and deletion apply to it.
+2. **One executor.** QADREN mounts the share and uses the Local Filesystem executor on the mount. There is no second executor, JobStore, or protocol client. No-overwrite for new files, the replacement protocol, durable attempts, root identity, and `UNKNOWN` reconciliation apply unchanged.
+3. **QADREN mount.** Each SMB connection has one mount directory: `<mounts root>/<connection_id>`. macOS refuses a network mount inside `~/Library` (`EPERM`, checked on 2026-10-24), so for the default data root (`~/Library/Application Support/QADREN`) the mounts root is `~/.qadren/mounts`. Another data root (tests, `QADREN_DATA_ROOT`) uses `<data root>/mounts`. Core and the app compute the same directory from the Registry path. The app mounts the share there through NetFS with the Keychain login, without a system dialog. The mount is visible in Finder, so Finder and QADREN use one mount of the share. When the user ejects it in Finder, the app mounts it again when it needs it; until then, the Core gate refuses SMB work. An address with a folder mounts that folder (`AllowSubMounts`).
+4. **Roots.** A Scenario root of an SMB connection is an absolute path inside its mount directory. Core refuses another root (`smb_root_outside_mount`).
+5. **Mount gate.** Core refuses every plan, snapshot, and effect for an SMB connection unless its mount directory is the mount point of an `smbfs` filesystem now. Without the mount, the directory is an ordinary local directory; work there would act on the wrong storage. The gate is in `storage_access`.
+6. **When the app mounts.** At app start, after a connection is saved, when the Scenario editor shows the connection, and before "Проверить план". If macOS has the share mounted at another place (for example by Finder), macOS refuses a second mount. The app checks the existing mounts before it mounts, because macOS reports a second mount with a code that looks like a refused login (`EACCES`). It explains this and offers "Отключить там и подключить для QADREN" after an explicit click. A Time Machine mount (`/Volumes/.timemachine/…`) is never unmounted; the app waits until the backup ends. Only `EAUTH` means a refused login; `EACCES` means that the server refused access to the share.
+7. **Background Worker.** The Worker does not mount a share. A scheduled Job finds the files when the app has mounted the share in the same user session; otherwise the Worker refuses the Job before any effect.
+8. **Address change.** The address of an SMB connection that a Scenario uses cannot change. Another share under the same roots could look like a mass deletion. Create a new connection for another share.
+9. **Writes on smbfs.** Checked on 2026-10-25 on a real SMB share; these are executor rules, not a change of the safety contract.
+   - smbfs refuses `F_FULLFSYNC` (ENOTSUP). The executor then uses `fsync`.
+   - The share supports neither hard links nor `RENAME_EXCL` (ENOTSUP). A new file is published by reservation: an `O_EXCL` create of the destination name (it fails on an existing name, also for another letter case), a check that the name is still the empty reservation, then a rename of the synced staging file. The time between that check and the rename is a remaining race on the reserved name only.
+   - The inode number belongs to the path name, not to the file. On smbfs the executor checks size and modification time after a replacement, and size after a new-file publish. These checks cannot detect a different writer that puts a file of the same size at the same name in that moment.
+   - smbfs lists names in NFD. The executor compares names up to the Unicode form, and a scan of an smbfs root reports names in NFC.
+10. **Trash.** An SMB share usually has no recoverable Trash. The executor uses `.Trashes/<uid>` only when the volume has it; otherwise a rule deletion is permanent. The editor states this for a network drive.
+11. **Removal.** Remove unmounts the QADREN mount and removes the empty mount directory with `rmdir`. It never removes content.
+
+## Consequences
+
+- AGENTS.md, `llms.txt`, the roadmap, and the storage adapter contract state Release 1 as "This Mac" and SMB network drive.
+- WebDAV and iCloud stay outside Release 1. [D-023](D-023-yandex-disk-to-mac.md) adds Yandex Disk as a one-way Scenario source.
+- Native E2E checks with a real SMB server are open work.

@@ -14,13 +14,16 @@ The `trash` capability means that a deletion can move an object into a recoverab
 
 - Local Filesystem on macOS: the home `.Trash` for the home volume, and `.Trashes/<uid>` on another volume that has `.Trashes`. The move is descriptor-relative, does not follow links, and never replaces a Trash entry.
 - Local Filesystem on Linux and Windows: no `trash` capability yet.
-- Yandex Disk (post-release): the REST API moves a deleted resource into the Disk Trash unless `permanently=true`.
+- SMB share ("Сетевой диск (SMB)", D-021): no verified recoverable Trash for a client. No `trash` capability.
+- Yandex Disk (destination is stage 2 of D-023): the REST API moves a deleted resource into the Disk Trash unless `permanently=true`.
 
 ## Release 1 adapters
 
-Local Filesystem is the only active Release 1 adapter. It reads selected source content without an extra `read_content` prompt. It must validate roots and paths, keep new destinations no-overwrite, use the approved replacement protocol for existing destinations, and reconcile uncertain effects without mutation.
+Local Filesystem is the only Release 1 executor. An SMB share reaches it through a QADREN mount (D-022). It reads selected source content without an extra `read_content` prompt. It must validate roots and paths, keep new destinations no-overwrite, use the approved replacement protocol for existing destinations, and reconcile uncertain effects without mutation.
 
-Yandex Disk and iCloud are post-release. Do not add API, OAuth, transfer, entitlement, UI, or live end-to-end work without a new owner decision. See [Yandex Disk adapter](yandex-adapter.md) and [D-017](../decisions/D-017-defer-icloud.md). File Provider materialization caused by a required Local Filesystem read does not create an iCloud adapter and does not allow unrelated prefetch.
+The SMB share connector (`smb_share`, [D-021](../decisions/D-021-smb-network-drive-connector.md), [D-022](../decisions/D-022-smb-in-release-1-scenarios.md)) stores an address, a Keychain login and password, and a status. Scenarios use it through a QADREN mount at `~/.qadren/mounts/<connection_id>` and the Local Filesystem executor. Core refuses an SMB plan or effect unless that directory is an `smbfs` mount point now (`storage_access`). Write rules for smbfs (flush, publish by reservation, name and identity checks) are in D-022, item 9. Large transfers (Transfer Runs, stored snapshots and plans, retry classes) follow [D-024](../decisions/D-024-large-transfers.md).
+
+Yandex Disk is a one-way Scenario source to a Local Filesystem root ([D-023](../decisions/D-023-yandex-disk-to-mac.md), [Yandex Disk adapter](yandex-adapter.md)). Yandex Disk as a destination needs stage 2 of D-023. iCloud is post-release ([D-017](../decisions/D-017-defer-icloud.md)). File Provider materialization caused by a required Local Filesystem read does not create an iCloud adapter and does not allow unrelated prefetch.
 
 ## New adapters
 

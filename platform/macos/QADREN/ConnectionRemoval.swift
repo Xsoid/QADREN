@@ -7,6 +7,9 @@ enum ConnectionRemoval {
         case unsupportedAdapter
     }
 
+    /// Adapters whose connection owns a Keychain item.
+    private static let credentialAdapters: Set<String> = ["yandex_disk", "smb_share"]
+
     static func run(
         adapter: String,
         disable: () throws -> Void,
@@ -14,7 +17,7 @@ enum ConnectionRemoval {
         deleteCredential: () throws -> Void,
         deleteRecord: () throws -> Void
     ) throws {
-        guard adapter == "yandex_disk" else { throw Failure.unsupportedAdapter }
+        guard credentialAdapters.contains(adapter) else { throw Failure.unsupportedAdapter }
         // Disable before credential cleanup so that failures remain visible
         // and future executors cannot schedule new work for this connection.
         try disable()

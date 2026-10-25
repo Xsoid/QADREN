@@ -244,7 +244,10 @@ struct SettingsPanelView: View {
     }
 
     private var scenarioEndpoints: [StorageEntry] {
-        var endpoints = connections.entries.filter { $0.adapter == "local_filesystem" }
+        // Yandex Disk is a one-way source only; the editor limits it (D-023).
+        var endpoints = connections.entries.filter {
+            ["local_filesystem", "smb_share", "yandex_disk"].contains($0.adapter)
+        }
         if !endpoints.contains(where: { $0.adapter == "local_filesystem" }) {
             endpoints.append(StorageEntry(
                 id: "local-computer", adapter: "local_filesystem", name: "Этот Mac",
@@ -312,6 +315,7 @@ struct SettingsPanelView: View {
 /// kind of storage; a connection is one configured record of it.
 enum StorageConnector: String, CaseIterable, Identifiable {
     case thisMac = "local_filesystem"
+    case networkDrive = "smb_share"
     case yandexDisk = "yandex_disk"
 
     var id: String { rawValue }
@@ -323,6 +327,7 @@ enum StorageConnector: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .thisMac: "Этот Mac"
+        case .networkDrive: "Сетевой диск (SMB)"
         case .yandexDisk: "Яндекс.Диск"
         }
     }
@@ -330,6 +335,7 @@ enum StorageConnector: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .thisMac: "laptopcomputer"
+        case .networkDrive: "server.rack"
         case .yandexDisk: "cloud"
         }
     }
@@ -337,6 +343,7 @@ enum StorageConnector: String, CaseIterable, Identifiable {
     var tint: Color {
         switch self {
         case .thisMac: QDTheme.cyan
+        case .networkDrive: QDTheme.blue
         case .yandexDisk: QDTheme.warning
         }
     }
@@ -344,69 +351,135 @@ enum StorageConnector: String, CaseIterable, Identifiable {
     var summary: String {
         switch self {
         case .thisMac: "Папки и диски этого Mac. Одно подключение на Mac, создаётся автоматически."
+        case .networkDrive: "Общая папка по протоколу SMB: NAS, компьютер Windows или другой Mac. Логин и пароль хранятся в Keychain."
         case .yandexDisk: "Облачное хранилище. Подключений может быть сколько угодно."
         }
     }
 }
 
+/// One screen of the Connections section. The section is one navigation
+/// stack inside the Settings window: the list, the connector list, and the
+/// connector form. Breadcrumbs go back; no extra window or sheet opens.
+private enum ConnectionsRoute: Hashable {
+    case list
+    case connectors
+    case newNetworkDrive
+    case editNetworkDrive(String)
+}
+
 private struct ConnectionsSettingsView: View {
     @ObservedObject var connections: StorageConnections
-    @State private var showsAddConnection = false
+    @State private var route: ConnectionsRoute = .list
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                HStack(alignment: .firstTextBaseline) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Подключения").font(.largeTitle.bold())
-                        Text("Хранилища, с которыми работают сценарии. Каждое подключение относится к одному коннектору.")
-                            .foregroundStyle(.secondary)
+                if route != .list {
+                    SettingsBreadcrumbs(items: crumbs)
+                }
+                switch route {
+                case .list:
+                    connectionList
+                case .connectors:
+                    ConnectorListView(connections: connections) { connector in
+                        if connector == .networkDrive { route = .newNetworkDrive }
+                        if connector == .yandexDisk {
+                            // The new card has "Войти в Яндекс" (D-023).
+                            connections.addYandex()
+                            route = .list
+                        }
                     }
-                    Spacer()
-                    Button("Добавить подключение", systemImage: "plus") { showsAddConnection = true }
-                }
-                if connections.hasLegacyYandexToken {
-                    SettingsNotice(
-                        text: "Найдена прежняя авторизация Яндекс Диска. Перенос создаёт отдельное подключение и оставляет старый Keychain-элемент до проверки копии.",
-                        symbol: "key"
-                    ) {
-                        Button("Перенести подключение") { connections.importLegacyYandex() }
+                case .newNetworkDrive:
+                    SMBConnectionForm(
+                        connections: connections, editing: nil,
+                        onDone: { route = .list }, onCancel: { route = .connectors }
+                    )
+                case let .editNetworkDrive(id):
+                    if let entry = connections.entries.first(where: { $0.id == id }) {
+                        SMBConnectionForm(
+                            connections: connections, editing: entry,
+                            onDone: { route = .list }, onCancel: { route = .list }
+                        )
                     }
                 }
-                if let error = connections.error {
-                    SettingsNotice(text: error, symbol: "exclamationmark.triangle")
-                }
-                if connections.entries.filter({ $0.adapter == StorageConnector.thisMac.rawValue }).count > 1 {
-                    SettingsNotice(
-                        text: "Найдено несколько подключений «Этот Mac» из старых данных. Нужно одно: удалите лишние. Подключение, которое используют сценарии, удалить нельзя.",
-                        symbol: "square.on.square"
-                    )
-                }
-                ForEach(connections.entries) { entry in
-                    ConnectionCard(
-                        entry: entry,
-                        canRemove: canRemove(entry),
-                        onRemove: { connections.remove(entry.id) },
-                        onRename: { connections.rename(entry.id, name: $0) },
-                        onSetEnabled: { connections.setEnabled(entry.id, enabled: $0) }
-                    )
-                    .id(entry.id + (entry.enabled ? ":enabled" : ":disabled") + ":" + entry.name)
-                }
-                Text("Удаление подключения меняет только локальную запись QADREN и её ключ в Keychain. Файлы в хранилище не удаляются.")
-                    .font(.caption).foregroundStyle(.secondary)
             }
             .frame(maxWidth: 900, alignment: .leading)
             .padding(24)
         }
-        .sheet(isPresented: $showsAddConnection) {
-            AddConnectionSheet(connections: connections.entries)
-        }
+        // Each screen starts at the top.
+        .id(route)
         .onAppear {
             connections.refresh()
             // The cards load after the window cleared its initial focus.
             // Opening the section must not select a name field.
             DispatchQueue.main.async { NSApp.keyWindow?.makeFirstResponder(nil) }
         }
+        .onChange(of: connections.entries.map(\.id)) { ids in
+            if case let .editNetworkDrive(id) = route, !ids.contains(id) { route = .list }
+        }
+    }
+
+    private var crumbs: [SettingsBreadcrumbs.Item] {
+        let root = SettingsBreadcrumbs.Item(title: "Подключения") { route = .list }
+        switch route {
+        case .list:
+            return [root]
+        case .connectors:
+            return [root, .init(title: "Добавить подключение")]
+        case .newNetworkDrive:
+            return [
+                root,
+                .init(title: "Добавить подключение") { route = .connectors },
+                .init(title: StorageConnector.networkDrive.title)
+            ]
+        case let .editNetworkDrive(id):
+            let name = connections.entries.first { $0.id == id }?.name ?? "Подключение"
+            return [root, .init(title: name) { route = .list }, .init(title: "Адрес и вход")]
+        }
+    }
+
+    @ViewBuilder
+    private var connectionList: some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Подключения").font(.largeTitle.bold())
+                Text("Хранилища, с которыми работают сценарии. Каждое подключение относится к одному коннектору.")
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Добавить подключение", systemImage: "plus") { route = .connectors }
+        }
+        if connections.hasLegacyYandexToken {
+            SettingsNotice(
+                text: "Найдена прежняя авторизация Яндекс Диска. Перенос создаёт отдельное подключение и оставляет старый Keychain-элемент до проверки копии.",
+                symbol: "key"
+            ) {
+                Button("Перенести подключение") { connections.importLegacyYandex() }
+            }
+        }
+        if let error = connections.error {
+            SettingsNotice(text: error, symbol: "exclamationmark.triangle")
+        }
+        if connections.entries.filter({ $0.adapter == StorageConnector.thisMac.rawValue }).count > 1 {
+            SettingsNotice(
+                text: "Найдено несколько подключений «Этот Mac» из старых данных. Нужно одно: удалите лишние. Подключение, которое используют сценарии, удалить нельзя.",
+                symbol: "square.on.square"
+            )
+        }
+        ForEach(connections.entries) { entry in
+            ConnectionCard(
+                entry: entry,
+                connections: connections,
+                canRemove: canRemove(entry),
+                onRemove: { connections.remove(entry.id) },
+                onRename: { connections.rename(entry.id, name: $0) },
+                onSetEnabled: { connections.setEnabled(entry.id, enabled: $0) },
+                onEditAddress: { route = .editNetworkDrive(entry.id) }
+            )
+            .id(entry.id + (entry.enabled ? ":enabled" : ":disabled") + ":" + entry.name)
+        }
+        Text("Удаление подключения меняет только локальную запись QADREN и её ключ в Keychain. Файлы в хранилище не удаляются.")
+            .font(.caption).foregroundStyle(.secondary)
     }
 
     /// "This Mac" always exists. Only an extra Local record from older data
@@ -417,32 +490,85 @@ private struct ConnectionsSettingsView: View {
     }
 }
 
+/// The path of a nested Settings screen. Every item except the last one
+/// goes back to its screen; the back button goes one level up.
+private struct SettingsBreadcrumbs: View {
+    struct Item {
+        let title: String
+        var action: (() -> Void)?
+    }
+
+    let items: [Item]
+
+    var body: some View {
+        HStack(spacing: 6) {
+            if items.count > 1, let back = items[items.count - 2].action {
+                Button("Назад", systemImage: "chevron.left", action: back)
+                    .labelStyle(.iconOnly)
+                    .help("На уровень выше")
+                    .keyboardShortcut("[", modifiers: .command)
+            }
+            ForEach(Array(items.enumerated()), id: \.offset) { index, item in
+                if index > 0 {
+                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
+                }
+                if index < items.count - 1, let action = item.action {
+                    Button(item.title, action: action)
+                        .buttonStyle(.link)
+                        .lineLimit(1)
+                } else {
+                    Text(item.title).fontWeight(.semibold).lineLimit(1)
+                }
+            }
+        }
+        .font(.callout)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Путь в настройках")
+    }
+}
+
 /// One connection with a visible boundary: connector icon and color, name,
 /// status, and the actions that the connector supports now.
 private struct ConnectionCard: View {
     let entry: StorageEntry
+    @ObservedObject var connections: StorageConnections
     let canRemove: Bool
     let onRemove: () -> Void
     let onRename: (String) -> Void
     let onSetEnabled: (Bool) -> Void
+    let onEditAddress: () -> Void
     @State private var name: String
     @State private var confirmRemoval = false
 
     init(
-        entry: StorageEntry, canRemove: Bool, onRemove: @escaping () -> Void,
-        onRename: @escaping (String) -> Void, onSetEnabled: @escaping (Bool) -> Void
+        entry: StorageEntry, connections: StorageConnections, canRemove: Bool,
+        onRemove: @escaping () -> Void,
+        onRename: @escaping (String) -> Void, onSetEnabled: @escaping (Bool) -> Void,
+        onEditAddress: @escaping () -> Void
     ) {
         self.entry = entry
+        self.connections = connections
         self.canRemove = canRemove
         self.onRemove = onRemove
         self.onRename = onRename
         self.onSetEnabled = onSetEnabled
+        self.onEditAddress = onEditAddress
         _name = State(initialValue: entry.name)
     }
 
     private var connector: StorageConnector? { StorageConnector(adapter: entry.adapter) }
     private var tint: Color { connector?.tint ?? .secondary }
-    private var parked: Bool { connector == .yandexDisk }
+    private var removalMessage: String {
+        switch connector {
+        case .yandexDisk:
+            "Будут удалены только локальная запись QADREN и её ключ в Keychain. Файлы на Яндекс.Диске не изменятся."
+        case .networkDrive:
+            "Будут удалены только локальная запись QADREN и логин с паролем в Keychain. Файлы на сетевом диске не изменятся."
+        default:
+            "Будет удалена только лишняя локальная запись QADREN. Файлы на этом Mac не изменятся."
+        }
+    }
+
     private var nameChanged: Bool {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         return !trimmed.isEmpty && trimmed != entry.name
@@ -470,14 +596,18 @@ private struct ConnectionCard: View {
                         get: { entry.enabled }, set: { onSetEnabled($0) }
                     ))
                     .toggleStyle(.switch)
-                    .disabled(parked && !entry.enabled)
                 }
             }
-            if parked {
-                SettingsNotice(
-                    text: "Коннектор заморожен до P3. QADREN хранит запись и ключ в Keychain, но не запускает OAuth и API-вызовы.",
-                    symbol: "snowflake"
-                )
+            if connector == .networkDrive {
+                SMBConnectionDetails(entry: entry, connections: connections, onEdit: onEditAddress)
+            }
+            if connector == .yandexDisk {
+                YandexConnectionDetails(entry: entry, connections: connections)
+                    // The connection object reads `enabled` once.
+                    .id(entry.id + (entry.enabled ? "-on" : "-off"))
+            } else if connector == .networkDrive {
+                Text("Папки сетевого диска выбираются в редакторе сценария. QADREN подключает диск сам, с сохранёнными логином и паролем. До подтверждённой операции файлы на нём не меняются.")
+                    .font(.caption).foregroundStyle(.secondary)
             } else {
                 Text(entry.enabled
                     ? "Папки выбираются в редакторе сценария. До подтверждённой операции QADREN не передаёт и не удаляет файлы."
@@ -502,9 +632,7 @@ private struct ConnectionCard: View {
         .confirmationDialog("Удалить подключение «\(entry.name)»?", isPresented: $confirmRemoval) {
             Button("Удалить подключение", role: .destructive, action: onRemove)
         } message: {
-            Text(parked
-                ? "Будут удалены только локальная запись QADREN и её ключ в Keychain. Файлы на Яндекс.Диске не изменятся."
-                : "Будет удалена только лишняя локальная запись QADREN. Файлы на этом Mac не изменятся.")
+            Text(removalMessage)
         }
     }
 
@@ -531,8 +659,9 @@ private struct ConnectionCard: View {
                 }
             }
             Spacer()
-            if parked {
-                QDStatusLabel(kind: .paused, text: "Заморожено")
+            if (connector == .networkDrive || connector == .yandexDisk) && entry.enabled {
+                let state = SMBConnectionDetails.status(entry.status)
+                QDStatusLabel(kind: state.kind, text: state.text)
             } else if entry.enabled {
                 QDStatusLabel(kind: .ready, text: "Включено")
             } else {
@@ -542,30 +671,20 @@ private struct ConnectionCard: View {
     }
 }
 
-/// The connectors that the user can add now (D-020). "This Mac" exists once
-/// and is created automatically; Yandex Disk is parked until P3.
-private struct AddConnectionSheet: View {
-    let connections: [StorageEntry]
-    @Environment(\.dismiss) private var dismiss
+/// The connectors that the user can add now (D-020, D-021, D-023). "This
+/// Mac" exists once and is created automatically.
+private struct ConnectorListView: View {
+    @ObservedObject var connections: StorageConnections
+    let choose: (StorageConnector) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Добавить подключение").font(.title2.bold())
-                Text("Выберите коннектор — тип хранилища.").foregroundStyle(.secondary)
-            }
-            ForEach(StorageConnector.allCases) { connector in
-                row(connector)
-            }
-            HStack {
-                Spacer()
-                Button("Закрыть") { dismiss() }
-                    .keyboardShortcut(.cancelAction)
-            }
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Добавить подключение").font(.largeTitle.bold())
+            Text("Выберите коннектор — тип хранилища.").foregroundStyle(.secondary)
         }
-        .padding(24)
-        .frame(width: 520)
-        .background(InitialFocusReset().frame(width: 0, height: 0))
+        ForEach(StorageConnector.allCases) { connector in
+            row(connector)
+        }
     }
 
     private func row(_ connector: StorageConnector) -> some View {
@@ -584,8 +703,8 @@ private struct AddConnectionSheet: View {
                 QDStatusLabel(kind: state.kind, text: state.text)
             }
             Spacer(minLength: 12)
-            Button("Подключить") {}
-                .disabled(true)
+            Button("Подключить") { choose(connector) }
+                .disabled(connector == .thisMac)
                 .help(state.text)
         }
         .padding(12)
@@ -596,10 +715,455 @@ private struct AddConnectionSheet: View {
     private func availability(_ connector: StorageConnector) -> (kind: QDStatusKind, text: String) {
         switch connector {
         case .thisMac:
-            let name = connections.first { $0.adapter == connector.rawValue }?.name ?? connector.title
+            let name = connections.entries.first { $0.adapter == connector.rawValue }?.name ?? connector.title
             return (.ready, "Уже подключён как «\(name)». Второе подключение не нужно.")
+        case .networkDrive:
+            return (.ready, "Доступен. Подключений может быть сколько угодно.")
         case .yandexDisk:
-            return (.paused, "Заморожен до P3. Новые подключения сейчас не создаются.")
+            return (.ready, "Доступен как источник: с Яндекс Диска на этот Mac. Подключений может быть сколько угодно.")
+        }
+    }
+}
+
+/// Sign-in and account of one Yandex Disk connection (D-023). The token stays
+/// in the Keychain; the card shows only the login and the disk space.
+private struct YandexConnectionDetails: View {
+    let entry: StorageEntry
+    let connections: StorageConnections
+    @StateObject private var yandex: YandexConnection
+
+    init(entry: StorageEntry, connections: StorageConnections) {
+        self.entry = entry
+        self.connections = connections
+        _yandex = StateObject(wrappedValue: YandexConnection(connectionID: entry.id, enabled: entry.enabled))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 10) {
+                GridRow {
+                    Text("Аккаунт").foregroundStyle(.secondary)
+                    Text(yandex.accountLabel ?? (yandex.connected ? "Вход выполнен" : "Вход не выполнен"))
+                }
+                if let quota = yandex.quota {
+                    GridRow {
+                        Text("Место").foregroundStyle(.secondary)
+                        Text("Занято \(Self.bytes(quota.used_space)) из \(Self.bytes(quota.total_space))")
+                    }
+                }
+            }
+            HStack(spacing: 10) {
+                Button(yandex.connected ? "Войти заново" : "Войти в Яндекс", systemImage: "person.badge.key") {
+                    yandex.connect()
+                }
+                .disabled(!entry.enabled || yandex.busy || yandex.clientID.isEmpty)
+                if yandex.connected {
+                    Button("Выйти", systemImage: "rectangle.portrait.and.arrow.right") { yandex.disconnect() }
+                        .disabled(yandex.busy)
+                }
+                if yandex.busy || yandex.metadataBusy { ProgressView().controlSize(.small) }
+            }
+            Text(statusText).font(.caption).foregroundStyle(.secondary)
+            if let error = yandex.metadataError {
+                Text("Яндекс Диск: " + error).font(.caption).foregroundStyle(.orange)
+            }
+            Text(entry.enabled
+                ? "Папки Диска выбираются в редакторе сценария. Яндекс Диск — только источник: QADREN читает файлы и ничего не меняет на Диске."
+                : "Подключение выключено: сценарии с ним не строят план и не переносят файлы.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        // Sign-in and account checks write the status to the Registry. The
+        // card header and the dashboard read it from there.
+        .onChange(of: yandex.status) { _ in connections.statusDidChange() }
+    }
+
+    private static func bytes(_ value: UInt64) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(clamping: value), countStyle: .file)
+    }
+
+    private var statusText: String {
+        switch yandex.status {
+        case "Enter registered Yandex OAuth Client ID": "В этой сборке не задан Client ID приложения Яндекса."
+        case "Registered connection", "Connected to Yandex Disk", "Connected; account verified": "Вход выполнен."
+        case "Authorization required or incomplete", "Authorization incomplete; reconnect required",
+             "No token in Keychain", "Credential reference mismatch; reconnect required":
+            "Нужен вход в Яндекс."
+        case "Waiting for Yandex authorization": "Ждём вход в браузере…"
+        case "Authentication cancelled or callback unavailable": "Вход отменён."
+        case "Yandex authorization requires renewal": "Яндекс просит войти заново."
+        case "Different Yandex account; create a separate connection", "Yandex account mismatch; connection blocked":
+            "Это другой аккаунт Яндекса. Для него создайте отдельное подключение."
+        case "Disconnected locally (Yandex token not revoked)":
+            "Выход выполнен на этом Mac. Файлы на Диске не изменены."
+        default: yandex.status
+        }
+    }
+}
+
+/// The address and the login of one SMB share connection (D-021), with the
+/// login check and the way to the edit screen. The password is never shown.
+private struct SMBConnectionDetails: View {
+    let entry: StorageEntry
+    @ObservedObject var connections: StorageConnections
+    let onEdit: () -> Void
+    @State private var login: String?
+    @State private var checking = false
+    @State private var result: SMBCheckOutcome?
+    @State private var problem: String?
+    /// The share is mounted at another place; a click can take it over.
+    @State private var elsewhere: String?
+
+    static func status(_ status: String) -> (kind: QDStatusKind, text: String) {
+        switch status {
+        case "connected": (.ready, "Подключено")
+        case "requires_auth": (.needsAction, "Нужен вход")
+        case "offline": (.offline, "Нет связи")
+        case "error": (.failed, "Ошибка")
+        default: (.unknown, "Не проверено")
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 10) {
+                GridRow {
+                    Text("Адрес").foregroundStyle(.secondary)
+                    Text(entry.endpoint_url ?? "Не задан")
+                        .font(.body.monospaced())
+                        .textSelection(.enabled)
+                        .lineLimit(1).truncationMode(.middle)
+                }
+                GridRow {
+                    Text("Вход").foregroundStyle(.secondary)
+                    Text(login.map { "Логин «\($0)», пароль сохранён в Keychain" } ?? "Логин и пароль не сохранены")
+                        .foregroundStyle(login == nil ? .orange : .primary)
+                }
+            }
+            HStack(spacing: 10) {
+                Button("Проверить вход", systemImage: "checkmark.shield") { check() }
+                    .disabled(checking || login == nil || !entry.enabled)
+                Button("Изменить адрес и вход", systemImage: "key", action: onEdit)
+                    .disabled(checking)
+                if checking {
+                    ProgressView().controlSize(.small)
+                    Text("Подключаюсь к серверу…").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if let result {
+                SettingsNotice(
+                    text: result.message,
+                    symbol: result.registryStatus == "connected" ? "checkmark.circle" : "exclamationmark.triangle"
+                )
+            }
+            if let problem {
+                SettingsNotice(text: problem, symbol: "exclamationmark.triangle") {
+                    if let elsewhere, !SMBMounts.isTimeMachine(elsewhere) {
+                        Button("Отключить там и подключить для QADREN") { takeOver(from: elsewhere) }
+                            .disabled(checking)
+                    }
+                }
+            }
+        }
+        .onAppear(perform: loadLogin)
+    }
+
+    private func loadLogin() {
+        do {
+            login = try SMBKeychain.read(entry.id)?.login
+            problem = nil
+        } catch {
+            login = nil
+            problem = "Не удалось прочитать логин и пароль из Keychain: " + error.localizedDescription
+        }
+    }
+
+    private func check() {
+        guard entry.endpoint_url != nil, login != nil else { return loadLogin() }
+        run { await SMBMounts.ensureMounted(entry) }
+    }
+
+    private func takeOver(from path: String) {
+        run { await SMBMounts.takeOver(entry, from: path) }
+    }
+
+    /// The check is the QADREN mount that Scenarios use (D-022).
+    private func run(_ mount: @escaping () async -> SMBMounts.Result) {
+        checking = true
+        result = nil
+        problem = nil
+        elsewhere = nil
+        Task {
+            let mount = await mount()
+            checking = false
+            switch mount {
+            case .mounted:
+                result = .connected
+                connections.recordSMBCheck(id: entry.id, outcome: .connected)
+            case let .failed(outcome):
+                result = outcome
+                connections.recordSMBCheck(id: entry.id, outcome: outcome)
+            case let .mountedElsewhere(path):
+                elsewhere = path
+                problem = mount.message
+            case .noCredentials:
+                problem = mount.message
+            }
+        }
+    }
+}
+
+/// Adds an SMB share connection, or changes the address, the login, and the
+/// password of an existing one. "Проверить и сохранить" signs in first; a
+/// failed check offers to save without the check.
+private struct SMBConnectionForm: View {
+    @ObservedObject var connections: StorageConnections
+    let editing: StorageEntry?
+    let onDone: () -> Void
+    let onCancel: () -> Void
+    @State private var name = "Сетевой диск"
+    @State private var address = ""
+    @State private var login = ""
+    @State private var password = ""
+    @State private var checking = false
+    @State private var outcome: SMBCheckOutcome?
+    @State private var problem: String?
+    @State private var mounted: [SMBShareChoice] = []
+    @State private var pickNote: String?
+    @StateObject private var browser = SMBServerBrowser()
+
+    private var addressValid: Bool { SMBAddress.mountURL(address) != nil }
+    private var complete: Bool {
+        addressValid && !login.trimmingCharacters(in: .whitespaces).isEmpty
+            && (editing != nil || !name.trimmingCharacters(in: .whitespaces).isEmpty)
+    }
+    private var credentials: SMBCredentials {
+        SMBCredentials(login: login.trimmingCharacters(in: .whitespaces), password: password)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                Image(systemName: StorageConnector.networkDrive.symbol)
+                    .font(.title2)
+                    .foregroundStyle(StorageConnector.networkDrive.tint)
+                    .frame(width: 44, height: 44)
+                    .background(StorageConnector.networkDrive.tint.opacity(0.15), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(editing == nil ? "Сетевой диск (SMB)" : "Адрес и вход «\(editing?.name ?? "")»")
+                        .font(.largeTitle.bold())
+                    Text("Общая папка на сервере по протоколу SMB.").foregroundStyle(.secondary)
+                }
+            }
+            sharePicker
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 10) {
+                if editing == nil {
+                    GridRow {
+                        Text("Название").foregroundStyle(.secondary)
+                        TextField("Название подключения", text: $name).textFieldStyle(.roundedBorder)
+                    }
+                }
+                GridRow {
+                    Text("Адрес").foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 4) {
+                        TextField("smb://nas.local/Общая папка", text: $address)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.body.monospaced())
+                        Text(address.isEmpty || addressValid
+                            ? "Сервер и общая папка, например smb://192.168.1.10/Документы."
+                            : QADRENUserMessage.text(for: "invalid_smb_address"))
+                            .font(.caption)
+                            .foregroundStyle(address.isEmpty || addressValid ? Color.secondary : Color.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                GridRow {
+                    Text("Логин").foregroundStyle(.secondary)
+                    TextField("Имя пользователя на сервере", text: $login)
+                        .textFieldStyle(.roundedBorder)
+                        .textContentType(.username)
+                }
+                GridRow {
+                    Text("Пароль").foregroundStyle(.secondary)
+                    SecureField("Пароль", text: $password)
+                        .textFieldStyle(.roundedBorder)
+                        .textContentType(.password)
+                }
+            }
+            Label("QADREN запоминает логин и пароль в Keychain этого Mac и сам входит с ними на сервер. В базу QADREN и в журналы они не попадают.", systemImage: "key.fill")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let outcome, outcome.registryStatus != "connected" {
+                SettingsNotice(text: outcome.message + " Можно исправить данные или сохранить подключение без проверки.", symbol: "exclamationmark.triangle")
+            }
+            if let problem {
+                SettingsNotice(text: problem, symbol: "exclamationmark.triangle")
+            }
+            HStack {
+                if checking {
+                    ProgressView().controlSize(.small)
+                    Text("Подключаюсь к серверу…").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Отмена", action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                if outcome != nil && outcome?.registryStatus != "connected" {
+                    Button("Сохранить без проверки") { save(outcome) }
+                        .disabled(checking || !complete)
+                }
+                Button("Проверить и сохранить", action: checkAndSave)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(checking || !complete)
+            }
+        }
+        .frame(maxWidth: 640, alignment: .leading)
+        .onAppear {
+            load()
+            mounted = SMBShareChoice.mounted()
+            browser.start()
+        }
+        .onDisappear { browser.stop() }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)) { _ in
+            mounted = SMBShareChoice.mounted()
+        }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didUnmountNotification)) { _ in
+            mounted = SMBShareChoice.mounted()
+        }
+        .onChange(of: address) { _ in outcome = nil }
+        .onChange(of: login) { _ in outcome = nil }
+        .onChange(of: password) { _ in outcome = nil }
+    }
+
+    /// Mouse-only choice, as in Finder: shares that macOS has mounted, servers
+    /// that Bonjour finds in the network, and the system folder panel.
+    private var sharePicker: some View {
+        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Выберите диск мышью").font(.headline)
+                Spacer()
+                Button("Выбрать папку…", systemImage: "folder") { pickFolder() }
+                    .help("Папка внутри подключённой сетевой папки")
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 2) {
+                    if !mounted.isEmpty {
+                        pickerCaption("Подключены в macOS — щёлкните, чтобы выбрать")
+                        ForEach(mounted) { choice in
+                            pickerRow(
+                                symbol: "externaldrive.connected.to.line.below",
+                                title: choice.title, detail: choice.server,
+                                selected: choice.address == address.trimmingCharacters(in: .whitespaces),
+                                action: { apply(choice) }
+                            )
+                        }
+                    }
+                    pickerCaption(browser.servers.isEmpty
+                        ? "Ищу серверы в сети…"
+                        : "Серверы в сети — щёлкните, macOS спросит логин и общую папку")
+                    ForEach(browser.servers, id: \.self) { server in
+                        pickerRow(
+                            symbol: "server.rack", title: server, detail: "Открыть в macOS",
+                            selected: false, action: { SMBServerBrowser.open(server) }
+                        )
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(height: 150)
+            .padding(6)
+            .background(.quaternary.opacity(0.5), in: shape)
+            if let pickNote {
+                Text(pickNote).font(.caption).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text("Или введите адрес вручную ниже.").font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private func pickerCaption(_ text: String) -> some View {
+        Text(text).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            .padding(.horizontal, 6).padding(.top, 6).padding(.bottom, 2)
+    }
+
+    private func pickerRow(
+        symbol: String, title: String, detail: String, selected: Bool, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: symbol)
+                    .foregroundStyle(StorageConnector.networkDrive.tint)
+                    .frame(width: 20)
+                Text(title).lineLimit(1)
+                Spacer(minLength: 8)
+                Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                if selected {
+                    Image(systemName: "checkmark").foregroundStyle(StorageConnector.networkDrive.tint)
+                }
+            }
+            .padding(.horizontal, 6).padding(.vertical, 5)
+            .contentShape(Rectangle())
+            .background(
+                selected ? StorageConnector.networkDrive.tint.opacity(0.15) : .clear,
+                in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func apply(_ choice: SMBShareChoice) {
+        address = choice.address
+        if let login = choice.login, self.login.isEmpty || editing == nil { self.login = login }
+        if editing == nil, name == "Сетевой диск" || name.isEmpty { name = choice.title }
+        pickNote = nil
+    }
+
+    private func pickFolder() {
+        // The key window is the Settings window of this form.
+        SMBServerBrowser.chooseFolder(attachedTo: NSApp.keyWindow) { choice in
+            if let choice {
+                apply(choice)
+            } else {
+                pickNote = "Эта папка не на сетевом диске SMB. Сначала подключите сервер: щёлкните его в списке серверов."
+            }
+        }
+    }
+
+    private func load() {
+        guard let editing else { return }
+        address = editing.endpoint_url ?? ""
+        if let saved = try? SMBKeychain.read(editing.id) {
+            login = saved.login
+            password = saved.password
+        }
+    }
+
+    private func checkAndSave() {
+        checking = true
+        problem = nil
+        let address = address
+        let credentials = credentials
+        Task {
+            let result = await SMBShareCheck.check(address: address, credentials: credentials)
+            checking = false
+            outcome = result
+            if result.registryStatus == "connected" { save(result) }
+        }
+    }
+
+    private func save(_ result: SMBCheckOutcome?) {
+        do {
+            if let editing {
+                try connections.updateSMBShare(
+                    id: editing.id, address: address, credentials: credentials, outcome: result
+                )
+            } else {
+                try connections.addSMBShare(
+                    name: name, address: address, credentials: credentials, outcome: result
+                )
+            }
+            onDone()
+        } catch {
+            problem = error.localizedDescription
         }
     }
 }
@@ -653,20 +1217,20 @@ private struct ScenariosSettingsView: View {
                             ))
                             .labelsHidden()
                             Button("Изменить") { editScenario(scenario) }
-                                .disabled(!isLocalScenario(scenario))
-                                .help(isLocalScenario(scenario)
-                                      ? "Изменить локальный сценарий"
-                                      : "Сценарий с Яндекс Диском отложен до P3")
+                                .disabled(!isSupportedScenario(scenario))
+                                .help(isSupportedScenario(scenario)
+                                      ? "Изменить сценарий"
+                                      : "Сценарий использует подключение, которое QADREN не поддерживает")
                             Button("Расписания") { editSchedules(scenario) }
                                 .disabled(!isLocalScenario(scenario))
                                 .help(isLocalScenario(scenario)
                                       ? "Настроить расписания локального сценария"
-                                      : "Сценарий с Яндекс Диском отложен до P3")
+                                      : "Расписания с Яндекс Диском пока недоступны: фоновая служба не получает вход в Яндекс")
                             Button("Проверить план") { previewScenario(scenario) }
-                                .disabled(!isLocalScenario(scenario))
-                                .help(isLocalScenario(scenario)
-                                      ? "Явно прочитать только метаданные двух локальных каталогов и показать план без передачи файлов"
-                                      : "Сценарий с Яндекс Диском отложен до P3")
+                                .disabled(!isSupportedScenario(scenario))
+                                .help(isSupportedScenario(scenario)
+                                      ? "Прочитать только метаданные обеих сторон и показать план без передачи файлов"
+                                      : "Сценарий использует подключение, которое QADREN не поддерживает")
                         }
                         EndpointLine(
                             title: "Источник",
@@ -700,13 +1264,20 @@ private struct ScenariosSettingsView: View {
     }
 
     private var supportedConnections: [StorageEntry] {
-        connections.filter { $0.adapter == "local_filesystem" }
+        connections.filter { $0.adapter == "local_filesystem" || $0.adapter == "smb_share" }
     }
 
+    /// A one-way Scenario from Yandex Disk to this Mac (D-023), or a local one.
+    private func isSupportedScenario(_ scenario: ScenarioEntry) -> Bool {
+        isLocalScenario(scenario) || YandexScenarioAccess.sourceConnectionID(scenario, entries: connections) != nil
+    }
+
+    /// Both endpoints are on this Mac: "This Mac" or a network drive that
+    /// QADREN mounts (D-022).
     private func isLocalScenario(_ scenario: ScenarioEntry) -> Bool {
         let endpointIDs = [scenario.left_connection_id, scenario.right_connection_id]
         return endpointIDs.allSatisfy { id in
-            connections.first(where: { $0.id == id })?.adapter == "local_filesystem"
+            ["local_filesystem", "smb_share"].contains(connections.first(where: { $0.id == id })?.adapter)
         }
     }
 
@@ -721,8 +1292,11 @@ private struct ScenariosSettingsView: View {
     }
 
     private func scenarioStatus(_ scenario: ScenarioEntry) -> String {
+        if !isSupportedScenario(scenario) {
+            return "Сценарий использует подключение, которое QADREN не поддерживает. Его запуск, изменение и расписания недоступны; запись сохранена локально."
+        }
         if !isLocalScenario(scenario) {
-            return "Сценарий использует Яндекс Диск и отложен до P3. Его запуск, изменение и расписания недоступны; запись сохранена локально."
+            return "Яндекс Диск → Mac: план и перенос запускаются из этого окна. Расписания и удаления на Mac пока недоступны."
         }
         return scenario.enabled
             ? "Проверьте план по метаданным, затем подтвердите отдельный перенос или пакет обычных действий. Конфликты обрабатываются отдельно."
@@ -730,7 +1304,11 @@ private struct ScenariosSettingsView: View {
     }
 
     private func adapterTitle(_ adapter: String) -> String {
-        adapter == "yandex_disk" ? "Яндекс Диск" : adapter
+        switch adapter {
+        case "yandex_disk": "Яндекс Диск"
+        case "smb_share": StorageConnector.networkDrive.title
+        default: adapter
+        }
     }
 
     private func directionTitle(_ direction: String) -> String {
@@ -776,7 +1354,23 @@ private struct ScenarioDryRunView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button("Проверить план", systemImage: "arrow.triangle.2.circlepath") { loadPlan() }
+                Button("Проверить план", systemImage: "arrow.triangle.2.circlepath") {
+                    // A network drive is mounted before Core reads it (D-022).
+                    isLoading = true
+                    Task {
+                        if let message = await SMBMounts.prepare(
+                            connectionIDs: [scenario.left_connection_id, scenario.right_connection_id]
+                        ) {
+                            isLoading = false
+                            hasRequestedPreview = true
+                            plan = []
+                            planUnavailable = true
+                            error = message
+                            return
+                        }
+                        loadPlan()
+                    }
+                }
                     .disabled(isLoading)
             }
             Text("Кнопка читает только имена и размеры файлов из выбранных локальных каталогов. Она не открывает содержимое, не вычисляет хэши, не создаёт Job и не передаёт файлы.")
@@ -885,21 +1479,40 @@ private struct ScenarioDryRunView: View {
                 if !resumedCreateBatches.isEmpty {
                     GroupBox("Выполнение пакета") {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("Local Worker продолжает подтверждённые пакеты после закрытия Settings.")
+                            Text("Пакет выполняет фоновая служба QADREN. Закрытие окна и выход из приложения его не останавливают.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                             ForEach(resumedCreateBatches) { batch in
                                 VStack(alignment: .leading, spacing: 4) {
                                     ProgressView(value: Double(batch.processed), total: Double(batch.total))
-                                    Text("Подтверждено \(batch.processed) из \(batch.total) · \(batch.currentPath)")
+                                    Text("Подтверждено \(batch.processed) из \(batch.total)"
+                                        + (batch.paused ? " · на паузе" : " · \(batch.currentPath)"))
                                         .font(.caption.monospaced())
+                                        .lineLimit(1).truncationMode(.middle)
+                                    if batch.retryWaiting > 0 {
+                                        Text("Ждут автоматического повтора: \(batch.retryWaiting)"
+                                            + (batch.nextRetry.map { ", следующий в \($0.formatted(date: .omitted, time: .shortened))" } ?? "")
+                                            + ". Это временные ошибки до записи файла, например ошибка 500 у Яндекса.")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    if batch.failures > 0 {
+                                        Text("Не выполнено: \(batch.failures). Причины: \(batch.failureReasons.prefix(4).joined(separator: ", ")).")
+                                            .font(.caption)
+                                            .foregroundStyle(.orange)
+                                    }
                                     if batch.cancellationRequested {
                                         Text("Отмена сохранена. QADREN завершит текущую операцию и не запустит следующий файл.")
                                             .font(.caption)
                                             .foregroundStyle(.secondary)
                                     } else {
-                                        Button("Остановить после текущего файла", role: .cancel) {
-                                            cancelResumedWorkerCreateBatch(batch)
+                                        HStack {
+                                            Button(batch.paused ? "Продолжить" : "Пауза после текущего файла") {
+                                                setResumedBatchPaused(batch, paused: !batch.paused)
+                                            }
+                                            Button("Остановить после текущего файла", role: .cancel) {
+                                                cancelResumedWorkerCreateBatch(batch)
+                                            }
                                         }
                                     }
                                 }
@@ -1022,6 +1635,28 @@ private struct ScenarioDryRunView: View {
         isLoading = true
         error = nil
         planUnavailable = false
+        // A Yandex Disk side reads the network, so the plan loads in a task.
+        Task { await loadPlanSides() }
+    }
+
+    /// Metadata of one Scenario side: a local scan, or the Yandex Disk API
+    /// off the main thread (D-023).
+    private static func snapshot(
+        root: String, connectionID: String, selection: [String] = []
+    ) async throws -> [ScenarioSnapshotItem] {
+        let adapter = (try? StorageRegistryBridge.list())?.first { $0.id == connectionID }?.adapter
+        guard adapter == "yandex_disk" else {
+            return try StorageRegistryBridge.localScenarioSnapshot(root: root, connectionID: connectionID)
+        }
+        return try await Task.detached(priority: .userInitiated) {
+            // Only the selected objects: a large Disk is not walked for them.
+            try StorageRegistryBridge.yandexScenarioSnapshot(
+                root: root, connectionID: connectionID, selection: selection
+            )
+        }.value
+    }
+
+    private func loadPlanSides() async {
         defer { isLoading = false; hasRequestedPreview = true }
         do {
             // A plan for a superseded revision must not offer actions.
@@ -1033,10 +1668,13 @@ private struct ScenarioDryRunView: View {
                 return
             }
             try StorageRegistryBridge.dispatchPendingScenarioCopyBaselines()
-            let left = try StorageRegistryBridge.localScenarioSnapshot(
-                root: scenario.left_root, connectionID: scenario.left_connection_id
+            // Selected paths are relative to the source root, which is the
+            // left side of a one-way Scenario.
+            let left = try await Self.snapshot(
+                root: scenario.left_root, connectionID: scenario.left_connection_id,
+                selection: scenario.selected_paths
             )
-            let right = try StorageRegistryBridge.localScenarioSnapshot(
+            let right = try await Self.snapshot(
                 root: scenario.right_root, connectionID: scenario.right_connection_id
             )
             leftSnapshot = left
@@ -1156,56 +1794,31 @@ private struct ScenarioDryRunView: View {
                 receiptID = try StorageRegistryBridge.confirmScenarioCreateBatch(
                     scenario: batchScenario, items: items
                 )
-                activeBatch = ScenarioBatchProgress(
-                    total: items.count, processed: 0, failures: 0, currentPath: items[0].relative_path,
-                    cancellationRequested: false, receiptID: receiptID
-                )
             } catch {
                 activeBatch = nil
                 workerOwnedCreateBatch = false
                 self.error = "Не удалось подтвердить пакет: \(error.localizedDescription)"
                 return
             }
-            batchProgressTask = Task {
-                while !Task.isCancelled {
-                    try? await Task.sleep(for: .milliseconds(200))
-                    // Cancellation ends the sleep early. Do not write progress
-                    // after the batch completion cleared it.
-                    guard !Task.isCancelled else { return }
-                    guard let receipt = try? StorageRegistryBridge.scenarioCreateBatch(id: receiptID) else {
-                        continue
-                    }
-                    let completed = receipt.children.filter { $0.state == "completed" }.count
-                    let failures = receipt.children.filter { $0.state != "pending" && $0.state != "completed" }.count
-                    activeBatch = ScenarioBatchProgress(
-                        total: receipt.children.count, processed: completed, failures: failures,
-                        currentPath: receipt.children.first { $0.state == "pending" }?.relative_path
-                            ?? receipt.children.last?.relative_path ?? "",
-                        cancellationRequested: receipt.cancellation_requested, receiptID: receiptID
-                    )
-                    if receipt.children.allSatisfy({ $0.state != "pending" }) { return }
-                }
-            }
+            // The Worker accepts the receipt at once and runs it on its run
+            // thread (D-024). Progress comes from the durable receipt.
+            activeBatch = nil
+            workerOwnedCreateBatch = false
             batchTask = Task.detached(priority: .userInitiated) {
                 var failure: String?
                 do {
-                    _ = try WorkerIPC.executeScenarioCreateBatch(receiptID: receiptID)
+                    _ = try WorkerIPC.executeScenarioCreateBatch(
+                        receiptID: receiptID, accessToken: try YandexScenarioAccess.token(for: batchScenario)
+                    )
                 } catch {
                     failure = error.localizedDescription
                 }
-                let receipt = try? StorageRegistryBridge.scenarioCreateBatch(id: receiptID)
-                let outcome = receipt.map(Self.createBatchOutcome)
-                    ?? failure.map { "Worker не подтвердил завершение пакета: \($0)" }
                 await MainActor.run {
-                    batchProgressTask?.cancel()
-                    batchProgressTask = nil
-                    activeBatch = nil
                     batchTask = nil
-                    workerOwnedCreateBatch = false
-                    loadPlan()
-                    // loadPlan() clears the previous notice. Show the batch
-                    // outcome after it and keep a plan read error visible.
-                    if let outcome { error = [outcome, error].compactMap { $0 }.joined(separator: "\n") }
+                    if let failure {
+                        error = "Фоновая служба не приняла пакет: \(failure). Пакет сохранён; служба начнёт его, когда запустится."
+                    }
+                    resumePendingCreateBatches()
                 }
             }
             return
@@ -1278,7 +1891,14 @@ private struct ScenarioDryRunView: View {
         if !unfinished.isEmpty {
             let shown = unfinished.prefix(5).joined(separator: ", ")
             let rest = unfinished.count > 5 ? " и ещё \(unfinished.count - 5)" : ""
-            parts.append("Не завершены файлы (\(unfinished.count)): \(shown)\(rest). Они не будут автоматически повторены.")
+            let reasons = Dictionary(
+                receipt.children.filter { !["completed", "cancelled"].contains($0.state) }
+                    .compactMap(\.last_error).map { ($0, 1) },
+                uniquingKeysWith: +
+            ).sorted { $0.value > $1.value }.prefix(4).map { "\($0.key): \($0.value)" }
+            parts.append("Не выполнены файлы (\(unfinished.count)): \(shown)\(rest)."
+                + (reasons.isEmpty ? "" : " Причины: \(reasons.joined(separator: ", ")).")
+                + " Временные ошибки уже повторялись автоматически; файлы остаются в плане.")
         }
         return parts.isEmpty ? nil : parts.joined(separator: " ")
     }
@@ -1295,22 +1915,18 @@ private struct ScenarioDryRunView: View {
         batchProgressTask = Task {
             while !Task.isCancelled {
                 let receipts = (try? StorageRegistryBridge.pendingScenarioCreateBatches(scenario: scenario)) ?? []
-                resumedCreateBatches = receipts.map { receipt in
-                    let completed = receipt.children.filter { $0.state == "completed" }.count
-                    let failures = receipt.children.filter { $0.state != "pending" && $0.state != "completed" }.count
-                    return ScenarioBatchProgress(
-                        total: receipt.children.count,
-                        processed: completed,
-                        failures: failures,
-                        currentPath: receipt.children.first { $0.state == "pending" }?.relative_path
-                            ?? receipt.children.last?.relative_path ?? "",
-                        cancellationRequested: receipt.cancellation_requested,
-                        receiptID: receipt.id
-                    )
-                }
+                let finishedIDs = resumedCreateBatches.compactMap(\.receiptID)
+                    .filter { id in !receipts.contains { $0.id == id } }
+                resumedCreateBatches = receipts.map(ScenarioBatchProgress.init(receipt:))
                 if resumedCreateBatches.isEmpty {
                     batchProgressTask = nil
+                    let outcomes = finishedIDs
+                        .compactMap { try? StorageRegistryBridge.scenarioCreateBatch(id: $0) }
+                        .compactMap(Self.createBatchOutcome)
                     loadPlan()
+                    // loadPlan() clears the previous notice. Show the batch
+                    // outcome after it.
+                    if !outcomes.isEmpty { error = outcomes.joined(separator: "\n") }
                     return
                 }
                 try? await Task.sleep(for: .milliseconds(200))
@@ -1338,6 +1954,15 @@ private struct ScenarioDryRunView: View {
             )
         } catch {
             self.error = "Не удалось остановить пакет: " + error.localizedDescription
+        }
+    }
+
+    private func setResumedBatchPaused(_ batch: ScenarioBatchProgress, paused: Bool) {
+        guard let receiptID = batch.receiptID else { return }
+        do {
+            try StorageRegistryBridge.setScenarioCreateBatchPaused(id: receiptID, paused: paused)
+        } catch {
+            self.error = "Не удалось изменить паузу пакета: " + error.localizedDescription
         }
     }
 
@@ -1467,6 +2092,12 @@ private struct ScenarioBatchProgress: Identifiable {
     let currentPath: String
     let cancellationRequested: Bool
     let receiptID: String?
+    /// Files that wait for an automatic retry (D-024).
+    var retryWaiting: Int = 0
+    var nextRetry: Date?
+    var paused = false
+    /// Last failure codes of the finished failed files, most frequent first.
+    var failureReasons: [String] = []
 
     init(
         total: Int,
@@ -1482,6 +2113,27 @@ private struct ScenarioBatchProgress: Identifiable {
         self.currentPath = currentPath
         self.cancellationRequested = cancellationRequested
         self.receiptID = receiptID
+    }
+
+    /// Progress of one Worker-owned receipt (D-024).
+    init(receipt: ScenarioCreateBatchReceipt) {
+        let children = receipt.children
+        let failed = children.filter { !["pending", "completed"].contains($0.state) }
+        let waiting = children.filter(\.waitsForRetry)
+        self.init(
+            total: children.count,
+            processed: children.filter { $0.state == "completed" }.count,
+            failures: failed.count,
+            currentPath: children.first { $0.state == "pending" && !$0.waitsForRetry }?.relative_path
+                ?? children.last?.relative_path ?? "",
+            cancellationRequested: receipt.cancellation_requested,
+            receiptID: receipt.id
+        )
+        retryWaiting = waiting.count
+        nextRetry = waiting.compactMap(\.next_retry_at).min().map { Date(timeIntervalSince1970: TimeInterval($0)) }
+        paused = receipt.paused ?? false
+        let counts = Dictionary(failed.compactMap(\.last_error).map { ($0, 1) }, uniquingKeysWith: +)
+        failureReasons = counts.sorted { $0.value > $1.value }.map { "\($0.key): \($0.value)" }
     }
 
     var id: String { receiptID ?? currentPath }
@@ -1759,12 +2411,17 @@ private struct ScenarioEditorView: View {
                             options: [
                                 .init(value: "left_to_right", title: "В одну сторону",
                                       detail: "Из источника в назначение.", symbol: "arrow.right"),
+                            ] + (sourceIsYandex ? [] : [
                                 .init(value: "bidirectional", title: "В обе стороны",
                                       detail: "Конфликты — только с вашим решением.", symbol: "arrow.left.arrow.right"),
-                            ],
+                            ]),
                             selection: direction,
                             choose: { direction = $0 }
                         )
+                        if sourceIsYandex {
+                            Text("С Яндекс Диском пока доступен только режим «В одну сторону»: с Диска на этот Mac или на сетевой диск.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                     }
                 }
                 HStack(alignment: .top, spacing: 16) {
@@ -1775,7 +2432,8 @@ private struct ScenarioEditorView: View {
                         connectionID: $leftID,
                         root: $leftRoot,
                         selection: $scope.selectedPaths,
-                        showsSelection: true
+                        showsSelection: true,
+                        excludesYandex: direction == "bidirectional"
                     )
                     ScenarioFolderPanel(
                         role: direction == "bidirectional" ? "Правая папка" : "Назначение",
@@ -1784,12 +2442,16 @@ private struct ScenarioEditorView: View {
                         connectionID: $rightID,
                         root: $rightRoot,
                         selection: .constant([]),
-                        showsSelection: false
+                        showsSelection: false,
+                        excludesYandex: true
                     )
                 }
                 ScenarioDeletionModeBox(
                     mode: scope.deletionMode,
                     bidirectional: direction == "bidirectional",
+                    networkDrive: [leftID, rightID].contains { id in
+                        connections.first { $0.id == id }?.adapter == "smb_share"
+                    },
                     choose: { mode in
                         if mode == .simple && scope.deletionMode != .simple {
                             confirmSimpleDeletions = true
@@ -1818,10 +2480,14 @@ private struct ScenarioEditorView: View {
                     selectedPaths: Set(scenario.selected_paths),
                     deletionMode: ScenarioDeletionMode(rawValue: scenario.deletion_mode) ?? .paranoid
                 )
-            } else if let first = connections.first {
+            } else if let first = connections.first(where: { $0.adapter != "yandex_disk" }) {
                 leftID = first.id
                 rightID = first.id
             }
+        }
+        .onChange(of: leftID) { _ in
+            // A Yandex Disk source supports one way only (D-023).
+            if sourceIsYandex { direction = "left_to_right" }
         }
         .alert("Включить простую синхронизацию?", isPresented: $confirmSimpleDeletions) {
             Button("Отмена", role: .cancel) {}
@@ -1829,6 +2495,10 @@ private struct ScenarioEditorView: View {
         } message: {
             Text("Файлы, удалённые в источнике, будут удаляться и в назначении без вопроса — если они уже синхронизированы и не менялись. Удаление идёт в Корзину, без Корзины — навсегда. Больше 20 удалений — только с подтверждением.")
         }
+    }
+
+    private var sourceIsYandex: Bool {
+        connections.first { $0.id == leftID }?.adapter == "yandex_disk"
     }
 
     private var canCreate: Bool {
@@ -1846,6 +2516,7 @@ private struct ScenarioEditorView: View {
 private struct ScenarioDeletionModeBox: View {
     let mode: ScenarioDeletionMode
     let bidirectional: Bool
+    let networkDrive: Bool
     let choose: (ScenarioDeletionMode) -> Void
 
     var body: some View {
@@ -1867,6 +2538,10 @@ private struct ScenarioDeletionModeBox: View {
                 if mode == .simple {
                     Label("В Корзину; без Корзины — навсегда. Больше 20 удалений — только с подтверждением.", systemImage: "info.circle")
                         .font(.caption).foregroundStyle(.secondary)
+                    if networkDrive {
+                        Label("На сетевом диске Корзины обычно нет: удалённые там файлы не восстановить из Корзины.", systemImage: "exclamationmark.triangle")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1885,6 +2560,8 @@ private struct ScenarioFolderPanel: View {
     @Binding var root: String
     @Binding var selection: Set<String>
     let showsSelection: Bool
+    /// Yandex Disk can be only the source of a one-way Scenario (D-023).
+    var excludesYandex = false
     @StateObject private var browser = ScenarioFolderBrowser()
     @State private var showsPathField = false
     @State private var pathDraft = ""
@@ -1892,9 +2569,16 @@ private struct ScenarioFolderPanel: View {
     @State private var showedInitialRoot = false
     /// One undo step for the root and its selection.
     @State private var previousRoot: (root: String, selection: Set<String>)?
+    @State private var mounting = false
+    @State private var mountResult: SMBMounts.Result?
 
     private var selectedConnection: StorageEntry? {
         connections.first { $0.id == connectionID }
+    }
+    private var isNetworkDrive: Bool { selectedConnection?.adapter == "smb_share" }
+    private var isYandex: Bool { selectedConnection?.adapter == "yandex_disk" }
+    private var pickable: [StorageEntry] {
+        excludesYandex ? connections.filter { $0.adapter != "yandex_disk" || $0.id == connectionID } : connections
     }
 
     var body: some View {
@@ -1904,8 +2588,9 @@ private struct ScenarioFolderPanel: View {
                     Label(role, systemImage: symbol).font(.headline).lineLimit(1)
                     Spacer(minLength: 8)
                     Picker("Подключение", selection: $connectionID) {
-                        ForEach(connections) { entry in
-                            Text(entry.name).tag(entry.id)
+                        ForEach(pickable) { entry in
+                            Label(entry.name, systemImage: StorageConnector(adapter: entry.adapter)?.symbol ?? "externaldrive")
+                                .tag(entry.id)
                         }
                     }
                     .pickerStyle(.menu)
@@ -1921,6 +2606,7 @@ private struct ScenarioFolderPanel: View {
                             changeRoot(to: "")
                         }
                         shownConnectionID = newID
+                        showConnection()
                     }
                 }
                 breadcrumbs
@@ -1936,7 +2622,31 @@ private struct ScenarioFolderPanel: View {
                     }
                 }
                 Divider()
-                if let error = browser.error {
+                if isNetworkDrive && mounting {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Подключаю сетевой диск…").foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 280)
+                } else if isNetworkDrive, let mountResult, let message = mountResult.message {
+                    SettingsNotice(text: message, symbol: "exclamationmark.triangle") {
+                        VStack(alignment: .trailing, spacing: 6) {
+                            if case let .mountedElsewhere(path) = mountResult, let entry = selectedConnection,
+                               !SMBMounts.isTimeMachine(path) {
+                                Button("Отключить там и подключить для QADREN") {
+                                    mounting = true
+                                    Task {
+                                        let result = await SMBMounts.takeOver(entry, from: path)
+                                        mounting = false
+                                        showMounted(result)
+                                    }
+                                }
+                            }
+                            Button("Повторить") { showConnection() }
+                        }
+                    }
+                    .frame(height: 280, alignment: .top)
+                } else if let error = browser.error {
                     SettingsNotice(text: error, symbol: "exclamationmark.triangle")
                         .frame(height: 280, alignment: .top)
                 } else {
@@ -1960,13 +2670,21 @@ private struct ScenarioFolderPanel: View {
                     Text("Подключение выключено. Сценарий можно сохранить, но проверка плана и перенос станут доступны только после включения подключения.")
                         .font(.caption).foregroundStyle(.orange)
                 }
+                if isNetworkDrive {
+                    Text("Сетевой диск: на нём обычно нет Корзины, поэтому удаления там окончательные.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if isYandex {
+                    Text("Яндекс Диск — источник: файлы скачиваются отсюда, на Диске ничего не меняется. Удаления на Mac по этому сценарию пока не выполняются.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .onAppear { browser.open(root.isEmpty ? NSHomeDirectory() : root) }
+        .onAppear(perform: showConnection)
         .onChange(of: root) { newRoot in
             // The root of an existing Scenario arrives after onAppear.
-            if !showedInitialRoot, !newRoot.isEmpty, browser.path != newRoot {
+            if !showedInitialRoot, !newRoot.isEmpty, browser.path != newRoot, !isNetworkDrive {
                 browser.open(newRoot)
             }
             showedInitialRoot = true
@@ -1979,15 +2697,19 @@ private struct ScenarioFolderPanel: View {
                 .labelStyle(.iconOnly)
                 .disabled(!browser.canGoUp)
                 .help("На уровень выше")
-            Button("Домой", systemImage: "house") { browser.open(NSHomeDirectory()) }
-                .labelStyle(.iconOnly)
-                .help("Домашняя папка")
-            Button("Перейти к папке", systemImage: "text.cursor") {
-                pathDraft = browser.path
-                showsPathField.toggle()
+            Button("Домой", systemImage: "house") {
+                browser.open(isNetworkDrive || isYandex ? browser.base : NSHomeDirectory())
             }
-            .labelStyle(.iconOnly)
-            .help("Ввести путь к папке")
+                .labelStyle(.iconOnly)
+                .help(isYandex ? "Корень Яндекс Диска" : isNetworkDrive ? "Общая папка сетевого диска" : "Домашняя папка")
+            if !isNetworkDrive && !isYandex {
+                Button("Перейти к папке", systemImage: "text.cursor") {
+                    pathDraft = browser.path
+                    showsPathField.toggle()
+                }
+                .labelStyle(.iconOnly)
+                .help("Ввести путь к папке")
+            }
             // A long path folds its first crumbs into a "…" menu, so the
             // visible folder always stays visible.
             ViewThatFits(in: .horizontal) {
@@ -2111,7 +2833,7 @@ private struct ScenarioFolderPanel: View {
             .buttonStyle(.borderless)
             .labelStyle(.titleAndIcon)
             .font(.caption)
-            Text(root.isEmpty ? "не выбрана" : root)
+            Text(root.isEmpty ? "не выбрана" : displayedRoot)
                 .font(.caption.monospaced())
                 .foregroundStyle(root.isEmpty ? .secondary : .primary)
                 .lineLimit(1)
@@ -2130,6 +2852,54 @@ private struct ScenarioFolderPanel: View {
         }
     }
 
+    /// An SMB root reads as "<connection>: /folder", not as the path of the
+    /// QADREN mount directory.
+    private var displayedRoot: String {
+        if isYandex, let entry = selectedConnection, root.hasPrefix("disk:/") {
+            return entry.name + ": " + root.dropFirst("disk:".count)
+        }
+        guard isNetworkDrive, let entry = selectedConnection,
+              let base = SMBMounts.path(for: entry.id), root.hasPrefix(base) else { return root }
+        let inner = String(root.dropFirst(base.count))
+        return entry.name + ": " + (inner.isEmpty ? "/" : inner)
+    }
+
+    /// Show the files of the selected connection. A network drive is mounted
+    /// into its QADREN directory first (D-022).
+    private func showConnection() {
+        guard let entry = selectedConnection else { return }
+        if entry.adapter == "yandex_disk" {
+            mountResult = nil
+            // A root from before D-023 is not a Yandex Disk path.
+            if !root.isEmpty && !root.hasPrefix("disk:/") { changeRoot(to: "") }
+            browser.rebase(
+                "disk:/", title: entry.name,
+                open: root.hasPrefix("disk:/") ? root : "disk:/", yandexConnectionID: entry.id
+            )
+            return
+        }
+        guard entry.adapter == "smb_share" else {
+            mountResult = nil
+            browser.rebase("/", title: "Этот Mac", open: root.isEmpty ? NSHomeDirectory() : root)
+            return
+        }
+        mounting = true
+        mountResult = nil
+        Task {
+            let result = await SMBMounts.ensureMounted(entry)
+            mounting = false
+            showMounted(result)
+        }
+    }
+
+    private func showMounted(_ result: SMBMounts.Result) {
+        mountResult = result
+        guard result == .mounted, let entry = selectedConnection,
+              let base = SMBMounts.path(for: entry.id) else { return }
+        let inside = root == base || root.hasPrefix(base + "/")
+        browser.rebase(base, title: entry.name, open: inside ? root : base)
+    }
+
     /// Change the root and keep one undo step. The selection is relative to
     /// the root, so a new root starts with an empty selection.
     private func changeRoot(to newRoot: String) {
@@ -2139,7 +2909,9 @@ private struct ScenarioFolderPanel: View {
     }
 
     private func folderTitle(_ path: String) -> String {
-        path == "/" ? "Этот Mac" : (path as NSString).lastPathComponent
+        if path == "/" { return "Этот Mac" }
+        if path == browser.base { return selectedConnection?.name ?? path }
+        return path.split(separator: "/").last.map(String.init) ?? path
     }
 
     @ViewBuilder
@@ -2294,6 +3066,9 @@ private struct SettingsEmptyState<Actions: View>: View {
 
 struct ApplicationSettingsView: View {
     @AppStorage("qadren.theme") private var themeRaw = QDThemeMode.dark.rawValue
+    /// Shared with the Worker through the Registry (D-024).
+    @State private var retryUntilSuccess = true
+    @State private var settingsError: String?
 
     var body: some View {
         Form {
@@ -2305,6 +3080,27 @@ struct ApplicationSettingsView: View {
                 }
                 Text("Применяется ко всем окнам QADREN и не меняет подключения, сценарии или Worker.")
                     .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Передача файлов") {
+                Toggle("Повторять недоступные файлы до успеха", isOn: Binding(
+                    get: { retryUntilSuccess },
+                    set: { newValue in
+                        do {
+                            try StorageRegistryBridge.setRetryUntilSuccess(newValue)
+                            retryUntilSuccess = newValue
+                            settingsError = nil
+                        } catch {
+                            settingsError = error.localizedDescription
+                        }
+                    }
+                ))
+                Text(retryUntilSuccess
+                    ? "Файл, который не скачался из-за временной ошибки (например, ошибка 500 у Яндекса), фоновая служба повторяет через 1 мин, 5 мин, 30 мин, 2 ч и 12 ч, а затем раз в сутки — пока он не скачается или вы не остановите пакет. Файл при неудачной попытке не записывается."
+                    : "Файл, который не скачался из-за временной ошибки, фоновая служба повторяет через 1 мин, 5 мин, 30 мин, 2 ч и 12 ч. После этого он отмечается как не выполненный и остаётся в плане.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let settingsError {
+                    Text(settingsError).font(.caption).foregroundStyle(.orange)
+                }
             }
             Section("Состояние приложения") {
                 LabeledContent("Настройки", value: "Отдельное окно")
@@ -2322,6 +3118,11 @@ struct ApplicationSettingsView: View {
         .formStyle(.grouped)
         .padding(20)
         .navigationTitle("Настройки приложения")
+        .onAppear {
+            if let settings = try? StorageRegistryBridge.sharedSettings() {
+                retryUntilSuccess = settings.retry_until_success
+            }
+        }
     }
 
     /// Marketing version and build number from Info.plist.

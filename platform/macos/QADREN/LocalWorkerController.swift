@@ -26,13 +26,70 @@ enum LocalWorkerController {
         }
         // An explicit user stop is durable: do not register again silently.
         guard registrationAllowed, !UserDefaults.standard.bool(forKey: stoppedByUserKey) else { return }
+        // A new build has a new bundle version. Register it again, so that
+        // launchd starts the Worker of this build. With an ad-hoc signature
+        // SMAppService also binds the Worker to the cdhash of the registered
+        // build and refuses another one (OS_REASON_CODESIGNING); with a Team
+        // ID signature the binding is the Team ID and the first attempt works.
+        if service.status == .enabled, registeredBuild != currentBuild {
+            // D-024: never stop a Worker while it writes a file. The running
+            // Worker continues; the next app start registers the new build.
+            if let active = try? WorkerIPC.activeItems(), active > 0 { return }
+            registerVerified(build: currentBuild, attempt: 0, unregisterFirst: true)
+            return
+        }
         // Before the first registration, some macOS versions report .notFound
         // instead of .notRegistered. Both mean: not registered yet.
         guard service.status == .notRegistered || service.status == .notFound else {
             registrationFailed = false
             return
         }
-        register()
+        registerVerified(build: currentBuild, attempt: 0, unregisterFirst: false)
+    }
+
+    /// Pauses before each repeat of the registration.
+    private static let retryDelays: [Double] = [10, 20, 40, 60, 90]
+
+    /// Register, and then prove that the Worker answers. An ad-hoc signed
+    /// build gets a new Worker cdhash, and macOS applies it to a LaunchAgent
+    /// registration only some time after the build: on 2026-10-25 a
+    /// registration within the first ~30 s kept the old cdhash, and the same
+    /// steps about a minute later worked. So repeat unregister and register
+    /// with growing pauses. The build counts as registered only after the
+    /// Worker answers; otherwise the next launch tries again.
+    private static func registerVerified(build: String, attempt: Int, unregisterFirst: Bool) {
+        let registerAndProbe = {
+            // The unregistration is applied a moment after the call returns.
+            DispatchQueue.main.asyncAfter(deadline: .now() + (unregisterFirst ? 3 : 0)) {
+                guard register() else { return }
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 5) {
+                    let answers = (try? WorkerIPC.probeStatus(timeoutSeconds: 2)) != nil
+                    DispatchQueue.main.async {
+                        if answers {
+                            registeredBuild = build
+                        } else if attempt < retryDelays.count {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + retryDelays[attempt]) {
+                                registerVerified(build: build, attempt: attempt + 1, unregisterFirst: true)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if unregisterFirst {
+            service.unregister { _ in registerAndProbe() }
+        } else {
+            registerAndProbe()
+        }
+    }
+
+    private static let registeredBuildKey = "qadren.worker.registered-build"
+    private static var currentBuild: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
+    }
+    private static var registeredBuild: String {
+        get { UserDefaults.standard.string(forKey: registeredBuildKey) ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: registeredBuildKey) }
     }
 
     private static let stoppedByUserKey = "qadren.worker.stopped-by-user"

@@ -1,4 +1,5 @@
-//! Read-only Yandex Disk metadata adapter. No content download or write endpoints.
+//! Yandex Disk adapter: metadata, verified content download (D-023 stage 1),
+//! and a no-overwrite upload primitive that no Scenario uses yet.
 use crate::{AdapterCapabilities, StorageAdapter};
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderValue, AUTHORIZATION};
@@ -23,10 +24,19 @@ pub enum YandexError {
     UnsafeTransferUrl,
     UploadRejected(u16),
     UploadOutcomeUnknown,
+    /// The downloaded byte count or MD5 differs from the provider metadata.
+    ContentMismatch,
+    /// The folder tree exceeds the snapshot entry or depth limit.
+    SnapshotTooLarge,
+    /// The API gave a download link, but the storage host does not serve the
+    /// content (for example HTTP 500). Observed on 2026-10-24 for some files
+    /// after the October 2026 Yandex data-center incident.
+    ContentUnavailable(u16),
 }
 impl From<reqwest::Error> for YandexError {
     fn from(err: reqwest::Error) -> Self {
-        Self::Transport(err)
+        // A download link is signed: it must never reach a log or a message.
+        Self::Transport(err.without_url())
     }
 }
 pub type Result<T> = std::result::Result<T, YandexError>;
@@ -196,7 +206,101 @@ struct DiskAccountUser {
 
 pub struct YandexMetadataClient {
     http: Client,
+    /// Content client: no OAuth header, at most one redirect to a Yandex host.
+    download_http: Client,
     api_base: String,
+}
+
+/// Hosts that may serve a signed download link or its single redirect.
+const TRANSFER_HOST_SUFFIXES: [&str; 2] = [".yandex.net", ".yandex.ru"];
+
+fn trusted_transfer_url(url: &reqwest::Url) -> bool {
+    url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.host_str().is_some_and(|host| {
+            TRANSFER_HOST_SUFFIXES
+                .iter()
+                .any(|suffix| host.ends_with(suffix))
+        })
+}
+
+fn download_client(timeout: Duration) -> reqwest::Result<Client> {
+    Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        // The blocking client applies this limit to each body read, so it
+        // stops a stalled transfer without limiting a large file.
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() > 1 || !trusted_transfer_url(attempt.url()) {
+                attempt.error("untrusted download redirect")
+            } else {
+                attempt.follow()
+            }
+        }))
+        .build()
+}
+
+/// One file in a Yandex Disk folder snapshot. `relative_path` uses `/` and is
+/// relative to the snapshot root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteFile {
+    pub relative_path: String,
+    pub size: u64,
+    pub md5: String,
+    pub modified: Option<String>,
+}
+
+/// Maximum folder depth of a snapshot, as for a local tree.
+const MAX_SNAPSHOT_DEPTH: usize = 256;
+
+/// Streams one download and computes its MD5. The reader refuses bytes past
+/// the expected size, and at end of stream it refuses a short stream or
+/// another MD5. A local writer therefore never publishes unverified content.
+pub struct YandexDownload {
+    body: reqwest::blocking::Response,
+    expected_size: u64,
+    expected_md5: String,
+    received: u64,
+    digest: md5::Context,
+    verified: bool,
+}
+
+impl Read for YandexDownload {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        if output.is_empty() {
+            return Ok(0);
+        }
+        let count = self.body.read(output)?;
+        if count == 0 {
+            let md5 = format!("{:x}", self.digest.clone().compute());
+            if self.received != self.expected_size || md5 != self.expected_md5 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "download differs from the provider size or MD5",
+                ));
+            }
+            self.verified = true;
+            return Ok(0);
+        }
+        self.received = self.received.saturating_add(count as u64);
+        if self.received > self.expected_size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "download exceeds the provider size",
+            ));
+        }
+        self.digest.consume(&output[..count]);
+        Ok(count)
+    }
+}
+
+impl YandexDownload {
+    /// True only after the reader reached the end of a stream with the
+    /// provider size and MD5.
+    pub fn verified(&self) -> bool {
+        self.verified
+    }
 }
 
 impl StorageAdapter for YandexMetadataClient {
@@ -207,7 +311,7 @@ impl StorageAdapter for YandexMetadataClient {
     fn capabilities(&self) -> AdapterCapabilities {
         AdapterCapabilities {
             metadata: true,
-            read_content: false,
+            read_content: true,
             write_content: false,
         }
     }
@@ -220,6 +324,7 @@ impl YandexMetadataClient {
                 .timeout(Duration::from_secs(15))
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
+            download_http: download_client(Duration::from_secs(60))?,
             api_base: API.to_owned(),
         })
     }
@@ -232,6 +337,7 @@ impl YandexMetadataClient {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("test HTTP client"),
+            download_http: download_client(Duration::from_secs(3)).expect("test HTTP client"),
             api_base,
         }
     }
@@ -388,10 +494,213 @@ impl YandexMetadataClient {
         }
         let query = [
             ("path", path.to_owned()),
-            ("limit", limit.clamp(1, 100).to_string()),
+            ("limit", limit.clamp(1, 1000).to_string()),
             ("offset", offset.to_string()),
         ];
         self.get_json("/resources", token, &query)
+    }
+
+    /// Opens one file download. The caller streams the result into a local
+    /// staging file and checks `verified`. The OAuth header goes only to the
+    /// API host, never to the signed link host. The expected size and MD5
+    /// come from metadata that the caller read before its durable attempt.
+    pub fn open_download(
+        &self,
+        token: &str,
+        path: &str,
+        expected_size: u64,
+        expected_md5: &str,
+    ) -> Result<YandexDownload> {
+        if !path.starts_with("disk:/")
+            || path.contains(|ch: char| ch.is_control())
+            || path == "disk:/"
+        {
+            return Err(YandexError::InvalidPath);
+        }
+        if !valid_md5(expected_md5) {
+            return Err(YandexError::ContentMismatch);
+        }
+        let link: TransferLink =
+            self.get_json("/resources/download", token, &[("path", path.to_owned())])?;
+        if link.method != "GET" {
+            return Err(YandexError::UnsafeTransferUrl);
+        }
+        let parsed = reqwest::Url::parse(&link.href).map_err(|_| YandexError::UnsafeTransferUrl)?;
+        if !trusted_transfer_url(&parsed) {
+            return Err(YandexError::UnsafeTransferUrl);
+        }
+        let response = self.download_http.get(parsed).send()?;
+        match response.status() {
+            StatusCode::OK => {}
+            StatusCode::NOT_FOUND => return Err(YandexError::NotFound),
+            StatusCode::TOO_MANY_REQUESTS => return Err(YandexError::RateLimited),
+            code if code.is_server_error() => {
+                return Err(YandexError::ContentUnavailable(code.as_u16()))
+            }
+            code => return Err(YandexError::Provider(code.as_u16())),
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length != expected_size)
+        {
+            return Err(YandexError::ContentMismatch);
+        }
+        Ok(YandexDownload {
+            body: response,
+            expected_size,
+            expected_md5: expected_md5.to_ascii_lowercase(),
+            received: 0,
+            digest: md5::Context::new(),
+            verified: false,
+        })
+    }
+
+    /// Lists every file under `root` through bounded metadata pages. Any
+    /// error fails the whole snapshot, so a partial tree never makes a plan.
+    /// A file without size or a valid MD5 fails closed.
+    pub fn list_tree(
+        &self,
+        token: &str,
+        root: &str,
+        max_entries: usize,
+    ) -> Result<Vec<RemoteFile>> {
+        self.list_selection(token, root, &[], max_entries)
+    }
+
+    /// Like `list_tree`, but only below the selected objects of a Scenario.
+    /// An empty selection is the full root. A selected object that does not
+    /// exist now gives no file. A large Disk is then never walked for a
+    /// small selection.
+    pub fn list_selection(
+        &self,
+        token: &str,
+        root: &str,
+        selected: &[String],
+        max_entries: usize,
+    ) -> Result<Vec<RemoteFile>> {
+        if !root.starts_with("disk:/") || root.contains(|ch: char| ch.is_control()) {
+            return Err(YandexError::InvalidPath);
+        }
+        let root = if root == "disk:/" {
+            root
+        } else {
+            root.trim_end_matches('/')
+        };
+        let join = |relative: &str| {
+            if root.ends_with('/') {
+                format!("{root}{relative}")
+            } else {
+                format!("{root}/{relative}")
+            }
+        };
+        let mut pending = Vec::new();
+        let mut files = Vec::new();
+        let mut entries = 0usize;
+        if selected.is_empty() {
+            pending.push((String::new(), 0usize));
+        }
+        for path in selected {
+            let segments: Vec<&str> = path.split('/').collect();
+            if segments
+                .iter()
+                .any(|segment| segment.is_empty() || *segment == "." || *segment == "..")
+                || path.contains(|ch: char| ch.is_control())
+            {
+                return Err(YandexError::InvalidPath);
+            }
+            let item = match self.resource_metadata(token, &join(path)) {
+                Ok(item) => item,
+                Err(YandexError::NotFound) => continue,
+                Err(error) => return Err(error),
+            };
+            entries += 1;
+            if entries > max_entries {
+                return Err(YandexError::SnapshotTooLarge);
+            }
+            match item.kind.as_str() {
+                "dir" => pending.push((path.clone(), segments.len())),
+                "file" => {
+                    let (Some(size), Some(md5)) = (item.size, item.md5) else {
+                        return Err(YandexError::Provider(200));
+                    };
+                    if !valid_md5(&md5) {
+                        return Err(YandexError::Provider(200));
+                    }
+                    files.push(RemoteFile {
+                        relative_path: path.clone(),
+                        size,
+                        md5: md5.to_ascii_lowercase(),
+                        modified: item.modified,
+                    });
+                }
+                _ => return Err(YandexError::Provider(200)),
+            }
+        }
+        while let Some((relative, depth)) = pending.pop() {
+            let folder = match (relative.is_empty(), root.ends_with('/')) {
+                (true, _) => root.to_owned(),
+                (false, true) => format!("{root}{relative}"),
+                (false, false) => format!("{root}/{relative}"),
+            };
+            let mut offset = 0u64;
+            loop {
+                let page = self.list_folder(token, &folder, offset, 1000)?;
+                if page.kind != "dir" {
+                    return Err(YandexError::InvalidPath);
+                }
+                let Some(list) = page.embedded else {
+                    return Err(YandexError::Provider(200));
+                };
+                let count = list.items.len() as u64;
+                for item in list.items {
+                    entries += 1;
+                    if entries > max_entries {
+                        return Err(YandexError::SnapshotTooLarge);
+                    }
+                    if item.name.is_empty()
+                        || item.name.contains('/')
+                        || item.name == "."
+                        || item.name == ".."
+                    {
+                        return Err(YandexError::InvalidPath);
+                    }
+                    let child = if relative.is_empty() {
+                        item.name.clone()
+                    } else {
+                        format!("{relative}/{}", item.name)
+                    };
+                    match item.kind.as_str() {
+                        "dir" => {
+                            if depth + 1 > MAX_SNAPSHOT_DEPTH {
+                                return Err(YandexError::SnapshotTooLarge);
+                            }
+                            pending.push((child, depth + 1));
+                        }
+                        "file" => {
+                            let (Some(size), Some(md5)) = (item.size, item.md5) else {
+                                return Err(YandexError::Provider(200));
+                            };
+                            if !valid_md5(&md5) {
+                                return Err(YandexError::Provider(200));
+                            }
+                            files.push(RemoteFile {
+                                relative_path: child,
+                                size,
+                                md5: md5.to_ascii_lowercase(),
+                                modified: item.modified,
+                            });
+                        }
+                        _ => return Err(YandexError::Provider(200)),
+                    }
+                }
+                offset += count;
+                if count == 0 || offset >= list.total {
+                    break;
+                }
+            }
+        }
+        files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+        Ok(files)
     }
 }
 
@@ -457,6 +766,7 @@ mod tests {
                 .timeout(Duration::from_secs(3))
                 .build()
                 .unwrap(),
+            download_http: download_client(Duration::from_secs(3)).unwrap(),
             api_base: format!("http://{addr}/v1/disk"),
         };
         (client, thread)
@@ -490,6 +800,7 @@ mod tests {
                 .timeout(Duration::from_secs(3))
                 .build()
                 .unwrap(),
+            download_http: download_client(Duration::from_secs(3)).unwrap(),
             api_base: format!("http://{address}/v1/disk"),
         };
         let result = client.upload_from_reader(
@@ -531,6 +842,7 @@ mod tests {
                 .timeout(Duration::from_secs(3))
                 .build()
                 .unwrap(),
+            download_http: download_client(Duration::from_secs(3)).unwrap(),
             api_base: format!("http://{address}/v1/disk"),
         };
         let match_result = client
@@ -720,6 +1032,7 @@ mod tests {
                 .timeout(Duration::from_millis(50))
                 .build()
                 .unwrap(),
+            download_http: download_client(Duration::from_secs(3)).unwrap(),
             api_base: format!("http://{addr}/v1/disk"),
         };
         assert!(matches!(
@@ -730,12 +1043,23 @@ mod tests {
     }
 
     #[test]
-    fn metadata_capabilities_exclude_contents() {
+    fn capabilities_allow_download_but_not_write() {
         let client = YandexMetadataClient::new().unwrap();
         let caps = client.capabilities();
         assert!(caps.metadata);
-        assert!(!caps.read_content);
+        assert!(caps.read_content);
         assert!(!caps.write_content);
+    }
+
+    #[test]
+    fn download_link_must_be_https_on_a_yandex_host() {
+        let ok = |url: &str| trusted_transfer_url(&reqwest::Url::parse(url).unwrap());
+        assert!(ok("https://downloader.disk.yandex.ru/disk/x"));
+        assert!(ok("https://s123.mds.storage.yandex.net/x"));
+        assert!(!ok("http://downloader.disk.yandex.ru/disk/x"));
+        assert!(!ok("https://yandex.ru.example.com/x"));
+        assert!(!ok("https://evilyandex.net/x"));
+        assert!(!ok("https://user:pw@downloader.disk.yandex.ru/x"));
     }
 
     #[test]

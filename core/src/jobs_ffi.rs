@@ -48,6 +48,11 @@ pub unsafe extern "C" fn qadren_jobs_dispatch_scenario_copy_baselines(
     })();
     match result {
         Ok(dispatched) => response(json!({"ok":true,"data":{"dispatched":dispatched}})),
+        // D-024: the Worker owns the JobStore while it runs and delivers the
+        // baselines itself, after each copy and on every poll.
+        Err(crate::jobs::JobStoreError::AlreadyOpen) => {
+            response(json!({"ok":true,"data":{"dispatched":0,"delivered_by":"worker"}}))
+        }
         Err(_) => response(json!({"ok":false,"error":"scenario_baseline_dispatch_unavailable"})),
     }
 }
@@ -190,9 +195,11 @@ pub unsafe extern "C" fn qadren_jobs_connection_has_unresolved_attempts(
     let (Some(path), Some(connection_id)) = (input(path), input(connection_id)) else {
         return response(json!({"ok": false, "error": "invalid_request"}));
     };
-    match JobStore::open(Path::new(path))
-        .and_then(|store| store.connection_has_unresolved_attempts(connection_id))
-    {
+    // A read: the Worker owns the JobStore while it runs (D-024).
+    match JobStore::open_read_only(Path::new(path)).and_then(|store| match store {
+        Some(store) => store.connection_has_unresolved_attempts(connection_id),
+        None => Ok(false),
+    }) {
         Ok(unresolved) => response(json!({"ok": true, "data": {"unresolved": unresolved}})),
         Err(crate::jobs::JobStoreError::InvalidId) => {
             response(json!({"ok": false, "error": "invalid_request"}))
@@ -448,6 +455,9 @@ pub unsafe extern "C" fn qadren_jobs_run_local_file_copy(
         Err(crate::job_execution::LocalFileCopyError::VerificationFailed) => {
             response(json!({"ok":false,"error":"verification_failed"}))
         }
+        Err(crate::job_execution::LocalFileCopyError::Remote(_)) => {
+            response(json!({"ok":false,"error":"provider_error"}))
+        }
         Err(crate::job_execution::LocalFileCopyError::OutcomeUnknown(_)) => {
             response(json!({"ok":false,"error":"outcome_unknown"}))
         }
@@ -552,6 +562,9 @@ pub unsafe extern "C" fn qadren_jobs_run_local_file_replace(
         }
         Err(crate::job_execution::LocalFileCopyError::VerificationFailed) => {
             response(json!({"ok":false,"error":"verification_failed"}))
+        }
+        Err(crate::job_execution::LocalFileCopyError::Remote(_)) => {
+            response(json!({"ok":false,"error":"provider_error"}))
         }
         Err(crate::job_execution::LocalFileCopyError::OutcomeUnknown(_)) => {
             response(json!({"ok":false,"error":"outcome_unknown"}))
@@ -665,6 +678,9 @@ pub unsafe extern "C" fn qadren_jobs_run_local_scenario_file_copy(
         Err(crate::job_execution::LocalFileCopyError::VerificationFailed) => {
             response(json!({"ok":false,"error":"verification_failed"}))
         }
+        Err(crate::job_execution::LocalFileCopyError::Remote(_)) => {
+            response(json!({"ok":false,"error":"provider_error"}))
+        }
         Err(crate::job_execution::LocalFileCopyError::OutcomeUnknown(_)) => {
             response(json!({"ok":false,"error":"outcome_unknown"}))
         }
@@ -775,6 +791,9 @@ pub unsafe extern "C" fn qadren_jobs_run_local_scenario_file_replace(
         }
         Err(crate::job_execution::LocalFileCopyError::VerificationFailed) => {
             response(json!({"ok":false,"error":"verification_failed"}))
+        }
+        Err(crate::job_execution::LocalFileCopyError::Remote(_)) => {
+            response(json!({"ok":false,"error":"provider_error"}))
         }
         Err(crate::job_execution::LocalFileCopyError::OutcomeUnknown(_)) => {
             response(json!({"ok":false,"error":"outcome_unknown"}))

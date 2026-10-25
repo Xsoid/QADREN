@@ -115,6 +115,38 @@ enum DiskMetadataBridge {
         }
         return listing
     }
+    /// Recursive metadata of one Yandex Disk Scenario root (D-023). An error
+    /// code comes back as a `yandex_` user message code.
+    static func scenarioSnapshot(
+        registryPath: String, connectionID: String, root: String, selection: [String], accessValue: String
+    ) throws -> [ScenarioSnapshotItem] {
+        let selectionJSON = String(decoding: try JSONEncoder().encode(selection), as: UTF8.self)
+        let pointer = registryPath.withCString { registry in
+            connectionID.withCString { connection in
+                root.withCString { root in
+                    selectionJSON.withCString { selection in
+                        accessValue.withCString { value in
+                            yandexScenarioSnapshot(registry, connection, root, selection, value)
+                        }
+                    }
+                }
+            }
+        }
+        guard let pointer else { throw BridgeFailure.message("No response from Rust") }
+        defer { yandexFree(pointer) }
+        guard let result = try? JSONDecoder().decode(
+            MetadataResult<[ScenarioSnapshotItem]>.self, from: Data(String(cString: pointer).utf8)
+        ) else {
+            throw BridgeFailure.message("Invalid metadata response")
+        }
+        guard result.ok, let items = result.data else {
+            let code = result.error ?? "provider_error"
+            throw BridgeFailure.message(QADRENUserMessage.text(
+                for: code.hasPrefix("local_") ? code : "yandex_" + code
+            ))
+        }
+        return items
+    }
     static func folder(token: String, path: String) throws -> DiskListing {
         try folderPage(accessValue: token, path: path, offset: 0)
     }
@@ -140,6 +172,11 @@ private enum BridgeFailure: Error {
     case message(String)
 }
 
+@_silgen_name("qadren_yandex_scenario_metadata_snapshot")
+private func yandexScenarioSnapshot(
+    _ registry: UnsafePointer<CChar>?, _ connectionID: UnsafePointer<CChar>?,
+    _ root: UnsafePointer<CChar>?, _ selection: UnsafePointer<CChar>?, _ value: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_yandex_list_folder_page")
 private func yandexFolderPage(_ value: UnsafePointer<CChar>?, _ path: UnsafePointer<CChar>?, _ offset: UInt64) -> UnsafeMutablePointer<CChar>?
 

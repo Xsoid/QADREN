@@ -13,6 +13,9 @@ final class StorageConnections: ObservableObject {
 
     init() {
         refresh()
+        // Network drives are mounted at start, so that plans and scheduled
+        // Jobs find their files (D-022).
+        Task { await SMBMounts.mountAll(self) }
     }
 
     func refresh() {
@@ -36,6 +39,71 @@ final class StorageConnections: ObservableObject {
         } catch {
             self.error = error.localizedDescription
         }
+    }
+
+    /// Saves one SMB share connection with its login and password (D-021).
+    /// The order fails closed, as `ConnectionAuthorization` does: the record
+    /// stays `requires_auth` until the Keychain item is written and read back.
+    /// `outcome` is the result of the login check; nil means not checked.
+    func addSMBShare(
+        name: String, address: String, credentials: SMBCredentials, outcome: SMBCheckOutcome?
+    ) throws {
+        let id = try StorageRegistryBridge.addSMBShare(name: name, address: address)
+        refresh()
+        publishChange()
+        try saveSMBCredentials(id: id, credentials: credentials, outcome: outcome)
+        Task { await SMBMounts.mountAll(self) }
+    }
+
+    /// Changes the address, the login, and the password of an SMB share.
+    /// A Scenario that uses this connection keeps its roots and confirmed
+    /// files; another share under the same roots could look like mass
+    /// deletion. So the address of a connection in use does not change.
+    func updateSMBShare(
+        id: String, address: String, credentials: SMBCredentials, outcome: SMBCheckOutcome?
+    ) throws {
+        let current = try StorageRegistryBridge.list().first { $0.id == id }
+        let addressChanged = current?.endpoint_url != SMBAddress.normalized(address)
+        if addressChanged {
+            if let scenario = try StorageRegistryBridge.listScenarios()
+                .first(where: { $0.left_connection_id == id || $0.right_connection_id == id }) {
+                throw StorageError.operation(
+                    "Адрес нельзя изменить: подключение использует сценарий «\(scenario.name)». Создайте новое подключение для другой сетевой папки."
+                )
+            }
+            // The QADREN mount still shows the old share.
+            SMBMounts.release(id)
+            try StorageRegistryBridge.setSMBEndpoint(id: id, address: address)
+        }
+        try saveSMBCredentials(id: id, credentials: credentials, outcome: outcome)
+        Task { await SMBMounts.mountAll(self) }
+    }
+
+    /// Records the result of a login check with the saved credentials.
+    func recordSMBCheck(id: String, outcome: SMBCheckOutcome) {
+        do {
+            try StorageRegistryBridge.setStatus(id: id, status: outcome.registryStatus)
+            refresh()
+            publishChange()
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    private func saveSMBCredentials(
+        id: String, credentials: SMBCredentials, outcome: SMBCheckOutcome?
+    ) throws {
+        defer {
+            refresh()
+            publishChange()
+        }
+        try StorageRegistryBridge.setStatus(id: id, status: "requires_auth")
+        try SMBKeychain.store(credentials, for: id)
+        guard try SMBKeychain.read(id) == credentials else {
+            throw StorageError.operation("Keychain copy could not be verified")
+        }
+        try StorageRegistryBridge.setCredential(id: id)
+        try StorageRegistryBridge.setStatus(id: id, status: outcome?.registryStatus ?? "disconnected")
     }
 
     @discardableResult
@@ -112,6 +180,16 @@ final class StorageConnections: ObservableObject {
                     deleteCredential: { try YandexKeychain.delete(id) },
                     deleteRecord: deleteRecord
                 )
+            case "smb_share":
+                try ConnectionRemoval.run(
+                    adapter: entry.adapter,
+                    disable: disable,
+                    ensureNoUnresolvedAttempts: ensureNoUnresolvedAttempts,
+                    deleteCredential: { try SMBKeychain.delete(id) },
+                    deleteRecord: deleteRecord
+                )
+                // Local cleanup only: unmount and remove the empty directory.
+                SMBMounts.release(id)
             case "local_filesystem":
                 try ConnectionRemoval.removeLocal(
                     disable: disable,
@@ -139,6 +217,13 @@ final class StorageConnections: ObservableObject {
                 self.error = "Connection removal incomplete; retry Remove: " + error.localizedDescription
             }
         }
+    }
+
+    /// Another object changed a connection status in the Registry, for
+    /// example a Yandex Disk sign-in. Read it again and tell the dashboard.
+    func statusDidChange() {
+        refresh()
+        publishChange()
     }
 
     private func publishChange() {

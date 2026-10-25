@@ -17,8 +17,10 @@ pub mod scenario_copy_dispatch;
 pub mod scenario_planner;
 pub mod schedule_dispatch;
 pub mod scheduler;
+pub mod storage_access;
 pub mod verification;
 pub mod yandex;
+pub mod yandex_execution;
 pub mod yandex_ffi;
 
 use std::ffi::c_char;

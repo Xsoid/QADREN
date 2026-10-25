@@ -9,11 +9,18 @@ This document defines approved product stages. It is not a work log or an accept
 3. Connect Local Filesystem Scenarios to those operations.
 4. Deliver local scheduling, independent Worker lifecycle, and macOS distribution evidence.
 
-Release 1 uses Local Filesystem only. New files use no-overwrite. Replacement follows the approved replacement protocol. A failed or uncertain effect is reconciled without mutation and remains `UNKNOWN` if proof is insufficient.
+Release 1 uses Local Filesystem and SMB network drives through a QADREN mount (D-022). New files use no-overwrite. Replacement follows the approved replacement protocol. A failed or uncertain effect is reconciled without mutation and remains `UNKNOWN` if proof is insufficient.
+
+## Release 1 improvements
+
+1. Yandex Disk to Mac: a one-way Scenario with a Yandex Disk source (D-023, stage 1).
+2. Large transfers (D-024): Worker-owned Transfer Runs with retries, then stored snapshots, then stored paged plans, then MD5 reconciliation.
+3. Deletion on the Mac side for a Yandex Disk source (a separate step).
+4. Mac to Yandex Disk and two-way Yandex Disk Scenarios (D-023, stage 2).
 
 ## Post-release
 
-Yandex Disk and iCloud require a separate owner decision before new feature work, OAuth, transfer, entitlement, or live integration testing. Remote Workers require a separate decision for transport, trust, command delivery, acknowledgments, revisions, and idempotency.
+iCloud requires a separate owner decision before new feature work, OAuth, transfer, entitlement, or live integration testing. Remote Workers require a separate decision for transport, trust, command delivery, acknowledgments, revisions, and idempotency.
 
 Content version archives, runtime BackupSet, inter-Scenario dependencies, remote Worker protocol, proprietary search indexes, and Controller-driven Worker updates are deferred.
 

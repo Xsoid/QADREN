@@ -15,10 +15,11 @@ QADREN is a cross-platform file transfer and synchronization system. Rust owns c
 
 ## Release 1
 
-- Release 1 is Local Filesystem only.
+- Release 1 file operations use "This Mac" (Local Filesystem) and the "Сетевой диск (SMB)" connector (`smb_share`). An SMB share is mounted at `~/.qadren/mounts/<connection_id>` and uses the Local Filesystem executor. Core refuses SMB work unless that mount is present. See `docs/decisions/D-021-smb-network-drive-connector.md` and `docs/decisions/D-022-smb-in-release-1-scenarios.md`.
 - Use one Rust JobStore. A `Scenario` defines synchronization rules. A `Job` is one execution or manual file operation.
 - Keep each `StorageConnection` independent. Bind OAuth and Keychain state to `connection_id`.
-- Yandex Disk and iCloud are post-release. Do not add API, OAuth, transfer, entitlement, or live end-to-end work without a new owner decision.
+- A one-way Scenario can use Yandex Disk (`yandex_disk`) as the source and a Local Filesystem or SMB root as the destination. The app runs these Jobs; the background Worker refuses them. Yandex Disk as a destination is stage 2. See `docs/decisions/D-023-yandex-disk-to-mac.md`.
+- iCloud is post-release. Do not add iCloud work without a new owner decision.
 - Do not add content versioning, runtime BackupSet, Scenario dependencies, or remote Worker protocol.
 
 ## Safety

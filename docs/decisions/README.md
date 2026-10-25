@@ -23,6 +23,10 @@ Baseline date: **2026-10-08**. Records list agreements. They do not prove the fe
 | D-018 | Accepted (2026-10-14) | [Local-first Release 1: P0 UI, P1 Local FS controller, P2 autonomous product; Yandex post-release P3, iCloud postponed](D-018-local-first-priorities.md) |
 | D-017 | Accepted, partially revised D-018 | [iCloud future-only; historical cloud scope is replaced by local-first Release 1](D-017-defer-icloud.md) |
 | D-020 | Accepted (2026-10-24) | [One automatic "This Mac" connection per Mac; connector list in "Добавить подключение"; revises D-016 for `local_filesystem` only](D-020-single-this-mac-connection.md) |
+| D-021 | Accepted (2026-10-24) | ["Сетевой диск (SMB)" connector: any number of connections, address in the Registry, login and password in the Keychain, login check through NetFS; no Scenario use yet](D-021-smb-network-drive-connector.md) |
+| D-022 | Accepted (2026-10-24) | [SMB network drive in Release 1 Scenarios: QADREN mount per connection, Local Filesystem executor, Core mount gate; revises D-018](D-022-smb-in-release-1-scenarios.md) |
+| D-023 | Accepted (2026-10-24) | [Yandex Disk to Mac: a one-way Scenario with a Yandex Disk source and a Local Filesystem destination; two-way is stage 2; revises D-018 and D-022](D-023-yandex-disk-to-mac.md) |
+| D-024 | Accepted (2026-10-25) | [Large transfers: Worker-owned Transfer Runs on a background thread, resumable snapshots, stored paged plans, retry classes, Worker token access (in memory now, shared Keychain group with a Team ID later), MD5 reconciliation](D-024-large-transfers.md) |
 | D-019 | Accepted (2026-10-23) | [Inline Scenario folder browser, selected objects, and Paranoid / Simple synchronization deletion modes with a 20-deletion threshold](D-019-scenario-selection-and-deletion-modes.md) |
 
 ## Revision 2026-10-09 — specification v0.2

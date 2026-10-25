@@ -28,6 +28,17 @@ enum ConnectionPresentationStatus: Equatable {
         }
     }
 
+    /// "This Mac" is not connected or checked like a remote storage; its
+    /// Registry status keeps the initial `disconnected`. An enabled "This
+    /// Mac" is ready.
+    init(adapter: String, enabled: Bool, registryStatus: String) {
+        if enabled && adapter == "local_filesystem" {
+            self = .ready
+        } else {
+            self.init(enabled: enabled, registryStatus: registryStatus)
+        }
+    }
+
     static func aggregate(_ entries: [ConnectionPresentationStatus], registryFailed: Bool) -> ConnectionPresentationStatus {
         if registryFailed { return .failed }
         guard !entries.isEmpty else { return .waiting }

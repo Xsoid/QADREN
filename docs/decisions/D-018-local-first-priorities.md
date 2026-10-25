@@ -1,6 +1,6 @@
 # D-018 — Local-First Release 1 Priorities
 
-**Date:** 2026-10-14. **Status:** accepted. **Overrides:** earlier Release 1 sequencing in D-017 and historical plans. Safety policies, D-016, and technical constraints remain in force.
+**Date:** 2026-10-14. **Status:** accepted; revised by [D-022](D-022-smb-in-release-1-scenarios.md) (SMB network drive in Release 1 Scenarios) and [D-023](D-023-yandex-disk-to-mac.md) (Yandex Disk to Mac). **Overrides:** earlier Release 1 sequencing in D-017 and historical plans. Safety policies, D-016, and technical constraints remain in force.
 
 ## Decision
 

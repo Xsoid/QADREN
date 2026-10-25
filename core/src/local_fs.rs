@@ -430,7 +430,18 @@ impl LocalFilesystem {
         }
         #[cfg(unix)]
         {
-            secure::list_with_skipped(&self.root_fd, path)
+            let (mut entries, mut skipped) = secure::list_with_skipped(&self.root_fd, path)?;
+            // smbfs lists names in NFD. Report them in NFC, the form that
+            // QADREN and providers use; smbfs opens a name in either form.
+            if secure::inode_follows_name(&self.root_fd) {
+                for entry in &mut entries {
+                    entry.name = secure::nfc(&entry.name);
+                }
+                for name in &mut skipped {
+                    *name = secure::nfc(name);
+                }
+            }
+            Ok((entries, skipped))
         }
         #[cfg(not(unix))]
         {
@@ -652,6 +663,29 @@ impl LocalFilesystem {
         let staging = replacement_staging_path(to)?;
         let bytes = self.copy_file_to_new(from, destination, &staging)?;
         match destination.rename_file_replace(&staging, to) {
+            Ok(()) => Ok(bytes),
+            Err(LocalError::OutcomeUnknown(error)) => Err(LocalError::OutcomeUnknown(error)),
+            Err(error) => Err(LocalError::OutcomeUnknown(io::Error::other(format!(
+                "replacement publish did not complete safely: {error:?}"
+            )))),
+        }
+    }
+
+    /// Write `input` to a private staging name, then atomically replace the
+    /// existing regular file `to`. An error before the staging file is
+    /// published leaves `to` unchanged. A publish error is UNKNOWN.
+    pub fn create_from_reader_to_replace<R: io::Read>(
+        &self,
+        to: &Path,
+        input: &mut R,
+    ) -> Result<u64> {
+        Self::relative(to)?;
+        if matches!(self.stat(to), Ok(entry) if entry.is_directory) {
+            return Err(LocalError::UnsafeEntry);
+        }
+        let staging = replacement_staging_path(to)?;
+        let bytes = self.create_from_reader(&staging, input)?;
+        match self.rename_file_replace(&staging, to) {
             Ok(()) => Ok(bytes),
             Err(LocalError::OutcomeUnknown(error)) => Err(LocalError::OutcomeUnknown(error)),
             Err(error) => Err(LocalError::OutcomeUnknown(io::Error::other(format!(
@@ -3189,7 +3223,10 @@ pub(crate) mod tests {
         let trash = secure::root(&trash_root).unwrap();
         secure::trash_file_into(&adapter.root_fd, Path::new("a.txt"), &trash).unwrap();
         assert!(!root.join("a.txt").exists());
-        assert_eq!(fs::read(trash_root.join("a.txt")).unwrap(), b"older trash entry");
+        assert_eq!(
+            fs::read(trash_root.join("a.txt")).unwrap(),
+            b"older trash entry"
+        );
         assert_eq!(fs::read(trash_root.join("a 2.txt")).unwrap(), b"new");
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(trash_root).unwrap();
