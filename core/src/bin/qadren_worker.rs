@@ -17,6 +17,7 @@ use qadren_core::job_execution::{
 use qadren_core::jobs::JobStore;
 use qadren_core::local_fs::LocalFilesystem;
 use qadren_core::model::{ConfirmedFileVersion, JobState, ScenarioReference};
+use qadren_core::plan_store;
 use qadren_core::registry::{BatchChildDue, DueBatchChild, Registry};
 use qadren_core::scenario_planner::{ObservedFile, PlanAction};
 use qadren_core::schedule_dispatch::dispatch_pending_schedule_jobs;
@@ -161,6 +162,17 @@ struct Request {
     /// The connection of `provide_access_token`.
     #[serde(default)]
     connection_id: Option<String>,
+    /// Plan requests (D-024 stage 4).
+    #[serde(default)]
+    plan_id: Option<String>,
+    #[serde(default)]
+    action: Option<String>,
+    #[serde(default)]
+    search: Option<String>,
+    #[serde(default)]
+    offset: Option<u64>,
+    #[serde(default)]
+    limit: Option<u64>,
 }
 
 /// A secret that never appears in `Debug` output or in a log.
@@ -1036,10 +1048,199 @@ fn run_snapshot_pass(paths: &WorkerPaths) -> bool {
             }
         }
     }
+    worked |= build_waiting_plans(paths, &store);
     if !worked {
         let _ = store.prune();
     }
     worked
+}
+
+/// Build each waiting plan whose two snapshots are complete; fail it when a
+/// snapshot failed (D-024 stage 4).
+fn build_waiting_plans(paths: &WorkerPaths, store: &SnapshotStore) -> bool {
+    let Ok(waiting) = plan_store::waiting_plans(store.connection()) else {
+        return false;
+    };
+    let mut built = false;
+    for (id, _, left, right) in waiting {
+        let states = (
+            store.info(&left).ok().flatten().map(|info| info.state),
+            store.info(&right).ok().flatten().map(|info| info.state),
+        );
+        match states {
+            (Some(l), Some(r)) if l == "complete" && r == "complete" => {
+                let Ok(registry) = Registry::open(&paths.registry) else {
+                    continue;
+                };
+                let started = SystemTime::now();
+                match plan_store::build_plan(
+                    &SnapshotStore::path_for(&paths.registry),
+                    &registry,
+                    &id,
+                ) {
+                    Ok(_) => eprintln!(
+                        "qadren-worker: {} plan {id} built in {} s",
+                        log_time(),
+                        started.elapsed().map_or(0, |elapsed| elapsed.as_secs())
+                    ),
+                    Err(_) => {
+                        eprintln!("qadren-worker: {} plan {id} failed", log_time());
+                        let _ = plan_store::fail_plan(store.connection(), &id, "plan_build_failed");
+                    }
+                }
+                built = true;
+            }
+            (Some(l), _) | (_, Some(l)) if l == "failed" => {
+                let _ = plan_store::fail_plan(store.connection(), &id, "snapshot_failed");
+            }
+            (None, _) | (_, None) => {
+                let _ = plan_store::fail_plan(store.connection(), &id, "snapshot_missing");
+            }
+            _ => {}
+        }
+    }
+    built
+}
+
+/// Start the snapshots of a Scenario revision and a plan that waits for
+/// them (D-024 stage 4).
+fn start_plan(paths: &WorkerPaths, request: &Request) -> serde_json::Value {
+    let started = start_snapshots(paths, request);
+    let (Some(left), Some(right)) = (started["left"].as_str(), started["right"].as_str()) else {
+        return started;
+    };
+    let (Some(scenario_id), Some(revision)) =
+        (request.scenario_id.as_deref(), request.scenario_revision)
+    else {
+        return serde_json::json!({"ok": false, "status": "invalid_request"});
+    };
+    let Ok(store) = SnapshotStore::open(&SnapshotStore::path_for(&paths.registry)) else {
+        return serde_json::json!({"ok": false, "status": "snapshot_store_unavailable"});
+    };
+    let reference = ScenarioReference {
+        scenario_id: scenario_id.to_owned(),
+        revision,
+    };
+    match plan_store::request_plan(store.connection(), &reference, left, right) {
+        Ok(plan) => serde_json::json!({"ok": true, "status": "accepted", "plan": plan}),
+        Err(_) => serde_json::json!({"ok": false, "status": "snapshot_store_unavailable"}),
+    }
+}
+
+/// The newest plan of a Scenario revision with the progress of its
+/// snapshots.
+fn plan_status(paths: &WorkerPaths, request: &Request) -> serde_json::Value {
+    let (Some(scenario_id), Some(revision)) =
+        (request.scenario_id.as_deref(), request.scenario_revision)
+    else {
+        return serde_json::json!({"ok": false, "status": "invalid_request"});
+    };
+    let Ok(store) = SnapshotStore::open_for_reading(&SnapshotStore::path_for(&paths.registry))
+    else {
+        return serde_json::json!({"ok": false, "status": "snapshot_store_unavailable"});
+    };
+    let reference = ScenarioReference {
+        scenario_id: scenario_id.to_owned(),
+        revision,
+    };
+    let plan = plan_store::latest_plan(store.connection(), &reference)
+        .ok()
+        .flatten();
+    let (left, right) = match &plan {
+        Some(plan) => (
+            store.info(&plan.left_snapshot).ok().flatten(),
+            store.info(&plan.right_snapshot).ok().flatten(),
+        ),
+        None => (None, None),
+    };
+    serde_json::json!({"ok": true, "status": "running", "plan": plan, "left": left, "right": right})
+}
+
+fn plan_page(paths: &WorkerPaths, request: &Request) -> serde_json::Value {
+    let Some(plan) = request.plan_id.as_deref() else {
+        return serde_json::json!({"ok": false, "status": "invalid_request"});
+    };
+    let Ok(store) = SnapshotStore::open_for_reading(&SnapshotStore::path_for(&paths.registry))
+    else {
+        return serde_json::json!({"ok": false, "status": "snapshot_store_unavailable"});
+    };
+    match plan_store::plan_page(
+        store.connection(),
+        plan,
+        request.action.as_deref(),
+        request.search.as_deref(),
+        request.offset.unwrap_or(0),
+        request.limit.unwrap_or(200),
+    ) {
+        Ok(rows) => serde_json::json!({"ok": true, "status": "running", "items": rows}),
+        Err(_) => serde_json::json!({"ok": false, "status": "snapshot_store_unavailable"}),
+    }
+}
+
+/// Make one Create batch of all Create rows of a complete plan, page by
+/// page, and let the run thread start it (D-024 stage 4).
+fn execute_plan_creates(paths: &WorkerPaths, request: &Request) -> serde_json::Value {
+    let Some(plan) = request.plan_id.as_deref() else {
+        return serde_json::json!({"ok": false, "status": "invalid_request"});
+    };
+    let Ok(store) = SnapshotStore::open_for_reading(&SnapshotStore::path_for(&paths.registry))
+    else {
+        return serde_json::json!({"ok": false, "status": "snapshot_store_unavailable"});
+    };
+    let Ok(Some(info)) = plan_store::plan_info(store.connection(), plan) else {
+        return serde_json::json!({"ok": false, "status": "plan_unavailable"});
+    };
+    if info.state != "complete" {
+        return serde_json::json!({"ok": false, "status": "plan_unavailable"});
+    }
+    let reference: Option<ScenarioReference> = store
+        .connection()
+        .query_row(
+            "SELECT scenario_id,revision FROM plans WHERE id=?1",
+            [plan],
+            |row| {
+                Ok(ScenarioReference {
+                    scenario_id: row.get(0)?,
+                    revision: row.get::<_, i64>(1)? as u64,
+                })
+            },
+        )
+        .ok();
+    let Some(reference) = reference else {
+        return serde_json::json!({"ok": false, "status": "plan_unavailable"});
+    };
+    let Ok(mut registry) = Registry::open(&paths.registry) else {
+        return serde_json::json!({"ok": false, "status": "registry_unavailable"});
+    };
+    if let (Some(connection), Some(AccessToken(token))) = (
+        yandex_source_connection(&registry, &reference.scenario_id, reference.revision),
+        request.access_token.as_ref(),
+    ) {
+        runner().remember_token(&connection, token);
+    }
+    let batch = match registry.begin_scenario_create_batch(&reference) {
+        Ok(batch) => batch,
+        Err(_) => return serde_json::json!({"ok": false, "status": "scenario_revision_stale"}),
+    };
+    let mut after = 0;
+    let mut added = 0;
+    loop {
+        let Ok(page) = plan_store::plan_creates_page(store.connection(), plan, after, 5_000) else {
+            return serde_json::json!({"ok": false, "status": "snapshot_store_unavailable"});
+        };
+        let Some(last) = page.last() else { break };
+        after = last.0;
+        let children: Vec<(String, bool)> = page
+            .into_iter()
+            .map(|(_, path, from_left)| (path, from_left))
+            .collect();
+        match registry.append_scenario_create_batch_children(&batch, &children) {
+            Ok(count) => added += count,
+            Err(_) => return serde_json::json!({"ok": false, "status": "registry_unavailable"}),
+        }
+    }
+    let _ = registry.set_scenario_create_batch_paused(&batch, false);
+    serde_json::json!({"ok": true, "status": "accepted", "batch": batch, "files": added})
 }
 
 /// Start or continue the snapshots of both sides of a Scenario revision.
@@ -1969,6 +2170,22 @@ fn handle_client(mut stream: UnixStream, paths: &WorkerPaths, stop: &mut bool) {
                     "active": runner().active.load(Ordering::SeqCst),
                 })
             );
+        }
+        "start_plan" => {
+            let answer = start_plan(paths, &request);
+            let _ = writeln!(stream, "{answer}");
+        }
+        "plan_status" => {
+            let answer = plan_status(paths, &request);
+            let _ = writeln!(stream, "{answer}");
+        }
+        "plan_page" => {
+            let answer = plan_page(paths, &request);
+            let _ = writeln!(stream, "{answer}");
+        }
+        "execute_plan_creates" => {
+            let answer = execute_plan_creates(paths, &request);
+            let _ = writeln!(stream, "{answer}");
         }
         "start_snapshot" => {
             let answer = start_snapshots(paths, &request);
@@ -3705,6 +3922,11 @@ mod tests {
             batch_id: None,
             access_token: None,
             connection_id: None,
+            plan_id: None,
+            action: None,
+            search: None,
+            offset: None,
+            limit: None,
         };
         assert_eq!(
             execute_conflict(&paths, &declined, true),
@@ -3764,6 +3986,11 @@ mod tests {
             batch_id: None,
             access_token: None,
             connection_id: None,
+            plan_id: None,
+            action: None,
+            search: None,
+            offset: None,
+            limit: None,
         };
         assert_eq!(update_registry_control(&paths, &pause), Ok("updated"));
         assert!(

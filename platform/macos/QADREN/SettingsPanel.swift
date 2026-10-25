@@ -1343,6 +1343,16 @@ private struct ScenarioDryRunView: View {
     /// True when the last plan read failed. An empty plan is then not
     /// evidence of "no changes".
     @State private var planUnavailable = false
+    /// Progress of the Worker snapshots and plan (D-024).
+    @State private var planProgress: String?
+    /// A stored plan with more rows than the screen loads at once (D-024).
+    @State private var largePlan: WorkerPlanInfo?
+    @State private var largeRows: [WorkerPlanRow] = []
+    @State private var largeFilter = ""
+    @State private var largeSearch = ""
+    @State private var largeOffset = 0
+    private static let largePlanRowLimit = 2_000
+    private static let largePageSize = 200
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -1382,8 +1392,10 @@ private struct ScenarioDryRunView: View {
                 SettingsNotice(text: skippedNotice, symbol: "link")
             }
             if isLoading {
-                ProgressView("Чтение метаданных и построение плана…")
+                ProgressView(planProgress ?? "Чтение метаданных и построение плана…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let largePlan {
+                largePlanSection(largePlan)
             } else if !hasRequestedPreview {
                 SettingsEmptyState(
                     title: "План ещё не проверен",
@@ -1656,8 +1668,13 @@ private struct ScenarioDryRunView: View {
         }.value
     }
 
+    /// The Worker walks both sides, stores the snapshots, and builds the
+    /// plan as a stream (D-024). A plan of at most 2,000 rows opens in the
+    /// full screen with all row actions; a larger one opens in pages.
     private func loadPlanSides() async {
-        defer { isLoading = false; hasRequestedPreview = true }
+        defer { isLoading = false; hasRequestedPreview = true; planProgress = nil }
+        largePlan = nil
+        largeRows = []
         do {
             // A plan for a superseded revision must not offer actions.
             if let current = try StorageRegistryBridge.listScenarios().first(where: { $0.id == scenario.id }),
@@ -1668,25 +1685,163 @@ private struct ScenarioDryRunView: View {
                 return
             }
             try StorageRegistryBridge.dispatchPendingScenarioCopyBaselines()
-            // Selected paths are relative to the source root, which is the
-            // left side of a one-way Scenario.
-            let left = try await Self.snapshot(
-                root: scenario.left_root, connectionID: scenario.left_connection_id,
-                selection: scenario.selected_paths
-            )
-            let right = try await Self.snapshot(
-                root: scenario.right_root, connectionID: scenario.right_connection_id
-            )
-            leftSnapshot = left
-            rightSnapshot = right
-            plan = try StorageRegistryBridge.dryRunScenario(
-                id: scenario.id, revision: scenario.revision, left: left, right: right
-            )
+            let scenario = scenario
+            let token = try YandexScenarioAccess.token(for: scenario)
+            let planID = try await Task.detached {
+                try WorkerIPC.startPlan(scenarioID: scenario.id, revision: scenario.revision, accessToken: token)
+            }.value
+            var status: WorkerPlanStatus
+            repeat {
+                try await Task.sleep(for: .seconds(1))
+                status = try await Task.detached {
+                    try WorkerIPC.planStatus(scenarioID: scenario.id, revision: scenario.revision)
+                }.value
+                planProgress = Self.planProgressText(status)
+            } while status.plan?.id == planID && ["waiting", "building"].contains(status.plan?.state ?? "")
+            guard let info = status.plan, info.id == planID, info.state == "complete" else {
+                let reason = status.left?.last_error ?? status.right?.last_error ?? status.plan?.error ?? "plan_unavailable"
+                throw StorageError.operation(QADRENUserMessage.text(for: reason))
+            }
+            let total = info.counts?.values.reduce(0) { $0 + $1.count } ?? 0
+            if total <= Self.largePlanRowLimit {
+                var rows: [WorkerPlanRow] = []
+                while rows.count < total {
+                    let offset = rows.count
+                    let page = try await Task.detached {
+                        try WorkerIPC.planPage(planID: planID, action: nil, search: nil, offset: offset, limit: 1_000)
+                    }.value
+                    if page.isEmpty { break }
+                    rows += page
+                }
+                plan = rows.filter { $0.action.kind != "no_action" || total <= Self.largePlanRowLimit }.map(\.item)
+                leftSnapshot = rows.compactMap(\.left_file)
+                rightSnapshot = rows.compactMap(\.right_file)
+            } else {
+                plan = []
+                leftSnapshot = []
+                rightSnapshot = []
+                largeFilter = info.counts?["create"] != nil ? "create" : ""
+                largeSearch = ""
+                largeOffset = 0
+                largePlan = info
+                await loadLargePage()
+            }
             loadConflictTasks()
         } catch {
             plan = []
             planUnavailable = true
             self.error = "Не удалось прочитать метаданные или построить план: " + error.localizedDescription
+        }
+    }
+
+    private static func planProgressText(_ status: WorkerPlanStatus) -> String {
+        func side(_ title: String, _ info: WorkerSnapshotInfo?) -> String {
+            guard let info else { return "\(title): ожидание" }
+            let state = info.state == "complete" ? "готово" : "читаю"
+            let wait = info.last_error.map { " · пауза: \(QADRENUserMessage.text(for: $0))" } ?? ""
+            return "\(title): \(state), файлов \(info.files), папок \(info.folders_done) из \(info.folders_done + info.folders_pending)\(wait)"
+        }
+        let building = status.plan?.state == "building" ? "\nСтрою план…" : ""
+        return side("Источник", status.left) + "\n" + side("Назначение", status.right) + building
+    }
+
+    /// One page of a large plan with the current filter and search.
+    private func loadLargePage() async {
+        guard let largePlan else { return }
+        let (id, filter, search, offset) = (largePlan.id, largeFilter, largeSearch, largeOffset)
+        do {
+            largeRows = try await Task.detached {
+                try WorkerIPC.planPage(
+                    planID: id, action: filter.isEmpty ? nil : filter,
+                    search: search.isEmpty ? nil : search, offset: offset, limit: Self.largePageSize
+                )
+            }.value
+        } catch {
+            self.error = "Не удалось прочитать страницу плана: " + error.localizedDescription
+        }
+    }
+
+    private static func bytes(_ value: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: value, countStyle: .file)
+    }
+
+    @ViewBuilder
+    private func largePlanSection(_ info: WorkerPlanInfo) -> some View {
+        let counts = info.counts ?? [:]
+        let kinds: [(String, String)] = [
+            ("create", "Создать"), ("update", "Заменить"), ("delete", "Удалить по правилу"),
+            ("delete_requires_decision", "Удаление — нужно решение"), ("conflict", "Конфликт"),
+            ("needs_verification", "Требует проверки"), ("no_action", "Без действия"),
+        ]
+        VStack(alignment: .leading, spacing: 12) {
+            GroupBox("Большой план") {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(kinds.filter { counts[$0.0] != nil }, id: \.0) { kind, title in
+                        let count = counts[kind]!
+                        Text("\(title): \(count.count)" + (count.bytes > 0 ? " · \(Self.bytes(count.bytes))" : ""))
+                            .font(.callout.monospacedDigit())
+                    }
+                    if (counts["update"]?.count ?? 0) + (counts["conflict"]?.count ?? 0)
+                        + (counts["delete"]?.count ?? 0) + (counts["delete_requires_decision"]?.count ?? 0) > 0 {
+                        Text("Замены, конфликты и удаления в большом плане пока не выполняются пакетом. Сейчас доступно создание новых файлов.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    if let creates = counts["create"], creates.count > 0 {
+                        Button("Создать все: \(creates.count)") { executeLargeCreates(info) }
+                            .disabled(activeBatch != nil || !resumedCreateBatches.isEmpty)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            HStack {
+                Picker("Действие", selection: $largeFilter) {
+                    Text("Все").tag("")
+                    ForEach(kinds.filter { counts[$0.0] != nil }, id: \.0) { kind, title in
+                        Text(title).tag(kind)
+                    }
+                }
+                .fixedSize()
+                TextField("Поиск по пути", text: $largeSearch)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { largeOffset = 0; Task { await loadLargePage() } }
+                Button("Назад", systemImage: "chevron.left") {
+                    largeOffset = max(0, largeOffset - Self.largePageSize); Task { await loadLargePage() }
+                }
+                .labelStyle(.iconOnly)
+                .disabled(largeOffset == 0)
+                Text("\(largeOffset + 1)–\(largeOffset + largeRows.count)")
+                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                Button("Вперёд", systemImage: "chevron.right") {
+                    largeOffset += Self.largePageSize; Task { await loadLargePage() }
+                }
+                .labelStyle(.iconOnly)
+                .disabled(largeRows.count < Self.largePageSize)
+            }
+            .onChange(of: largeFilter) { _ in largeOffset = 0; Task { await loadLargePage() } }
+            List(largeRows, id: \.relative_path) { row in
+                HStack {
+                    Text(row.relative_path).font(.callout.monospaced()).lineLimit(1).truncationMode(.middle)
+                    Spacer()
+                    Text(actionTitle(row.action)).font(.caption.weight(.semibold))
+                }
+            }
+            .listStyle(.inset(alternatesRowBackgrounds: true))
+        }
+    }
+
+    /// The Worker makes one batch of all Create rows of the stored plan.
+    private func executeLargeCreates(_ info: WorkerPlanInfo) {
+        let scenario = scenario
+        Task {
+            do {
+                let token = try YandexScenarioAccess.token(for: scenario)
+                _ = try await Task.detached {
+                    try WorkerIPC.executePlanCreates(planID: info.id, accessToken: token)
+                }.value
+                resumePendingCreateBatches()
+            } catch {
+                self.error = "Фоновая служба не приняла пакет: " + error.localizedDescription
+            }
         }
     }
 

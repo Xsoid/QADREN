@@ -1409,6 +1409,47 @@ impl Registry {
     }
 
     /// Save one user-confirmed Create batch before the Worker starts a child.
+    /// Start an empty, paused Create batch for a large plan (D-024). The
+    /// caller adds the children page by page and then resumes the batch, so
+    /// no list of all paths is held in memory.
+    pub fn begin_scenario_create_batch(&mut self, scenario: &ScenarioReference) -> Result<String> {
+        if !self.is_current_scenario_revision(&scenario.scenario_id, scenario.revision)? {
+            return Err(RegistryError::StaleScenarioRevision);
+        }
+        let id: String = self
+            .db
+            .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
+        self.db.execute(
+            "INSERT INTO scenario_create_batches(id,scenario_id,scenario_revision,paused) VALUES(?1,?2,?3,1)",
+            params![id, scenario.scenario_id, scenario.revision as i64],
+        )?;
+        Ok(id)
+    }
+
+    /// Add one page of children to a batch from `begin_scenario_create_batch`.
+    /// An invalid or repeated path is skipped. Returns the number added.
+    pub fn append_scenario_create_batch_children(
+        &mut self,
+        batch_id: &str,
+        children: &[(String, bool)],
+    ) -> Result<usize> {
+        let transaction = self.db.transaction()?;
+        let mut added = 0;
+        {
+            let mut insert = transaction.prepare_cached(
+                "INSERT OR IGNORE INTO scenario_create_batch_children(batch_id,relative_path,source_is_left,job_id)
+                 VALUES(?1,?2,?3,'scenario-batch-copy-' || lower(hex(randomblob(16))))",
+            )?;
+            for (path, source_is_left) in children {
+                if valid_sync_path(path) {
+                    added += insert.execute(params![batch_id, path, source_is_left])?;
+                }
+            }
+        }
+        transaction.commit()?;
+        Ok(added)
+    }
+
     /// Paths are immutable and get stable Job IDs, so a controller reconnect
     /// can observe work without submitting the same effect again.
     pub fn create_scenario_create_batch(
@@ -2238,6 +2279,61 @@ impl Registry {
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into);
         states
+    }
+
+    /// One page of confirmed file states after `after_path`, in path order
+    /// (D-024: the streaming planner never loads all of them).
+    pub fn confirmed_file_states_page(
+        &self,
+        reference: &ScenarioReference,
+        after_path: &str,
+        limit: usize,
+    ) -> Result<Vec<FileSyncState>> {
+        let mut statement = self.db.prepare(
+            "SELECT relative_path,
+                left_object_revision,left_size,left_checksum_md5,
+                right_object_revision,right_size,right_checksum_md5
+             FROM file_sync_states
+             WHERE scenario_id=?1 AND scenario_revision=?2 AND relative_path>?3
+             ORDER BY relative_path LIMIT ?4",
+        )?;
+        let states = statement
+            .query_map(
+                params![
+                    reference.scenario_id,
+                    reference.revision as i64,
+                    after_path,
+                    limit as i64
+                ],
+                |row| {
+                    Ok(FileSyncState {
+                        scenario: reference.clone(),
+                        relative_path: row.get(0)?,
+                        left: decode_confirmed_version(row, 1, 2, 3)?,
+                        right: decode_confirmed_version(row, 4, 5, 6)?,
+                    })
+                },
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(states)
+    }
+
+    /// The direction and the scope of a Scenario revision, for a planner.
+    pub fn scenario_plan_inputs(
+        &self,
+        reference: &ScenarioReference,
+    ) -> Result<(SyncDirection, ScenarioScope)> {
+        let stored = self
+            .get_scenario_revision(&reference.scenario_id, reference.revision)?
+            .ok_or(RegistryError::NotFound)?;
+        let direction = match stored.direction.as_str() {
+            "left_to_right" => SyncDirection::LeftToRight,
+            "right_to_left" => SyncDirection::RightToLeft,
+            "bidirectional" => SyncDirection::Bidirectional,
+            _ => return Err(RegistryError::PlanningFailed),
+        };
+        let scope = self.get_scenario_revision_scope(&reference.scenario_id, reference.revision)?;
+        Ok((direction, scope))
     }
 
     /// Add or reopen one metadata-only conflict task. This has no adapter or

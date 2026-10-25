@@ -372,51 +372,18 @@ pub fn plan_scoped(
     let mut items = paths
         .into_iter()
         .map(|path| {
-            let state = confirmed.get(path).copied();
-            let left_file = left.get(path).copied();
-            let right_file = right.get(path).copied();
-            let left_change = delta(left_file, state.and_then(|entry| entry.left.as_ref()));
-            let right_change = delta(right_file, state.and_then(|entry| entry.right.as_ref()));
-            let collides = variants.get(&name_key(path)).copied().unwrap_or(0) > 1;
-            let action = if scope.classify(path, name_key) == ScopeMatch::NameVariant {
-                PlanAction::NeedsVerification {
-                    reason: SELECTION_NAME_VARIANT_REASON,
-                }
-            } else if skipped.contains(path.as_str()) {
-                PlanAction::NeedsVerification {
-                    reason: SKIPPED_ENTRY_REASON,
-                }
-            } else if collides {
-                PlanAction::NeedsVerification {
-                    reason: NAME_COLLISION_REASON,
-                }
-            } else {
-                match scenario.direction {
-                    SyncDirection::LeftToRight => directional_action(
-                        left_change,
-                        right_change,
-                        left_file.is_some(),
-                        right_file.is_some(),
-                        true,
-                    ),
-                    SyncDirection::RightToLeft => directional_action(
-                        right_change,
-                        left_change,
-                        right_file.is_some(),
-                        left_file.is_some(),
-                        false,
-                    ),
-                    SyncDirection::Bidirectional => {
-                        bidirectional_action(left_change, right_change, left_file, right_file)
-                    }
-                }
-            };
-            PlanItem {
-                relative_path: path.clone(),
-                left: left_change,
-                right: right_change,
-                action,
-            }
+            plan_path(
+                scenario.direction,
+                &scope,
+                &PathObservation {
+                    path,
+                    confirmed: confirmed.get(path).copied(),
+                    left: left.get(path).copied(),
+                    right: right.get(path).copied(),
+                    skipped: skipped.contains(path.as_str()),
+                },
+                variants.get(&name_key(path)).copied().unwrap_or(0) > 1,
+            )
         })
         .collect::<Vec<_>>();
     if scope.deletion_mode == DeletionMode::Simple {
@@ -433,6 +400,77 @@ pub fn plan_scoped(
         }
     }
     Ok(items)
+}
+
+/// What the planner knows about one relative path.
+pub struct PathObservation<'a> {
+    pub path: &'a str,
+    pub confirmed: Option<&'a FileSyncState>,
+    pub left: Option<&'a ObservedFile>,
+    pub right: Option<&'a ObservedFile>,
+    /// A side skipped a symbolic link or special file at this path.
+    pub skipped: bool,
+}
+
+/// The plan item of one path. `collides` is true when another planned path
+/// has the same name key. The streaming planner (D-024) calls this for each
+/// path of a name-key group, so both planners decide the same way. The
+/// simple deletion rule is applied by the caller over the whole plan.
+pub fn plan_path(
+    direction: SyncDirection,
+    scope: &ScenarioScope,
+    observation: &PathObservation<'_>,
+    collides: bool,
+) -> PlanItem {
+    let PathObservation {
+        path,
+        confirmed: state,
+        left: left_file,
+        right: right_file,
+        skipped,
+    } = *observation;
+    let left_change = delta(left_file, state.and_then(|entry| entry.left.as_ref()));
+    let right_change = delta(right_file, state.and_then(|entry| entry.right.as_ref()));
+    let action = if scope.classify(path, name_key) == ScopeMatch::NameVariant {
+        PlanAction::NeedsVerification {
+            reason: SELECTION_NAME_VARIANT_REASON,
+        }
+    } else if skipped || !valid_path(path) {
+        // A name that cannot be a safe path segment is never executable.
+        PlanAction::NeedsVerification {
+            reason: SKIPPED_ENTRY_REASON,
+        }
+    } else if collides {
+        PlanAction::NeedsVerification {
+            reason: NAME_COLLISION_REASON,
+        }
+    } else {
+        match direction {
+            SyncDirection::LeftToRight => directional_action(
+                left_change,
+                right_change,
+                left_file.is_some(),
+                right_file.is_some(),
+                true,
+            ),
+            SyncDirection::RightToLeft => directional_action(
+                right_change,
+                left_change,
+                right_file.is_some(),
+                left_file.is_some(),
+                false,
+            ),
+            SyncDirection::Bidirectional => {
+                bidirectional_action(left_change, right_change, left_file, right_file)
+            }
+        }
+    };
+    PlanItem {
+        relative_path: path.to_owned(),
+        left: left_change,
+        right: right_change,
+        action,
+    }
 }
 
 #[cfg(test)]

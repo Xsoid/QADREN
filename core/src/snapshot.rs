@@ -193,6 +193,15 @@ impl SnapshotStore {
         Ok(Self { db })
     }
 
+    /// The connection, for the plan store in the same database.
+    pub fn into_connection(self) -> Connection {
+        self.db
+    }
+
+    pub fn connection(&self) -> &Connection {
+        &self.db
+    }
+
     /// Open for status reads only: no schema statements and no journal-mode
     /// change, which can wait for the write lock of the walking thread. The
     /// IPC thread uses this so that it always answers (D-024).

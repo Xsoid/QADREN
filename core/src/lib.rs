@@ -10,6 +10,7 @@ pub mod jobs_ffi;
 pub mod local_fs;
 pub mod local_fs_ffi;
 pub mod model;
+pub mod plan_store;
 pub mod policy;
 pub mod registry;
 pub mod registry_ffi;

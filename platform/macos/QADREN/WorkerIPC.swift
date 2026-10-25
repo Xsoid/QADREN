@@ -82,6 +82,49 @@ struct WorkerConflictRequest: Encodable {
     let destructive_consent: Bool
 }
 
+/// A walk of one Scenario side (D-024 stage 3).
+struct WorkerSnapshotInfo: Decodable, Equatable {
+    let state: String
+    let files: Int
+    let folders_done: Int
+    let folders_pending: Int
+    let last_error: String?
+    let retry_at: Int64?
+}
+
+struct WorkerPlanCount: Decodable, Equatable {
+    let count: Int
+    let bytes: Int64
+}
+
+/// A stored plan (D-024 stage 4).
+struct WorkerPlanInfo: Decodable, Equatable {
+    let id: String
+    let state: String
+    let error: String?
+    let counts: [String: WorkerPlanCount]?
+}
+
+struct WorkerPlanStatus: Decodable {
+    let plan: WorkerPlanInfo?
+    let left: WorkerSnapshotInfo?
+    let right: WorkerSnapshotInfo?
+}
+
+/// One stored plan row with the file metadata of both sides.
+struct WorkerPlanRow: Decodable {
+    let relative_path: String
+    let action: ScenarioPlanAction
+    let left: String
+    let right: String
+    let left_file: ScenarioSnapshotItem?
+    let right_file: ScenarioSnapshotItem?
+
+    var item: ScenarioPlanItem {
+        ScenarioPlanItem(relative_path: relative_path, left: left, right: right, action: action)
+    }
+}
+
 struct WorkerStatusRequest: Encodable {
     let command = "status"
 }
@@ -275,6 +318,18 @@ enum WorkerIPC {
     }
 
     private static func send(_ payload: Data, socketPath: String, timeoutSeconds: Int = 5) throws -> Response {
+        let response = try sendRaw(payload, socketPath: socketPath, timeoutSeconds: timeoutSeconds, limit: 64 * 1024)
+        guard let decoded = try? JSONDecoder().decode(Response.self, from: response) else {
+            throw WorkerIPCError.invalidResponse
+        }
+        return decoded
+    }
+
+    /// Send one request line and read one answer line of at most `limit`
+    /// bytes. A plan page can be larger than a status answer (D-024).
+    private static func sendRaw(
+        _ payload: Data, socketPath: String, timeoutSeconds: Int, limit: Int
+    ) throws -> Data {
         let descriptor = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard descriptor >= 0 else { throw WorkerIPCError.unavailable }
         defer { Darwin.close(descriptor) }
@@ -306,17 +361,71 @@ enum WorkerIPC {
 
         try writeAll(payload, descriptor: descriptor)
         var response = Data()
-        while response.count < 64 * 1024 {
-            var byte: UInt8 = 0
-            let count = Darwin.read(descriptor, &byte, 1)
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while response.count < limit {
+            let count = Darwin.read(descriptor, &buffer, buffer.count)
             guard count > 0 else { break }
-            if byte == 0x0a { break }
-            response.append(byte)
+            response.append(contentsOf: buffer[0..<count])
+            if buffer[count - 1] == 0x0a { break }
         }
-        guard !response.isEmpty, let decoded = try? JSONDecoder().decode(Response.self, from: response) else {
+        if response.last == 0x0a { response.removeLast() }
+        guard !response.isEmpty else { throw WorkerIPCError.invalidResponse }
+        return response
+    }
+
+    private struct PlanAnswerStatus: Decodable { let ok: Bool; let status: String }
+
+    /// A request to the plan commands of the Worker (D-024 stage 4).
+    private struct PlanRequest: Encodable {
+        let command: String
+        var scenario_id: String? = nil
+        var scenario_revision: UInt64? = nil
+        var plan_id: String? = nil
+        var action: String? = nil
+        var search: String? = nil
+        var offset: Int? = nil
+        var limit: Int? = nil
+        var access_token: String? = nil
+    }
+
+    private static func plan<T: Decodable>(_ request: PlanRequest, as type: T.Type) throws -> T {
+        let payload = try JSONEncoder().encode(request) + Data([0x0a])
+        let data = try sendRaw(payload, socketPath: defaultSocketPath(), timeoutSeconds: 30, limit: 16 * 1024 * 1024)
+        if let status = try? JSONDecoder().decode(PlanAnswerStatus.self, from: data), !status.ok {
+            throw WorkerIPCError.rejected(status.status)
+        }
+        guard let decoded = try? JSONDecoder().decode(T.self, from: data) else {
             throw WorkerIPCError.invalidResponse
         }
         return decoded
+    }
+
+    /// Start the snapshots and the plan of a Scenario revision.
+    static func startPlan(scenarioID: String, revision: UInt64, accessToken: String?) throws -> String {
+        struct Answer: Decodable { let plan: String }
+        return try plan(
+            PlanRequest(command: "start_plan", scenario_id: scenarioID, scenario_revision: revision, access_token: accessToken),
+            as: Answer.self
+        ).plan
+    }
+
+    static func planStatus(scenarioID: String, revision: UInt64) throws -> WorkerPlanStatus {
+        try plan(PlanRequest(command: "plan_status", scenario_id: scenarioID, scenario_revision: revision), as: WorkerPlanStatus.self)
+    }
+
+    static func planPage(planID: String, action: String?, search: String?, offset: Int, limit: Int) throws -> [WorkerPlanRow] {
+        struct Answer: Decodable { let items: [WorkerPlanRow] }
+        return try plan(
+            PlanRequest(command: "plan_page", plan_id: planID, action: action, search: search, offset: offset, limit: limit),
+            as: Answer.self
+        ).items
+    }
+
+    /// Make one Create batch of all Create rows of a stored plan.
+    static func executePlanCreates(planID: String, accessToken: String?) throws -> (batch: String, files: Int) {
+        struct Answer: Decodable { let batch: String; let files: Int }
+        let answer = try plan(PlanRequest(command: "execute_plan_creates", plan_id: planID, access_token: accessToken), as: Answer.self)
+        return (answer.batch, answer.files)
     }
 
     private static func writeAll(_ data: Data, descriptor: Int32) throws {
