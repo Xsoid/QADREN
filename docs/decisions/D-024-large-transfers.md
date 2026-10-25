@@ -48,6 +48,7 @@ The owner target (2026-10-25) is hundreds of thousands of files in one Scenario,
 4. The walk lists only the selected objects of the Scenario (already in Core since 2026-10-25).
 5. The Yandex walk uses pages of 1,000 entries and at most 4 parallel requests. HTTP 429 pauses all requests of that connection and increases the pause.
 6. The executor still reads the source metadata of each file again before its effect. A snapshot is evidence for the plan, not for the effect.
+7. Implementation (2026-10-25): `snapshots.sqlite3` next to the Registry, WAL mode, written only by the Worker snapshot thread. One snapshot is one key: connection, root, and Scenario selection. The selection applies to both sides, so a destination is not walked outside the selected objects. A selected object of unknown type is probed: a file becomes one row, a folder enters the queue. A transient error (network, HTTP 429 or 5xx, a missing SMB mount) delays the walk for 30 s, doubled up to 30 min; HTTP 401 waits for a new token; HTTP 403 fails the snapshot. A new walk of a key keeps the last complete snapshot until it completes; older snapshots are deleted. IPC: `start_snapshot` and `snapshot_status` for a Scenario revision.
 
 ### 3. Plan
 
@@ -94,7 +95,7 @@ A retry is safe only because the executor closes the attempt as "failed before e
 
 1. Done (2026-10-25): Worker background run thread, durable runs with retries, token in memory (stage A), no re-registration during a run.
 2. Done (2026-10-25): scale pass on stage 1: indexed and paged due items, progress counts from the database, a single-row check before each item, the newest 200 Jobs and counts for the monitoring screen, indexed unknown-Job and attempt queries. Checked with 300,000 batch children and 300,000 Jobs.
-3. Snapshot store and resumable Yandex and local walks, with a generated 300,000-file check.
+3. Done (2026-10-25): snapshot store and resumable Yandex and local walks. Checked: 300,000 generated local files in 3,031 folders in about 7 s; the real Yandex Disk folder "Xsoid [Архив]" (143,426 files, 8,197 folders) in 16.7 min with 4 requests in flight; `kill -9` during each walk, then the same snapshot continued without loss; Worker memory 11 MB. One name with a control character became a skipped object instead of a failed walk.
 4. Streaming plan, plan store, and the paged plan screen; a run starts from the stored plan, not from a path list in the app.
 5. MD5 reconciliation for Yandex downloads.
 6. Deferred: Developer ID signing and the shared Keychain access group (stage B). It needs an Apple Developer account and a new owner decision.

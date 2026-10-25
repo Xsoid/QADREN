@@ -20,6 +20,9 @@ use qadren_core::model::{ConfirmedFileVersion, JobState, ScenarioReference};
 use qadren_core::registry::{BatchChildDue, DueBatchChild, Registry};
 use qadren_core::scenario_planner::{ObservedFile, PlanAction};
 use qadren_core::schedule_dispatch::dispatch_pending_schedule_jobs;
+use qadren_core::snapshot::{
+    walk_local_step, walk_yandex_step, SnapshotError, SnapshotKey, SnapshotStore,
+};
 use qadren_core::storage_access::YANDEX_DISK;
 use qadren_core::yandex::{YandexError, YandexMetadataClient};
 use qadren_core::yandex_execution::run_yandex_scenario_file_download;
@@ -913,6 +916,187 @@ const RETRY_DELAYS: [i64; 5] = [60, 300, 1_800, 7_200, 43_200];
 /// Pause between the retries after the schedule when the "retry until
 /// success" setting is on.
 const RETRY_FOREVER_DELAY: i64 = 86_400;
+/// Parallel metadata requests for each Yandex Disk snapshot (D-024).
+const YANDEX_PARALLEL_METADATA: usize = 4;
+
+/// The two snapshot keys of a Scenario revision: left and right side, each
+/// with the Scenario selection (D-024 stage 3).
+fn snapshot_keys(
+    registry: &Registry,
+    scenario_id: &str,
+    revision: u64,
+) -> Option<(SnapshotKey, SnapshotKey)> {
+    let scenario = registry
+        .get_scenario_revision(scenario_id, revision)
+        .ok()??;
+    let selection = registry
+        .get_scenario_revision_scope(scenario_id, revision)
+        .ok()?
+        .selected_paths;
+    let key = |connection_id: &str, root: &str| {
+        let adapter = registry.get(connection_id).ok()??.adapter;
+        Some(SnapshotKey {
+            connection_id: connection_id.to_owned(),
+            kind: if adapter == YANDEX_DISK {
+                YANDEX_DISK.to_owned()
+            } else {
+                "local".to_owned()
+            },
+            root: root.to_owned(),
+            selection: selection.clone(),
+        })
+    };
+    Some((
+        key(&scenario.left_connection_id, &scenario.left_root)?,
+        key(&scenario.right_connection_id, &scenario.right_root)?,
+    ))
+}
+
+/// The snapshot thread: continue every walking snapshot until the Worker
+/// exits (D-024 stage 3).
+fn run_snapshots_forever(paths: WorkerPaths) {
+    loop {
+        let worked = run_snapshot_pass(&paths);
+        thread::sleep(if worked {
+            Duration::from_millis(5)
+        } else {
+            Duration::from_secs(1)
+        });
+    }
+}
+
+/// One step of each walking snapshot. Returns true when a page was written.
+fn run_snapshot_pass(paths: &WorkerPaths) -> bool {
+    let Ok(store) = SnapshotStore::open(&SnapshotStore::path_for(&paths.registry)) else {
+        return false;
+    };
+    let Ok(walking) = store.walking(unix_now()) else {
+        return false;
+    };
+    let client = YandexMetadataClient::new().ok();
+    let mut worked = false;
+    for snapshot in walking {
+        let result = if snapshot.key.kind == YANDEX_DISK {
+            // Without a token from the app the walk waits.
+            let (Some(token), Some(client)) =
+                (runner().token(&snapshot.key.connection_id), client.as_ref())
+            else {
+                continue;
+            };
+            walk_yandex_step(
+                &store,
+                client,
+                &token,
+                &snapshot.id,
+                &snapshot.key.root,
+                YANDEX_PARALLEL_METADATA,
+            )
+        } else {
+            // An SMB root is walked only while its QADREN mount is present.
+            let ready = Registry::open(&paths.registry)
+                .ok()
+                .and_then(|registry| registry.get(&snapshot.key.connection_id).ok().flatten())
+                .is_some_and(|connection| {
+                    qadren_core::storage_access::root_ready(
+                        &connection,
+                        &paths.registry,
+                        Path::new(&snapshot.key.root),
+                    )
+                });
+            if !ready {
+                let _ = store.delay(&snapshot.id, "local_connection_unavailable");
+                continue;
+            }
+            walk_local_step(&store, &snapshot.id, Path::new(&snapshot.key.root))
+        };
+        match result {
+            Ok(outcome) => worked |= outcome.pages > 0,
+            Err(SnapshotError::Transient(code)) => {
+                eprintln!(
+                    "qadren-worker: {} snapshot {} waits: {code}",
+                    log_time(),
+                    snapshot.id
+                );
+                let _ = store.delay(&snapshot.id, &code);
+            }
+            Err(SnapshotError::Blocked(code)) if code == "yandex_unauthorized" => {
+                runner().forget_token(&snapshot.key.connection_id);
+                let _ = store.delay(&snapshot.id, &code);
+            }
+            Err(SnapshotError::Blocked(code)) => {
+                eprintln!(
+                    "qadren-worker: {} snapshot {} failed: {code}",
+                    log_time(),
+                    snapshot.id
+                );
+                let _ = store.fail(&snapshot.id, &code);
+            }
+            Err(_) => {
+                let _ = store.delay(&snapshot.id, "snapshot_store_unavailable");
+            }
+        }
+    }
+    if !worked {
+        let _ = store.prune();
+    }
+    worked
+}
+
+/// Start or continue the snapshots of both sides of a Scenario revision.
+fn start_snapshots(paths: &WorkerPaths, request: &Request) -> serde_json::Value {
+    let (Some(scenario_id), Some(revision)) =
+        (request.scenario_id.as_deref(), request.scenario_revision)
+    else {
+        return serde_json::json!({"ok": false, "status": "invalid_request"});
+    };
+    let Ok(registry) = Registry::open(&paths.registry) else {
+        return serde_json::json!({"ok": false, "status": "registry_unavailable"});
+    };
+    let Some((left, right)) = snapshot_keys(&registry, scenario_id, revision) else {
+        return serde_json::json!({"ok": false, "status": "scenario_unavailable"});
+    };
+    if let (Some(connection), Some(AccessToken(token))) = (
+        yandex_source_connection(&registry, scenario_id, revision),
+        request.access_token.as_ref(),
+    ) {
+        runner().remember_token(&connection, token);
+    }
+    let Ok(store) = SnapshotStore::open(&SnapshotStore::path_for(&paths.registry)) else {
+        return serde_json::json!({"ok": false, "status": "snapshot_store_unavailable"});
+    };
+    match (store.start(&left), store.start(&right)) {
+        (Ok(left), Ok(right)) => {
+            serde_json::json!({"ok": true, "status": "accepted", "left": left, "right": right})
+        }
+        _ => serde_json::json!({"ok": false, "status": "invalid_request"}),
+    }
+}
+
+/// The newest snapshot of each side of a Scenario revision.
+fn snapshot_status(paths: &WorkerPaths, request: &Request) -> serde_json::Value {
+    let (Some(scenario_id), Some(revision)) =
+        (request.scenario_id.as_deref(), request.scenario_revision)
+    else {
+        return serde_json::json!({"ok": false, "status": "invalid_request"});
+    };
+    let Some((left, right)) = Registry::open(&paths.registry)
+        .ok()
+        .and_then(|registry| snapshot_keys(&registry, scenario_id, revision))
+    else {
+        return serde_json::json!({"ok": false, "status": "scenario_unavailable"});
+    };
+    let Ok(store) = SnapshotStore::open_for_reading(&SnapshotStore::path_for(&paths.registry))
+    else {
+        return serde_json::json!({"ok": false, "status": "snapshot_store_unavailable"});
+    };
+    serde_json::json!({
+        "ok": true,
+        "status": "running",
+        "left": store.latest(&left).ok().flatten(),
+        "right": store.latest(&right).ok().flatten(),
+    })
+}
+
 /// Batch children that one pass of the run thread reads (D-024).
 const DUE_PAGE: usize = 256;
 /// Parallel downloads for each Yandex Disk connection (D-024).
@@ -1786,6 +1970,14 @@ fn handle_client(mut stream: UnixStream, paths: &WorkerPaths, stop: &mut bool) {
                 })
             );
         }
+        "start_snapshot" => {
+            let answer = start_snapshots(paths, &request);
+            let _ = writeln!(stream, "{answer}");
+        }
+        "snapshot_status" => {
+            let answer = snapshot_status(paths, &request);
+            let _ = writeln!(stream, "{answer}");
+        }
         "provide_access_token" => {
             let ok = match (
                 request.connection_id.as_deref(),
@@ -2113,6 +2305,10 @@ fn run(paths: WorkerPaths, once: bool) -> Result<(), String> {
     {
         let paths = paths.clone();
         thread::spawn(move || run_batches_forever(paths));
+    }
+    {
+        let paths = paths.clone();
+        thread::spawn(move || run_snapshots_forever(paths));
     }
     // D-024: the IPC thread answers at all times. Reconciliation and
     // schedules can wait for a network drive, so they poll on their own thread.

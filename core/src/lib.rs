@@ -17,6 +17,7 @@ pub mod scenario_copy_dispatch;
 pub mod scenario_planner;
 pub mod schedule_dispatch;
 pub mod scheduler;
+pub mod snapshot;
 pub mod storage_access;
 pub mod verification;
 pub mod yandex;

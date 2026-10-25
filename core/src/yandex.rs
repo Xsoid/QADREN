@@ -480,6 +480,34 @@ impl YandexMetadataClient {
         }
     }
 
+    /// One metadata page of a folder with only the fields a snapshot needs
+    /// (D-024). The default answer also carries preview links and other
+    /// fields; a smaller answer makes a large walk faster.
+    pub fn list_folder_page(
+        &self,
+        token: &str,
+        path: &str,
+        offset: u64,
+        limit: u32,
+    ) -> Result<Resource> {
+        if path.is_empty() || path.contains(|ch: char| ch.is_control()) {
+            return Err(YandexError::InvalidPath);
+        }
+        let query = [
+            ("path", path.to_owned()),
+            ("limit", limit.clamp(1, 1000).to_string()),
+            ("offset", offset.to_string()),
+            (
+                "fields",
+                "name,path,type,size,md5,_embedded.items.name,_embedded.items.path,\
+                 _embedded.items.type,_embedded.items.size,_embedded.items.md5,\
+                 _embedded.total,_embedded.limit,_embedded.offset"
+                    .to_owned(),
+            ),
+        ];
+        self.get_json("/resources", token, &query)
+    }
+
     /// Lists directory metadata without downloading file contents.
     /// Limit is deliberately capped to avoid large responses and memory usage.
     pub fn list_folder(
