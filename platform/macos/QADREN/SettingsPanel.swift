@@ -1365,6 +1365,8 @@ private struct ScenarioDryRunView: View {
     @State private var planUnavailable = false
     /// Progress of the Worker snapshots and plan (D-024).
     @State private var planProgress: String?
+    /// When the shown plan was built.
+    @State private var planBuiltAt: Date?
     /// A stored plan with more rows than the screen loads at once (D-024).
     @State private var largePlan: WorkerPlanInfo?
     @State private var largeRows: [WorkerPlanRow] = []
@@ -1403,8 +1405,12 @@ private struct ScenarioDryRunView: View {
                 }
                     .disabled(isLoading)
             }
-            Text("Кнопка читает только имена и размеры файлов из выбранных локальных каталогов. Она не открывает содержимое, не вычисляет хэши, не создаёт Job и не передаёт файлы.")
+            Text("Кнопка читает только имена, размеры и MD5 выбранных объектов на обеих сторонах. Она не открывает содержимое, не создаёт Job и не передаёт файлы. Большая папка на Яндекс Диске читается долго: 190 000 файлов — около получаса.")
                 .font(.callout).foregroundStyle(.secondary)
+            if let planBuiltAt, !isLoading {
+                Text("Показан план от \(planBuiltAt.formatted(date: .abbreviated, time: .shortened)). Чтобы учесть новые изменения, нажмите «Проверить план».")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if let error {
                 SettingsNotice(text: error, symbol: "exclamationmark.triangle")
             }
@@ -1611,6 +1617,10 @@ private struct ScenarioDryRunView: View {
         .onAppear {
             loadConflictTasks()
             resumePendingCreateBatches()
+            // Show the last stored plan, or follow a plan in progress; a new
+            // walk starts only from "Проверить план" (D-024).
+            isLoading = true
+            Task { await loadPlanSides(startNew: false) }
         }
         .onDisappear {
             batchProgressTask?.cancel()
@@ -1691,8 +1701,9 @@ private struct ScenarioDryRunView: View {
     /// The Worker walks both sides, stores the snapshots, and builds the
     /// plan as a stream (D-024). A plan of at most 2,000 rows opens in the
     /// full screen with all row actions; a larger one opens in pages.
-    private func loadPlanSides() async {
-        defer { isLoading = false; hasRequestedPreview = true; planProgress = nil }
+    private func loadPlanSides(startNew: Bool = true) async {
+        var shown = true
+        defer { isLoading = false; hasRequestedPreview = hasRequestedPreview || shown; planProgress = nil }
         largePlan = nil
         largeRows = []
         do {
@@ -1707,21 +1718,39 @@ private struct ScenarioDryRunView: View {
             try StorageRegistryBridge.dispatchPendingScenarioCopyBaselines()
             let scenario = scenario
             let token = try YandexScenarioAccess.token(for: scenario)
-            let planID = try await Task.detached {
-                try WorkerIPC.startPlan(scenarioID: scenario.id, revision: scenario.revision, accessToken: token)
-            }.value
+            let planID: String
+            if startNew {
+                planID = try await Task.detached {
+                    try WorkerIPC.startPlan(scenarioID: scenario.id, revision: scenario.revision, accessToken: token)
+                }.value
+            } else {
+                let latest = try? await Task.detached {
+                    try WorkerIPC.planStatus(scenarioID: scenario.id, revision: scenario.revision)
+                }.value
+                guard let latest = latest?.plan, latest.state != "failed" else {
+                    shown = false
+                    return
+                }
+                planID = latest.id
+            }
             var status: WorkerPlanStatus
             repeat {
                 try await Task.sleep(for: .seconds(1))
                 status = try await Task.detached {
-                    try WorkerIPC.planStatus(scenarioID: scenario.id, revision: scenario.revision)
+                    try WorkerIPC.planStatus(scenarioID: scenario.id, revision: scenario.revision, planID: planID)
                 }.value
                 planProgress = Self.planProgressText(status)
-            } while status.plan?.id == planID && ["waiting", "building"].contains(status.plan?.state ?? "")
+            } while ["waiting", "building"].contains(status.plan?.state ?? "")
+            // A newer plan of the same revision replaced this one: follow it.
+            if status.plan?.error == "superseded" {
+                await loadPlanSides(startNew: false)
+                return
+            }
             guard let info = status.plan, info.id == planID, info.state == "complete" else {
                 let reason = status.left?.last_error ?? status.right?.last_error ?? status.plan?.error ?? "plan_unavailable"
                 throw StorageError.operation(QADRENUserMessage.text(for: reason))
             }
+            planBuiltAt = info.finished_at.map { Date(timeIntervalSince1970: TimeInterval($0)) }
             let total = info.counts?.values.reduce(0) { $0 + $1.count } ?? 0
             if total <= Self.largePlanRowLimit {
                 var rows: [WorkerPlanRow] = []

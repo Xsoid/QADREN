@@ -101,6 +101,7 @@ struct WorkerPlanCount: Decodable, Equatable {
 struct WorkerPlanInfo: Decodable, Equatable {
     let id: String
     let state: String
+    var finished_at: Int64? = nil
     let error: String?
     let counts: [String: WorkerPlanCount]?
 }
@@ -409,8 +410,11 @@ enum WorkerIPC {
         ).plan
     }
 
-    static func planStatus(scenarioID: String, revision: UInt64) throws -> WorkerPlanStatus {
-        try plan(PlanRequest(command: "plan_status", scenario_id: scenarioID, scenario_revision: revision), as: WorkerPlanStatus.self)
+    static func planStatus(scenarioID: String, revision: UInt64, planID: String? = nil) throws -> WorkerPlanStatus {
+        try plan(
+            PlanRequest(command: "plan_status", scenario_id: scenarioID, scenario_revision: revision, plan_id: planID),
+            as: WorkerPlanStatus.self
+        )
     }
 
     static func planPage(planID: String, action: String?, search: String?, offset: Int, limit: Int) throws -> [WorkerPlanRow] {

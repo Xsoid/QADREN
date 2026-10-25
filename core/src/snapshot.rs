@@ -133,6 +133,16 @@ fn valid_relative(path: &str) -> bool {
             .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
 }
 
+/// Return free pages to the file system. `incremental_vacuum` frees one
+/// page per result row, so every row must be read (a single step freed only
+/// one page: the file grew to 481 MB with 263 MB free, 2026-10-25).
+pub fn release_free_pages(db: &Connection) -> Result<()> {
+    let mut statement = db.prepare("PRAGMA incremental_vacuum")?;
+    let mut rows = statement.query([])?;
+    while rows.next()?.is_some() {}
+    Ok(())
+}
+
 pub struct SnapshotStore {
     db: Connection,
 }
@@ -149,6 +159,15 @@ impl SnapshotStore {
     pub fn open(path: &Path) -> Result<Self> {
         let db = Connection::open(path)?;
         db.busy_timeout(std::time::Duration::from_secs(30))?;
+        // Freed pages return to the file system after a prune (a database
+        // without this only grows). Switching an existing database needs
+        // one VACUUM.
+        let auto_vacuum: i64 = db.pragma_query_value(None, "auto_vacuum", |row| row.get(0))?;
+        if auto_vacuum != 2 {
+            db.pragma_update(None, "journal_mode", "DELETE")?;
+            db.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
+            db.execute_batch("VACUUM;")?;
+        }
         // Readers (the app) never block the writer (the Worker).
         db.pragma_update(None, "journal_mode", "WAL")?;
         db.execute_batch(
@@ -387,13 +406,34 @@ impl SnapshotStore {
     /// state (a failed one keeps its error and its progress) and the newest
     /// complete one (the plan source).
     pub fn prune(&self) -> Result<usize> {
+        let removed = self.prune_rows()?;
+        release_free_pages(&self.db)?;
+        Ok(removed)
+    }
+
+    fn prune_rows(&self) -> Result<usize> {
+        // A snapshot that a plan waits for or was built from stays: a plan
+        // must never lose its source (found on 2026-10-25).
+        let referenced = "SELECT left_snapshot FROM plans UNION SELECT right_snapshot FROM plans";
+        let has_plans: bool = self.db.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='plans'",
+            [],
+            |row| row.get::<_, i64>(0).map(|count| count > 0),
+        )?;
+        let keep_for_plans = if has_plans {
+            format!("AND id NOT IN ({referenced})")
+        } else {
+            String::new()
+        };
         Ok(self.db.execute(
-            "DELETE FROM snapshots WHERE state!='walking'
-               AND id NOT IN (SELECT id FROM snapshots s WHERE started_at=(
-                   SELECT max(started_at) FROM snapshots t WHERE t.fingerprint=s.fingerprint))
-               AND id NOT IN (SELECT id FROM snapshots s WHERE state='complete' AND finished_at=(
-                   SELECT max(finished_at) FROM snapshots t
-                   WHERE t.fingerprint=s.fingerprint AND t.state='complete'))",
+            &format!(
+                "DELETE FROM snapshots WHERE state!='walking' {keep_for_plans}
+                   AND id NOT IN (SELECT id FROM snapshots s WHERE started_at=(
+                       SELECT max(started_at) FROM snapshots t WHERE t.fingerprint=s.fingerprint))
+                   AND id NOT IN (SELECT id FROM snapshots s WHERE state='complete' AND finished_at=(
+                       SELECT max(finished_at) FROM snapshots t
+                       WHERE t.fingerprint=s.fingerprint AND t.state='complete'))"
+            ),
             [],
         )?)
     }

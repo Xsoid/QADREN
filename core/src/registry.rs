@@ -2126,7 +2126,66 @@ impl Registry {
             })?;
         insert_revision_selection(&transaction, id, revision as u64, &selection)?;
         transaction.commit()?;
+        self.carry_forward_confirmed_states(id, revision as u64)?;
         Ok(())
+    }
+
+    /// Copy the confirmed file states of the previous revision into
+    /// `revision` when both revisions use the same connections and roots.
+    /// A confirmed state records the versions of one path on two endpoints;
+    /// a new selection, direction, or name does not change that evidence.
+    /// Without this, every file synchronized before an edit became a
+    /// conflict (found on 2026-10-25). Existing states of `revision` stay.
+    pub fn carry_forward_confirmed_states(&self, id: &str, revision: u64) -> Result<usize> {
+        if revision < 2 {
+            return Ok(0);
+        }
+        let endpoints = |revision: u64| -> Result<Option<(String, String, String, String)>> {
+            Ok(self
+                .db
+                .query_row(
+                    "SELECT left_connection_id,left_root,right_connection_id,right_root
+                     FROM scenario_revisions WHERE scenario_id=?1 AND revision=?2",
+                    params![id, revision as i64],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()?)
+        };
+        let Some(current) = endpoints(revision)? else {
+            return Ok(0);
+        };
+        // The newest earlier revision with confirmed states.
+        let source: Option<i64> = self
+            .db
+            .query_row(
+                "SELECT max(scenario_revision) FROM file_sync_states
+                 WHERE scenario_id=?1 AND scenario_revision<?2",
+                params![id, revision as i64],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        let Some(source) = source else {
+            return Ok(0);
+        };
+        // Every revision between the source and this one must keep the
+        // endpoints; otherwise the evidence belongs to other storage.
+        for between in source as u64..revision {
+            if endpoints(between)?.as_ref() != Some(&current) {
+                return Ok(0);
+            }
+        }
+        Ok(self.db.execute(
+            "INSERT OR IGNORE INTO file_sync_states(
+                scenario_id,scenario_revision,relative_path,
+                left_object_revision,left_size,left_checksum_md5,
+                right_object_revision,right_size,right_checksum_md5)
+             SELECT scenario_id,?3,relative_path,
+                left_object_revision,left_size,left_checksum_md5,
+                right_object_revision,right_size,right_checksum_md5
+             FROM file_sync_states WHERE scenario_id=?1 AND scenario_revision=?2",
+            params![id, source, revision as i64],
+        )?)
     }
 
     /// Retrieves the immutable configuration that belongs to a Job's pinned

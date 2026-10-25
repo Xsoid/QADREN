@@ -1105,6 +1105,29 @@ fn build_waiting_plans(paths: &WorkerPaths, store: &SnapshotStore) -> bool {
 /// Start the snapshots of a Scenario revision and a plan that waits for
 /// them (D-024 stage 4).
 fn start_plan(paths: &WorkerPaths, request: &Request) -> serde_json::Value {
+    // A plan that already waits or is being built is the answer: a second
+    // request must not start more walks (found on 2026-10-25).
+    if let (Some(scenario_id), Some(revision), Ok(store)) = (
+        request.scenario_id.as_deref(),
+        request.scenario_revision,
+        SnapshotStore::open(&SnapshotStore::path_for(&paths.registry)),
+    ) {
+        let reference = ScenarioReference {
+            scenario_id: scenario_id.to_owned(),
+            revision,
+        };
+        if let Ok(Some(plan)) = plan_store::active_plan(store.connection(), &reference) {
+            let connection = Registry::open(&paths.registry)
+                .ok()
+                .and_then(|registry| yandex_source_connection(&registry, scenario_id, revision));
+            if let (Some(connection), Some(AccessToken(token))) =
+                (connection, request.access_token.as_ref())
+            {
+                runner().remember_token(&connection, token);
+            }
+            return serde_json::json!({"ok": true, "status": "accepted", "plan": plan});
+        }
+    }
     let started = start_snapshots(paths, request);
     let (Some(left), Some(right)) = (started["left"].as_str(), started["right"].as_str()) else {
         return started;
@@ -1121,6 +1144,10 @@ fn start_plan(paths: &WorkerPaths, request: &Request) -> serde_json::Value {
         scenario_id: scenario_id.to_owned(),
         revision,
     };
+    // A revision made before the carry-over fix has no confirmed states.
+    if let Ok(registry) = Registry::open(&paths.registry) {
+        let _ = registry.carry_forward_confirmed_states(scenario_id, revision);
+    }
     match plan_store::request_plan(store.connection(), &reference, left, right) {
         Ok(plan) => serde_json::json!({"ok": true, "status": "accepted", "plan": plan}),
         Err(_) => serde_json::json!({"ok": false, "status": "snapshot_store_unavailable"}),
@@ -1143,9 +1170,13 @@ fn plan_status(paths: &WorkerPaths, request: &Request) -> serde_json::Value {
         scenario_id: scenario_id.to_owned(),
         revision,
     };
-    let plan = plan_store::latest_plan(store.connection(), &reference)
-        .ok()
-        .flatten();
+    // A screen follows its own plan by ID; without one, the newest plan.
+    let plan = match request.plan_id.as_deref() {
+        Some(id) => plan_store::plan_info(store.connection(), id).ok().flatten(),
+        None => plan_store::latest_plan(store.connection(), &reference)
+            .ok()
+            .flatten(),
+    };
     let (left, right) = match &plan {
         Some(plan) => (
             store.info(&plan.left_snapshot).ok().flatten(),

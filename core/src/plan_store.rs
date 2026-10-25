@@ -102,6 +102,19 @@ fn side_label(change: SideChange) -> &'static str {
     }
 }
 
+/// The plan of a Scenario revision that waits or is being built, if any.
+pub fn active_plan(db: &Connection, reference: &ScenarioReference) -> Result<Option<String>> {
+    ensure_schema(db)?;
+    Ok(db
+        .query_row(
+            "SELECT id FROM plans WHERE scenario_id=?1 AND revision=?2
+               AND state IN ('waiting','building') ORDER BY created_at DESC LIMIT 1",
+            params![reference.scenario_id, reference.revision as i64],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
 /// Register a plan that waits for its two snapshots.
 pub fn request_plan(
     db: &Connection,
@@ -471,20 +484,34 @@ pub fn build_plan(store_path: &std::path::Path, registry: &Registry, id: &str) -
         "UPDATE plans SET state='complete', finished_at=?2, counts=?3 WHERE id=?1",
         params![id, unix_now(), counts.to_string()],
     )?;
-    // Keep the newest two plans of this Scenario revision.
+    // Waiting plans of this revision that are older than this one are
+    // superseded by it.
+    tx.execute(
+        "UPDATE plans SET state='failed', error='superseded', finished_at=?3
+         WHERE scenario_id=?1 AND revision=?2 AND state='waiting' AND created_at<=(
+            SELECT created_at FROM plans WHERE id=?4) AND id!=?4",
+        params![
+            reference.scenario_id,
+            reference.revision as i64,
+            unix_now(),
+            id
+        ],
+    )?;
+    // Keep only this plan of the Scenario revision; plans are large.
     tx.execute(
         "DELETE FROM plan_items WHERE plan_id IN (
             SELECT id FROM plans WHERE scenario_id=?1 AND revision=?2 AND state!='waiting'
-            ORDER BY created_at DESC LIMIT -1 OFFSET 2)",
+            ORDER BY created_at DESC LIMIT -1 OFFSET 1)",
         params![reference.scenario_id, reference.revision as i64],
     )?;
     tx.execute(
         "DELETE FROM plans WHERE id IN (
             SELECT id FROM plans WHERE scenario_id=?1 AND revision=?2 AND state!='waiting'
-            ORDER BY created_at DESC LIMIT -1 OFFSET 2)",
+            ORDER BY created_at DESC LIMIT -1 OFFSET 1)",
         params![reference.scenario_id, reference.revision as i64],
     )?;
     tx.commit()?;
+    let _ = crate::snapshot::release_free_pages(&db);
     plan_info(&db, id)?.ok_or(SnapshotError::NotFound)
 }
 
