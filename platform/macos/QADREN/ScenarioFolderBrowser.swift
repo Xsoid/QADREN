@@ -11,6 +11,9 @@ struct ScenarioScopeDraft: Equatable {
     /// Relative paths under the source root. Empty means the full root.
     var selectedPaths: Set<String> = []
     var deletionMode: ScenarioDeletionMode = .paranoid
+    /// D-024 retry mode. It is outside the revision: a change of this value
+    /// alone does not make a new revision.
+    var retryUntilSuccess = true
 }
 
 /// One directory level of the local disk for the Scenario editor. The Core

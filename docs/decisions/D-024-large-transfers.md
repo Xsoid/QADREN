@@ -71,7 +71,7 @@ Each item failure has one of these classes:
 
 A retry is safe only because the executor closes the attempt as "failed before effect" when no content was published. The retry uses a new Job and attempt for the same item.
 
-**Retry until success.** A shared setting "Повторять недоступные файлы до успеха" in Application Settings (stored in the Registry, read by the Worker) continues the retries after the schedule: every 24 h, until the item succeeds or the user pauses or stops the run. It applies to the transient classes only, never to a permanent failure or an unproven effect. The owner requested it on 2026-10-25 because the Yandex Disk storage did not serve some files after the data-center incident; it is on by default.
+**Retry until success.** The Scenario parameter "Повторять недоступные файлы до успеха" continues the retries after the schedule: every 24 h, until the item succeeds or the user pauses or stops the run. It applies to the transient classes only, never to a permanent failure or an unproven effect. The owner requested it on 2026-10-25 because the Yandex Disk storage did not serve some files after the data-center incident; it is on by default. On 2026-10-25 the owner moved it from Application Settings to the Scenario: each Scenario has its own value. The value is in the `scenarios` row of the Registry, outside the revision, so a change does not make a new revision and does not stop a running batch. The Worker reads the value at each failure. The migration copies the previous global value to every existing Scenario.
 
 ### 5. Worker access to the token
 

@@ -223,12 +223,14 @@ pub extern "C" fn qadren_scenarios_list(path: *const c_char) -> *mut c_char {
         let mut entries = Vec::new();
         for item in db.list_scenarios()? {
             let scope = db.get_scenario_revision_scope(&item.id, item.revision)?;
+            let retry_until_success = db.scenario_retry_until_success(&item.id)?;
             entries.push(json!({
                 "id": item.id, "name": item.name, "left_connection_id": item.left_connection_id,
                 "left_root": item.left_root, "right_connection_id": item.right_connection_id,
                 "right_root": item.right_root, "direction": item.direction, "enabled": item.enabled,
                 "revision": item.revision, "selected_paths": scope.selected_paths,
-                "deletion_mode": scope.deletion_mode.as_str()
+                "deletion_mode": scope.deletion_mode.as_str(),
+                "retry_until_success": retry_until_success
             }));
         }
         Ok(json!(entries))
@@ -537,22 +539,20 @@ pub extern "C" fn qadren_scenario_create_batch_summary(
     })
 }
 
-/// Settings that the app and the Worker share.
+/// Turn the "retry until success" mode of D-024 on (1) or off (0) for one
+/// Scenario. The Scenario revision does not change, so a running batch
+/// continues and the Worker reads the new value at the next failure.
 #[no_mangle]
-pub extern "C" fn qadren_settings_get(path: *const c_char) -> *mut c_char {
-    with_registry(path, |db| {
-        Ok(json!({"retry_until_success": db.retry_until_success()?}))
-    })
-}
-
-/// Turn the "retry until success" mode of D-024 on (1) or off (0).
-#[no_mangle]
-pub extern "C" fn qadren_settings_set_retry_until_success(
+pub extern "C" fn qadren_scenario_set_retry_until_success(
     path: *const c_char,
+    scenario_id: *const c_char,
     enabled: i32,
 ) -> *mut c_char {
+    let Some(scenario_id) = input(scenario_id) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
     with_registry(path, |db| {
-        db.set_retry_until_success(enabled != 0)?;
+        db.set_scenario_retry_until_success(&scenario_id, enabled != 0)?;
         Ok(json!({"retry_until_success": enabled != 0}))
     })
 }

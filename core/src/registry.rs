@@ -254,7 +254,7 @@ impl Registry {
         }
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 21 {
+        if version > 22 {
             return Err(RegistryError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -587,6 +587,23 @@ impl Registry {
                  CREATE INDEX batch_children_by_batch
                    ON scenario_create_batch_children(batch_id, state);
                  PRAGMA user_version = 21;
+                 COMMIT;",
+            )?;
+        }
+        if version <= 21 {
+            // The retry-until-success mode of D-024 is a Scenario parameter.
+            // It is not part of a revision: it changes no file scope, and a
+            // change must not stop a running batch. The previous global value
+            // moves to every existing Scenario.
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE scenarios ADD COLUMN retry_until_success INTEGER NOT NULL DEFAULT 1
+                   CHECK(retry_until_success IN (0,1));
+                 UPDATE scenarios SET retry_until_success=0
+                   WHERE EXISTS(SELECT 1 FROM app_settings
+                                WHERE key='retry_until_success' AND value='0');
+                 DELETE FROM app_settings WHERE key='retry_until_success';
+                 PRAGMA user_version = 22;
                  COMMIT;",
             )?;
         }
@@ -1639,28 +1656,28 @@ impl Registry {
         Ok(rows)
     }
 
-    /// When true, a batch child with a transient failure is retried every 24 h
-    /// after the D-024 retry schedule, until it succeeds or the user stops the
-    /// batch. The owner turned it on by default on 2026-10-25.
-    pub fn retry_until_success(&self) -> Result<bool> {
-        let value: Option<String> = self
+    /// When true, a batch child of this Scenario with a transient failure is
+    /// retried every 24 h after the D-024 retry schedule, until it succeeds
+    /// or the user stops the batch. The default is on. A missing Scenario
+    /// reads as off.
+    pub fn scenario_retry_until_success(&self, scenario_id: &str) -> Result<bool> {
+        let value: Option<bool> = self
             .db
             .query_row(
-                "SELECT value FROM app_settings WHERE key='retry_until_success'",
-                [],
+                "SELECT retry_until_success FROM scenarios WHERE id=?1",
+                [scenario_id],
                 |row| row.get(0),
             )
             .optional()?;
-        Ok(value.as_deref() != Some("0"))
+        Ok(value.unwrap_or(false))
     }
 
-    pub fn set_retry_until_success(&self, enabled: bool) -> Result<()> {
-        self.db.execute(
-            "INSERT INTO app_settings(key,value) VALUES('retry_until_success',?1)
-             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            [if enabled { "1" } else { "0" }],
-        )?;
-        Ok(())
+    /// Change the retry mode of one Scenario. The revision does not change.
+    pub fn set_scenario_retry_until_success(&self, scenario_id: &str, enabled: bool) -> Result<()> {
+        self.changed(self.db.execute(
+            "UPDATE scenarios SET retry_until_success=?1 WHERE id=?2",
+            params![enabled, scenario_id],
+        )?)
     }
 
     /// Check one child before the Worker starts it. This reads one row.

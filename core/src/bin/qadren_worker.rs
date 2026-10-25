@@ -1624,7 +1624,7 @@ fn record_batch_child_outcome(
             let attempt = child.retries as usize;
             let delay = RETRY_DELAYS.get(attempt).copied().or_else(|| {
                 registry
-                    .retry_until_success()
+                    .scenario_retry_until_success(&child.scenario.scenario_id)
                     .unwrap_or(false)
                     .then_some(RETRY_FOREVER_DELAY)
             });

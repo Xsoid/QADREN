@@ -25,7 +25,7 @@ final class ScenarioSettings: ObservableObject {
         scope: ScenarioScopeDraft = ScenarioScopeDraft()
     ) -> String? {
         do {
-            _ = try StorageRegistryBridge.createScenario(
+            let id = try StorageRegistryBridge.createScenario(
                 name: name,
                 leftID: leftID,
                 leftRoot: leftRoot,
@@ -35,6 +35,9 @@ final class ScenarioSettings: ObservableObject {
                 selectedPaths: scope.selectedPaths.sorted(),
                 deletionMode: scope.deletionMode
             )
+            if !scope.retryUntilSuccess {
+                try StorageRegistryBridge.setScenarioRetryUntilSuccess(id: id, enabled: false)
+            }
             refresh()
             return nil
         } catch {
@@ -63,17 +66,33 @@ final class ScenarioSettings: ObservableObject {
         scope: ScenarioScopeDraft = ScenarioScopeDraft()
     ) -> String? {
         do {
-            try StorageRegistryBridge.updateScenario(
-                id: id,
-                name: name,
-                leftID: leftID,
-                leftRoot: leftRoot,
-                rightID: rightID,
-                rightRoot: rightRoot,
-                direction: direction,
-                selectedPaths: scope.selectedPaths.sorted(),
-                deletionMode: scope.deletionMode
-            )
+            let current = entries.first { $0.id == id }
+            // A new revision only when the revision configuration changes.
+            // The retry mode alone keeps the revision and a running batch.
+            let revisionChanged = current.map {
+                $0.name != name.trimmingCharacters(in: .whitespacesAndNewlines)
+                    || $0.left_connection_id != leftID || $0.left_root != leftRoot
+                    || $0.right_connection_id != rightID || $0.right_root != rightRoot
+                    || $0.direction != direction
+                    || Set($0.selected_paths) != scope.selectedPaths
+                    || $0.deletion_mode != scope.deletionMode.rawValue
+            } ?? true
+            if revisionChanged {
+                try StorageRegistryBridge.updateScenario(
+                    id: id,
+                    name: name,
+                    leftID: leftID,
+                    leftRoot: leftRoot,
+                    rightID: rightID,
+                    rightRoot: rightRoot,
+                    direction: direction,
+                    selectedPaths: scope.selectedPaths.sorted(),
+                    deletionMode: scope.deletionMode
+                )
+            }
+            if current?.retry_until_success != scope.retryUntilSuccess {
+                try StorageRegistryBridge.setScenarioRetryUntilSuccess(id: id, enabled: scope.retryUntilSuccess)
+            }
             refresh()
             return nil
         } catch {
@@ -1288,7 +1307,8 @@ private struct ScenariosSettingsView: View {
         let deletions = scenario.deletion_mode == ScenarioDeletionMode.simple.rawValue
             ? "удаления: простая синхронизация"
             : "удаления: параноик"
-        return objects + " · " + deletions
+        let retries = scenario.retry_until_success ? "повтор до успеха" : "повтор 5 раз"
+        return objects + " · " + deletions + " · " + retries
     }
 
     private func scenarioStatus(_ scenario: ScenarioEntry) -> String {
@@ -2603,6 +2623,7 @@ private struct ScenarioEditorView: View {
                         }
                     }
                 )
+                ScenarioRetryBox(retryUntilSuccess: $scope.retryUntilSuccess)
                 Text("Создание сохраняет только конфигурацию. Передача файлов начинается позднее, только из проверенного плана и после отдельного подтверждения.")
                     .font(.caption).foregroundStyle(.secondary)
                 if let error {
@@ -2621,7 +2642,8 @@ private struct ScenarioEditorView: View {
                 direction = scenario.direction
                 scope = ScenarioScopeDraft(
                     selectedPaths: Set(scenario.selected_paths),
-                    deletionMode: ScenarioDeletionMode(rawValue: scenario.deletion_mode) ?? .paranoid
+                    deletionMode: ScenarioDeletionMode(rawValue: scenario.deletion_mode) ?? .paranoid,
+                    retryUntilSuccess: scenario.retry_until_success
                 )
             } else if let first = connections.first(where: { $0.adapter != "yandex_disk" }) {
                 leftID = first.id
@@ -2686,6 +2708,26 @@ private struct ScenarioDeletionModeBox: View {
                             .font(.caption).foregroundStyle(.orange)
                     }
                 }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+/// The D-024 retry mode of a Scenario. It is outside the revision.
+private struct ScenarioRetryBox: View {
+    @Binding var retryUntilSuccess: Bool
+
+    var body: some View {
+        GroupBox("Передача файлов") {
+            VStack(alignment: .leading, spacing: 8) {
+                Toggle("Повторять недоступные файлы до успеха", isOn: $retryUntilSuccess)
+                Text(retryUntilSuccess
+                    ? "Файл, который не скачался из-за временной ошибки (например, ошибка 500 у Яндекса), фоновая служба повторяет через 1 мин, 5 мин, 30 мин, 2 ч и 12 ч, а затем раз в сутки — пока он не скачается или вы не остановите пакет. Файл при неудачной попытке не записывается."
+                    : "Файл, который не скачался из-за временной ошибки, фоновая служба повторяет через 1 мин, 5 мин, 30 мин, 2 ч и 12 ч. После этого он отмечается как не выполненный и остаётся в плане.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("Эта настройка не создаёт новую ревизию: идущий пакет продолжается и применяет новое значение при следующей ошибке.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -3209,9 +3251,6 @@ private struct SettingsEmptyState<Actions: View>: View {
 
 struct ApplicationSettingsView: View {
     @AppStorage("qadren.theme") private var themeRaw = QDThemeMode.dark.rawValue
-    /// Shared with the Worker through the Registry (D-024).
-    @State private var retryUntilSuccess = true
-    @State private var settingsError: String?
 
     var body: some View {
         Form {
@@ -3223,27 +3262,6 @@ struct ApplicationSettingsView: View {
                 }
                 Text("Применяется ко всем окнам QADREN и не меняет подключения, сценарии или Worker.")
                     .font(.caption).foregroundStyle(.secondary)
-            }
-            Section("Передача файлов") {
-                Toggle("Повторять недоступные файлы до успеха", isOn: Binding(
-                    get: { retryUntilSuccess },
-                    set: { newValue in
-                        do {
-                            try StorageRegistryBridge.setRetryUntilSuccess(newValue)
-                            retryUntilSuccess = newValue
-                            settingsError = nil
-                        } catch {
-                            settingsError = error.localizedDescription
-                        }
-                    }
-                ))
-                Text(retryUntilSuccess
-                    ? "Файл, который не скачался из-за временной ошибки (например, ошибка 500 у Яндекса), фоновая служба повторяет через 1 мин, 5 мин, 30 мин, 2 ч и 12 ч, а затем раз в сутки — пока он не скачается или вы не остановите пакет. Файл при неудачной попытке не записывается."
-                    : "Файл, который не скачался из-за временной ошибки, фоновая служба повторяет через 1 мин, 5 мин, 30 мин, 2 ч и 12 ч. После этого он отмечается как не выполненный и остаётся в плане.")
-                    .font(.caption).foregroundStyle(.secondary)
-                if let settingsError {
-                    Text(settingsError).font(.caption).foregroundStyle(.orange)
-                }
             }
             Section("Состояние приложения") {
                 LabeledContent("Настройки", value: "Отдельное окно")
@@ -3270,11 +3288,6 @@ struct ApplicationSettingsView: View {
         .formStyle(.grouped)
         .padding(20)
         .navigationTitle("Настройки приложения")
-        .onAppear {
-            if let settings = try? StorageRegistryBridge.sharedSettings() {
-                retryUntilSuccess = settings.retry_until_success
-            }
-        }
     }
 
     /// Marketing version and build number from Info.plist.

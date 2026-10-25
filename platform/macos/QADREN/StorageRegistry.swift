@@ -37,10 +37,10 @@ private func scenarioCreateBatchSummariesFFI(
 private func scenarioCreateBatchSummaryFFI(
     _ path: UnsafePointer<CChar>?, _ batchID: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
-@_silgen_name("qadren_settings_get")
-private func settingsGetFFI(_ path: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
-@_silgen_name("qadren_settings_set_retry_until_success")
-private func settingsSetRetryUntilSuccessFFI(_ path: UnsafePointer<CChar>?, _ enabled: Int32) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_scenario_set_retry_until_success")
+private func scenarioSetRetryUntilSuccessFFI(
+    _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?, _ enabled: Int32
+) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_scenario_create_batch_set_paused")
 private func setScenarioCreateBatchPausedFFI(
     _ path: UnsafePointer<CChar>?, _ batchID: UnsafePointer<CChar>?, _ paused: Int32
@@ -196,6 +196,9 @@ struct ScenarioEntry: Decodable, Identifiable {
     var selected_paths: [String] = []
     /// `paranoid` or `simple` (D-019).
     var deletion_mode: String = ScenarioDeletionMode.paranoid.rawValue
+    /// D-024: retry a temporarily unavailable file every 24 h after the
+    /// retry schedule. A Scenario parameter outside the revision.
+    var retry_until_success: Bool = true
 }
 
 /// How a Scenario revision treats a deletion after a confirmed synchronization.
@@ -830,22 +833,16 @@ enum StorageRegistryBridge {
         }
     }
 
-    /// Settings that the app and the Worker share (Registry).
-    struct SharedSettings: Decodable {
-        let retry_until_success: Bool
-    }
-
-    static func sharedSettings() throws -> SharedSettings {
-        let database = try path
-        return try database.withCString { try unwrap(settingsGetFFI($0), as: SharedSettings.self, databasePath: database) }
-    }
-
     /// D-024: after the retry schedule, retry a temporarily unavailable file
-    /// every 24 h until it succeeds or the user stops the batch.
-    static func setRetryUntilSuccess(_ enabled: Bool) throws {
+    /// of this Scenario every 24 h until it succeeds or the user stops the
+    /// batch. The revision does not change, so a running batch continues.
+    static func setScenarioRetryUntilSuccess(id: String, enabled: Bool) throws {
+        struct Result: Decodable { let retry_until_success: Bool }
         let database = try path
-        let _: SharedSettings = try database.withCString {
-            try unwrap(settingsSetRetryUntilSuccessFFI($0, enabled ? 1 : 0), as: SharedSettings.self, databasePath: database)
+        let _: Result = try database.withCString { db in
+            try id.withCString { id in
+                try unwrap(scenarioSetRetryUntilSuccessFFI(db, id, enabled ? 1 : 0), as: Result.self, databasePath: database)
+            }
         }
     }
 
