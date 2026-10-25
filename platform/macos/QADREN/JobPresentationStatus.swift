@@ -77,4 +77,14 @@ struct JobQueueSummary: Equatable {
         waiting = presentations.filter { $0 == .waiting }.count
         unknown = presentations.filter { $0 == .unknown }.count
     }
+
+    /// From counts by state (D-024), without a list of all Jobs.
+    init(counts: [String: Int]) {
+        func total(_ presentation: JobPresentationStatus) -> Int {
+            counts.filter { JobPresentationStatus(state: $0.key) == presentation }.values.reduce(0, +)
+        }
+        active = total(.active)
+        waiting = total(.waiting)
+        unknown = total(.unknown)
+    }
 }

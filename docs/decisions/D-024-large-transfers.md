@@ -20,6 +20,17 @@ Facts from 2026-10-24 and 2026-10-25:
 
 ## Decision
 
+### 0. Scale target
+
+The owner target (2026-10-25) is hundreds of thousands of files in one Scenario, and the system must not fail or stall at that size. The design target is **1,000,000 files for each Scenario side**. These rules apply to every part of a large transfer:
+
+1. **No full list in memory.** No component loads all files, all plan rows, all batch children, or all Jobs into memory or into one FFI response. Each reads pages or streams rows in path order.
+2. **Bounded memory.** The Worker uses bounded memory that does not grow with the number of files (target: less than 300 MB resident at 1,000,000 files). The app uses memory for one visible page, not for the full data set.
+3. **Indexed queries.** Each periodic query (due items, unknown Jobs, unresolved attempts, progress counts) uses an index and reads only the rows it needs. A poll or a progress refresh never scans all items.
+4. **Durable progress.** A walk, a plan, and a run continue after a crash or a restart from their stored state. No step must start again from the beginning because of an interruption.
+5. **Responsive interface.** The IPC thread answers in less than 1 s at every size. Progress shows counts from the database, not from a list of items.
+6. **Measured.** Each stage is checked with a generated data set of at least 300,000 files, with time and peak memory recorded.
+
 ### 1. The Worker owns long runs
 
 1. A **Transfer Run** is one durable execution of one Scenario revision: its snapshots, its plan, and its items. Each item is one file effect and uses one Job with the existing durable attempt model. There is still one JobStore.
@@ -41,7 +52,7 @@ Facts from 2026-10-24 and 2026-10-25:
 ### 3. Plan
 
 1. Core computes the plan in the Worker from two complete snapshots and stores it in SQLite: one row for each path with an action, plus counts for each action.
-2. The 10,000-entry and 1 MB limits do not apply to this path. A new limit of 1,000,000 entries for each side protects memory. A larger Scenario must use a smaller selection.
+2. The 10,000-entry and 1 MB limits do not apply to this path. The plan is computed as a stream: the Worker merges the two stored snapshots and the stored baselines in the order of the name key (NFC, lowercase), so names that can name one file are adjacent, and it writes plan rows in pages. The mass-deletion count is a database count, not a list. The supported size is 1,000,000 entries for each side.
 3. The plan screen shows counts and the total size for each action, and the rows page by page, with a filter by action and a search by path. It does not build one view for each file.
 4. "Создать все" confirms one run with the counts that the user sees. It does not send a list of paths through the app.
 5. Replacements and deletions keep their confirmations (D-018, D-019). A mass deletion still needs its explicit confirmation of the proposed set.
@@ -81,11 +92,12 @@ A retry is safe only because the executor closes the attempt as "failed before e
 
 ## Order of work
 
-1. Worker: background run thread, durable Transfer Run with items, retry classes, run report, token in memory (stage A), no re-registration during a run.
-2. Snapshot store and resumable Yandex and local walks.
-3. Plan store and the paged plan screen; remove the old limits for the new path.
-4. MD5 reconciliation for Yandex downloads.
-5. Deferred: Developer ID signing and the shared Keychain access group (stage B). It needs an Apple Developer account and a new owner decision.
+1. Done (2026-10-25): Worker background run thread, durable runs with retries, token in memory (stage A), no re-registration during a run.
+2. Done (2026-10-25): scale pass on stage 1: indexed and paged due items, progress counts from the database, a single-row check before each item, the newest 200 Jobs and counts for the monitoring screen, indexed unknown-Job and attempt queries. Checked with 300,000 batch children and 300,000 Jobs.
+3. Snapshot store and resumable Yandex and local walks, with a generated 300,000-file check.
+4. Streaming plan, plan store, and the paged plan screen; a run starts from the stored plan, not from a path list in the app.
+5. MD5 reconciliation for Yandex downloads.
+6. Deferred: Developer ID signing and the shared Keychain access group (stage B). It needs an Apple Developer account and a new owner decision.
 
 Each step keeps the safety invariants of AGENTS.md: durable attempt before an effect, no-overwrite for new files, the replacement protocol, and `UNKNOWN` without a blind retry.
 

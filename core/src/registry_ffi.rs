@@ -489,6 +489,54 @@ pub extern "C" fn qadren_scenario_create_batch_request_cancellation(
     }
 }
 
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() as i64)
+}
+
+/// Progress summaries of the batches of one Scenario revision that still
+/// have pending children (D-024). Counts only, never the list of children.
+#[no_mangle]
+pub extern "C" fn qadren_scenario_create_batch_summaries(
+    path: *const c_char,
+    scenario_id: *const c_char,
+    revision: u64,
+) -> *mut c_char {
+    let Some(scenario_id) = input(scenario_id) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    let reference = ScenarioReference {
+        scenario_id,
+        revision,
+    };
+    with_registry(path, |db| {
+        let now = unix_now();
+        let summaries = db
+            .pending_scenario_create_batch_ids_for(&reference)?
+            .into_iter()
+            .filter_map(|id| db.scenario_create_batch_summary(&id, now).transpose())
+            .collect::<crate::registry::Result<Vec<_>>>()?;
+        Ok(json!(summaries))
+    })
+}
+
+/// Progress summary of one batch (D-024).
+#[no_mangle]
+pub extern "C" fn qadren_scenario_create_batch_summary(
+    path: *const c_char,
+    batch_id: *const c_char,
+) -> *mut c_char {
+    let Some(batch_id) = input(batch_id) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    with_registry(path, |db| {
+        db.scenario_create_batch_summary(&batch_id, unix_now())?
+            .map(|summary| json!(summary))
+            .ok_or(RegistryError::NotFound)
+    })
+}
+
 /// Settings that the app and the Worker share.
 #[no_mangle]
 pub extern "C" fn qadren_settings_get(path: *const c_char) -> *mut c_char {

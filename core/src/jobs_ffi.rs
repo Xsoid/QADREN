@@ -166,17 +166,25 @@ pub unsafe extern "C" fn qadren_jobs_list(path: *const c_char) -> *mut c_char {
         return response(json!({"ok": false, "error": "invalid_path"}));
     };
     // Read-only: the Worker owns the JobStore lock and the restart rule.
-    match JobStore::open_read_only(Path::new(path))
-        .and_then(|store| store.map_or_else(|| Ok(Vec::new()), |store| store.list_jobs()))
-    {
-        Ok(jobs) => response(json!({
+    // D-024: the newest 200 Jobs and the counts by state, never all Jobs.
+    const RECENT: usize = 200;
+    let result = JobStore::open_read_only(Path::new(path)).and_then(|store| match store {
+        Some(store) => Ok((store.recent_jobs(RECENT)?, store.job_state_counts()?)),
+        None => Ok((Vec::new(), Vec::new())),
+    });
+    match result {
+        Ok((jobs, counts)) => response(json!({
             "ok": true,
             "data": jobs.into_iter().map(|job| json!({
                 "id": job.id,
                 "state": crate::jobs::state_label(job.state),
                 "scenario_id": job.scenario_id,
                 "scenario_revision": job.scenario_revision,
-            })).collect::<Vec<_>>()
+            })).collect::<Vec<_>>(),
+            "total": counts.iter().map(|(_, count)| count).sum::<u64>(),
+            "counts": counts.into_iter()
+                .map(|(state, count)| (crate::jobs::state_label(state).to_owned(), json!(count)))
+                .collect::<serde_json::Map<_, _>>(),
         })),
         Err(_) => response(json!({"ok": false, "error": "job_store_unavailable"})),
     }

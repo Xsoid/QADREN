@@ -43,7 +43,17 @@ struct JobRow: Decodable, Identifiable, Sendable {
 private struct JobEnvelope: Decodable {
     let ok: Bool
     let data: [JobRow]?
+    /// D-024: all Jobs by state; `data` holds only the newest 200.
+    var counts: [String: Int]?
+    var total: Int?
     let error: String?
+}
+
+/// The newest Jobs and the counts of all Jobs by state (D-024).
+struct JobInventorySnapshot: Sendable {
+    let recent: [JobRow]
+    let counts: [String: Int]
+    let total: Int
 }
 
 private struct MockCreateEnvelope: Decodable {
@@ -82,6 +92,14 @@ enum JobInventory {
     }
 
     static func list(databasePath: String) throws -> [JobRow] {
+        try inventory(databasePath: databasePath).recent
+    }
+
+    static func inventory() throws -> JobInventorySnapshot {
+        try inventory(databasePath: paths().database)
+    }
+
+    static func inventory(databasePath: String) throws -> JobInventorySnapshot {
         let ptr = databasePath.withCString { jobList($0) }
         guard let ptr else { throw StorageError.operation("Job inventory unavailable") }
         defer { jobFree(ptr) }
@@ -92,7 +110,8 @@ enum JobInventory {
         try? FileManager.default.setAttributes(
             [.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: databasePath
         )
-        return jobs
+        let counts = result.counts ?? Dictionary(jobs.map { ($0.state, 1) }, uniquingKeysWith: +)
+        return JobInventorySnapshot(recent: jobs, counts: counts, total: result.total ?? jobs.count)
     }
 
     /// Fails closed when the durable Job inventory cannot prove this local

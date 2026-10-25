@@ -38,6 +38,9 @@ enum MonitoringFreshness: Equatable {
 
 struct MonitoringSnapshot: Sendable {
     let jobs: [JobRow]?
+    /// D-024: counts of all Jobs by state; `jobs` holds only the newest ones.
+    var jobCounts: [String: Int]? = nil
+    var jobTotal: Int? = nil
     let jobError: String?
     let worker: WorkerReachability
     let capturedAt: Date
@@ -45,10 +48,10 @@ struct MonitoringSnapshot: Sendable {
     /// Reads the JobStore inventory and sends one IPC `status` request. Both
     /// reads are non-mutating. Call this function off the main thread.
     static func capture(databasePath: String? = nil, socketPath: String? = nil) -> MonitoringSnapshot {
-        var jobs: [JobRow]?
+        var inventory: JobInventorySnapshot?
         var jobError: String?
         do {
-            jobs = try databasePath.map { try JobInventory.list(databasePath: $0) } ?? JobInventory.list()
+            inventory = try databasePath.map { try JobInventory.inventory(databasePath: $0) } ?? JobInventory.inventory()
         } catch {
             jobError = error.localizedDescription
         }
@@ -61,7 +64,10 @@ struct MonitoringSnapshot: Sendable {
         } catch {
             worker = .notResponding
         }
-        return MonitoringSnapshot(jobs: jobs, jobError: jobError, worker: worker, capturedAt: Date())
+        return MonitoringSnapshot(
+            jobs: inventory?.recent, jobCounts: inventory?.counts, jobTotal: inventory?.total,
+            jobError: jobError, worker: worker, capturedAt: Date()
+        )
     }
 }
 
@@ -72,6 +78,9 @@ final class MonitoringFeed: ObservableObject {
     static let refreshInterval: TimeInterval = 5
 
     @Published private(set) var jobs: [JobRow] = []
+    /// Counts of all Jobs by state (D-024).
+    @Published private(set) var jobCounts: [String: Int] = [:]
+    @Published private(set) var jobTotal = 0
     @Published private(set) var jobError: String?
     @Published private(set) var worker: WorkerReachability = .unchecked
     @Published private(set) var lastInventoryRead: Date?
@@ -106,6 +115,8 @@ final class MonitoringFeed: ObservableObject {
     func apply(_ snapshot: MonitoringSnapshot) {
         if let jobs = snapshot.jobs {
             self.jobs = jobs
+            jobCounts = snapshot.jobCounts ?? Dictionary(jobs.map { ($0.state, 1) }, uniquingKeysWith: +)
+            jobTotal = snapshot.jobTotal ?? jobs.count
             lastInventoryRead = snapshot.capturedAt
         }
         // Keep the last good rows after a failed read; freshness marks them stale.

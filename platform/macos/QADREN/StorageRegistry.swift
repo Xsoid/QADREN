@@ -29,6 +29,14 @@ private func scenarioCreateBatchGet(
 private func requestScenarioCreateBatchCancellationFFI(
     _ path: UnsafePointer<CChar>?, _ batchID: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_scenario_create_batch_summaries")
+private func scenarioCreateBatchSummariesFFI(
+    _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?, _ revision: UInt64
+) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_scenario_create_batch_summary")
+private func scenarioCreateBatchSummaryFFI(
+    _ path: UnsafePointer<CChar>?, _ batchID: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_settings_get")
 private func settingsGetFFI(_ path: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_settings_set_retry_until_success")
@@ -272,6 +280,43 @@ struct ScenarioCreateBatchReceipt: Decodable {
     var paused: Bool? = nil
     let children: [ScenarioCreateBatchChild]
 }
+/// Progress of one batch from database counts (D-024).
+struct ScenarioBatchSummary: Decodable {
+    let id: String
+    let cancellation_requested: Bool
+    let paused: Bool
+    let total: Int
+    let completed: Int
+    let failed: Int
+    let cancelled: Int
+    let unknown: Int
+    let due: Int
+    let retry_waiting: Int
+    let next_retry_at: Int64?
+    let current_path: String?
+    /// Pairs of a failure code and its count, most frequent first.
+    let failure_reasons: [[CodableValue]]
+    let unfinished_sample: [String]
+
+    /// "code: count" texts of `failure_reasons`.
+    var reasonTexts: [String] {
+        failure_reasons.compactMap { pair in
+            guard pair.count == 2, case let .text(code) = pair[0], case let .number(count) = pair[1] else { return nil }
+            return "\(code): \(Int(count))"
+        }
+    }
+}
+
+/// A JSON string or number inside a tuple array.
+enum CodableValue: Decodable {
+    case text(String)
+    case number(Double)
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let text = try? container.decode(String.self) { self = .text(text) } else { self = .number(try container.decode(Double.self)) }
+    }
+}
+
 struct ScenarioCreateBatchChild: Decodable {
     let relative_path: String
     let state: String
@@ -754,6 +799,25 @@ enum StorageRegistryBridge {
         return try database.withCString { path in
             try id.withCString { id in
                 try unwrap(scenarioCreateBatchGet(path, id), as: ScenarioCreateBatchReceipt.self, databasePath: database)
+            }
+        }
+    }
+
+    /// Progress of the unfinished batches of one Scenario revision (D-024).
+    static func scenarioCreateBatchSummaries(scenario: ScenarioEntry) throws -> [ScenarioBatchSummary] {
+        let database = try path
+        return try database.withCString { path in
+            try scenario.id.withCString { id in
+                try unwrap(scenarioCreateBatchSummariesFFI(path, id, scenario.revision), as: [ScenarioBatchSummary].self, databasePath: database)
+            }
+        }
+    }
+
+    static func scenarioCreateBatchSummary(id: String) throws -> ScenarioBatchSummary {
+        let database = try path
+        return try database.withCString { path in
+            try id.withCString { id in
+                try unwrap(scenarioCreateBatchSummaryFFI(path, id), as: ScenarioBatchSummary.self, databasePath: database)
             }
         }
     }

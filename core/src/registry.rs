@@ -164,6 +164,42 @@ pub struct ScenarioBatchChild {
     pub last_error: Option<String>,
 }
 
+/// Progress of one batch from database counts (D-024). It never lists all
+/// children.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ScenarioBatchSummary {
+    pub id: String,
+    pub cancellation_requested: bool,
+    pub paused: bool,
+    pub total: u64,
+    pub completed: u64,
+    pub failed: u64,
+    pub cancelled: u64,
+    pub unknown: u64,
+    /// `pending` children without a future retry time.
+    pub due: u64,
+    /// `pending` children with a future retry time.
+    pub retry_waiting: u64,
+    /// Unix seconds of the next retry, if any.
+    pub next_retry_at: Option<i64>,
+    /// The first due child in path order.
+    pub current_path: Option<String>,
+    /// The most frequent failure codes of finished children, with counts.
+    pub failure_reasons: Vec<(String, u64)>,
+    /// Up to 5 unfinished paths in path order, for the outcome message.
+    pub unfinished_sample: Vec<String>,
+}
+
+/// Whether the Worker can start one batch child now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchChildDue {
+    Due,
+    Paused,
+    Cancelled,
+    /// Another state, another Job ID, or no such child.
+    NotDue,
+}
+
 /// A batch child that the Worker can start now.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DueBatchChild {
@@ -218,7 +254,7 @@ impl Registry {
         }
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 20 {
+        if version > 21 {
             return Err(RegistryError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -538,6 +574,19 @@ impl Registry {
                     value TEXT NOT NULL
                  );
                  PRAGMA user_version = 20;
+                 COMMIT;",
+            )?;
+        }
+        if version <= 20 {
+            // D-024 scale rules: the run thread and the progress view read
+            // batch children through indexes, never by a full scan.
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE INDEX batch_children_due
+                   ON scenario_create_batch_children(state, next_retry_at);
+                 CREATE INDEX batch_children_by_batch
+                   ON scenario_create_batch_children(batch_id, state);
+                 PRAGMA user_version = 21;
                  COMMIT;",
             )?;
         }
@@ -1511,10 +1560,15 @@ impl Registry {
         }
     }
 
-    /// Children that the Worker can start at `now`: `pending`, without a
-    /// retry time in the future, in a batch that is not paused. A cancelled
-    /// batch is included, so that the Worker records `cancelled`.
-    pub fn due_scenario_create_batch_children(&self, now: i64) -> Result<Vec<DueBatchChild>> {
+    /// At most `limit` children that the Worker can start at `now`:
+    /// `pending`, without a retry time in the future, in a batch that is not
+    /// paused. A cancelled batch is included, so that the Worker records
+    /// `cancelled`. The query uses the `batch_children_due` index.
+    pub fn due_scenario_create_batch_children(
+        &self,
+        now: i64,
+        limit: usize,
+    ) -> Result<Vec<DueBatchChild>> {
         let mut statement = self.db.prepare(
             "SELECT c.batch_id,b.scenario_id,b.scenario_revision,c.relative_path,c.source_is_left,
                     c.job_id,c.retries,b.cancellation_requested
@@ -1522,10 +1576,11 @@ impl Registry {
              JOIN scenario_create_batches b ON b.id=c.batch_id
              WHERE c.state='pending' AND b.paused=0
                AND (c.next_retry_at IS NULL OR c.next_retry_at<=?1 OR b.cancellation_requested=1)
-             ORDER BY c.batch_id, c.relative_path",
+             ORDER BY c.batch_id, c.relative_path
+             LIMIT ?2",
         )?;
         let rows = statement
-            .query_map([now], |row| {
+            .query_map(params![now, limit as i64], |row| {
                 Ok(DueBatchChild {
                     batch_id: row.get(0)?,
                     scenario: ScenarioReference {
@@ -1565,6 +1620,151 @@ impl Registry {
             [if enabled { "1" } else { "0" }],
         )?;
         Ok(())
+    }
+
+    /// Check one child before the Worker starts it. This reads one row.
+    pub fn batch_child_due(
+        &self,
+        batch_id: &str,
+        relative_path: &str,
+        job_id: &str,
+    ) -> Result<BatchChildDue> {
+        let row: Option<(String, String, bool, bool)> = self
+            .db
+            .query_row(
+                "SELECT c.state,c.job_id,b.paused,b.cancellation_requested
+                 FROM scenario_create_batch_children c
+                 JOIN scenario_create_batches b ON b.id=c.batch_id
+                 WHERE c.batch_id=?1 AND c.relative_path=?2",
+                params![batch_id, relative_path],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        Ok(match row {
+            Some((state, current, _, _)) if state != "pending" || current != job_id => {
+                BatchChildDue::NotDue
+            }
+            Some((_, _, _, true)) => BatchChildDue::Cancelled,
+            Some((_, _, true, _)) => BatchChildDue::Paused,
+            Some(_) => BatchChildDue::Due,
+            None => BatchChildDue::NotDue,
+        })
+    }
+
+    /// Progress of one batch from counts (D-024). `now` separates due
+    /// children from children that wait for a retry.
+    pub fn scenario_create_batch_summary(
+        &self,
+        batch_id: &str,
+        now: i64,
+    ) -> Result<Option<ScenarioBatchSummary>> {
+        let parent: Option<(bool, bool)> = self
+            .db
+            .query_row(
+                "SELECT cancellation_requested,paused FROM scenario_create_batches WHERE id=?1",
+                [batch_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((cancellation_requested, paused)) = parent else {
+            return Ok(None);
+        };
+        let mut summary = ScenarioBatchSummary {
+            id: batch_id.to_owned(),
+            cancellation_requested,
+            paused,
+            total: 0,
+            completed: 0,
+            failed: 0,
+            cancelled: 0,
+            unknown: 0,
+            due: 0,
+            retry_waiting: 0,
+            next_retry_at: None,
+            current_path: None,
+            failure_reasons: Vec::new(),
+            unfinished_sample: Vec::new(),
+        };
+        let mut statement = self.db.prepare(
+            "SELECT state,
+                    CASE WHEN state='pending' AND next_retry_at>?2 THEN 1 ELSE 0 END,
+                    count(*), min(CASE WHEN state='pending' THEN next_retry_at END)
+             FROM scenario_create_batch_children WHERE batch_id=?1 GROUP BY 1,2",
+        )?;
+        let rows = statement.query_map(params![batch_id, now], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, bool>(1)?,
+                row.get::<_, i64>(2)? as u64,
+                row.get::<_, Option<i64>>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (state, waiting, count, next) = row?;
+            summary.total += count;
+            match (state.as_str(), waiting) {
+                ("completed", _) => summary.completed += count,
+                ("failed", _) => summary.failed += count,
+                ("cancelled", _) => summary.cancelled += count,
+                ("unknown", _) => summary.unknown += count,
+                ("pending", true) => {
+                    summary.retry_waiting += count;
+                    summary.next_retry_at = next;
+                }
+                _ => summary.due += count,
+            }
+        }
+        summary.current_path = self
+            .db
+            .query_row(
+                "SELECT relative_path FROM scenario_create_batch_children
+                 WHERE batch_id=?1 AND state='pending' AND (next_retry_at IS NULL OR next_retry_at<=?2)
+                 ORDER BY relative_path LIMIT 1",
+                params![batch_id, now],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let mut statement = self.db.prepare(
+            "SELECT last_error,count(*) FROM scenario_create_batch_children
+             WHERE batch_id=?1 AND state IN ('failed','unknown') AND last_error IS NOT NULL
+             GROUP BY last_error ORDER BY count(*) DESC LIMIT 5",
+        )?;
+        summary.failure_reasons = statement
+            .query_map([batch_id], |row| {
+                Ok((row.get(0)?, row.get::<_, i64>(1)? as u64))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut statement = self.db.prepare(
+            "SELECT relative_path FROM scenario_create_batch_children
+             WHERE batch_id=?1 AND state NOT IN ('completed','cancelled')
+             ORDER BY relative_path LIMIT 5",
+        )?;
+        summary.unfinished_sample = statement
+            .query_map([batch_id], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(Some(summary))
+    }
+
+    /// IDs of the batches of one Scenario revision that still have pending
+    /// children (due or waiting for a retry).
+    pub fn pending_scenario_create_batch_ids_for(
+        &self,
+        scenario: &ScenarioReference,
+    ) -> Result<Vec<String>> {
+        let mut statement = self.db.prepare(
+            "SELECT b.id FROM scenario_create_batches b
+             WHERE b.scenario_id=?1 AND b.scenario_revision=?2
+               AND EXISTS (SELECT 1 FROM scenario_create_batch_children c
+                           WHERE c.batch_id=b.id AND c.state='pending')
+             ORDER BY b.rowid",
+        )?;
+        let ids = statement
+            .query_map(
+                params![scenario.scenario_id, scenario.revision as i64],
+                |row| row.get(0),
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(ids)
     }
 
     /// Pause or resume a batch. A pause takes effect before the next child.

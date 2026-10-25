@@ -1877,26 +1877,17 @@ private struct ScenarioDryRunView: View {
 
     /// Describes a finished Worker-owned Create batch from its durable receipt.
     /// A cancelled child is not a failure: it never started.
-    nonisolated static func createBatchOutcome(_ receipt: ScenarioCreateBatchReceipt) -> String? {
-        let total = receipt.children.count
-        let completed = receipt.children.filter { $0.state == "completed" }.count
-        let cancelled = receipt.children.filter { $0.state == "cancelled" }.count
-        let unfinished = receipt.children
-            .filter { !["completed", "cancelled"].contains($0.state) }
-            .map(\.relative_path)
+    nonisolated static func createBatchOutcome(_ summary: ScenarioBatchSummary) -> String? {
+        let unfinished = summary.total - summary.completed - summary.cancelled
         var parts: [String] = []
-        if cancelled > 0 {
-            parts.append("Пакет остановлен по запросу: создано \(completed) из \(total). Остальные файлы (\(cancelled)) не запускались.")
+        if summary.cancelled > 0 {
+            parts.append("Пакет остановлен по запросу: создано \(summary.completed) из \(summary.total). Остальные файлы (\(summary.cancelled)) не запускались.")
         }
-        if !unfinished.isEmpty {
-            let shown = unfinished.prefix(5).joined(separator: ", ")
-            let rest = unfinished.count > 5 ? " и ещё \(unfinished.count - 5)" : ""
-            let reasons = Dictionary(
-                receipt.children.filter { !["completed", "cancelled"].contains($0.state) }
-                    .compactMap(\.last_error).map { ($0, 1) },
-                uniquingKeysWith: +
-            ).sorted { $0.value > $1.value }.prefix(4).map { "\($0.key): \($0.value)" }
-            parts.append("Не выполнены файлы (\(unfinished.count)): \(shown)\(rest)."
+        if unfinished > 0 {
+            let shown = summary.unfinished_sample.joined(separator: ", ")
+            let rest = unfinished > summary.unfinished_sample.count ? " и ещё \(unfinished - summary.unfinished_sample.count)" : ""
+            let reasons = summary.reasonTexts.prefix(4)
+            parts.append("Не выполнены файлы (\(unfinished)): \(shown)\(rest)."
                 + (reasons.isEmpty ? "" : " Причины: \(reasons.joined(separator: ", ")).")
                 + " Временные ошибки уже повторялись автоматически; файлы остаются в плане.")
         }
@@ -1914,14 +1905,15 @@ private struct ScenarioDryRunView: View {
         batchProgressTask?.cancel()
         batchProgressTask = Task {
             while !Task.isCancelled {
-                let receipts = (try? StorageRegistryBridge.pendingScenarioCreateBatches(scenario: scenario)) ?? []
+                // D-024: counts from the database, never all children.
+                let receipts = (try? StorageRegistryBridge.scenarioCreateBatchSummaries(scenario: scenario)) ?? []
                 let finishedIDs = resumedCreateBatches.compactMap(\.receiptID)
                     .filter { id in !receipts.contains { $0.id == id } }
-                resumedCreateBatches = receipts.map(ScenarioBatchProgress.init(receipt:))
+                resumedCreateBatches = receipts.map(ScenarioBatchProgress.init(summary:))
                 if resumedCreateBatches.isEmpty {
                     batchProgressTask = nil
                     let outcomes = finishedIDs
-                        .compactMap { try? StorageRegistryBridge.scenarioCreateBatch(id: $0) }
+                        .compactMap { try? StorageRegistryBridge.scenarioCreateBatchSummary(id: $0) }
                         .compactMap(Self.createBatchOutcome)
                     loadPlan()
                     // loadPlan() clears the previous notice. Show the batch
@@ -1929,7 +1921,8 @@ private struct ScenarioDryRunView: View {
                     if !outcomes.isEmpty { error = outcomes.joined(separator: "\n") }
                     return
                 }
-                try? await Task.sleep(for: .milliseconds(200))
+                // A summary of a very large batch takes about 0.1 s (D-024 check).
+                try? await Task.sleep(for: .seconds(2))
             }
         }
     }
@@ -2115,25 +2108,20 @@ private struct ScenarioBatchProgress: Identifiable {
         self.receiptID = receiptID
     }
 
-    /// Progress of one Worker-owned receipt (D-024).
-    init(receipt: ScenarioCreateBatchReceipt) {
-        let children = receipt.children
-        let failed = children.filter { !["pending", "completed"].contains($0.state) }
-        let waiting = children.filter(\.waitsForRetry)
+    /// Progress of one Worker-owned batch from its summary (D-024).
+    init(summary: ScenarioBatchSummary) {
         self.init(
-            total: children.count,
-            processed: children.filter { $0.state == "completed" }.count,
-            failures: failed.count,
-            currentPath: children.first { $0.state == "pending" && !$0.waitsForRetry }?.relative_path
-                ?? children.last?.relative_path ?? "",
-            cancellationRequested: receipt.cancellation_requested,
-            receiptID: receipt.id
+            total: summary.total,
+            processed: summary.completed,
+            failures: summary.failed + summary.unknown,
+            currentPath: summary.current_path ?? "",
+            cancellationRequested: summary.cancellation_requested,
+            receiptID: summary.id
         )
-        retryWaiting = waiting.count
-        nextRetry = waiting.compactMap(\.next_retry_at).min().map { Date(timeIntervalSince1970: TimeInterval($0)) }
-        paused = receipt.paused ?? false
-        let counts = Dictionary(failed.compactMap(\.last_error).map { ($0, 1) }, uniquingKeysWith: +)
-        failureReasons = counts.sorted { $0.value > $1.value }.map { "\($0.key): \($0.value)" }
+        retryWaiting = summary.retry_waiting
+        nextRetry = summary.next_retry_at.map { Date(timeIntervalSince1970: TimeInterval($0)) }
+        paused = summary.paused
+        failureReasons = summary.reasonTexts
     }
 
     var id: String { receiptID ?? currentPath }

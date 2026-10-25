@@ -17,7 +17,7 @@ use qadren_core::job_execution::{
 use qadren_core::jobs::JobStore;
 use qadren_core::local_fs::LocalFilesystem;
 use qadren_core::model::{ConfirmedFileVersion, JobState, ScenarioReference};
-use qadren_core::registry::{DueBatchChild, Registry};
+use qadren_core::registry::{BatchChildDue, DueBatchChild, Registry};
 use qadren_core::scenario_planner::{ObservedFile, PlanAction};
 use qadren_core::schedule_dispatch::dispatch_pending_schedule_jobs;
 use qadren_core::storage_access::YANDEX_DISK;
@@ -409,10 +409,9 @@ fn reconcile_unknown_scenario_creates(
     let candidates = {
         let store = JobStore::open(&paths.jobs).map_err(|_| "job_store_unavailable".to_string())?;
         let unknown = store
-            .list_jobs()
+            .jobs_in_state(JobState::Unknown)
             .map_err(|_| "job_store_unavailable".to_string())?
             .into_iter()
-            .filter(|job| job.state == JobState::Unknown)
             .filter_map(|job| {
                 job.scenario_id
                     .zip(job.scenario_revision)
@@ -573,10 +572,9 @@ fn finish_schedule_job(jobs: &mut JobStore, job_id: &str, next: JobState) -> Res
 fn execute_queued_schedule_jobs(paths: &WorkerPaths, registry: &Registry) -> Result<(), String> {
     let queued = JobStore::open(&paths.jobs)
         .map_err(|_| "job_store_unavailable".to_string())?
-        .list_jobs()
+        .jobs_in_state(JobState::Queued)
         .map_err(|_| "job_store_unavailable".to_string())?
-        .into_iter()
-        .filter(|job| job.state == JobState::Queued);
+        .into_iter();
     for job in queued {
         let Some(reference) = registry
             .schedule_job_reference(&job.id)
@@ -915,6 +913,8 @@ const RETRY_DELAYS: [i64; 5] = [60, 300, 1_800, 7_200, 43_200];
 /// Pause between the retries after the schedule when the "retry until
 /// success" setting is on.
 const RETRY_FOREVER_DELAY: i64 = 86_400;
+/// Batch children that one pass of the run thread reads (D-024).
+const DUE_PAGE: usize = 256;
 /// Parallel downloads for each Yandex Disk connection (D-024).
 const YANDEX_PARALLEL_DOWNLOADS: usize = 2;
 
@@ -970,7 +970,8 @@ fn run_due_batch_children(paths: &WorkerPaths) {
     let Ok(registry) = Registry::open(&paths.registry) else {
         return;
     };
-    let Ok(due) = registry.due_scenario_create_batch_children(unix_now()) else {
+    // D-024 scale rules: one bounded page per pass, read through an index.
+    let Ok(due) = registry.due_scenario_create_batch_children(unix_now(), DUE_PAGE) else {
         return;
     };
     let mut sources: HashMap<String, Option<String>> = HashMap::new();
@@ -1033,30 +1034,25 @@ fn run_due_batch_children(paths: &WorkerPaths) {
 }
 
 /// The child is still pending with the same Job ID and its batch is not
-/// paused. A pause or a stop takes effect before the next child.
+/// paused. A pause or a stop takes effect before the next child. This reads
+/// one row.
 fn still_due(paths: &WorkerPaths, child: &DueBatchChild) -> bool {
-    let Ok(Some(receipt)) = Registry::open(&paths.registry)
-        .and_then(|registry| registry.scenario_create_batch(&child.batch_id))
-    else {
+    let Ok(registry) = Registry::open(&paths.registry) else {
         return false;
     };
-    if receipt.cancellation_requested {
-        if let Ok(registry) = Registry::open(&paths.registry) {
+    match registry.batch_child_due(&child.batch_id, &child.relative_path, &child.job_id) {
+        Ok(BatchChildDue::Due) => true,
+        Ok(BatchChildDue::Cancelled) => {
             let _ = registry.finish_scenario_create_batch_child(
                 &child.batch_id,
                 &child.relative_path,
                 "cancelled",
                 None,
             );
+            false
         }
-        return false;
+        _ => false,
     }
-    !receipt.paused
-        && receipt.children.iter().any(|current| {
-            current.relative_path == child.relative_path
-                && current.job_id == child.job_id
-                && current.state == "pending"
-        })
 }
 
 fn job_state(paths: &WorkerPaths, job_id: &str) -> Option<JobState> {

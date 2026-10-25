@@ -156,7 +156,7 @@ struct MainView: View {
             }) {
                 QDStatusLabel(kind: jobWidgetStatus, text: "Задания: \(jobPresentationStatus.title)")
                 if widget.density == .compact {
-                    QDMetric(value: "\(visibleJobs.count)", label: "в инвентаре", provenance: "локальный JobStore")
+                    QDMetric(value: "\(feed.jobTotal)", label: "в инвентаре", provenance: "локальный JobStore")
                 } else if visibleJobs.isEmpty {
                     QDEmptyState(title: "Заданий нет", detail: "Задания появятся, когда Worker выполнит сценарий по вашему запросу или по расписанию.", symbol: "tray")
                 } else {
@@ -172,7 +172,7 @@ struct MainView: View {
                 } else {
                     QDStatusLabel(kind: jobWidgetStatus, text: "Очередь: \(jobPresentationStatus.title)")
                     if widget.density == .compact {
-                        QDMetric(value: "\(visibleJobs.count)", label: "в инвентаре", provenance: "локальный JobStore")
+                        QDMetric(value: "\(feed.jobTotal)", label: "в инвентаре", provenance: "локальный JobStore")
                     } else {
                         LazyVGrid(
                             columns: [GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 12)],
@@ -341,15 +341,16 @@ struct MainView: View {
         }
     }
     private var jobPresentationStatus: JobPresentationStatus {
+        // D-024: the states present in the counts of all Jobs.
         JobPresentationStatus.aggregate(
-            visibleJobs.map(\.state), inventoryFailed: jobError != nil
+            feed.jobCounts.filter { $0.value > 0 }.map(\.key), inventoryFailed: jobError != nil
         )
     }
     private var jobWidgetStatus: QDStatusKind {
         jobStatusKind(for: jobPresentationStatus)
     }
     private var jobQueueSummary: JobQueueSummary {
-        JobQueueSummary(states: visibleJobs.map(\.state))
+        JobQueueSummary(counts: feed.jobCounts)
     }
     private var connectionWidgetStatus: QDStatusKind {
         statusKind(for: connectionPresentationStatus)

@@ -606,6 +606,14 @@ impl JobStore {
             )?;
         }
         db.pragma_update(None, "foreign_keys", "ON")?;
+        // D-024 scale rules: state queries use indexes. The schema version
+        // stays 12, so read-only controllers keep their version check.
+        if restart_rule {
+            db.execute_batch(
+                "CREATE INDEX IF NOT EXISTS jobs_by_state ON jobs(state);
+                 CREATE INDEX IF NOT EXISTS job_attempts_by_status ON job_attempts(status);",
+            )?;
+        }
         // A previous process may have written remote effects before dying.
         // Reconciliation is required; never resubmit these Jobs blindly.
         if restart_rule {
@@ -717,6 +725,65 @@ impl JobStore {
         })?;
         jobs.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(JobStoreError::from)
+    }
+
+    /// Jobs in one state, through the `jobs_by_state` index (D-024).
+    pub fn jobs_in_state(&self, state: JobState) -> Result<Vec<StoredJob>> {
+        self.check_storage_identity()?;
+        let mut statement = self.db.prepare(
+            "SELECT id,state,scenario_id,scenario_revision FROM jobs WHERE state=?1 ORDER BY rowid ASC",
+        )?;
+        let jobs = statement.query_map([label(state)], |row| {
+            let state: String = row.get(1)?;
+            let revision: Option<i64> = row.get(3)?;
+            Ok(StoredJob {
+                id: row.get(0)?,
+                state: parse_state(&state)?,
+                scenario_id: row.get(2)?,
+                scenario_revision: revision.map(|value| value as u64),
+            })
+        })?;
+        jobs.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(JobStoreError::from)
+    }
+
+    /// The newest `limit` Jobs, oldest first, without the G1 mock Jobs. The
+    /// monitoring screen shows these; it never reads all Jobs (D-024).
+    pub fn recent_jobs(&self, limit: usize) -> Result<Vec<StoredJob>> {
+        self.check_storage_identity()?;
+        let mut statement = self.db.prepare(
+            "SELECT id,state,scenario_id,scenario_revision FROM jobs
+             WHERE id NOT LIKE 'g1-%' ORDER BY rowid DESC LIMIT ?1",
+        )?;
+        let mut jobs = statement
+            .query_map([limit as i64], |row| {
+                let state: String = row.get(1)?;
+                let revision: Option<i64> = row.get(3)?;
+                Ok(StoredJob {
+                    id: row.get(0)?,
+                    state: parse_state(&state)?,
+                    scenario_id: row.get(2)?,
+                    scenario_revision: revision.map(|value| value as u64),
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        jobs.reverse();
+        Ok(jobs)
+    }
+
+    /// Job counts by state, without the G1 mock Jobs.
+    pub fn job_state_counts(&self) -> Result<Vec<(JobState, u64)>> {
+        self.check_storage_identity()?;
+        let mut statement = self
+            .db
+            .prepare("SELECT state,count(*) FROM jobs WHERE id NOT LIKE 'g1-%' GROUP BY state")?;
+        let counts = statement
+            .query_map([], |row| {
+                let state: String = row.get(0)?;
+                Ok((parse_state(&state)?, row.get::<_, i64>(1)? as u64))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(counts)
     }
 
     /// Compare-and-set: only the expected persisted state may advance.
