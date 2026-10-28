@@ -212,6 +212,29 @@ pub struct DueBatchChild {
     pub cancellation_requested: bool,
 }
 
+/// One durable execution of a Scenario revision (D-025): snapshots, a
+/// stored plan, then the batch of its items.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioRun {
+    pub id: String,
+    pub scenario: ScenarioReference,
+    /// `manual` or `schedule`.
+    pub trigger: String,
+    pub schedule_job_id: Option<String>,
+    pub plan_id: Option<String>,
+    pub batch_id: Option<String>,
+    /// `planning`, `executing`, `completed`, `failed`, or `cancelled`.
+    pub state: String,
+    /// Why an active run makes no progress now, for example `needs_sign_in`.
+    pub waiting_reason: Option<String>,
+    pub error: Option<String>,
+    /// Plan items that this run does not execute yet (Update, deletion,
+    /// conflict), until the executor supports them.
+    pub deferred_items: u64,
+    pub created_at: i64,
+    pub finished_at: Option<i64>,
+}
+
 /// A user-owned conflict task. It is Registry metadata, not a JobStore Job;
 /// pending conflict work never blocks ordinary Scenario transfers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -254,7 +277,7 @@ impl Registry {
         }
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 22 {
+        if version > 23 {
             return Err(RegistryError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -604,6 +627,39 @@ impl Registry {
                                 WHERE key='retry_until_success' AND value='0');
                  DELETE FROM app_settings WHERE key='retry_until_success';
                  PRAGMA user_version = 22;
+                 COMMIT;",
+            )?;
+        }
+        if version <= 22 {
+            // D-025: one durable Scenario Run for a manual or a scheduled
+            // execution. The plan lives in the snapshot store, so `plan_id`
+            // has no foreign key. A run is active until `finished_at`.
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE scenario_runs (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    scenario_id TEXT NOT NULL,
+                    scenario_revision INTEGER NOT NULL CHECK(scenario_revision > 0),
+                    trigger TEXT NOT NULL CHECK(trigger IN ('manual','schedule')),
+                    schedule_job_id TEXT UNIQUE,
+                    plan_id TEXT,
+                    batch_id TEXT REFERENCES scenario_create_batches(id) ON DELETE RESTRICT,
+                    state TEXT NOT NULL
+                      CHECK(state IN ('planning','executing','completed','failed','cancelled')),
+                    waiting_reason TEXT,
+                    error TEXT,
+                    deferred_items INTEGER NOT NULL DEFAULT 0 CHECK(deferred_items >= 0),
+                    created_at INTEGER NOT NULL,
+                    finished_at INTEGER,
+                    CHECK((trigger='schedule') = (schedule_job_id IS NOT NULL)),
+                    FOREIGN KEY(scenario_id,scenario_revision)
+                      REFERENCES scenario_revisions(scenario_id,revision) ON DELETE RESTRICT
+                 );
+                 CREATE INDEX scenario_runs_active
+                   ON scenario_runs(state) WHERE state IN ('planning','executing');
+                 CREATE INDEX scenario_runs_by_scenario
+                   ON scenario_runs(scenario_id, created_at);
+                 PRAGMA user_version = 23;
                  COMMIT;",
             )?;
         }
@@ -1803,6 +1859,189 @@ impl Registry {
         Ok(Some(summary))
     }
 
+    /// Start the run of a dispatched schedule Job. A repeated call for the
+    /// same Job returns the existing run, so a restart never starts two.
+    pub fn begin_schedule_run(&self, schedule_job_id: &str) -> Result<String> {
+        let reference = self
+            .schedule_job_reference(schedule_job_id)?
+            .ok_or(RegistryError::NotFound)?;
+        self.db.execute(
+            "INSERT OR IGNORE INTO scenario_runs(
+                id,scenario_id,scenario_revision,trigger,schedule_job_id,state,created_at
+             ) VALUES(lower(hex(randomblob(16))),?1,?2,'schedule',?3,'planning',?4)",
+            params![
+                reference.scenario_id,
+                reference.revision as i64,
+                schedule_job_id,
+                unix_seconds()
+            ],
+        )?;
+        Ok(self.db.query_row(
+            "SELECT id FROM scenario_runs WHERE schedule_job_id=?1",
+            [schedule_job_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Record a manual run whose batch the user confirmed from a plan.
+    pub fn begin_manual_run(
+        &self,
+        scenario: &ScenarioReference,
+        plan_id: &str,
+        batch_id: &str,
+        deferred_items: u64,
+    ) -> Result<String> {
+        let id: String = self
+            .db
+            .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
+        self.db.execute(
+            "INSERT INTO scenario_runs(
+                id,scenario_id,scenario_revision,trigger,plan_id,batch_id,state,
+                deferred_items,created_at
+             ) VALUES(?1,?2,?3,'manual',?4,?5,'executing',?6,?7)",
+            params![
+                id,
+                scenario.scenario_id,
+                scenario.revision as i64,
+                plan_id,
+                batch_id,
+                deferred_items as i64,
+                unix_seconds()
+            ],
+        )?;
+        Ok(id)
+    }
+
+    fn scenario_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScenarioRun> {
+        Ok(ScenarioRun {
+            id: row.get(0)?,
+            scenario: ScenarioReference {
+                scenario_id: row.get(1)?,
+                revision: row.get::<_, i64>(2)? as u64,
+            },
+            trigger: row.get(3)?,
+            schedule_job_id: row.get(4)?,
+            plan_id: row.get(5)?,
+            batch_id: row.get(6)?,
+            state: row.get(7)?,
+            waiting_reason: row.get(8)?,
+            error: row.get(9)?,
+            deferred_items: row.get::<_, i64>(10)? as u64,
+            created_at: row.get(11)?,
+            finished_at: row.get(12)?,
+        })
+    }
+
+    const SCENARIO_RUN_COLUMNS: &'static str =
+        "id,scenario_id,scenario_revision,trigger,schedule_job_id,plan_id,batch_id,state,
+         waiting_reason,error,deferred_items,created_at,finished_at";
+
+    pub fn scenario_run(&self, id: &str) -> Result<Option<ScenarioRun>> {
+        Ok(self
+            .db
+            .query_row(
+                &format!(
+                    "SELECT {} FROM scenario_runs WHERE id=?1",
+                    Self::SCENARIO_RUN_COLUMNS
+                ),
+                [id],
+                Self::scenario_run_from_row,
+            )
+            .optional()?)
+    }
+
+    /// Runs that are planning or executing, oldest first, through an index.
+    pub fn active_scenario_runs(&self) -> Result<Vec<ScenarioRun>> {
+        let mut statement = self.db.prepare(&format!(
+            "SELECT {} FROM scenario_runs WHERE state IN ('planning','executing')
+             ORDER BY created_at, rowid",
+            Self::SCENARIO_RUN_COLUMNS
+        ))?;
+        let rows = statement
+            .query_map([], Self::scenario_run_from_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// The newest run of each listed Scenario is what the interface shows.
+    pub fn latest_scenario_run(&self, scenario_id: &str) -> Result<Option<ScenarioRun>> {
+        Ok(self
+            .db
+            .query_row(
+                &format!(
+                    "SELECT {} FROM scenario_runs WHERE scenario_id=?1
+                     ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                    Self::SCENARIO_RUN_COLUMNS
+                ),
+                [scenario_id],
+                Self::scenario_run_from_row,
+            )
+            .optional()?)
+    }
+
+    /// Attach the plan that a planning run waits for. `None` clears it, so
+    /// the run requests a new plan.
+    pub fn set_scenario_run_plan(&self, id: &str, plan_id: Option<&str>) -> Result<()> {
+        self.update_active_run(
+            "UPDATE scenario_runs SET plan_id=?2, waiting_reason=NULL
+             WHERE id=?1 AND state='planning'",
+            id,
+            plan_id,
+        )
+    }
+
+    /// Record why an active run makes no progress now; `None` clears it.
+    pub fn set_scenario_run_waiting(&self, id: &str, reason: Option<&str>) -> Result<()> {
+        self.update_active_run(
+            "UPDATE scenario_runs SET waiting_reason=?2
+             WHERE id=?1 AND state IN ('planning','executing')",
+            id,
+            reason,
+        )
+    }
+
+    fn update_active_run(&self, sql: &str, id: &str, value: Option<&str>) -> Result<()> {
+        if self.db.execute(sql, params![id, value])? == 0 {
+            return Err(RegistryError::NotFound);
+        }
+        Ok(())
+    }
+
+    /// A planning run starts the batch made from its complete plan.
+    pub fn set_scenario_run_executing(
+        &self,
+        id: &str,
+        batch_id: &str,
+        deferred_items: u64,
+    ) -> Result<()> {
+        let changed = self.db.execute(
+            "UPDATE scenario_runs SET state='executing', batch_id=?2, deferred_items=?3,
+                    waiting_reason=NULL
+             WHERE id=?1 AND state='planning'",
+            params![id, batch_id, deferred_items as i64],
+        )?;
+        if changed == 0 {
+            return Err(RegistryError::NotFound);
+        }
+        Ok(())
+    }
+
+    /// Finish an active run. A finished run never changes again.
+    pub fn finish_scenario_run(&self, id: &str, state: &str, error: Option<&str>) -> Result<()> {
+        if !matches!(state, "completed" | "failed" | "cancelled") {
+            return Err(RegistryError::InvalidSyncState);
+        }
+        let changed = self.db.execute(
+            "UPDATE scenario_runs SET state=?2, error=?3, waiting_reason=NULL, finished_at=?4
+             WHERE id=?1 AND state IN ('planning','executing')",
+            params![id, state, error, unix_seconds()],
+        )?;
+        if changed == 0 {
+            return Err(RegistryError::NotFound);
+        }
+        Ok(())
+    }
+
     /// IDs of the batches of one Scenario revision that still have pending
     /// children (due or waiting for a retry).
     pub fn pending_scenario_create_batch_ids_for(
@@ -2758,6 +2997,12 @@ fn insert_revision_selection(
     Ok(())
 }
 
+fn unix_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() as i64)
+}
+
 fn valid_name(name: &str) -> bool {
     let trimmed = name.trim();
     !trimmed.is_empty() && trimmed.chars().count() <= 120 && !trimmed.chars().any(char::is_control)
@@ -2790,9 +3035,7 @@ fn normalized_smb_url(url: &str) -> Option<String> {
         return None;
     }
     if let Some(port) = port {
-        if port.parse::<u16>().ok().filter(|port| *port > 0).is_none() {
-            return None;
-        }
+        port.parse::<u16>().ok().filter(|port| *port > 0)?;
     }
     let segments: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
     if segments.is_empty() || segments.iter().any(|part| *part == "." || *part == "..") {

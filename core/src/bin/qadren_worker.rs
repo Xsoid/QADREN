@@ -18,7 +18,7 @@ use qadren_core::jobs::JobStore;
 use qadren_core::local_fs::LocalFilesystem;
 use qadren_core::model::{ConfirmedFileVersion, JobState, ScenarioReference};
 use qadren_core::plan_store;
-use qadren_core::registry::{BatchChildDue, DueBatchChild, Registry};
+use qadren_core::registry::{BatchChildDue, DueBatchChild, Registry, ScenarioRun};
 use qadren_core::scenario_planner::{ObservedFile, PlanAction};
 use qadren_core::schedule_dispatch::dispatch_pending_schedule_jobs;
 use qadren_core::snapshot::{
@@ -42,7 +42,7 @@ use std::time::{Duration, SystemTime};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(60);
 const POLL_OVERLAP: Duration = Duration::from_secs(90);
-const MAX_SCHEDULE_SCAN_ENTRIES: usize = 10_000;
+const MAX_RULE_DELETION_SCAN_ENTRIES: usize = 10_000;
 
 #[derive(Debug, Clone)]
 struct WorkerPaths {
@@ -289,7 +289,8 @@ fn dispatch_due(paths: &WorkerPaths) -> Result<(usize, usize), String> {
     let dispatched = dispatch_pending_schedule_jobs(&registry, &mut jobs)
         .map_err(|_| "schedule_dispatch_unavailable".to_string())?;
     drop(jobs);
-    execute_queued_schedule_jobs(paths, &registry)?;
+    drop(registry);
+    advance_scenario_runs(paths)?;
     Ok((staged, dispatched))
 }
 
@@ -504,7 +505,7 @@ fn observed_files(root: &Path) -> Result<(Vec<ObservedFile>, Vec<String>), Strin
     let filesystem =
         LocalFilesystem::open(root).map_err(|_| "schedule_root_unavailable".to_string())?;
     filesystem
-        .list_tree_with_skipped(Path::new(""), MAX_SCHEDULE_SCAN_ENTRIES)
+        .list_tree_with_skipped(Path::new(""), MAX_RULE_DELETION_SCAN_ENTRIES)
         .map_err(|_| "schedule_scan_unavailable".to_string())
         .map(|(entries, skipped)| {
             (
@@ -548,17 +549,6 @@ fn enabled_local_connection(
     }
 }
 
-fn observed_version(files: &[ObservedFile], relative_path: &str) -> Option<ConfirmedFileVersion> {
-    files
-        .iter()
-        .find(|file| file.relative_path == relative_path)
-        .map(|file| ConfirmedFileVersion {
-            object_revision: file.object_revision.clone(),
-            size: file.size,
-            checksum_md5: file.checksum_md5.clone(),
-        })
-}
-
 fn finish_schedule_job(jobs: &mut JobStore, job_id: &str, next: JobState) -> Result<(), String> {
     jobs.advance(
         job_id,
@@ -580,16 +570,39 @@ fn finish_schedule_job(jobs: &mut JobStore, job_id: &str, next: JobState) -> Res
     .map_err(|_| "schedule_job_state_unavailable".to_string())
 }
 
-/// Execute each queued schedule coordinator once. It scans only metadata at
-/// run time. A new destination is copied through the existing durable Create
-/// executor. Replacements, deletions, and conflicting metadata become durable
-/// conflict tasks and require a later explicit UI decision.
-fn execute_queued_schedule_jobs(paths: &WorkerPaths, registry: &Registry) -> Result<(), String> {
+/// Finish the schedule Job of a finished run. The Job stays `Queued` while
+/// its run is active: the restart rule makes a `Running` Job `UNKNOWN`.
+fn finish_schedule_job_for_run(
+    jobs: &mut JobStore,
+    job_id: &str,
+    run: &ScenarioRun,
+    unknown: bool,
+) -> Result<(), String> {
+    match run.state.as_str() {
+        "completed" => finish_schedule_job(jobs, job_id, JobState::Completed),
+        "cancelled" => jobs
+            .advance(
+                job_id,
+                JobState::Queued,
+                JobState::Cancelled,
+                Confirmation::Unknown,
+            )
+            .map_err(|_| "schedule_job_state_unavailable".to_string()),
+        _ if unknown => finish_schedule_job(jobs, job_id, JobState::Unknown),
+        _ => finish_schedule_job(jobs, job_id, JobState::Failed),
+    }
+}
+
+/// D-025: start a run for each dispatched schedule Job, then move each
+/// active run one step. A manual run and a scheduled run use the same
+/// snapshots, plan, and batch.
+fn advance_scenario_runs(paths: &WorkerPaths) -> Result<(), String> {
+    let registry =
+        Registry::open(&paths.registry).map_err(|_| "registry_unavailable".to_string())?;
     let queued = JobStore::open(&paths.jobs)
         .map_err(|_| "job_store_unavailable".to_string())?
         .jobs_in_state(JobState::Queued)
-        .map_err(|_| "job_store_unavailable".to_string())?
-        .into_iter();
+        .map_err(|_| "job_store_unavailable".to_string())?;
     for job in queued {
         let Some(reference) = registry
             .schedule_job_reference(&job.id)
@@ -602,207 +615,215 @@ fn execute_queued_schedule_jobs(paths: &WorkerPaths, registry: &Registry) -> Res
         {
             return Err("schedule_job_identity_mismatch".to_string());
         }
-        let result = execute_schedule_job(paths, registry, &reference, &job.id);
-        let mut jobs =
-            JobStore::open(&paths.jobs).map_err(|_| "job_store_unavailable".to_string())?;
-        match result {
-            Ok(waiting_for_decision) => finish_schedule_job(
-                &mut jobs,
-                &job.id,
-                if waiting_for_decision {
-                    JobState::WaitingForDecision
-                } else {
-                    JobState::Completed
-                },
-            )?,
-            Err(error) if error == "schedule_outcome_unknown" => {
-                finish_schedule_job(&mut jobs, &job.id, JobState::Unknown)?
-            }
-            Err(_) => finish_schedule_job(&mut jobs, &job.id, JobState::Failed)?,
+        let run = registry
+            .begin_schedule_run(&job.id)
+            .and_then(|id| registry.scenario_run(&id))
+            .map_err(|_| "schedule_registry_unavailable".to_string())?
+            .ok_or_else(|| "schedule_registry_unavailable".to_string())?;
+        // A crash after the run finished and before the Job did.
+        if run.finished_at.is_some() {
+            let unknown = run.error.as_deref() == Some("items_unknown");
+            let mut jobs =
+                JobStore::open(&paths.jobs).map_err(|_| "job_store_unavailable".to_string())?;
+            finish_schedule_job_for_run(&mut jobs, &job.id, &run, unknown)?;
+        }
+    }
+    let runs = registry
+        .active_scenario_runs()
+        .map_err(|_| "registry_unavailable".to_string())?;
+    drop(registry);
+    for run in runs {
+        // One run that cannot advance must not stop the others.
+        if let Err(error) = advance_scenario_run(paths, &run) {
+            eprintln!(
+                "qadren-worker: {} run {} waits: {error}",
+                log_time(),
+                run.id
+            );
         }
     }
     Ok(())
 }
 
-fn execute_schedule_job(
+/// A request for the plan IPC functions, made by the Worker itself.
+fn internal_request(command: &str, scenario: &ScenarioReference) -> Option<Request> {
+    serde_json::from_value(serde_json::json!({
+        "command": command,
+        "scenario_id": scenario.scenario_id,
+        "scenario_revision": scenario.revision,
+    }))
+    .ok()
+}
+
+fn advance_scenario_run(paths: &WorkerPaths, run: &ScenarioRun) -> Result<(), String> {
+    let registry =
+        Registry::open(&paths.registry).map_err(|_| "registry_unavailable".to_string())?;
+    // A Yandex Disk run without a token from the app waits (D-024 stage A).
+    let needs_sign_in =
+        yandex_source_connection(&registry, &run.scenario.scenario_id, run.scenario.revision)
+            .is_some_and(|connection| runner().token(&connection).is_none());
+    let finished = match run.state.as_str() {
+        "planning" => advance_planning_run(paths, &registry, run, needs_sign_in)?,
+        "executing" => advance_executing_run(&registry, run, needs_sign_in)?,
+        _ => false,
+    };
+    drop(registry);
+    if finished {
+        finish_run_job(paths, &run.id)?;
+    }
+    Ok(())
+}
+
+/// Request the plan of a planning run, or start the batch of its complete
+/// plan. Returns true when the run finished.
+fn advance_planning_run(
     paths: &WorkerPaths,
     registry: &Registry,
-    reference: &ScenarioReference,
-    schedule_job_id: &str,
+    run: &ScenarioRun,
+    needs_sign_in: bool,
 ) -> Result<bool, String> {
-    let scenario = registry
-        .get_scenario_revision(&reference.scenario_id, reference.revision)
-        .map_err(|_| "schedule_scenario_unavailable".to_string())?
-        .ok_or_else(|| "schedule_scenario_unavailable".to_string())?;
-    enabled_local_connection(registry, &paths.registry, &scenario.left_connection_id)?;
-    enabled_local_connection(registry, &paths.registry, &scenario.right_connection_id)?;
-    let (left, skipped_left) = observed_files(Path::new(&scenario.left_root))?;
-    let (right, skipped_right) = observed_files(Path::new(&scenario.right_root))?;
-    let plan = registry
-        .plan_scenario_dry_run_with_skipped(reference, &left, &right, &skipped_left, &skipped_right)
-        .map_err(|_| "schedule_plan_unavailable".to_string())?;
-    let mut waiting_for_decision = false;
-    for item in plan {
-        match item.action {
-            PlanAction::NoAction => {}
-            PlanAction::Create { from_left } => {
-                let (source_root, source_connection, destination_root, destination_connection) =
-                    if from_left {
-                        (
-                            &scenario.left_root,
-                            &scenario.left_connection_id,
-                            &scenario.right_root,
-                            &scenario.right_connection_id,
-                        )
-                    } else {
-                        (
-                            &scenario.right_root,
-                            &scenario.right_connection_id,
-                            &scenario.left_root,
-                            &scenario.left_connection_id,
-                        )
-                    };
-                let status = run_local_scenario_file_copy(
-                    &paths.jobs,
-                    &paths.registry,
-                    &reference.scenario_id,
-                    reference.revision,
-                    Path::new(source_root),
-                    source_connection,
-                    Path::new(&item.relative_path),
-                    Path::new(destination_root),
-                    destination_connection,
-                    Path::new(&item.relative_path),
-                    &registry
-                        .reserve_schedule_child_job_id(schedule_job_id, &item.relative_path)
-                        .map_err(|_| "schedule_child_identity_unavailable".to_string())?,
-                );
-                match status {
-                    Ok(
-                        LocalFileCopyStatus::Completed
-                        | LocalFileCopyStatus::Existing(JobState::Completed),
-                    ) => {}
-                    Ok(LocalFileCopyStatus::Existing(_)) => {
-                        return Err("schedule_child_not_completed".to_string())
-                    }
-                    Err(LocalFileCopyError::OutcomeUnknown(_)) => {
-                        return Err("schedule_outcome_unknown".to_string())
-                    }
-                    Err(LocalFileCopyError::TargetExists) => {
-                        let source = observed_version(
-                            if from_left { &left } else { &right },
-                            &item.relative_path,
-                        );
-                        let destination = observed_version(
-                            if from_left { &right } else { &left },
-                            &item.relative_path,
-                        );
-                        if let (Some(source), Some(destination)) = (source, destination) {
-                            let conflict_id = registry
-                                .queue_conflict_task(
-                                    reference,
-                                    &item.relative_path,
-                                    "content",
-                                    Some(from_left),
-                                    Some(&if from_left {
-                                        source.clone()
-                                    } else {
-                                        destination.clone()
-                                    }),
-                                    Some(&if from_left { destination } else { source }),
-                                )
-                                .map_err(|_| "schedule_conflict_unavailable".to_string())?;
-                            registry
-                                .link_schedule_conflict(schedule_job_id, &conflict_id)
-                                .map_err(|_| "schedule_conflict_unavailable".to_string())?;
-                            waiting_for_decision = true;
-                        } else {
-                            return Err("schedule_plan_stale".to_string());
-                        }
-                    }
-                    Err(_) => {
-                        return Err("schedule_create_unavailable".to_string());
-                    }
-                }
+    let Some(plan_id) = run.plan_id.as_deref() else {
+        let request = internal_request("start_plan", &run.scenario)
+            .ok_or_else(|| "invalid_request".to_string())?;
+        let response = start_plan(paths, &request);
+        return match (response["plan"].as_str(), response["status"].as_str()) {
+            (Some(plan), _) => registry
+                .set_scenario_run_plan(&run.id, Some(plan))
+                .map(|_| false)
+                .map_err(|_| "registry_unavailable".to_string()),
+            (None, Some("scenario_unavailable")) => {
+                finish_run(registry, run, "failed", Some("scenario_unavailable"))
             }
-            PlanAction::Update { from_left } => {
-                let left_version = observed_version(&left, &item.relative_path)
-                    .ok_or_else(|| "schedule_conflict_unavailable".to_string())?;
-                let right_version = observed_version(&right, &item.relative_path)
-                    .ok_or_else(|| "schedule_conflict_unavailable".to_string())?;
-                let conflict_id = registry
-                    .queue_conflict_task(
-                        reference,
-                        &item.relative_path,
-                        "content",
-                        Some(from_left),
-                        Some(&left_version),
-                        Some(&right_version),
-                    )
-                    .map_err(|_| "schedule_conflict_unavailable".to_string())?;
-                registry
-                    .link_schedule_conflict(schedule_job_id, &conflict_id)
-                    .map_err(|_| "schedule_conflict_unavailable".to_string())?;
-                waiting_for_decision = true;
-            }
-            PlanAction::Conflict { .. } => {
-                let left_version = observed_version(&left, &item.relative_path)
-                    .ok_or_else(|| "schedule_conflict_unavailable".to_string())?;
-                let right_version = observed_version(&right, &item.relative_path)
-                    .ok_or_else(|| "schedule_conflict_unavailable".to_string())?;
-                let conflict_id = registry
-                    .queue_conflict_task(
-                        reference,
-                        &item.relative_path,
-                        "content",
-                        None,
-                        Some(&left_version),
-                        Some(&right_version),
-                    )
-                    .map_err(|_| "schedule_conflict_unavailable".to_string())?;
-                registry
-                    .link_schedule_conflict(schedule_job_id, &conflict_id)
-                    .map_err(|_| "schedule_conflict_unavailable".to_string())?;
-                waiting_for_decision = true;
-            }
-            PlanAction::DeleteRequiresDecision { .. } => {
-                let left_version = observed_version(&left, &item.relative_path);
-                let right_version = observed_version(&right, &item.relative_path);
-                let conflict_id = registry
-                    .queue_conflict_task(
-                        reference,
-                        &item.relative_path,
-                        "deletion",
-                        None,
-                        left_version.as_ref(),
-                        right_version.as_ref(),
-                    )
-                    .map_err(|_| "schedule_conflict_unavailable".to_string())?;
-                registry
-                    .link_schedule_conflict(schedule_job_id, &conflict_id)
-                    .map_err(|_| "schedule_conflict_unavailable".to_string())?;
-                waiting_for_decision = true;
-            }
-            PlanAction::Delete { .. } => {
-                let child = |path: &str| {
+            (None, status) => Err(status.unwrap_or("plan_unavailable").to_string()),
+        };
+    };
+    let store = SnapshotStore::open_for_reading(&SnapshotStore::path_for(&paths.registry))
+        .map_err(|_| "snapshot_store_unavailable".to_string())?;
+    let info = plan_store::plan_info(store.connection(), plan_id)
+        .map_err(|_| "snapshot_store_unavailable".to_string())?;
+    drop(store);
+    match info {
+        None => registry.set_scenario_run_plan(&run.id, None),
+        Some(info) if info.state == "complete" => {
+            let deferred = deferred_plan_items(&info);
+            return match batch_from_plan(paths, plan_id) {
+                Ok((_, batch, _)) => {
                     registry
-                        .reserve_schedule_child_job_id(schedule_job_id, path)
-                        .map_err(|_| "schedule_child_identity_unavailable".to_string())
-                };
-                match run_rule_deletions(paths, reference, std::slice::from_ref(&item), &child) {
-                    Ok(_) => {}
-                    Err(error) if error == "outcome_unknown" => {
-                        return Err("schedule_outcome_unknown".to_string())
-                    }
-                    Err(_) => return Err("schedule_rule_delete_unavailable".to_string()),
+                        .set_scenario_run_executing(&run.id, &batch, deferred)
+                        .and_then(|_| registry.set_scenario_create_batch_paused(&batch, false))
+                        .map_err(|_| "registry_unavailable".to_string())?;
+                    Ok(false)
                 }
-            }
-            PlanAction::NeedsVerification { .. } => {
-                return Err("schedule_metadata_needs_verification".to_string())
-            }
+                Err("scenario_revision_stale") => {
+                    finish_run(registry, run, "failed", Some("scenario_revision_stale"))
+                }
+                Err(status) => Err(status.to_string()),
+            };
+        }
+        // A newer plan of the same revision replaced this one; follow it.
+        Some(info) if info.state == "failed" && info.error.as_deref() == Some("superseded") => {
+            registry.set_scenario_run_plan(&run.id, None)
+        }
+        Some(info) if info.state == "failed" => {
+            return finish_run(registry, run, "failed", Some("plan_failed"));
+        }
+        Some(_) => {
+            registry.set_scenario_run_waiting(&run.id, needs_sign_in.then_some("needs_sign_in"))
         }
     }
-    Ok(waiting_for_decision)
+    .map(|_| false)
+    .map_err(|_| "registry_unavailable".to_string())
+}
+
+/// Finish an executing run when its batch has no pending child. Returns
+/// true when the run finished.
+fn advance_executing_run(
+    registry: &Registry,
+    run: &ScenarioRun,
+    needs_sign_in: bool,
+) -> Result<bool, String> {
+    let summary = run
+        .batch_id
+        .as_deref()
+        .map(|batch| registry.scenario_create_batch_summary(batch, unix_now()))
+        .transpose()
+        .map_err(|_| "registry_unavailable".to_string())?
+        .flatten()
+        .ok_or_else(|| "batch_unavailable".to_string())?;
+    if summary.due + summary.retry_waiting > 0 {
+        registry
+            .set_scenario_run_waiting(&run.id, needs_sign_in.then_some("needs_sign_in"))
+            .map_err(|_| "registry_unavailable".to_string())?;
+        return Ok(false);
+    }
+    let (state, error) = if summary.unknown > 0 {
+        ("failed", Some("items_unknown"))
+    } else if summary.failed > 0 {
+        ("failed", Some("items_failed"))
+    } else if summary.cancelled > 0 {
+        ("cancelled", None)
+    } else {
+        ("completed", None)
+    };
+    finish_run(registry, run, state, error)
+}
+
+fn finish_run(
+    registry: &Registry,
+    run: &ScenarioRun,
+    state: &str,
+    error: Option<&str>,
+) -> Result<bool, String> {
+    eprintln!(
+        "qadren-worker: {} run {} {state}{}",
+        log_time(),
+        run.id,
+        error.map_or(String::new(), |error| format!(": {error}"))
+    );
+    registry
+        .finish_scenario_run(&run.id, state, error)
+        .map(|_| true)
+        .map_err(|_| "registry_unavailable".to_string())
+}
+
+/// After a run finished, finish its schedule Job. A manual run has none.
+fn finish_run_job(paths: &WorkerPaths, run_id: &str) -> Result<(), String> {
+    let registry =
+        Registry::open(&paths.registry).map_err(|_| "registry_unavailable".to_string())?;
+    let Some(run) = registry
+        .scenario_run(run_id)
+        .map_err(|_| "registry_unavailable".to_string())?
+    else {
+        return Ok(());
+    };
+    let Some(job_id) = run.schedule_job_id.as_deref() else {
+        return Ok(());
+    };
+    let mut jobs = JobStore::open(&paths.jobs).map_err(|_| "job_store_unavailable".to_string())?;
+    if jobs
+        .state(job_id)
+        .map_err(|_| "job_store_unavailable".to_string())?
+        != Some(JobState::Queued)
+    {
+        return Ok(());
+    }
+    let unknown = run.error.as_deref() == Some("items_unknown");
+    finish_schedule_job_for_run(&mut jobs, job_id, &run, unknown)
+}
+
+/// Plan items that a run does not execute yet: everything except Create and
+/// no action. Update, deletion, and conflict execution is Xsoid/QADREN#31.
+fn deferred_plan_items(info: &plan_store::PlanInfo) -> u64 {
+    info.counts
+        .as_ref()
+        .and_then(|counts| counts.as_object())
+        .map_or(0, |counts| {
+            counts
+                .iter()
+                .filter(|(action, _)| !matches!(action.as_str(), "create" | "no_action"))
+                .filter_map(|(_, value)| value["count"].as_u64())
+                .sum()
+        })
 }
 
 fn remove_stale_socket(socket: &Path) -> Result<(), String> {
@@ -1208,23 +1229,22 @@ fn plan_page(paths: &WorkerPaths, request: &Request) -> serde_json::Value {
     }
 }
 
-/// Make one Create batch of all Create rows of a complete plan, page by
-/// page, and let the run thread start it (D-024 stage 4).
-fn execute_plan_creates(paths: &WorkerPaths, request: &Request) -> serde_json::Value {
-    let Some(plan) = request.plan_id.as_deref() else {
-        return serde_json::json!({"ok": false, "status": "invalid_request"});
-    };
-    let Ok(store) = SnapshotStore::open_for_reading(&SnapshotStore::path_for(&paths.registry))
-    else {
-        return serde_json::json!({"ok": false, "status": "snapshot_store_unavailable"});
-    };
+/// Make one paused Create batch of all Create rows of a complete plan, page
+/// by page. The caller records the run and then resumes the batch, so a
+/// crash in between leaves a paused batch that never runs.
+fn batch_from_plan(
+    paths: &WorkerPaths,
+    plan: &str,
+) -> Result<(ScenarioReference, String, usize), &'static str> {
+    let store = SnapshotStore::open_for_reading(&SnapshotStore::path_for(&paths.registry))
+        .map_err(|_| "snapshot_store_unavailable")?;
     let Ok(Some(info)) = plan_store::plan_info(store.connection(), plan) else {
-        return serde_json::json!({"ok": false, "status": "plan_unavailable"});
+        return Err("plan_unavailable");
     };
     if info.state != "complete" {
-        return serde_json::json!({"ok": false, "status": "plan_unavailable"});
+        return Err("plan_unavailable");
     }
-    let reference: Option<ScenarioReference> = store
+    let reference: ScenarioReference = store
         .connection()
         .query_row(
             "SELECT scenario_id,revision FROM plans WHERE id=?1",
@@ -1236,11 +1256,40 @@ fn execute_plan_creates(paths: &WorkerPaths, request: &Request) -> serde_json::V
                 })
             },
         )
-        .ok();
-    let Some(reference) = reference else {
-        return serde_json::json!({"ok": false, "status": "plan_unavailable"});
+        .map_err(|_| "plan_unavailable")?;
+    let mut registry = Registry::open(&paths.registry).map_err(|_| "registry_unavailable")?;
+    let batch = registry
+        .begin_scenario_create_batch(&reference)
+        .map_err(|_| "scenario_revision_stale")?;
+    let mut after = 0;
+    let mut added = 0;
+    loop {
+        let page = plan_store::plan_creates_page(store.connection(), plan, after, 5_000)
+            .map_err(|_| "snapshot_store_unavailable")?;
+        let Some(last) = page.last() else { break };
+        after = last.0;
+        let children: Vec<(String, bool)> = page
+            .into_iter()
+            .map(|(_, path, from_left)| (path, from_left))
+            .collect();
+        added += registry
+            .append_scenario_create_batch_children(&batch, &children)
+            .map_err(|_| "registry_unavailable")?;
+    }
+    Ok((reference, batch, added))
+}
+
+/// "Создать все" of a plan screen: a manual run of all Create rows of a
+/// complete plan (D-024 stage 4, D-025).
+fn execute_plan_creates(paths: &WorkerPaths, request: &Request) -> serde_json::Value {
+    let Some(plan) = request.plan_id.as_deref() else {
+        return serde_json::json!({"ok": false, "status": "invalid_request"});
     };
-    let Ok(mut registry) = Registry::open(&paths.registry) else {
+    let (reference, batch, added) = match batch_from_plan(paths, plan) {
+        Ok(made) => made,
+        Err(status) => return serde_json::json!({"ok": false, "status": status}),
+    };
+    let Ok(registry) = Registry::open(&paths.registry) else {
         return serde_json::json!({"ok": false, "status": "registry_unavailable"});
     };
     if let (Some(connection), Some(AccessToken(token))) = (
@@ -1249,28 +1298,21 @@ fn execute_plan_creates(paths: &WorkerPaths, request: &Request) -> serde_json::V
     ) {
         runner().remember_token(&connection, token);
     }
-    let batch = match registry.begin_scenario_create_batch(&reference) {
-        Ok(batch) => batch,
-        Err(_) => return serde_json::json!({"ok": false, "status": "scenario_revision_stale"}),
-    };
-    let mut after = 0;
-    let mut added = 0;
-    loop {
-        let Ok(page) = plan_store::plan_creates_page(store.connection(), plan, after, 5_000) else {
-            return serde_json::json!({"ok": false, "status": "snapshot_store_unavailable"});
-        };
-        let Some(last) = page.last() else { break };
-        after = last.0;
-        let children: Vec<(String, bool)> = page
-            .into_iter()
-            .map(|(_, path, from_left)| (path, from_left))
-            .collect();
-        match registry.append_scenario_create_batch_children(&batch, &children) {
-            Ok(count) => added += count,
-            Err(_) => return serde_json::json!({"ok": false, "status": "registry_unavailable"}),
-        }
+    let deferred = SnapshotStore::open_for_reading(&SnapshotStore::path_for(&paths.registry))
+        .ok()
+        .and_then(|store| {
+            plan_store::plan_info(store.connection(), plan)
+                .ok()
+                .flatten()
+        })
+        .map_or(0, |info| deferred_plan_items(&info));
+    if registry
+        .begin_manual_run(&reference, plan, &batch, deferred)
+        .and_then(|_| registry.set_scenario_create_batch_paused(&batch, false))
+        .is_err()
+    {
+        return serde_json::json!({"ok": false, "status": "registry_unavailable"});
     }
-    let _ = registry.set_scenario_create_batch_paused(&batch, false);
     serde_json::json!({"ok": true, "status": "accepted", "batch": batch, "files": added})
 }
 
@@ -2728,6 +2770,24 @@ mod tests {
         false
     }
 
+    /// Drive every run to its end without the Worker threads: poll, walk
+    /// and plan, then execute due batch children (D-025).
+    fn drive_runs(paths: &WorkerPaths) {
+        for _ in 0..6 {
+            dispatch_due(paths).unwrap();
+            while run_snapshot_pass(paths) {}
+            run_due_batch_children(paths);
+        }
+    }
+
+    fn latest_run(paths: &WorkerPaths, scenario: &str) -> qadren_core::registry::ScenarioRun {
+        Registry::open(&paths.registry)
+            .unwrap()
+            .latest_scenario_run(scenario)
+            .unwrap()
+            .unwrap()
+    }
+
     #[test]
     fn duplicate_worker_lock_is_denied_before_store_access() {
         let root = root("lock");
@@ -2926,98 +2986,47 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_run_scans_roots_copies_new_files_and_queues_existing_file_updates() {
-        let root = root("scheduled-execution");
-        let left_root = root.join("left");
-        let right_root = root.join("right");
-        fs::create_dir_all(&left_root).unwrap();
-        fs::create_dir_all(&right_root).unwrap();
+    fn scheduled_run_copies_new_files_through_snapshots_plan_and_batch() {
+        let (root, left_root, right_root, paths, scenario) =
+            scheduled_fixture("scheduled-execution");
         fs::write(left_root.join("report.txt"), b"first version").unwrap();
-        let paths = WorkerPaths {
-            socket: root.join("worker.sock"),
-            registry: root.join("registry.sqlite3"),
-            jobs: root.join("jobs.sqlite3"),
-        };
-        let registry = Registry::open(&paths.registry).unwrap();
-        let left = registry.add("local_filesystem", "Left").unwrap();
-        let right = registry.add("local_filesystem", "Right").unwrap();
-        let scenario = registry
-            .create_scenario(
-                "Scheduled",
-                &left,
-                left_root.to_str().unwrap(),
-                &right,
-                right_root.to_str().unwrap(),
-                "left_to_right",
-            )
-            .unwrap();
-        let current = now();
-        registry
-            .create_scenario_schedule(
-                &scenario,
-                "UTC",
-                current.weekday().num_days_from_monday() as u8,
-                current.hour() as u8,
-                current.minute() as u8,
-            )
-            .unwrap();
-        drop(registry);
-
+        schedule_current_minute(&paths, &scenario);
         assert_eq!(dispatch_due(&paths).unwrap(), (1, 1));
+        // The slot starts a run; the poll itself copies nothing.
+        let run = latest_run(&paths, &scenario);
+        assert_eq!(
+            (run.trigger.as_str(), run.state.as_str()),
+            ("schedule", "planning")
+        );
+        assert!(!right_root.join("report.txt").exists());
+        assert_eq!(coordinator_states(&paths), vec![JobState::Queued]);
+
+        drive_runs(&paths);
         assert_eq!(
             fs::read(right_root.join("report.txt")).unwrap(),
             b"first version"
         );
-        let first_jobs = JobStore::open(&paths.jobs).unwrap().list_jobs().unwrap();
-        assert_eq!(first_jobs.len(), 2);
-        assert!(first_jobs
-            .iter()
-            .any(|job| job.id.starts_with("schedule-") && job.state == JobState::Completed));
-        assert!(first_jobs
-            .iter()
-            .any(|job| job.id.starts_with("schedule-copy-") && job.state == JobState::Completed));
+        let run = latest_run(&paths, &scenario);
+        assert_eq!(run.state, "completed");
+        assert_eq!(run.deferred_items, 0);
+        assert_eq!(coordinator_states(&paths), vec![JobState::Completed]);
 
+        // An Update is not executed by a run yet (Xsoid/QADREN#31). The run
+        // reports it as deferred and changes no file.
         fs::write(left_root.join("report.txt"), b"second version").unwrap();
-        let registry = Registry::open(&paths.registry).unwrap();
-        registry
-            .create_scenario_schedule(
-                &scenario,
-                "UTC",
-                current.weekday().num_days_from_monday() as u8,
-                current.hour() as u8,
-                current.minute() as u8,
-            )
-            .unwrap();
-        drop(registry);
-        assert_eq!(dispatch_due(&paths).unwrap(), (1, 1));
+        schedule_current_minute(&paths, &scenario);
+        drive_runs(&paths);
         assert_eq!(
             fs::read(right_root.join("report.txt")).unwrap(),
             b"first version"
         );
-        let registry = Registry::open(&paths.registry).unwrap();
-        let conflicts = registry
-            .list_conflict_tasks(&ScenarioReference {
-                scenario_id: scenario,
-                revision: 1,
-            })
-            .unwrap();
-        assert_eq!(conflicts.len(), 1);
-        assert_eq!(conflicts[0].kind, "content");
-        assert_eq!(conflicts[0].state, "pending");
-        let jobs = JobStore::open(&paths.jobs).unwrap().list_jobs().unwrap();
-        assert!(jobs
-            .iter()
-            .any(|job| job.state == JobState::WaitingForDecision));
-        registry
-            .select_conflict_task(&conflicts[0].id, Some(true), "skip_transfer")
-            .unwrap();
-        complete_ready_schedule_jobs(&paths, &conflicts[0].id).unwrap();
-        assert!(JobStore::open(&paths.jobs)
-            .unwrap()
-            .list_jobs()
-            .unwrap()
-            .iter()
-            .any(|job| job.id.starts_with("schedule-") && job.state == JobState::Completed));
+        let run = latest_run(&paths, &scenario);
+        assert_eq!(run.state, "completed");
+        assert_eq!(run.deferred_items, 1);
+        assert_eq!(
+            coordinator_states(&paths),
+            vec![JobState::Completed, JobState::Completed]
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3072,6 +3081,7 @@ mod tests {
         drop(registry);
 
         assert_eq!(dispatch_due(&paths).unwrap(), (1, 1));
+        drive_runs(&paths);
         assert_eq!(
             fs::read(right_root.join("missed.txt")).unwrap(),
             b"missed slot"
@@ -3156,24 +3166,97 @@ mod tests {
         .unwrap()
     }
 
+    fn version_of(root: &Path, path: &str) -> Option<ConfirmedFileVersion> {
+        observed_files(root)
+            .unwrap()
+            .0
+            .into_iter()
+            .find(|file| file.relative_path == path)
+            .map(|file| ConfirmedFileVersion {
+                object_revision: file.object_revision,
+                size: file.size,
+                checksum_md5: file.checksum_md5,
+            })
+    }
+
+    /// A schedule coordinator that the legacy schedule path left waiting for
+    /// decisions. Runs no longer make one (D-025), but such Jobs must still
+    /// resolve. Returns the conflict IDs in the order of `tasks`.
+    fn legacy_waiting_coordinator(
+        paths: &WorkerPaths,
+        scenario: &str,
+        left_root: &Path,
+        right_root: &Path,
+        tasks: &[(&str, &str, Option<bool>)],
+    ) -> Vec<String> {
+        let job = "schedule-legacy-coordinator";
+        let mut jobs = JobStore::open(&paths.jobs).unwrap();
+        jobs.enqueue(job, Some((scenario, 1))).unwrap();
+        jobs.advance(
+            job,
+            JobState::Queued,
+            JobState::Running,
+            Confirmation::Confirmed(EvidenceLevel::Requested),
+        )
+        .unwrap();
+        jobs.advance(
+            job,
+            JobState::Running,
+            JobState::WaitingForDecision,
+            Confirmation::Unknown,
+        )
+        .unwrap();
+        let registry = Registry::open(&paths.registry).unwrap();
+        let reference = ScenarioReference {
+            scenario_id: scenario.to_owned(),
+            revision: 1,
+        };
+        tasks
+            .iter()
+            .map(|(path, kind, source_is_left)| {
+                let id = registry
+                    .queue_conflict_task(
+                        &reference,
+                        path,
+                        kind,
+                        *source_is_left,
+                        version_of(left_root, path).as_ref(),
+                        version_of(right_root, path).as_ref(),
+                    )
+                    .unwrap();
+                registry.link_schedule_conflict(job, &id).unwrap();
+                id
+            })
+            .collect()
+    }
+
     #[test]
     fn scheduled_deletion_waits_for_fresh_consent_and_completes_its_coordinator() {
         let (root, left_root, right_root, paths, scenario) =
             scheduled_fixture("scheduled-deletion");
         fs::write(left_root.join("report.txt"), b"baseline").unwrap();
         schedule_current_minute(&paths, &scenario);
-        assert_eq!(dispatch_due(&paths).unwrap(), (1, 1));
+        drive_runs(&paths);
         assert_eq!(
             fs::read(right_root.join("report.txt")).unwrap(),
             b"baseline"
         );
 
-        // The source file is deleted. The next scheduled run must not delete
-        // the destination by itself.
+        // The source file is deleted. In Paranoid mode the next scheduled
+        // run must not delete the destination by itself.
         fs::remove_file(left_root.join("report.txt")).unwrap();
         schedule_current_minute(&paths, &scenario);
-        assert_eq!(dispatch_due(&paths).unwrap(), (1, 1));
+        drive_runs(&paths);
         assert!(right_root.join("report.txt").exists());
+        assert_eq!(latest_run(&paths, &scenario).deferred_items, 1);
+
+        let ids = legacy_waiting_coordinator(
+            &paths,
+            &scenario,
+            &left_root,
+            &right_root,
+            &[("report.txt", "deletion", None)],
+        );
         let registry = Registry::open(&paths.registry).unwrap();
         let reference = ScenarioReference {
             scenario_id: scenario.clone(),
@@ -3181,11 +3264,9 @@ mod tests {
         };
         let conflicts = registry.list_conflict_tasks(&reference).unwrap();
         assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].id, ids[0]);
         assert_eq!(conflicts[0].kind, "deletion");
         assert_eq!(conflicts[0].state, "pending");
-        let states = coordinator_states(&paths);
-        assert_eq!(states.len(), 2);
-        assert!(states.contains(&JobState::Completed));
         assert!(coordinator_states(&paths).contains(&JobState::WaitingForDecision));
 
         // An unselected task cannot be executed, even with consent.
@@ -3263,28 +3344,22 @@ mod tests {
         fs::write(left_root.join("a.txt"), b"first a").unwrap();
         fs::write(left_root.join("b.txt"), b"first b").unwrap();
         schedule_current_minute(&paths, &scenario);
-        assert_eq!(dispatch_due(&paths).unwrap(), (1, 1));
+        drive_runs(&paths);
 
         fs::write(left_root.join("a.txt"), b"second version of a").unwrap();
         fs::write(left_root.join("b.txt"), b"second version of b").unwrap();
-        schedule_current_minute(&paths, &scenario);
-        assert_eq!(dispatch_due(&paths).unwrap(), (1, 1));
+        let ids = legacy_waiting_coordinator(
+            &paths,
+            &scenario,
+            &left_root,
+            &right_root,
+            &[
+                ("a.txt", "content", Some(true)),
+                ("b.txt", "content", Some(true)),
+            ],
+        );
         let registry = Registry::open(&paths.registry).unwrap();
-        let conflicts = registry
-            .list_conflict_tasks(&ScenarioReference {
-                scenario_id: scenario.clone(),
-                revision: 1,
-            })
-            .unwrap();
-        assert_eq!(conflicts.len(), 2);
-        let task = |path: &str| {
-            conflicts
-                .iter()
-                .find(|task| task.relative_path == path)
-                .unwrap()
-                .id
-                .clone()
-        };
+        let task = |path: &str| ids[if path == "a.txt" { 0 } else { 1 }].clone();
 
         // One resolved task out of two keeps the coordinator waiting.
         registry
@@ -3369,6 +3444,7 @@ mod tests {
 
         schedule_current_minute(&paths, &scenario);
         assert_eq!(dispatch_due(&paths).unwrap(), (1, 1));
+        drive_runs(&paths);
         assert_eq!(
             fs::read(right_root.join("report.txt")).unwrap(),
             b"scheduled"

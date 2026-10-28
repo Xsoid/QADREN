@@ -189,7 +189,7 @@ struct MainView: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     if widget.density == .expanded {
-                        Text("Источник: локальный JobStore; Worker выполняет безопасные Create по расписанию.")
+                        Text("Источник: локальный JobStore; Worker выполняет запуски сценариев по расписанию.")
                             .font(.caption2).foregroundStyle(.secondary)
                     }
                 }

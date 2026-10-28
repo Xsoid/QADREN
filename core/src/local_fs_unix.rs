@@ -680,7 +680,7 @@ pub fn trash_file_into(root: &File, target: &Path, trash: &File) -> Result<()> {
             return Err(unconfirmed());
         }
         sync(&directory).map_err(LocalError::OutcomeUnknown)?;
-        sync(&trash).map_err(LocalError::OutcomeUnknown)?;
+        sync(trash).map_err(LocalError::OutcomeUnknown)?;
         return Ok(());
     }
     Err(LocalError::AlreadyExists)

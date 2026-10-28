@@ -1241,10 +1241,12 @@ private struct ScenariosSettingsView: View {
                                       ? "Изменить сценарий"
                                       : "Сценарий использует подключение, которое QADREN не поддерживает")
                             Button("Расписания") { editSchedules(scenario) }
-                                .disabled(!isLocalScenario(scenario))
-                                .help(isLocalScenario(scenario)
-                                      ? "Настроить расписания локального сценария"
-                                      : "Расписания с Яндекс Диском пока недоступны: фоновая служба не получает вход в Яндекс")
+                                .disabled(!isSupportedScenario(scenario))
+                                .help(!isSupportedScenario(scenario)
+                                      ? "Сценарий использует подключение, которое QADREN не поддерживает"
+                                      : isLocalScenario(scenario)
+                                      ? "Настроить расписания сценария"
+                                      : "Настроить расписания. Вход в Яндекс фоновая служба получает от QADREN: после перезапуска Mac запуск ждёт, пока вы откроете QADREN")
                             Button("Проверить план") { previewScenario(scenario) }
                                 .disabled(!isSupportedScenario(scenario))
                                 .help(isSupportedScenario(scenario)
@@ -1316,7 +1318,7 @@ private struct ScenariosSettingsView: View {
             return "Сценарий использует подключение, которое QADREN не поддерживает. Его запуск, изменение и расписания недоступны; запись сохранена локально."
         }
         if !isLocalScenario(scenario) {
-            return "Яндекс Диск → Mac: план и перенос запускаются из этого окна. Расписания и удаления на Mac пока недоступны."
+            return "Яндекс Диск → Mac: план и перенос запускаются из этого окна или по расписанию. После перезапуска Mac запуск по расписанию ждёт, пока вы откроете QADREN. Удаления на Mac пока недоступны."
         }
         return scenario.enabled
             ? "Проверьте план по метаданным, затем подтвердите отдельный перенос или пакет обычных действий. Конфликты обрабатываются отдельно."
