@@ -1890,6 +1890,10 @@ private struct ScenarioDryRunView: View {
                     try WorkerIPC.executePlanCreates(planID: info.id, accessToken: token)
                 }.value
                 resumePendingCreateBatches()
+            } catch WorkerIPCError.rejected("run_active") {
+                // D-025: show the active run instead of a second run.
+                self.error = QADRENUserMessage.text(for: "run_active")
+                resumePendingCreateBatches()
             } catch {
                 self.error = "Фоновая служба не приняла пакет: " + error.localizedDescription
             }

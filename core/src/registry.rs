@@ -43,6 +43,8 @@ pub enum RegistryError {
     /// A Yandex Disk connection is not the source of a one-way Scenario
     /// with a destination on this Mac (D-023, stage 1).
     UnsupportedYandexScope,
+    /// Another run of the Scenario is active (D-025 section 2).
+    ScenarioRunActive,
 }
 impl From<rusqlite::Error> for RegistryError {
     fn from(error: rusqlite::Error) -> Self {
@@ -212,6 +214,15 @@ pub struct DueBatchChild {
     pub cancellation_requested: bool,
 }
 
+/// The answer of `begin_schedule_run`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScheduleRunStart {
+    /// The run of this schedule Job.
+    Started(String),
+    /// Another run of the Scenario was active; the slot started nothing.
+    Skipped(String),
+}
+
 /// One durable execution of a Scenario revision (D-025): snapshots, a
 /// stored plan, then the batch of its items.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -277,7 +288,7 @@ impl Registry {
         }
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 23 {
+        if version > 24 {
             return Err(RegistryError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -660,6 +671,28 @@ impl Registry {
                  CREATE INDEX scenario_runs_by_scenario
                    ON scenario_runs(scenario_id, created_at);
                  PRAGMA user_version = 23;
+                 COMMIT;",
+            )?;
+        }
+        if version <= 23 {
+            // D-025 section 2: at most one active run for each Scenario, as a
+            // constraint. An older duplicate active run cannot exist after
+            // this migration; only the oldest one stays active. A slot that
+            // arrives during an active run records that run and starts none.
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 UPDATE scenario_runs
+                   SET state='cancelled', error='duplicate_active_run', waiting_reason=NULL,
+                       finished_at=CAST(strftime('%s','now') AS INTEGER)
+                   WHERE state IN ('planning','executing')
+                     AND rowid <> (SELECT min(r.rowid) FROM scenario_runs r
+                                   WHERE r.scenario_id=scenario_runs.scenario_id
+                                     AND r.state IN ('planning','executing'));
+                 DROP INDEX scenario_runs_active;
+                 CREATE UNIQUE INDEX scenario_runs_one_active
+                   ON scenario_runs(scenario_id) WHERE state IN ('planning','executing');
+                 ALTER TABLE schedule_occurrences ADD COLUMN skipped_active_run_id TEXT;
+                 PRAGMA user_version = 24;
                  COMMIT;",
             )?;
         }
@@ -1266,8 +1299,9 @@ impl Registry {
     ) -> Result<usize> {
         let transaction = self.db.unchecked_transaction()?;
         let mut claimed_by_scenario: Vec<DueScheduleOccurrence> = Vec::new();
+        let mut claimed: Vec<DueScheduleOccurrence> = Vec::new();
         for occurrence in due {
-            let claimed = transaction.execute(
+            let inserted = transaction.execute(
                 "INSERT OR IGNORE INTO schedule_occurrences(schedule_id,occurrence_key)
                  SELECT ss.id,?2 FROM scenario_schedules ss
                  JOIN scenarios s ON s.id=ss.scenario_id
@@ -1280,9 +1314,10 @@ impl Registry {
                     occurrence.scenario_id
                 ],
             )?;
-            if claimed == 0 {
+            if inserted == 0 {
                 continue;
             }
+            claimed.push(occurrence.clone());
             // `due` is sorted by Scenario, so the last claimed slot of each
             // Scenario replaces the earlier ones of that pass.
             match claimed_by_scenario.last_mut() {
@@ -1292,6 +1327,30 @@ impl Registry {
         }
         let mut staged = 0;
         for occurrence in claimed_by_scenario {
+            // D-025 section 2: a slot during an active run of its Scenario
+            // starts nothing and makes no conflict. The active run continues
+            // and no follow-up run is recorded.
+            let active: Option<String> = transaction
+                .query_row(
+                    "SELECT id FROM scenario_runs WHERE scenario_id=?1
+                       AND state IN ('planning','executing')",
+                    [&occurrence.scenario_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(active) = active {
+                for slot in claimed
+                    .iter()
+                    .filter(|slot| slot.scenario_id == occurrence.scenario_id)
+                {
+                    transaction.execute(
+                        "UPDATE schedule_occurrences SET skipped_active_run_id=?3
+                         WHERE schedule_id=?1 AND occurrence_key=?2",
+                        params![slot.schedule_id, slot.occurrence_key.0, active],
+                    )?;
+                }
+                continue;
+            }
             // The complete bounded, validated tuple is retained rather than
             // hashed: Job identity must not rely on collision resistance.
             let job_id = format!(
@@ -1860,27 +1919,108 @@ impl Registry {
     }
 
     /// Start the run of a dispatched schedule Job. A repeated call for the
-    /// same Job returns the existing run, so a restart never starts two.
-    pub fn begin_schedule_run(&self, schedule_job_id: &str) -> Result<String> {
+    /// same Job returns the same answer, so a restart never starts two runs.
+    /// When another run of the Scenario is active, the slot is skipped
+    /// (D-025 section 2) and stays skipped after that run ends.
+    pub fn begin_schedule_run(&self, schedule_job_id: &str) -> Result<ScheduleRunStart> {
         let reference = self
             .schedule_job_reference(schedule_job_id)?
             .ok_or(RegistryError::NotFound)?;
-        self.db.execute(
-            "INSERT OR IGNORE INTO scenario_runs(
+        let transaction = self.db.unchecked_transaction()?;
+        let existing: Option<String> = transaction
+            .query_row(
+                "SELECT id FROM scenario_runs WHERE schedule_job_id=?1",
+                [schedule_job_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(id) = existing {
+            return Ok(ScheduleRunStart::Started(id));
+        }
+        let (schedule_id, occurrence_key, skipped): (String, String, Option<String>) = transaction
+            .query_row(
+                "SELECT o.schedule_id,o.occurrence_key,so.skipped_active_run_id
+                 FROM schedule_job_outbox o
+                 LEFT JOIN schedule_occurrences so
+                   ON so.schedule_id=o.schedule_id AND so.occurrence_key=o.occurrence_key
+                 WHERE o.job_id=?1",
+                [schedule_job_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+        if let Some(active) = skipped {
+            return Ok(ScheduleRunStart::Skipped(active));
+        }
+        let active: Option<String> = transaction
+            .query_row(
+                "SELECT id FROM scenario_runs WHERE scenario_id=?1
+                   AND state IN ('planning','executing')",
+                [&reference.scenario_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(active) = active {
+            transaction.execute(
+                "UPDATE schedule_occurrences SET skipped_active_run_id=?3
+                 WHERE schedule_id=?1 AND occurrence_key=?2",
+                params![schedule_id, occurrence_key, active],
+            )?;
+            transaction.commit()?;
+            return Ok(ScheduleRunStart::Skipped(active));
+        }
+        let id: String =
+            transaction.query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
+        transaction.execute(
+            "INSERT INTO scenario_runs(
                 id,scenario_id,scenario_revision,trigger,schedule_job_id,state,created_at
-             ) VALUES(lower(hex(randomblob(16))),?1,?2,'schedule',?3,'planning',?4)",
+             ) VALUES(?1,?2,?3,'schedule',?4,'planning',?5)",
             params![
+                id,
                 reference.scenario_id,
                 reference.revision as i64,
                 schedule_job_id,
                 unix_seconds()
             ],
         )?;
-        Ok(self.db.query_row(
-            "SELECT id FROM scenario_runs WHERE schedule_job_id=?1",
-            [schedule_job_id],
-            |row| row.get(0),
-        )?)
+        transaction.commit()?;
+        Ok(ScheduleRunStart::Started(id))
+    }
+
+    /// The active run of a Scenario, if any. At most one exists.
+    pub fn active_scenario_run(&self, scenario_id: &str) -> Result<Option<ScenarioRun>> {
+        Ok(self
+            .db
+            .query_row(
+                &format!(
+                    "SELECT {} FROM scenario_runs WHERE scenario_id=?1
+                       AND state IN ('planning','executing')",
+                    Self::SCENARIO_RUN_COLUMNS
+                ),
+                [scenario_id],
+                Self::scenario_run_from_row,
+            )
+            .optional()?)
+    }
+
+    /// Slots of a Scenario that were skipped because a run was active,
+    /// newest first: `(schedule_id, occurrence_key, active_run_id)`.
+    pub fn skipped_schedule_slots(
+        &self,
+        scenario_id: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, String, String)>> {
+        let mut statement = self.db.prepare(
+            "SELECT so.schedule_id,so.occurrence_key,so.skipped_active_run_id
+             FROM schedule_occurrences so
+             JOIN scenario_schedules ss ON ss.id=so.schedule_id
+             WHERE ss.scenario_id=?1 AND so.skipped_active_run_id IS NOT NULL
+             ORDER BY so.rowid DESC LIMIT ?2",
+        )?;
+        let rows = statement
+            .query_map(params![scenario_id, limit as i64], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     /// Record a manual run whose batch the user confirmed from a plan.
@@ -1894,21 +2034,31 @@ impl Registry {
         let id: String = self
             .db
             .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
-        self.db.execute(
-            "INSERT INTO scenario_runs(
+        self.db
+            .execute(
+                "INSERT INTO scenario_runs(
                 id,scenario_id,scenario_revision,trigger,plan_id,batch_id,state,
                 deferred_items,created_at
              ) VALUES(?1,?2,?3,'manual',?4,?5,'executing',?6,?7)",
-            params![
-                id,
-                scenario.scenario_id,
-                scenario.revision as i64,
-                plan_id,
-                batch_id,
-                deferred_items as i64,
-                unix_seconds()
-            ],
-        )?;
+                params![
+                    id,
+                    scenario.scenario_id,
+                    scenario.revision as i64,
+                    plan_id,
+                    batch_id,
+                    deferred_items as i64,
+                    unix_seconds()
+                ],
+            )
+            .map_err(|error| match error {
+                // `scenario_runs_one_active`: another run of the Scenario is active.
+                rusqlite::Error::SqliteFailure(failure, _)
+                    if failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
+                {
+                    RegistryError::ScenarioRunActive
+                }
+                other => other.into(),
+            })?;
         Ok(id)
     }
 
@@ -4301,6 +4451,104 @@ mod tests {
             &[("file.txt".into(), true)],
         )
         .unwrap();
+    }
+
+    fn started_run(start: ScheduleRunStart) -> String {
+        match start {
+            ScheduleRunStart::Started(id) => id,
+            ScheduleRunStart::Skipped(active) => panic!("skipped for {active}"),
+        }
+    }
+
+    /// Xsoid/QADREN#30: hourly slots during a run of three hours give one
+    /// run and two skipped slots. The next slot after the run starts a new
+    /// run, with no follow-up run in between.
+    #[test]
+    fn slots_during_an_active_run_are_skipped_without_a_follow_up_run() {
+        let db = Registry::in_memory().unwrap();
+        let scenario = schedule_fixture(&db, "hourly");
+        for hour in [10, 11, 12] {
+            db.create_scenario_schedule(&scenario, "UTC", 0, hour, 0)
+                .unwrap();
+        }
+        let stage = |from: &str, through: &str| {
+            db.stage_due_schedule_occurrences(schedule_utc(from), schedule_utc(through))
+                .unwrap()
+        };
+        assert_eq!(stage("2026-10-05T09:59:00Z", "2026-10-05T10:00:00Z"), 1);
+        let first_job = db.pending_schedule_job_outbox().unwrap()[0].job_id.clone();
+        let run = started_run(db.begin_schedule_run(&first_job).unwrap());
+        assert_eq!(
+            db.begin_schedule_run(&first_job).unwrap(),
+            ScheduleRunStart::Started(run.clone())
+        );
+
+        assert_eq!(stage("2026-10-05T10:59:00Z", "2026-10-05T11:00:00Z"), 0);
+        assert_eq!(stage("2026-10-05T11:59:00Z", "2026-10-05T12:00:00Z"), 0);
+        let skipped = db.skipped_schedule_slots(&scenario, 10).unwrap();
+        assert_eq!(skipped.len(), 2);
+        assert!(skipped.iter().all(|(_, _, active)| *active == run));
+        assert_eq!(db.pending_schedule_job_outbox().unwrap().len(), 1);
+
+        db.finish_scenario_run(&run, "completed", None).unwrap();
+        assert_eq!(db.active_scenario_run(&scenario).unwrap(), None);
+        // The skipped slots stay skipped: no follow-up run.
+        assert_eq!(stage("2026-10-05T12:00:00Z", "2026-10-12T09:59:00Z"), 0);
+        assert_eq!(stage("2026-10-12T09:59:00Z", "2026-10-12T10:00:00Z"), 1);
+        let next_job = db
+            .pending_schedule_job_outbox()
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.job_id != first_job)
+            .unwrap()
+            .job_id;
+        let next = started_run(db.begin_schedule_run(&next_job).unwrap());
+        assert_ne!(next, run);
+    }
+
+    /// The database, not only code, allows one active run for each
+    /// Scenario. A slot whose run starts after a manual run stays skipped.
+    #[test]
+    fn one_active_run_per_scenario_is_a_database_constraint() {
+        let mut db = Registry::in_memory().unwrap();
+        let scenario = schedule_fixture(&db, "constraint");
+        db.create_scenario_schedule(&scenario, "UTC", 0, 10, 0)
+            .unwrap();
+        db.stage_due_schedule_occurrences(
+            schedule_utc("2026-10-05T09:59:00Z"),
+            schedule_utc("2026-10-05T10:00:00Z"),
+        )
+        .unwrap();
+        let job = db.pending_schedule_job_outbox().unwrap()[0].job_id.clone();
+        let reference = ScenarioReference {
+            scenario_id: scenario.clone(),
+            revision: 1,
+        };
+        let batch = db.begin_scenario_create_batch(&reference).unwrap();
+        let manual = db.begin_manual_run(&reference, "plan", &batch, 0).unwrap();
+
+        assert!(matches!(
+            db.begin_manual_run(&reference, "plan", &batch, 0),
+            Err(RegistryError::ScenarioRunActive)
+        ));
+        assert!(db
+            .db
+            .execute(
+                "INSERT INTO scenario_runs(id,scenario_id,scenario_revision,trigger,state,created_at)
+                 VALUES('direct',?1,1,'manual','planning',0)",
+                [&scenario],
+            )
+            .is_err());
+        assert_eq!(
+            db.begin_schedule_run(&job).unwrap(),
+            ScheduleRunStart::Skipped(manual.clone())
+        );
+        db.finish_scenario_run(&manual, "completed", None).unwrap();
+        assert_eq!(
+            db.begin_schedule_run(&job).unwrap(),
+            ScheduleRunStart::Skipped(manual)
+        );
+        assert_eq!(db.active_scenario_run(&scenario).unwrap(), None);
     }
 
     #[test]

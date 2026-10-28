@@ -18,7 +18,9 @@ use qadren_core::jobs::JobStore;
 use qadren_core::local_fs::LocalFilesystem;
 use qadren_core::model::{ConfirmedFileVersion, JobState, ScenarioReference};
 use qadren_core::plan_store;
-use qadren_core::registry::{BatchChildDue, DueBatchChild, Registry, ScenarioRun};
+use qadren_core::registry::{
+    BatchChildDue, DueBatchChild, Registry, RegistryError, ScenarioRun, ScheduleRunStart,
+};
 use qadren_core::scenario_planner::{ObservedFile, PlanAction};
 use qadren_core::schedule_dispatch::dispatch_pending_schedule_jobs;
 use qadren_core::snapshot::{
@@ -615,9 +617,33 @@ fn advance_scenario_runs(paths: &WorkerPaths) -> Result<(), String> {
         {
             return Err("schedule_job_identity_mismatch".to_string());
         }
-        let run = registry
+        let start = registry
             .begin_schedule_run(&job.id)
-            .and_then(|id| registry.scenario_run(&id))
+            .map_err(|_| "schedule_registry_unavailable".to_string())?;
+        let run_id = match start {
+            ScheduleRunStart::Started(id) => id,
+            // D-025 section 2: the active run continues; this slot ends
+            // without a run, a conflict, or a follow-up run.
+            ScheduleRunStart::Skipped(active) => {
+                eprintln!(
+                    "qadren-worker: {} schedule Job {} skipped: run {active} is active",
+                    log_time(),
+                    job.id
+                );
+                JobStore::open(&paths.jobs)
+                    .map_err(|_| "job_store_unavailable".to_string())?
+                    .advance(
+                        &job.id,
+                        JobState::Queued,
+                        JobState::Cancelled,
+                        Confirmation::Unknown,
+                    )
+                    .map_err(|_| "schedule_job_state_unavailable".to_string())?;
+                continue;
+            }
+        };
+        let run = registry
+            .scenario_run(&run_id)
             .map_err(|_| "schedule_registry_unavailable".to_string())?
             .ok_or_else(|| "schedule_registry_unavailable".to_string())?;
         // A crash after the run finished and before the Job did.
@@ -1279,12 +1305,43 @@ fn batch_from_plan(
     Ok((reference, batch, added))
 }
 
+/// The Scenario of a stored plan.
+fn plan_scenario_id(paths: &WorkerPaths, plan: &str) -> Option<String> {
+    let store = SnapshotStore::open_for_reading(&SnapshotStore::path_for(&paths.registry)).ok()?;
+    store
+        .connection()
+        .query_row("SELECT scenario_id FROM plans WHERE id=?1", [plan], |row| {
+            row.get(0)
+        })
+        .ok()
+}
+
+fn run_active_answer(run: &ScenarioRun) -> serde_json::Value {
+    serde_json::json!({
+        "ok": false,
+        "status": "run_active",
+        "run": run.id,
+        "state": run.state,
+        "batch": run.batch_id,
+    })
+}
+
 /// "Создать все" of a plan screen: a manual run of all Create rows of a
 /// complete plan (D-024 stage 4, D-025).
 fn execute_plan_creates(paths: &WorkerPaths, request: &Request) -> serde_json::Value {
     let Some(plan) = request.plan_id.as_deref() else {
         return serde_json::json!({"ok": false, "status": "invalid_request"});
     };
+    // D-025 section 2: a manual request during an active run shows that run
+    // and starts no second run.
+    if let Some(active) = plan_scenario_id(paths, plan).and_then(|scenario| {
+        Registry::open(&paths.registry)
+            .ok()?
+            .active_scenario_run(&scenario)
+            .ok()?
+    }) {
+        return run_active_answer(&active);
+    }
     let (reference, batch, added) = match batch_from_plan(paths, plan) {
         Ok(made) => made,
         Err(status) => return serde_json::json!({"ok": false, "status": status}),
@@ -1306,9 +1363,21 @@ fn execute_plan_creates(paths: &WorkerPaths, request: &Request) -> serde_json::V
                 .flatten()
         })
         .map_or(0, |info| deferred_plan_items(&info));
+    match registry.begin_manual_run(&reference, plan, &batch, deferred) {
+        Ok(_) => {}
+        // A run started between the check and now. Its paused batch never
+        // executes; cancel it so that it does not wait forever.
+        Err(RegistryError::ScenarioRunActive) => {
+            let _ = registry.request_scenario_create_batch_cancellation(&batch);
+            return match registry.active_scenario_run(&reference.scenario_id) {
+                Ok(Some(active)) => run_active_answer(&active),
+                _ => serde_json::json!({"ok": false, "status": "run_active"}),
+            };
+        }
+        Err(_) => return serde_json::json!({"ok": false, "status": "registry_unavailable"}),
+    }
     if registry
-        .begin_manual_run(&reference, plan, &batch, deferred)
-        .and_then(|_| registry.set_scenario_create_batch_paused(&batch, false))
+        .set_scenario_create_batch_paused(&batch, false)
         .is_err()
     {
         return serde_json::json!({"ok": false, "status": "registry_unavailable"});
@@ -1754,6 +1823,37 @@ fn local_error_kind(error: &qadren_core::local_fs::LocalError) -> String {
         }
         other => format!("{other:?}"),
     }
+}
+
+/// "Остановить": stop the active run of a Scenario (D-025 section 2). A
+/// planning run ends now. An executing run cancels its pending items and
+/// ends when no item executes; completed items stay.
+fn stop_scenario_run(paths: &WorkerPaths, request: &Request) -> serde_json::Value {
+    let Some(scenario_id) = request.scenario_id.as_deref() else {
+        return serde_json::json!({"ok": false, "status": "invalid_request"});
+    };
+    let Ok(registry) = Registry::open(&paths.registry) else {
+        return serde_json::json!({"ok": false, "status": "registry_unavailable"});
+    };
+    let run = match registry.active_scenario_run(scenario_id) {
+        Ok(Some(run)) => run,
+        Ok(None) => return serde_json::json!({"ok": true, "status": "no_active_run"}),
+        Err(_) => return serde_json::json!({"ok": false, "status": "registry_unavailable"}),
+    };
+    let stopped = match (run.state.as_str(), run.batch_id.as_deref()) {
+        ("executing", Some(batch)) => registry
+            .request_scenario_create_batch_cancellation(batch)
+            .is_ok(),
+        _ => finish_run(&registry, &run, "cancelled", Some("stopped_by_user")).is_ok(),
+    };
+    drop(registry);
+    if !stopped {
+        return serde_json::json!({"ok": false, "status": "registry_unavailable"});
+    }
+    if run.state == "planning" {
+        let _ = finish_run_job(paths, &run.id);
+    }
+    serde_json::json!({"ok": true, "status": "stop_requested", "run": run.id})
 }
 
 fn request_create_batch_cancellation(
@@ -2258,6 +2358,10 @@ fn handle_client(mut stream: UnixStream, paths: &WorkerPaths, stop: &mut bool) {
         }
         "execute_plan_creates" => {
             let answer = execute_plan_creates(paths, &request);
+            let _ = writeln!(stream, "{answer}");
+        }
+        "stop_run" => {
+            let answer = stop_scenario_run(paths, &request);
             let _ = writeln!(stream, "{answer}");
         }
         "start_snapshot" => {
