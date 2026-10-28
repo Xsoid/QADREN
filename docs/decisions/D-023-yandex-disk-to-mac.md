@@ -15,7 +15,7 @@ Release 1 is out. The current work is a set of Release 1 improvements. The owner
 5. **Recheck before the effect.** The executor reads the Yandex metadata of the source file again before the attempt. A different size or MD5 than the plan saw stops the file as stale.
 6. **Reconciliation.** After lost effect proof, the executor checks only the local destination. It never downloads again blindly. Insufficient evidence keeps `UNKNOWN`.
 7. **Plan snapshot.** Core lists the Yandex source folder recursively through bounded metadata pages. Each file gives its relative path, size, MD5, and modification time to the pure planner.
-8. **Where it runs.** In stage 1 the app runs Yandex Jobs and gives the token to Core for each call. The background Worker refuses a Yandex Job before any effect, because it cannot read the app Keychain item. A shared Keychain access group is a separate step.
+8. **Where it runs.** In stage 1 the app runs Yandex Jobs and gives the token to Core for each call. The background Worker refuses a Yandex Job before any effect, because it cannot read the app Keychain item. A shared Keychain access group is a separate step. *Revised by [D-024](D-024-large-transfers.md) section 5 (the Worker runs Yandex Jobs with a token from the app) and [D-025](D-025-autonomous-scheduled-scenarios.md) section 7 (Yandex Disk Scenarios have schedules).*
 9. **Secrets.** The access token stays in the Keychain, bound to `connection_id`. Core receives it only in memory. Core never writes the token or a signed download link to SQLite, logs, or Job evidence.
 
 ## Consequences

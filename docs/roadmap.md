@@ -15,7 +15,7 @@ Release 1 uses Local Filesystem and SMB network drives through a QADREN mount (D
 
 1. Yandex Disk to Mac: a one-way Scenario with a Yandex Disk source (D-023, stage 1).
 2. Large transfers (D-024): Worker-owned Transfer Runs with retries, then stored snapshots, then stored paged plans, then MD5 reconciliation.
-3. Deletion on the Mac side for a Yandex Disk source (a separate step).
+3. Autonomous scheduled Scenarios (D-025): one run path, one active run for each Scenario, automatic Update and Delete, Yandex Disk schedules, Worker SMB mount, launch at login, daily and every-N-hours schedules, parallel runs. This includes deletion on the Mac side for a Yandex Disk source.
 4. Mac to Yandex Disk and two-way Yandex Disk Scenarios (D-023, stage 2).
 
 ## Post-release

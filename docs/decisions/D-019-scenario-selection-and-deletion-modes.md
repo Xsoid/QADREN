@@ -1,6 +1,6 @@
 # D-019 — Scenario Object Selection and Deletion Modes
 
-**Date:** 2026-10-23. **Status:** accepted. **Extends:** D-018 rules 2 and 4. Safety policies, D-016, and D-018 remain in force.
+**Date:** 2026-10-23. **Status:** accepted; rule 4 partially revised by [D-025](D-025-autonomous-scheduled-scenarios.md) (2026-10-28). **Extends:** D-018 rules 2 and 4. Safety policies, D-016, and D-018 remain in force.
 
 ## Decision
 
@@ -19,7 +19,7 @@
    - QADREN confirmed the object in an earlier synchronization of this revision.
    - The object is inside the selection.
    - The object did not change on the other side after that synchronization. Otherwise, the plan shows a conflict.
-   - The plan has 20 deletions or fewer. With 21 or more deletions, all deletions of that plan wait for an explicit decision. The threshold is fixed.
+   - The plan has 20 deletions or fewer. With 21 or more deletions, all deletions of that plan wait for an explicit decision. The threshold is fixed. *Revised by D-025 section 5: Simple synchronization has no threshold. A missing or unreadable source root, or a source snapshot that is not complete, never gives a deletion.*
    - A missing root folder, for example a disconnected disk, is an error. It is never a deletion.
 5. **Trash of the connection.** An automatic deletion moves the object into the Trash of the connection when the adapter has a `trash` capability. When the connection or volume has no Trash, the deletion is permanent. Every connector design must examine deletion into the provider Trash.
 

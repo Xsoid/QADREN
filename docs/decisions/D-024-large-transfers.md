@@ -75,7 +75,7 @@ A retry is safe only because the executor closes the attempt as "failed before e
 
 ### 5. Worker access to the token
 
-1. **Now (stage A).** The app sends the token to the Worker when it starts or resumes a Yandex run. The Worker keeps it in memory only, for that run. After a Worker restart the run waits with the state "Нужен вход: откройте QADREN". When the app opens, it sends the token again and the run continues. A scheduled Yandex run also waits for the app.
+1. **Now (stage A).** The app sends the token to the Worker when it starts or resumes a Yandex run. The Worker keeps it in memory only, for that run. After a Worker restart the run waits with the state "Нужен вход: откройте QADREN". When the app opens, it sends the token again and the run continues. A scheduled Yandex run also waits for the app. *Revised by [D-025](D-025-autonomous-scheduled-scenarios.md) sections 7 and 9: Yandex Disk Scenarios have schedules, and a launch-at-login setting gives the token to the Worker after a Mac restart.*
 2. **Target (stage B, deferred).** The owner has no Apple Developer Program account (2026-10-25), so stage A stays in force until a new owner decision. Stage B: sign the app and the Worker with one Apple Team ID (Developer ID). Store the token in a Keychain access group that the app and the Worker share. Then the Worker reads the token itself, and runs and schedules continue without the app. The same signature removes the cdhash binding of the LaunchAgent to each ad-hoc build.
 3. QADREN stores the OAuth refresh token in the Keychain, bound to `connection_id`. The Worker renews the access token before it expires.
 4. Rejected: a token file on disk, a token in SQLite, and a Keychain ACL that names an ad-hoc Worker binary (it breaks at every build).
@@ -107,7 +107,7 @@ Each step keeps the safety invariants of AGENTS.md: durable attempt before an ef
 1. There is no Apple Developer Program account. The Worker keeps the token in memory (stage A). Stage B is deferred.
 2. 4 parallel metadata requests and 2 parallel downloads for each Yandex Disk connection are accepted.
 3. The retry schedule (1 min, 5 min, 30 min, 2 h, 12 h) is accepted.
-4. Deletion on the Mac side for a Yandex Disk source is a separate step, outside this decision.
+4. Deletion on the Mac side for a Yandex Disk source is a separate step, outside this decision. *Decided in [D-025](D-025-autonomous-scheduled-scenarios.md) section 3.*
 5. A setting must let the Worker retry an unavailable file until it succeeds (added on 2026-10-25; see "Retry until success" in section 4).
 
 ## Consequences

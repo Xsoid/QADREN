@@ -24,6 +24,7 @@
   approved replacement protocol, a durable attempt, explicit operation scope,
   and `UNKNOWN` reconciliation. The owner removed the previous Release 1
   fail-closed block for this operation on 2026-10-17.
+- A scheduled run and a manual run use one durable Scenario Run. A Scenario has at most one active run; a slot during an active run is skipped. In a one-way Scenario the source always wins under a rule that the user confirms one time. Simple synchronization has no deletion threshold, but a missing or unreadable source root, or an incomplete source snapshot, never gives a deletion or a replacement (D-025).
 - Do not add content versioning, runtime BackupSet, scenario dependencies, or remote Worker protocol to Release 1.
 
 ## Documentation language

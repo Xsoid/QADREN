@@ -18,7 +18,7 @@ QADREN is a cross-platform file transfer and synchronization system. Rust owns c
 - Release 1 file operations use "This Mac" (Local Filesystem) and the "Сетевой диск (SMB)" connector (`smb_share`). An SMB share is mounted at `~/.qadren/mounts/<connection_id>` and uses the Local Filesystem executor. Core refuses SMB work unless that mount is present. See `docs/decisions/D-021-smb-network-drive-connector.md` and `docs/decisions/D-022-smb-in-release-1-scenarios.md`.
 - Use one Rust JobStore. A `Scenario` defines synchronization rules. A `Job` is one execution or manual file operation.
 - Keep each `StorageConnection` independent. Bind OAuth and Keychain state to `connection_id`.
-- A one-way Scenario can use Yandex Disk (`yandex_disk`) as the source and a Local Filesystem or SMB root as the destination. The app runs these Jobs; the background Worker refuses them. Yandex Disk as a destination is stage 2. See `docs/decisions/D-023-yandex-disk-to-mac.md`.
+- A one-way Scenario can use Yandex Disk (`yandex_disk`) as the source and a Local Filesystem or SMB root as the destination. The Worker runs these Jobs with a token that the app gives it in memory (D-024 stage A). Yandex Disk as a destination is stage 2. See `docs/decisions/D-023-yandex-disk-to-mac.md`.
 - iCloud is post-release. Do not add iCloud work without a new owner decision.
 - Do not add content versioning, runtime BackupSet, Scenario dependencies, or remote Worker protocol.
 
@@ -30,7 +30,8 @@ QADREN is a cross-platform file transfer and synchronization system. Rust owns c
 - Before a modifying external effect, save a durable attempt. Check capability, exact scope, destination state, no-overwrite for new files, and required destructive consent.
 - If effect proof is lost, reconcile without mutation. Persist a verified outcome only when evidence is sufficient. Otherwise retain `UNKNOWN`.
 - A Local Filesystem update can replace an existing destination only through the approved replacement protocol.
-- A Scenario revision has selected objects and a deletion mode: Paranoid (every deletion asks) or Simple synchronization (an approved rule, Trash first, 20-deletion threshold). See `docs/decisions/D-019-scenario-selection-and-deletion-modes.md`.
+- A Scenario revision has selected objects and a deletion mode: Paranoid (every deletion asks) or Simple synchronization (an approved rule, Trash first, no threshold since D-025). See `docs/decisions/D-019-scenario-selection-and-deletion-modes.md`.
+- Scheduled and manual runs use one durable Scenario Run, at most one active run for each Scenario. In a one-way Scenario the source always wins. The Worker mounts SMB shares. A missing source root or an incomplete source snapshot never gives a deletion. See `docs/decisions/D-025-autonomous-scheduled-scenarios.md`.
 
 ## Documentation
 
