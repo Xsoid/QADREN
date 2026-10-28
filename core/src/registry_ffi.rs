@@ -1462,14 +1462,18 @@ mod tests {
         let left: Value =
             serde_json::from_str(unsafe { CStr::from_ptr(add_left) }.to_str().unwrap()).unwrap();
         unsafe { qadren_registry_free_string(add_left) };
-        let add_right = qadren_registry_add(path.as_ptr(), adapter.as_ptr(), right_name.as_ptr());
+        // D-023: Yandex Disk is only the source of a one-way Scenario.
+        let local = CString::new("local_filesystem").unwrap();
+        let add_right = qadren_registry_add(path.as_ptr(), local.as_ptr(), right_name.as_ptr());
         let right: Value =
             serde_json::from_str(unsafe { CStr::from_ptr(add_right) }.to_str().unwrap()).unwrap();
         unsafe { qadren_registry_free_string(add_right) };
         let left_id = CString::new(left["data"]["id"].as_str().unwrap()).unwrap();
         let right_id = CString::new(right["data"]["id"].as_str().unwrap()).unwrap();
         let scenario_name = CString::new("Documents").unwrap();
-        let root = CString::new("/").unwrap();
+        // A Yandex Disk root starts with `disk:/`.
+        let root = CString::new("disk:/").unwrap();
+        let destination_root = CString::new("/archive").unwrap();
         let direction = CString::new("left_to_right").unwrap();
         let created = qadren_scenarios_create(
             path.as_ptr(),
@@ -1477,7 +1481,7 @@ mod tests {
             left_id.as_ptr(),
             root.as_ptr(),
             right_id.as_ptr(),
-            root.as_ptr(),
+            destination_root.as_ptr(),
             direction.as_ptr(),
         );
         let scenario: Value =
@@ -1571,15 +1575,17 @@ mod tests {
         let disabled = qadren_scenarios_set_enabled(path.as_ptr(), scenario_id.as_ptr(), 0);
         unsafe { qadren_registry_free_string(disabled) };
         let updated_name = CString::new("Updated documents").unwrap();
+        // The sides swap; Yandex Disk stays the source.
+        let reversed = CString::new("right_to_left").unwrap();
         let update_pointer = qadren_scenarios_update(
             path.as_ptr(),
             scenario_id.as_ptr(),
             updated_name.as_ptr(),
             right_id.as_ptr(),
-            root.as_ptr(),
+            destination_root.as_ptr(),
             left_id.as_ptr(),
             root.as_ptr(),
-            direction.as_ptr(),
+            reversed.as_ptr(),
         );
         let update: Value =
             serde_json::from_str(unsafe { CStr::from_ptr(update_pointer) }.to_str().unwrap())

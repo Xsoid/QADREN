@@ -2889,7 +2889,9 @@ mod tests {
 
         // The receipt was saved by a controller that has now exited. A new
         // Worker process polls it from the existing Registry and owns effects.
+        // The run thread executes batch children (D-024).
         assert_eq!(dispatch_due(&paths).unwrap(), (0, 0));
+        run_due_batch_children(&paths);
         assert_eq!(fs::read(right_root.join("first.txt")).unwrap(), b"first");
         assert_eq!(fs::read(right_root.join("second.txt")).unwrap(), b"second");
         let registry = Registry::open(&paths.registry).unwrap();
@@ -2913,6 +2915,7 @@ mod tests {
         // A subsequent restart finds no pending child and therefore creates no
         // duplicate Job or replacement effect.
         assert_eq!(dispatch_due(&paths).unwrap(), (0, 0));
+        run_due_batch_children(&paths);
         assert_eq!(
             JobStore::open(&paths.jobs)
                 .unwrap()
@@ -2966,6 +2969,7 @@ mod tests {
         drop(registry);
 
         assert_eq!(dispatch_due(&paths).unwrap(), (0, 0));
+        run_due_batch_children(&paths);
         assert!(!right_root.join("first.txt").exists());
         assert!(!right_root.join("second.txt").exists());
         let stored = Registry::open(&paths.registry)

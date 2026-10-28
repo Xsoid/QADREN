@@ -3381,7 +3381,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             db.list_confirmed_file_states(&reference).unwrap(),
-            vec![state]
+            vec![state.clone()]
         );
 
         db.update_scenario(
@@ -3396,11 +3396,36 @@ mod tests {
             },
         )
         .unwrap();
+        // The same connections and roots keep the evidence (`beecbb7`).
         let later = ScenarioReference {
-            scenario_id,
+            scenario_id: scenario_id.clone(),
             revision: 2,
         };
-        assert!(db.list_confirmed_file_states(&later).unwrap().is_empty());
+        let carried = db.list_confirmed_file_states(&later).unwrap();
+        assert_eq!(carried.len(), 1);
+        assert_eq!(carried[0].scenario, later);
+        assert_eq!(carried[0].left, state.left);
+        assert_eq!(carried[0].right, state.right);
+
+        // Another root is other storage: the evidence stays with revision 2.
+        db.update_scenario(
+            &scenario_id,
+            ScenarioUpdate {
+                name: "Documents v3",
+                left_connection_id: &left,
+                left_root: "/documents",
+                right_connection_id: &right,
+                right_root: "/other-archive",
+                direction: "left_to_right",
+            },
+        )
+        .unwrap();
+        let moved = ScenarioReference {
+            scenario_id,
+            revision: 3,
+        };
+        assert!(db.list_confirmed_file_states(&moved).unwrap().is_empty());
+        assert_eq!(db.list_confirmed_file_states(&later).unwrap().len(), 1);
     }
 
     #[test]
@@ -3692,14 +3717,15 @@ mod tests {
     #[test]
     fn scenario_update_creates_a_new_revision_without_changing_enablement() {
         let db = Registry::in_memory().unwrap();
+        // D-023: Yandex Disk is only the source of a one-way Scenario.
         let left = db.add("local_filesystem", "Left").unwrap();
         let right = db.add("yandex_disk", "Right").unwrap();
         let id = db
             .create_scenario(
                 "Documents",
-                &left,
-                "/old",
                 &right,
+                "/old",
+                &left,
                 "/archive",
                 "left_to_right",
             )
@@ -3710,9 +3736,9 @@ mod tests {
             &id,
             ScenarioUpdate {
                 name: "Updated documents",
-                left_connection_id: &right,
+                left_connection_id: &left,
                 left_root: "/source",
-                right_connection_id: &left,
+                right_connection_id: &right,
                 right_root: "/target",
                 direction: "right_to_left",
             },
@@ -3721,8 +3747,8 @@ mod tests {
 
         let scenario = db.list_scenarios().unwrap().pop().unwrap();
         assert_eq!(scenario.name, "Updated documents");
-        assert_eq!(scenario.left_connection_id, right);
-        assert_eq!(scenario.right_connection_id, left);
+        assert_eq!(scenario.left_connection_id, left);
+        assert_eq!(scenario.right_connection_id, right);
         assert_eq!(scenario.revision, 2);
         assert!(!scenario.enabled);
 
@@ -4216,7 +4242,7 @@ mod tests {
             Err(RegistryError::ScenarioRootsOverlap)
         ));
         // Provider paths are not paths on this Mac.
-        db.create_scenario("Cloud", &left, "/data", &cloud, "/data", "left_to_right")
+        db.create_scenario("Cloud", &cloud, "/data", &left, "/data", "left_to_right")
             .unwrap();
         let id = db
             .create_scenario(
