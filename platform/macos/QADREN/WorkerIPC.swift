@@ -425,6 +425,12 @@ enum WorkerIPC {
         ).items
     }
 
+    /// "Остановить": stop the active run of a Scenario. Completed items stay.
+    static func stopRun(scenarioID: String) throws {
+        struct Answer: Decodable { let status: String }
+        _ = try plan(PlanRequest(command: "stop_run", scenario_id: scenarioID), as: Answer.self)
+    }
+
     /// Make one Create batch of all Create rows of a stored plan.
     static func executePlanCreates(planID: String, accessToken: String?) throws -> (batch: String, files: Int) {
         struct Answer: Decodable { let batch: String; let files: Int }

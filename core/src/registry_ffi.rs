@@ -796,6 +796,37 @@ pub extern "C" fn qadren_scenario_schedules_list(
     })
 }
 
+/// The active run of one Scenario and its slots that were skipped during a
+/// run (D-025 section 2). This only reads the Registry.
+#[no_mangle]
+pub extern "C" fn qadren_scenario_run_state(
+    path: *const c_char,
+    scenario_id: *const c_char,
+) -> *mut c_char {
+    let Some(scenario_id) = input(scenario_id) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    with_registry(path, |db| {
+        let active = db.active_scenario_run(&scenario_id)?.map(|run| {
+            json!({
+                "id": run.id, "trigger": run.trigger, "state": run.state,
+                "waiting_reason": run.waiting_reason, "created_at": run.created_at
+            })
+        });
+        let skipped = db
+            .skipped_schedule_slots(&scenario_id, 20)?
+            .into_iter()
+            .map(|(schedule_id, occurrence_key, run_id)| {
+                json!({
+                    "schedule_id": schedule_id, "occurrence_key": occurrence_key,
+                    "run_id": run_id
+                })
+            })
+            .collect::<Vec<Value>>();
+        Ok(json!({"active": active, "skipped": skipped}))
+    })
+}
+
 /// Read durable automatic-trigger state for one Scenario. This is registry
 /// metadata only; it neither evaluates schedules nor inspects or changes Jobs.
 #[no_mangle]

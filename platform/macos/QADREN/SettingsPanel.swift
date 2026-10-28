@@ -109,12 +109,15 @@ final class ScenarioScheduleSettings: ObservableObject {
     @Published private(set) var automation = ScenarioAutomationEntry(
         locally_paused: false, pending_automatic_run: false
     )
+    @Published private(set) var runState = ScenarioRunState(active: nil, skipped: [])
+    @Published private(set) var isStopping = false
     @Published private(set) var error: String?
 
     func refresh(scenarioID: String) {
         do {
             entries = try StorageRegistryBridge.listScenarioSchedules(scenarioID: scenarioID)
             automation = try StorageRegistryBridge.scenarioAutomation(scenarioID: scenarioID)
+            runState = try StorageRegistryBridge.scenarioRunState(scenarioID: scenarioID)
             let now = Date()
             upcoming = try StorageRegistryBridge.dueScenarioSchedules(
                 after: now,
@@ -125,6 +128,27 @@ final class ScenarioScheduleSettings: ObservableObject {
         } catch {
             upcoming = []
             self.error = error.localizedDescription
+        }
+    }
+
+    /// The newest slot of a schedule that was skipped during a run.
+    func lastSkippedSlot(scheduleID: String) -> ScenarioRunState.SkippedSlot? {
+        runState.skipped.first { $0.schedule_id == scheduleID }
+    }
+
+    /// "Остановить": the Worker stops the active run (D-025). A planning run
+    /// ends now; an executing run ends after the current file.
+    func stopRun(scenarioID: String) {
+        isStopping = true
+        Task {
+            do {
+                try await Task.detached { try WorkerIPC.stopRun(scenarioID: scenarioID) }.value
+                error = nil
+            } catch {
+                self.error = "Фоновая служба не остановила запуск: " + error.localizedDescription
+            }
+            isStopping = false
+            refresh(scenarioID: scenarioID)
         }
     }
 
@@ -2446,6 +2470,7 @@ private struct ScenarioSchedulesView: View {
     @State private var timezone = TimeZone.current.identifier
     @State private var weekday: UInt8 = 0
     @State private var time = Date()
+    @State private var confirmStop = false
 
     private let weekdays = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
 
@@ -2467,6 +2492,27 @@ private struct ScenarioSchedulesView: View {
             )
 
             Form {
+                if let run = schedules.runState.active {
+                    Section("Текущий запуск") {
+                        HStack(alignment: .center, spacing: 12) {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .foregroundStyle(QDTheme.cyan)
+                                .accessibilityHidden(true)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(runTitle(run))
+                                Text(runDetail(run))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button("Остановить", role: .cancel) { confirmStop = true }
+                                .disabled(schedules.isStopping)
+                        }
+                        Text("Пока идёт этот запуск, слоты расписаний пропускаются. Новый запуск начнётся со следующего слота после его окончания.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 Section("Автоматизация") {
                     Toggle("Приостановить автоматические триггеры", isOn: Binding(
                         get: { schedules.automation.locally_paused },
@@ -2532,6 +2578,14 @@ private struct ScenarioSchedulesView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(weekdays[Int(entry.weekday)] + " · " + timeTitle(entry))
                             Text(entry.timezone).font(.caption.monospaced()).foregroundStyle(.secondary)
+                            if let skipped = schedules.lastSkippedSlot(scheduleID: entry.id) {
+                                Label(
+                                    "Пропущено: идёт предыдущий запуск · " + skipped.occurrence_key,
+                                    systemImage: "forward.end"
+                                )
+                                .font(.caption)
+                                .foregroundStyle(QDTheme.warning)
+                            }
                         }
                         Spacer()
                         Toggle("Включено", isOn: Binding(
@@ -2550,6 +2604,32 @@ private struct ScenarioSchedulesView: View {
         }
         .padding(24)
         .onAppear { schedules.refresh(scenarioID: scenario.id) }
+        .task {
+            // The Worker advances runs in the background; keep the state current.
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5))
+                schedules.refresh(scenarioID: scenario.id)
+            }
+        }
+        .confirmationDialog("Остановить текущий запуск?", isPresented: $confirmStop) {
+            Button("Остановить запуск") { schedules.stopRun(scenarioID: scenario.id) }
+        } message: {
+            Text("Скопированные файлы останутся. Файл, который копируется сейчас, будет завершён. Остальные файлы этого запуска не скопируются; следующий слот расписания начнёт новый запуск.")
+        }
+    }
+
+    private func runTitle(_ run: ScenarioRunState.Run) -> String {
+        let trigger = run.trigger == "schedule" ? "Запуск по расписанию" : "Ручной запуск"
+        let state = run.state == "planning" ? "снимки и план" : "копирование файлов"
+        return trigger + " · " + state
+    }
+
+    private func runDetail(_ run: ScenarioRunState.Run) -> String {
+        let started = Date(timeIntervalSince1970: TimeInterval(run.created_at))
+            .formatted(date: .abbreviated, time: .shortened)
+        guard let reason = run.waiting_reason else { return "Начат " + started }
+        let waiting = reason == "needs_sign_in" ? "Нужен вход: откройте QADREN" : QADRENUserMessage.text(for: reason)
+        return "Начат " + started + " · ждёт: " + waiting
     }
 
     private func create() {

@@ -118,6 +118,10 @@ private func scenarioSchedulesDispatch(
 private func scenarioAutomationGet(
     _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_scenario_run_state")
+private func scenarioRunStateGet(
+    _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_scenario_automation_set_paused")
 private func scenarioAutomationSetPaused(
     _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?, _ paused: UInt8
@@ -236,6 +240,23 @@ struct ScenarioScheduleOccurrence: Decodable, Identifiable, Equatable {
 struct ScenarioAutomationEntry: Decodable, Equatable {
     let locally_paused: Bool
     let pending_automatic_run: Bool
+}
+/// The active Scenario Run and the slots skipped during a run (D-025).
+struct ScenarioRunState: Decodable, Equatable {
+    struct Run: Decodable, Equatable {
+        let id: String
+        let trigger: String
+        let state: String
+        let waiting_reason: String?
+        let created_at: Int64
+    }
+    struct SkippedSlot: Decodable, Equatable {
+        let schedule_id: String
+        let occurrence_key: String
+        let run_id: String
+    }
+    let active: Run?
+    let skipped: [SkippedSlot]
 }
 struct ScenarioSnapshotItem: Codable {
     let relative_path: String
@@ -1006,6 +1027,15 @@ enum StorageRegistryBridge {
         return try database.withCString { db in
             try scenarioID.withCString { id in
                 try unwrap(scenarioSchedulesList(db, id), as: [ScenarioScheduleEntry].self)
+            }
+        }
+    }
+
+    static func scenarioRunState(scenarioID: String) throws -> ScenarioRunState {
+        let database = try path
+        return try database.withCString { db in
+            try scenarioID.withCString { id in
+                try unwrap(scenarioRunStateGet(db, id), as: ScenarioRunState.self)
             }
         }
     }
