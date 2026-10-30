@@ -16,11 +16,6 @@ private func scenarioCreate(
 private func scenarioSetEnabled(
     _ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ enabled: UInt8
 ) -> UnsafeMutablePointer<CChar>?
-@_silgen_name("qadren_scenario_create_batch")
-private func scenarioCreateBatchFFI(
-    _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?, _ revision: UInt64,
-    _ items: UnsafePointer<CChar>?
-) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_scenario_create_batch_get")
 private func scenarioCreateBatchGet(
     _ path: UnsafePointer<CChar>?, _ batchID: UnsafePointer<CChar>?
@@ -380,10 +375,6 @@ struct ScenarioCreateBatchChild: Decodable {
     var waitsForRetry: Bool {
         state == "pending" && (next_retry_at.map { TimeInterval($0) > Date().timeIntervalSince1970 } ?? false)
     }
-}
-private struct ScenarioCreateBatchItem: Encodable {
-    let relative_path: String
-    let source_is_left: Bool
 }
 struct ScenarioConflictTask: Decodable, Identifiable {
     let id: String
@@ -838,25 +829,6 @@ enum StorageRegistryBridge {
     ) throws {
         let request = try scenarioCreateRequest(scenario: scenario, item: item)
         _ = try WorkerIPC.executeScenarioCreate(request)
-    }
-
-    static func confirmScenarioCreateBatch(scenario: ScenarioEntry, items: [ScenarioPlanItem]) throws -> String {
-        let children = try items.map { item -> ScenarioCreateBatchItem in
-            guard item.action.kind == "create", let sourceIsLeft = item.action.from_left else {
-                throw StorageError.operation("План не разрешает создание этого файла")
-            }
-            return ScenarioCreateBatchItem(relative_path: item.relative_path, source_is_left: sourceIsLeft)
-        }
-        guard !children.isEmpty else { throw StorageError.operation("Пакет не содержит файлов для создания") }
-        let payload = try JSONEncoder().encode(children)
-        guard let payloadString = String(data: payload, encoding: .utf8) else { throw StorageError.operation("Cannot encode Scenario batch") }
-        let database = try path
-        let receipt: ScenarioCreateBatchReceipt = try database.withCString { path in
-            try scenario.id.withCString { id in try payloadString.withCString { items in
-                try unwrap(scenarioCreateBatchFFI(path, id, scenario.revision, items), as: ScenarioCreateBatchReceipt.self, databasePath: database)
-            }}
-        }
-        return receipt.id
     }
 
     static func scenarioCreateBatch(id: String) throws -> ScenarioCreateBatchReceipt {

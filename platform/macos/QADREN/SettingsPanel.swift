@@ -1381,8 +1381,6 @@ private struct ScenarioDryRunView: View {
     @State private var rightSnapshot: [ScenarioSnapshotItem] = []
     @State private var pendingConflictReplace: ScenarioConflictTask?
     @State private var pendingConflictDelete: ScenarioConflictTask?
-    @State private var pendingBatch: [ScenarioPlanItem] = []
-    @State private var pendingBatchKind: String?
     @State private var activeBatch: ScenarioBatchProgress?
     @State private var batchTask: Task<Void, Never>?
     @State private var batchProgressTask: Task<Void, Never>?
@@ -1480,30 +1478,12 @@ private struct ScenarioDryRunView: View {
                 let creates = plan.filter { $0.action.kind == "create" }
                 let updates = plan.filter { $0.action.kind == "update" }
                 let ruleDeletes = plan.filter { $0.action.kind == "delete" }
-                if !creates.isEmpty || !updates.isEmpty || !ruleDeletes.isEmpty {
+                // All Creates, Updates, and rule Deletes run through one
+                // Scenario Run (D-025): no limit on the number of files, and
+                // the write-root lock applies.
+                if let storedPlan, !creates.isEmpty || !updates.isEmpty || !ruleDeletes.isEmpty {
                     HStack {
-                        if let storedPlan {
-                            synchronizeButton(storedPlan)
-                        }
-                        if !ruleDeletes.isEmpty {
-                            Button("Удалить по правилу: \(ruleDeletes.count)", role: .destructive) {
-                                executeRuleDeletions()
-                            }
-                            .disabled(activeBatch != nil || !resumedCreateBatches.isEmpty)
-                            .help("Файлы, удалённые в источнике, переносятся в Корзину. На томе без Корзины удаление безвозвратное.")
-                        }
-                        if !creates.isEmpty {
-                            Button("Создать все: \(creates.count)") {
-                                executeCreateBatch(creates)
-                            }
-                            .disabled(activeBatch != nil || !resumedCreateBatches.isEmpty)
-                        }
-                        if !updates.isEmpty {
-                            Button("Заменить все: \(updates.count)", role: .destructive) {
-                                pendingBatch = updates; pendingBatchKind = "update"
-                            }
-                            .disabled(activeBatch != nil || !resumedCreateBatches.isEmpty)
-                        }
+                        synchronizeButton(storedPlan)
                     }
                 }
                 if let activeBatch {
@@ -1687,16 +1667,6 @@ private struct ScenarioDryRunView: View {
                     + "будет удалён только \(deleteConflictDestinationDescription). "
                     + "Другие файлы не изменятся."
             )
-        }
-        .alert("Выполнить пакет сценария?", isPresented: Binding(
-            get: { !pendingBatch.isEmpty }, set: { if !$0 { pendingBatch = []; pendingBatchKind = nil } }
-        )) {
-            Button("Отмена", role: .cancel) { pendingBatch = []; pendingBatchKind = nil }
-            Button("Заменить файлы", role: .destructive) {
-                executePendingBatch()
-            }
-        } message: {
-            Text("Будет выполнено: \(pendingBatch.count).\n\n\(pendingBatch.map(\.relative_path).joined(separator: "\n"))\n\nДля каждого файла QADREN создаст отдельный Job и повторно проверит его условия. Конфликтные задачи в этот пакет не входят.")
         }
     }
 
@@ -2040,109 +2010,6 @@ private struct ScenarioDryRunView: View {
         return root.hasSuffix("/") ? root + task.relative_path : root + "/" + task.relative_path
     }
 
-    private func executePendingBatch() {
-        let items = pendingBatch
-        let kind = pendingBatchKind
-        pendingBatch = []
-        pendingBatchKind = nil
-        guard !items.isEmpty, (kind == "create" || kind == "update") else { return }
-        let batchScenario = scenario
-        // Capture the plan metadata now. The Worker compares it with the files.
-        let plannedSnapshots = Dictionary(
-            items.map { ($0.id, plannedSnapshots(for: $0)) }, uniquingKeysWith: { first, _ in first }
-        )
-        activeBatch = ScenarioBatchProgress(
-            total: items.count, processed: 0, failures: 0, currentPath: items[0].relative_path,
-            cancellationRequested: false
-        )
-        workerOwnedCreateBatch = kind == "create"
-        if kind == "create" {
-            let receiptID: String
-            do {
-                receiptID = try StorageRegistryBridge.confirmScenarioCreateBatch(
-                    scenario: batchScenario, items: items
-                )
-            } catch {
-                activeBatch = nil
-                workerOwnedCreateBatch = false
-                self.error = "Не удалось подтвердить пакет: \(error.localizedDescription)"
-                return
-            }
-            // The Worker accepts the receipt at once and runs it on its run
-            // thread (D-024). Progress comes from the durable receipt.
-            activeBatch = nil
-            workerOwnedCreateBatch = false
-            batchTask = Task.detached(priority: .userInitiated) {
-                var failure: String?
-                do {
-                    _ = try WorkerIPC.executeScenarioCreateBatch(
-                        receiptID: receiptID, accessToken: try YandexScenarioAccess.token(for: batchScenario)
-                    )
-                } catch {
-                    failure = error.localizedDescription
-                }
-                await MainActor.run {
-                    batchTask = nil
-                    if let failure {
-                        error = "Фоновая служба не приняла пакет: \(failure). Пакет сохранён; служба начнёт его, когда запустится."
-                    }
-                    resumePendingCreateBatches()
-                }
-            }
-            return
-        }
-        batchTask = Task.detached(priority: .userInitiated) {
-            var failures: [String] = []
-            var processed = 0
-            for (offset, item) in items.enumerated() {
-                guard !Task.isCancelled else { break }
-                let progressBeforeItem = ScenarioBatchProgress(
-                    total: items.count, processed: processed, failures: failures.count,
-                    currentPath: item.relative_path, cancellationRequested: false
-                )
-                await MainActor.run {
-                    activeBatch = progressBeforeItem
-                }
-                do {
-                    if kind == "create" {
-                        try StorageRegistryBridge.executeScenarioCreate(scenario: batchScenario, item: item)
-                    } else {
-                        let planned = plannedSnapshots[item.id]
-                        try StorageRegistryBridge.executeScenarioUpdate(
-                            scenario: batchScenario, item: item,
-                            plannedSource: planned?.source, plannedDestination: planned?.destination
-                        )
-                    }
-                } catch {
-                    failures.append(item.relative_path)
-                }
-                processed = offset + 1
-                let progressAfterItem = ScenarioBatchProgress(
-                    total: items.count, processed: processed, failures: failures.count,
-                    currentPath: item.relative_path, cancellationRequested: Task.isCancelled
-                )
-                await MainActor.run {
-                    activeBatch = progressAfterItem
-                }
-            }
-            let finishedFailures = failures
-            let wasCancelled = Task.isCancelled
-            let processedCount = processed
-            let total = items.count
-            await MainActor.run {
-                activeBatch = nil
-                batchTask = nil
-                workerOwnedCreateBatch = false
-                loadPlan()
-                if wasCancelled {
-                    error = "Пакет остановлен после обработанных файлов: \(processedCount) из \(total). Незавершённые файлы не запускались."
-                } else if !finishedFailures.isEmpty {
-                    error = "Не удалось выполнить файлов: \(finishedFailures.joined(separator: ", ")). Остальные элементы пакета были обработаны."
-                }
-            }
-        }
-    }
-
     /// Describes a finished Worker-owned Create batch from its durable receipt.
     /// A cancelled child is not a failure: it never started.
     nonisolated static func createBatchOutcome(_ summary: ScenarioBatchSummary) -> String? {
@@ -2160,13 +2027,6 @@ private struct ScenarioDryRunView: View {
                 + " Временные ошибки уже повторялись автоматически; файлы остаются в плане.")
         }
         return parts.isEmpty ? nil : parts.joined(separator: " ")
-    }
-
-    private func executeCreateBatch(_ items: [ScenarioPlanItem]) {
-        guard !items.isEmpty else { return }
-        pendingBatch = items
-        pendingBatchKind = "create"
-        executePendingBatch()
     }
 
     private func resumePendingCreateBatches() {
@@ -2240,23 +2100,6 @@ private struct ScenarioDryRunView: View {
             }
         } catch {
             self.error = "Не удалось остановить пакет: " + error.localizedDescription
-        }
-    }
-
-    /// The Worker plans again and deletes only what the simple rule covers.
-    private func executeRuleDeletions() {
-        do {
-            _ = try WorkerIPC.executeScenarioRuleDeletions(
-                WorkerScenarioRuleDeletionsRequest(
-                    scenario_id: scenario.id,
-                    scenario_revision: scenario.revision,
-                    batch_id: "scenario-rule-delete-" + UUID().uuidString.lowercased()
-                )
-            )
-            loadPlan()
-        } catch {
-            self.error = "Удаление по правилу не выполнено: " + error.localizedDescription
-            loadPlan()
         }
     }
 
