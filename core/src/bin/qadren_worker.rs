@@ -1212,6 +1212,9 @@ fn run_snapshot_pass(paths: &WorkerPaths) -> bool {
     }
     worked |= build_waiting_plans(paths, &store);
     if !worked {
+        if let Ok(registry) = Registry::open(&paths.registry) {
+            let _ = plan_store::remove_plans_of_removed_scenarios(store.connection(), &registry);
+        }
         let _ = store.prune();
     }
     worked

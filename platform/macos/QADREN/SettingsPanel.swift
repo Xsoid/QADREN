@@ -46,6 +46,16 @@ final class ScenarioSettings: ObservableObject {
         }
     }
 
+    func remove(_ id: String) -> String? {
+        do {
+            try StorageRegistryBridge.removeScenario(id: id)
+            refresh()
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
     func setEnabled(_ id: String, enabled: Bool) {
         do {
             try StorageRegistryBridge.setScenarioEnabled(id: id, enabled: enabled)
@@ -262,6 +272,7 @@ struct SettingsPanelView: View {
                             connections: scenarioEndpoints,
                             scenario: editedScenario,
                             saveScenario: saveScenario,
+                            removeScenario: removeScenario,
                             cancel: { isEditingScenario = false }
                         )
                     } else {
@@ -312,6 +323,15 @@ struct SettingsPanelView: View {
         schedulesScenario = nil
         editedScenario = scenario
         isEditingScenario = true
+    }
+
+    private func removeScenario(_ id: String) -> String? {
+        let result = scenarios.remove(id)
+        if result == nil {
+            editedScenario = nil
+            isEditingScenario = false
+        }
+        return result
     }
 
     private func saveScenario(
@@ -2688,7 +2708,9 @@ private struct ScenarioEditorView: View {
     let connections: [StorageEntry]
     let scenario: ScenarioEntry?
     let saveScenario: (String, String, String, String, String, String, ScenarioScopeDraft) -> String?
+    let removeScenario: (String) -> String?
     let cancel: () -> Void
+    @State private var confirmRemoval = false
     @State private var name = ""
     @State private var leftID = ""
     /// An empty root means that the user has not chosen a folder yet.
@@ -2789,8 +2811,18 @@ private struct ScenarioEditorView: View {
                 if let error {
                     SettingsNotice(text: error, symbol: "exclamationmark.triangle")
                 }
+                if scenario != nil {
+                    Button("Удалить сценарий", systemImage: "trash", role: .destructive) { confirmRemoval = true }
+                }
             }
             .padding(24)
+        }
+        .confirmationDialog("Удалить сценарий «\(scenario?.name ?? name)»?", isPresented: $confirmRemoval) {
+            Button("Удалить сценарий", role: .destructive) {
+                if let scenario { error = removeScenario(scenario.id) }
+            }
+        } message: {
+            Text("QADREN удалит с этого Mac сценарий, его расписания, историю запусков и планы. Файлы в источнике и назначении не изменятся.")
         }
         .task(id: [leftID, leftRoot, rightID, rightRoot, direction]) {
             guard !leftRoot.isEmpty, !rightRoot.isEmpty else {

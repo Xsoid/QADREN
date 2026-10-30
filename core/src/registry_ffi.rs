@@ -1295,6 +1295,48 @@ pub unsafe extern "C" fn qadren_registry_remove_after_job_gate(
     }
 }
 
+/// Remove one Scenario and its local records after a fresh JobStore gate.
+/// Files in the source and the destination do not change.
+///
+/// # Safety
+/// Arguments must point to valid NUL-terminated UTF-8 strings for this call.
+#[no_mangle]
+pub unsafe extern "C" fn qadren_registry_remove_scenario_after_job_gate(
+    registry_path: *const c_char,
+    jobs_path: *const c_char,
+    scenario_id: *const c_char,
+) -> *mut c_char {
+    let (Some(registry_path), Some(jobs_path), Some(scenario_id)) =
+        (input(registry_path), input(jobs_path), input(scenario_id))
+    else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    let registry = match Registry::open(Path::new(&registry_path)) {
+        Ok(registry) => registry,
+        Err(_) => return output(json!({"ok":false,"error":"registry_unavailable"})),
+    };
+    // The Worker owns the JobStore; this gate only reads it. No JobStore
+    // yet means no Job of this Scenario.
+    match JobStore::open_read_only(Path::new(&jobs_path))
+        .and_then(|jobs| jobs.map_or(Ok(false), |jobs| jobs.scenario_has_unresolved_jobs(&scenario_id)))
+    {
+        Ok(true) => return output(json!({"ok":false,"error":"scenario_has_unresolved_jobs"})),
+        Ok(false) => {}
+        Err(_) => return output(json!({"ok":false,"error":"job_store_unavailable"})),
+    }
+    match registry.remove_scenario(&scenario_id) {
+        Ok(()) => output(json!({"ok":true,"data":true})),
+        Err(RegistryError::NotFound) => output(json!({"ok":false,"error":"scenario_not_found"})),
+        Err(RegistryError::ScenarioRunActive) => {
+            output(json!({"ok":false,"error":"scenario_run_active"}))
+        }
+        Err(RegistryError::ScenarioHasUnresolvedItems) => {
+            output(json!({"ok":false,"error":"scenario_has_unresolved_jobs"}))
+        }
+        Err(_) => output(json!({"ok":false,"error":"registry_unavailable"})),
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn qadren_registry_rename(
     path: *const c_char,

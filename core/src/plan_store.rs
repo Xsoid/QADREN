@@ -508,6 +508,35 @@ pub fn build_plan(store_path: &std::path::Path, registry: &Registry, id: &str) -
     plan_info(&db, id)?.ok_or(SnapshotError::NotFound)
 }
 
+/// Remove the plans of Scenarios that no longer exist in the Registry.
+/// A removed Scenario never needs its plans again; the snapshot prune then
+/// frees the snapshots that only these plans kept.
+pub fn remove_plans_of_removed_scenarios(db: &Connection, registry: &Registry) -> Result<usize> {
+    let existing: std::collections::HashSet<String> = registry
+        .list_scenarios()
+        .map_err(|_| SnapshotError::Blocked("registry_unavailable".into()))?
+        .into_iter()
+        .map(|scenario| scenario.id)
+        .collect();
+    let stored: Vec<String> = db
+        .prepare("SELECT DISTINCT scenario_id FROM plans")?
+        .query_map([], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut removed = 0;
+    for scenario_id in stored.iter().filter(|id| !existing.contains(*id)) {
+        let tx = db.unchecked_transaction()?;
+        for table in ["plan_items", "plan_baselines"] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE plan_id IN (SELECT id FROM plans WHERE scenario_id=?1)"),
+                [scenario_id],
+            )?;
+        }
+        removed += tx.execute("DELETE FROM plans WHERE scenario_id=?1", [scenario_id])?;
+        tx.commit()?;
+    }
+    Ok(removed)
+}
+
 /// One page of plan rows in plan order, in the JSON shape of the app plan
 /// items, with the file metadata of both sides. `action` filters by kind;
 /// `search` keeps rows whose path contains it.

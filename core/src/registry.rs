@@ -46,6 +46,9 @@ pub enum RegistryError {
     UnsupportedYandexScope,
     /// Another run of the Scenario is active (D-025 section 2).
     ScenarioRunActive,
+    /// A batch item of the Scenario has an unknown result. Its record must
+    /// stay for reconciliation.
+    ScenarioHasUnresolvedItems,
 }
 impl From<rusqlite::Error> for RegistryError {
     fn from(error: rusqlite::Error) -> Self {
@@ -2797,6 +2800,69 @@ impl Registry {
         Ok(())
     }
 
+    /// Removes a Scenario and all its local records: revisions, schedules,
+    /// runs, batches, conflict tasks, and synchronization states. This
+    /// changes only the Registry. It never touches a file or a provider
+    /// object. The caller checks JobStore first; this check and the removal
+    /// are one transaction, so a run cannot start in between.
+    pub fn remove_scenario(&self, scenario_id: &str) -> Result<()> {
+        let transaction = rusqlite::Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?;
+        let exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM scenarios WHERE id=?1)",
+            [scenario_id],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Err(RegistryError::NotFound);
+        }
+        let active: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM scenario_runs
+                           WHERE scenario_id=?1 AND state IN ('planning','executing'))",
+            [scenario_id],
+            |row| row.get(0),
+        )?;
+        if active {
+            return Err(RegistryError::ScenarioRunActive);
+        }
+        let unknown: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM scenario_create_batch_children c
+                           JOIN scenario_create_batches b ON b.id=c.batch_id
+                           WHERE b.scenario_id=?1 AND c.state='unknown')",
+            [scenario_id],
+            |row| row.get(0),
+        )?;
+        if unknown {
+            return Err(RegistryError::ScenarioHasUnresolvedItems);
+        }
+        // Children before parents: every foreign key is RESTRICT.
+        for statement in [
+            "DELETE FROM schedule_child_jobs WHERE schedule_job_id IN
+               (SELECT job_id FROM schedule_job_outbox WHERE scenario_id=?1)",
+            "DELETE FROM schedule_conflict_links WHERE conflict_id IN
+               (SELECT id FROM scenario_conflict_tasks WHERE scenario_id=?1)
+               OR schedule_job_id IN (SELECT job_id FROM schedule_job_outbox WHERE scenario_id=?1)",
+            "DELETE FROM schedule_job_outbox WHERE scenario_id=?1",
+            "DELETE FROM schedule_occurrences WHERE schedule_id IN
+               (SELECT id FROM scenario_schedules WHERE scenario_id=?1)",
+            "DELETE FROM scenario_schedules WHERE scenario_id=?1",
+            "DELETE FROM scenario_runs WHERE scenario_id=?1",
+            "DELETE FROM scenario_create_batch_children WHERE batch_id IN
+               (SELECT id FROM scenario_create_batches WHERE scenario_id=?1)",
+            "DELETE FROM scenario_create_batches WHERE scenario_id=?1",
+            "DELETE FROM scenario_conflict_tasks WHERE scenario_id=?1",
+            "DELETE FROM file_sync_states WHERE scenario_id=?1",
+            "DELETE FROM scenario_revision_selection WHERE scenario_id=?1",
+            "DELETE FROM scenario_source_wins_consents WHERE scenario_id=?1",
+            "DELETE FROM scenario_automation WHERE scenario_id=?1",
+            "DELETE FROM scenario_revisions WHERE scenario_id=?1",
+            "DELETE FROM scenarios WHERE id=?1",
+        ] {
+            transaction.execute(statement, [scenario_id])?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Atomically claim one evaluated local schedule slot. A duplicate claim
     /// is intentionally a no-op, preventing repeated DST hours and restart
     /// catch-up from creating duplicate future Jobs.
@@ -4544,6 +4610,53 @@ mod tests {
             db.remove_scenario_schedule(&scenario, &schedule),
             Err(RegistryError::NotFound)
         ));
+    }
+
+    #[test]
+    fn removing_a_scenario_removes_its_records_and_waits_for_unresolved_work() {
+        let mut db = Registry::in_memory().unwrap();
+        let left = db.add("local_filesystem", "Left").unwrap();
+        let right = db.add("local_filesystem", "Right").unwrap();
+        let scenario = db
+            .create_scenario("Documents", &left, "/documents", &right, "/archive", "left_to_right")
+            .unwrap();
+        let schedule = db.create_scenario_schedule(&scenario, "Europe/Samara", 0, 9, 30).unwrap();
+        assert!(db.claim_schedule_occurrence(&schedule, "slot").unwrap());
+        let reference = ScenarioReference { scenario_id: scenario.clone(), revision: 1 };
+        let batch = db
+            .create_scenario_create_batch(&reference, &[("a.txt".into(), true)])
+            .unwrap()
+            .id;
+        let run = db.begin_manual_run(&reference, "plan", &batch, 0).unwrap();
+
+        // An active run keeps the Scenario.
+        assert!(matches!(db.remove_scenario(&scenario), Err(RegistryError::ScenarioRunActive)));
+        db.finish_scenario_run(&run, "completed", None).unwrap();
+        db.set_scenario_create_batch_child_state(&batch, "a.txt", "completed").unwrap();
+
+        // An unknown item keeps the Scenario: reconciliation needs its record.
+        let other = db
+            .create_scenario("Music", &left, "/music", &right, "/copy", "left_to_right")
+            .unwrap();
+        let other_batch = db
+            .create_scenario_create_batch(
+                &ScenarioReference { scenario_id: other.clone(), revision: 1 },
+                &[("b.txt".into(), true)],
+            )
+            .unwrap()
+            .id;
+        db.set_scenario_create_batch_child_state(&other_batch, "b.txt", "unknown").unwrap();
+        assert!(matches!(
+            db.remove_scenario(&other),
+            Err(RegistryError::ScenarioHasUnresolvedItems)
+        ));
+
+        db.remove_scenario(&scenario).unwrap();
+        assert_eq!(db.list_scenarios().unwrap().len(), 1);
+        assert!(db.get_scenario_revision(&scenario, 1).unwrap().is_none());
+        assert!(matches!(db.remove_scenario(&scenario), Err(RegistryError::NotFound)));
+        // The connections stay; only the Scenario records are gone.
+        assert_eq!(db.list().unwrap().len(), 2);
     }
 
     #[test]

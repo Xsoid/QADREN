@@ -1907,6 +1907,28 @@ impl JobStore {
         Ok(blocked != 0)
     }
 
+    /// True when a Job of this Scenario is not finished or has an active or
+    /// unknown attempt. Removing the Scenario then could lose the record
+    /// that reconciliation needs.
+    pub fn scenario_has_unresolved_jobs(&self, scenario_id: &str) -> Result<bool> {
+        self.check_storage_identity()?;
+        if scenario_id.is_empty() {
+            return Err(JobStoreError::InvalidId);
+        }
+        let blocked: i64 = self.db.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM jobs j
+                WHERE j.scenario_id = ?1
+                  AND (j.state NOT IN ('completed','failed','cancelled')
+                       OR EXISTS(SELECT 1 FROM job_attempts a
+                                 WHERE a.job_id = j.id AND a.status IN ('active','unknown')))
+            )",
+            [scenario_id],
+            |row| row.get(0),
+        )?;
+        Ok(blocked != 0)
+    }
+
     pub fn state(&self, id: &str) -> Result<Option<JobState>> {
         Ok(self.get(id)?.map(|job| job.state))
     }

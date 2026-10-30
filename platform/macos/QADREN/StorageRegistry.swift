@@ -172,6 +172,11 @@ private func registryRemoveAfterJobGate(
     _ registryPath: UnsafePointer<CChar>?, _ jobsPath: UnsafePointer<CChar>?,
     _ id: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_registry_remove_scenario_after_job_gate")
+private func registryRemoveScenarioAfterJobGate(
+    _ registryPath: UnsafePointer<CChar>?, _ jobsPath: UnsafePointer<CChar>?,
+    _ scenarioID: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_set_credential")
 private func registrySetCredential(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ ref: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_set_status")
@@ -411,6 +416,10 @@ enum QADRENUserMessage {
         switch code {
         case "scenario_roots_overlap":
             "Папки сценария пересекаются: одна совпадает с другой или находится внутри неё. Выберите папки, которые не вложены друг в друга."
+        case "scenario_run_active":
+            "Сценарий сейчас выполняется. Остановите запуск или дождитесь его окончания, затем удалите сценарий."
+        case "scenario_has_unresolved_jobs":
+            "У сценария есть незавершённые операции или операции с неизвестным результатом. QADREN сначала проверит их. Удалите сценарий после этого."
         case "scenario_revision_stale":
             "Сценарий изменён после построения плана. Вернитесь к списку сценариев и проверьте план заново."
         case "target_exists":
@@ -1302,6 +1311,23 @@ enum StorageRegistryBridge {
 
     /// Final local record deletion for the recoverable removal workflow. Rust
     /// rechecks that the record is disabled and has no unresolved Jobs.
+    /// Removes a Scenario and its local records. Files do not change.
+    static func removeScenario(id: String) throws {
+        let database = try path
+        let jobsDatabase = try JobInventory.paths().database
+        let _: Bool = try database.withCString { db in
+            try jobsDatabase.withCString { jobs in
+                try id.withCString { value in
+                    try unwrap(
+                        registryRemoveScenarioAfterJobGate(db, jobs, value),
+                        as: Bool.self,
+                        databasePath: database
+                    )
+                }
+            }
+        }
+    }
+
     static func removeAfterJobGate(
         id: String, jobsDatabasePath: String, databasePath: String? = nil
     ) throws {
