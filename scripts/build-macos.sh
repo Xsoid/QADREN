@@ -37,6 +37,7 @@ cp assets/qadren-logo.png "$APP/Contents/Resources/qadren-logo.png"
 rm -f "$APP/Contents/Resources/qadren-worker"
 cp "$ROOT/core/target/$TARGET/release/qadren-worker" "$APP/Contents/Resources/qadren-worker"
 cp platform/macos/LaunchAgents/dev.qadren.worker.plist "$APP/Contents/Library/LaunchAgents/dev.qadren.worker.plist"
+cp platform/macos/LaunchAgents/dev.qadren.login.plist "$APP/Contents/Library/LaunchAgents/dev.qadren.login.plist"
 # Embed public OAuth Client ID from an untracked local build config.
 CONFIG="$ROOT/config/oauth.local.env"
 if [[ -f "$CONFIG" ]]; then
@@ -59,7 +60,7 @@ fi
 plutil -lint "$APP/Contents/Info.plist"
 
 xcrun swiftc -O -target "$ARCH-apple-macos13.0" \
-  -framework SwiftUI -framework AppKit -framework Foundation -framework ServiceManagement -framework NetFS -framework Network \
+  -framework SwiftUI -framework AppKit -framework Foundation -framework ServiceManagement -framework NetFS -framework Network -framework UserNotifications \
   platform/macos/QADREN/*.swift \
   "$ROOT/core/target/$TARGET/release/libqadren_core.a" \
   -o "$APP/Contents/MacOS/QADREN"

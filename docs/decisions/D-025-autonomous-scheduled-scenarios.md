@@ -88,8 +88,8 @@ A Yandex Disk Scenario can have schedules. The Worker executes its runs with the
 
 ### 9. Launch at login
 
-1. A setting "Запускать QADREN при входе в систему" registers the app as a login item. The default is off.
-2. A start at login opens no window. The app gives the Worker the Yandex Disk token of each enabled Yandex connection and the SMB login of each enabled SMB connection, then quits.
+1. A setting "Запускать QADREN при входе в систему" registers the login LaunchAgent `dev.qadren.login` through `SMAppService.agent`. The agent starts the app executable with the argument `--login-handoff`. The argument is the signal of a login start; it does not depend on an Apple Event property of a login item. The default is off.
+2. A start at login opens no window and no Dock icon: the app does the handoff before any scene exists. It waits for the Worker socket, gives the Worker the Yandex Disk token of each enabled Yandex connection and the SMB login of each enabled SMB connection, then quits. If a Keychain item is missing or locked, the app posts the notification "Нужен вход" and quits; the affected runs wait.
 3. The setting explains why it is necessary: the background service cannot read the Keychain items of QADREN without an Apple Developer ID signature (D-024 stage B is deferred). It keeps the token and the login in memory only, so after a Mac restart Scenarios with Yandex Disk or a network drive wait until QADREN opens.
 4. When a Yandex or SMB Scenario has a schedule and the setting is off, the schedule editor shows this limitation and a button that turns the setting on.
 

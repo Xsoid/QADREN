@@ -147,6 +147,10 @@ final class ScenarioScheduleSettings: ObservableObject {
         }
     }
 
+    func report(_ message: String) {
+        error = message
+    }
+
     func setLocallyPaused(scenarioID: String, paused: Bool) {
         do {
             try StorageRegistryBridge.setScenarioLocallyPaused(scenarioID: scenarioID, paused: paused)
@@ -2503,8 +2507,18 @@ private struct ScenarioSchedulesView: View {
     @State private var daysMask: UInt8 = ScheduleWording.allDays
     @State private var time = Calendar.current.date(bySettingHour: 3, minute: 0, second: 0, of: Date()) ?? Date()
     @State private var confirmStop = false
+    @State private var loginState = LoginHandoff.state
 
     private static let timezones = TimeZone.knownTimeZoneIdentifiers.sorted()
+
+    /// A Yandex Disk or SMB endpoint needs credentials that only the app
+    /// can give to the Worker.
+    private var needsLoginHandoff: Bool {
+        let entries = (try? StorageRegistryBridge.list()) ?? []
+        return [scenario.left_connection_id, scenario.right_connection_id].contains { id in
+            ["yandex_disk", "smb_share"].contains(entries.first { $0.id == id }?.adapter ?? "")
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -2522,6 +2536,28 @@ private struct ScenarioSchedulesView: View {
                 text: "Запуски по расписанию выполняет фоновая служба QADREN. Окно приложения можно не открывать.",
                 symbol: "clock.badge.checkmark"
             )
+
+            if needsLoginHandoff, !schedules.entries.isEmpty, loginState != .enabled {
+                SettingsNotice(
+                    text: loginState == .requiresApproval
+                        ? "Запуск при входе в систему ждёт разрешения в Системных настройках › Объекты входа. Пока его нет, после перезагрузки Mac запуски этого сценария ждут, пока вы откроете QADREN."
+                        : "Этому сценарию нужны данные для входа. После перезагрузки Mac его запуски ждут, пока вы откроете QADREN. Включите «Запускать QADREN при входе в систему», чтобы они шли сами.",
+                    symbol: "person.badge.key"
+                ) {
+                    if loginState == .requiresApproval {
+                        Button("Открыть настройки") { LoginHandoff.openLoginItemsSettings() }
+                    } else {
+                        Button("Включить") {
+                            do {
+                                try LoginHandoff.setEnabled(true)
+                            } catch {
+                                schedules.report(error.localizedDescription)
+                            }
+                            loginState = LoginHandoff.state
+                        }
+                    }
+                }
+            }
 
             Form {
                 if let run = schedules.runState.active {
@@ -2671,6 +2707,7 @@ private struct ScenarioSchedulesView: View {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(5))
                 schedules.refresh(scenarioID: scenario.id)
+                loginState = LoginHandoff.state
             }
         }
         .confirmationDialog("Остановить текущий запуск?", isPresented: $confirmStop) {
@@ -3514,11 +3551,53 @@ private struct SettingsEmptyState<Actions: View>: View {
     }
 }
 
+/// "Запускать QADREN при входе в систему" (issue #33). The switch shows the
+/// real state of the login LaunchAgent, including "requires approval".
+struct LaunchAtLoginSection: View {
+    @State private var state = LoginHandoff.state
+    @State private var error: String?
+
+    static let explanation = "Фоновая служба не может сама прочитать пароли и токены QADREN из Связки ключей: у приложения нет подписи Apple Developer ID. Приложение передаёт их службе, и служба хранит их только в памяти. После перезагрузки Mac память пуста. С этой настройкой QADREN при входе в систему передаёт службе данные для входа и сразу закрывается, без окна. Без неё сценарии с Яндекс Диском и сетевыми дисками ждут, пока вы откроете QADREN."
+
+    var body: some View {
+        Section("Запуск") {
+            Toggle("Запускать QADREN при входе в систему", isOn: Binding(
+                get: { state != .off },
+                set: { enabled in
+                    do {
+                        try LoginHandoff.setEnabled(enabled)
+                        error = nil
+                    } catch {
+                        self.error = error.localizedDescription
+                    }
+                    state = LoginHandoff.state
+                }
+            ))
+            if state == .requiresApproval {
+                HStack {
+                    Label("Нужно разрешение в Системных настройках › Объекты входа", systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(QDTheme.warning)
+                    Spacer()
+                    Button("Открыть") { LoginHandoff.openLoginItemsSettings() }
+                }
+                .font(.callout)
+            }
+            if let error {
+                Text(error).font(.caption).foregroundStyle(QDTheme.warning)
+            }
+            Text(Self.explanation)
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .onAppear { state = LoginHandoff.state }
+    }
+}
+
 struct ApplicationSettingsView: View {
     @AppStorage("qadren.theme") private var themeRaw = QDThemeMode.dark.rawValue
 
     var body: some View {
         Form {
+            LaunchAtLoginSection()
             Section("Оформление") {
                 Picker("Тема", selection: $themeRaw) {
                     ForEach(QDThemeMode.allCases) { mode in

@@ -5,6 +5,8 @@ struct QADRENApp: App {
     @AppStorage("qadren.theme") private var themeRaw = QDThemeMode.dark.rawValue
 
     init() {
+        // A login start gives the Worker its credentials and quits here.
+        LoginHandoff.runIfRequested()
         LocalWorkerController.registerIfNeeded()
         YandexScenarioAccess.startTokenDelivery()
     }
