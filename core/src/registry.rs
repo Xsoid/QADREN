@@ -7,8 +7,8 @@ use crate::model::{
     ScenarioPolicies, ScenarioReference, ScenarioScope, StorageEndpoint, SyncDirection,
 };
 use crate::scenario_planner::{self, ObservedFile, PlanItem};
-use crate::scheduler::{OccurrenceKey, WeeklySchedule};
-use chrono::{DateTime, Utc, Weekday};
+use crate::scheduler::{every_hours_anchor, OccurrenceKey, Schedule, ScheduleRule};
+use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
@@ -113,11 +113,51 @@ pub struct ScenarioSchedule {
     pub id: String,
     pub scenario_id: String,
     pub timezone: String,
-    /// Monday is 0 and Sunday is 6, matching `Weekday::num_days_from_monday`.
-    pub weekday: u8,
+    pub kind: ScheduleKind,
+    /// Active local days. Monday is bit 0 and Sunday is bit 6.
+    pub days_mask: u8,
+    /// The local time of a days-at-time slot, or the local anchor time that
+    /// the user selected for an every-N-hours schedule.
     pub hour: u8,
     pub minute: u8,
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleKind {
+    DaysAtTime,
+    /// Every N hours (1–24) from a UTC anchor.
+    EveryHours {
+        interval_hours: u8,
+        anchor: DateTime<Utc>,
+    },
+}
+
+impl ScenarioSchedule {
+    /// The evaluable form of this record.
+    pub fn schedule(&self) -> Result<Schedule> {
+        let schedule = Schedule {
+            timezone: Tz::from_str(&self.timezone).map_err(|_| RegistryError::InvalidSchedule)?,
+            days_mask: self.days_mask,
+            rule: match self.kind {
+                ScheduleKind::DaysAtTime => ScheduleRule::DaysAtTime {
+                    hour: self.hour.into(),
+                    minute: self.minute.into(),
+                },
+                ScheduleKind::EveryHours {
+                    interval_hours,
+                    anchor,
+                } => ScheduleRule::EveryHours {
+                    interval_hours: interval_hours.into(),
+                    anchor,
+                },
+            },
+        };
+        schedule
+            .validate()
+            .map_err(|_| RegistryError::InvalidSchedule)?;
+        Ok(schedule)
+    }
 }
 
 /// A read-only automatic-run candidate derived from persisted configuration.
@@ -127,6 +167,7 @@ pub struct DueScheduleOccurrence {
     pub scenario_id: String,
     pub schedule_id: String,
     pub occurrence_key: OccurrenceKey,
+    pub due_at: DateTime<Utc>,
 }
 
 /// A durable request to create one automatic Job. It is intentionally kept in
@@ -316,7 +357,7 @@ impl Registry {
         }
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 25 {
+        if version > 26 {
             return Err(RegistryError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -742,6 +783,27 @@ impl Registry {
                       REFERENCES scenario_revisions(scenario_id,revision) ON DELETE CASCADE
                  );
                  PRAGMA user_version = 25;
+                 COMMIT;",
+            )?;
+        }
+        if version <= 25 {
+            // Issue #34: selected days at a time (daily is all days) and every
+            // N hours. A weekly row becomes one selected day. Its slot keys do
+            // not change, so no slot repeats after the migration. `weekday`
+            // stays for older readers and holds the first selected day.
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE scenario_schedules
+                   ADD COLUMN kind TEXT NOT NULL DEFAULT 'days_at_time'
+                   CHECK(kind IN ('days_at_time','every_hours'));
+                 ALTER TABLE scenario_schedules
+                   ADD COLUMN days_mask INTEGER NOT NULL DEFAULT 127
+                   CHECK(days_mask BETWEEN 1 AND 127);
+                 ALTER TABLE scenario_schedules
+                   ADD COLUMN interval_hours INTEGER CHECK(interval_hours BETWEEN 1 AND 24);
+                 ALTER TABLE scenario_schedules ADD COLUMN anchor_utc TEXT;
+                 UPDATE scenario_schedules SET days_mask = 1 << weekday;
+                 PRAGMA user_version = 26;
                  COMMIT;",
             )?;
         }
@@ -1171,6 +1233,7 @@ impl Registry {
             .ok_or(RegistryError::NotFound)
     }
 
+    /// One weekly slot: a days-at-time schedule with one selected day.
     pub fn create_scenario_schedule(
         &self,
         scenario_id: &str,
@@ -1179,14 +1242,122 @@ impl Registry {
         hour: u8,
         minute: u8,
     ) -> Result<String> {
-        validate_schedule(timezone, weekday, hour, minute)?;
+        if weekday > 6 {
+            return Err(RegistryError::InvalidSchedule);
+        }
+        self.create_scenario_days_schedule(scenario_id, timezone, 1 << weekday, hour, minute)
+    }
+
+    /// Selected local days (Monday is bit 0) at one local time.
+    pub fn create_scenario_days_schedule(
+        &self,
+        scenario_id: &str,
+        timezone: &str,
+        days_mask: u8,
+        hour: u8,
+        minute: u8,
+    ) -> Result<String> {
+        self.insert_schedule(ScenarioSchedule {
+            id: String::new(),
+            scenario_id: scenario_id.to_owned(),
+            timezone: timezone.to_owned(),
+            kind: ScheduleKind::DaysAtTime,
+            days_mask,
+            hour,
+            minute,
+            enabled: true,
+        })
+    }
+
+    /// Every `interval_hours` hours from the local time `hour:minute` of
+    /// the current day in `timezone`, on the selected local days.
+    pub fn create_scenario_hours_schedule(
+        &self,
+        scenario_id: &str,
+        timezone: &str,
+        interval_hours: u8,
+        hour: u8,
+        minute: u8,
+        days_mask: u8,
+    ) -> Result<String> {
+        self.create_scenario_hours_schedule_at(
+            scenario_id,
+            timezone,
+            interval_hours,
+            hour,
+            minute,
+            days_mask,
+            DateTime::<Utc>::from(std::time::SystemTime::now()),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_scenario_hours_schedule_at(
+        &self,
+        scenario_id: &str,
+        timezone: &str,
+        interval_hours: u8,
+        hour: u8,
+        minute: u8,
+        days_mask: u8,
+        now: DateTime<Utc>,
+    ) -> Result<String> {
+        let zone = Tz::from_str(timezone).map_err(|_| RegistryError::InvalidSchedule)?;
+        let anchor = every_hours_anchor(
+            zone,
+            now.with_timezone(&zone).date_naive(),
+            hour.into(),
+            minute.into(),
+        )
+        .map_err(|_| RegistryError::InvalidSchedule)?;
+        self.insert_schedule(ScenarioSchedule {
+            id: String::new(),
+            scenario_id: scenario_id.to_owned(),
+            timezone: timezone.to_owned(),
+            kind: ScheduleKind::EveryHours {
+                interval_hours,
+                anchor,
+            },
+            days_mask,
+            hour,
+            minute,
+            enabled: true,
+        })
+    }
+
+    fn insert_schedule(&self, schedule: ScenarioSchedule) -> Result<String> {
+        schedule.schedule()?;
+        let (kind, interval_hours, anchor) = match schedule.kind {
+            ScheduleKind::DaysAtTime => ("days_at_time", None, None),
+            ScheduleKind::EveryHours {
+                interval_hours,
+                anchor,
+            } => (
+                "every_hours",
+                Some(interval_hours),
+                Some(anchor.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+            ),
+        };
+        let first_day = schedule.days_mask.trailing_zeros();
         let id: String = self
             .db
             .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
         let changed = self.db.execute(
-            "INSERT INTO scenario_schedules(id,scenario_id,timezone,weekday,hour,minute)
-             SELECT ?1,id,?2,?3,?4,?5 FROM scenarios WHERE id=?6",
-            params![id, timezone, weekday, hour, minute, scenario_id],
+            "INSERT INTO scenario_schedules(
+                id,scenario_id,timezone,weekday,hour,minute,kind,days_mask,interval_hours,anchor_utc
+             ) SELECT ?1,id,?2,?3,?4,?5,?6,?7,?8,?9 FROM scenarios WHERE id=?10",
+            params![
+                id,
+                schedule.timezone,
+                first_day,
+                schedule.hour,
+                schedule.minute,
+                kind,
+                schedule.days_mask,
+                interval_hours,
+                anchor,
+                schedule.scenario_id
+            ],
         )?;
         if changed == 0 {
             return Err(RegistryError::NotFound);
@@ -1195,24 +1366,49 @@ impl Registry {
     }
 
     pub fn list_scenario_schedules(&self, scenario_id: &str) -> Result<Vec<ScenarioSchedule>> {
-        let mut statement = self.db.prepare(
-            "SELECT id,scenario_id,timezone,weekday,hour,minute,enabled
-             FROM scenario_schedules WHERE scenario_id=?1 ORDER BY weekday,hour,minute,id",
-        )?;
-        let schedules = statement
-            .query_map([scenario_id], |row| {
-                Ok(ScenarioSchedule {
-                    id: row.get(0)?,
-                    scenario_id: row.get(1)?,
-                    timezone: row.get(2)?,
-                    weekday: row.get(3)?,
-                    hour: row.get(4)?,
-                    minute: row.get(5)?,
-                    enabled: row.get(6)?,
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into);
+        self.read_schedules(
+            "WHERE ss.scenario_id=?1 ORDER BY ss.kind,ss.hour,ss.minute,ss.id",
+            Some(scenario_id),
+        )
+    }
+
+    fn read_schedules(&self, filter: &str, scenario_id: Option<&str>) -> Result<Vec<ScenarioSchedule>> {
+        let mut statement = self.db.prepare(&format!(
+            "SELECT ss.id,ss.scenario_id,ss.timezone,ss.kind,ss.days_mask,ss.interval_hours,
+                    ss.anchor_utc,ss.hour,ss.minute,ss.enabled
+             FROM scenario_schedules ss {filter}"
+        ))?;
+        let read = |row: &rusqlite::Row<'_>| {
+            let kind = match row.get::<_, String>(3)?.as_str() {
+                "days_at_time" => ScheduleKind::DaysAtTime,
+                "every_hours" => {
+                    let anchor: String = row.get(6)?;
+                    ScheduleKind::EveryHours {
+                        interval_hours: row.get(5)?,
+                        anchor: DateTime::parse_from_rfc3339(&anchor)
+                            .map_err(|_| rusqlite::Error::InvalidQuery)?
+                            .with_timezone(&Utc),
+                    }
+                }
+                _ => return Err(rusqlite::Error::InvalidQuery),
+            };
+            Ok(ScenarioSchedule {
+                id: row.get(0)?,
+                scenario_id: row.get(1)?,
+                timezone: row.get(2)?,
+                kind,
+                days_mask: row.get(4)?,
+                hour: row.get(7)?,
+                minute: row.get(8)?,
+                enabled: row.get(9)?,
+            })
+        };
+        let schedules = match scenario_id {
+            Some(scenario_id) => statement.query_map([scenario_id], read)?,
+            None => statement.query_map([], read)?,
+        }
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into);
         schedules
     }
 
@@ -1227,53 +1423,25 @@ impl Registry {
         if through < after {
             return Err(RegistryError::InvalidSchedule);
         }
-        let mut statement = self.db.prepare(
-            "SELECT ss.id,ss.scenario_id,ss.timezone,ss.weekday,ss.hour,ss.minute
-             FROM scenario_schedules ss
-             JOIN scenarios s ON s.id=ss.scenario_id
+        let schedules = self.read_schedules(
+            "JOIN scenarios s ON s.id=ss.scenario_id
              LEFT JOIN scenario_automation a ON a.scenario_id=s.id
              WHERE ss.enabled=1 AND s.enabled=1 AND COALESCE(a.locally_paused,0)=0
              ORDER BY ss.scenario_id,ss.id",
+            None,
         )?;
-        let schedules = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, u8>(3)?,
-                    row.get::<_, u8>(4)?,
-                    row.get::<_, u8>(5)?,
-                ))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
         let mut due = Vec::new();
-        for (schedule_id, scenario_id, timezone, weekday, hour, minute) in schedules {
-            let timezone = Tz::from_str(&timezone).map_err(|_| RegistryError::InvalidSchedule)?;
-            let weekday = match weekday {
-                0 => Weekday::Mon,
-                1 => Weekday::Tue,
-                2 => Weekday::Wed,
-                3 => Weekday::Thu,
-                4 => Weekday::Fri,
-                5 => Weekday::Sat,
-                6 => Weekday::Sun,
-                _ => return Err(RegistryError::InvalidSchedule),
-            };
-            let schedule = WeeklySchedule {
-                timezone,
-                weekday,
-                hour: hour as u32,
-                minute: minute as u32,
-            };
-            for occurrence_key in schedule
+        for record in schedules {
+            for occurrence in record
+                .schedule()?
                 .occurrences_between(after, through)
                 .map_err(|_| RegistryError::InvalidSchedule)?
             {
                 due.push(DueScheduleOccurrence {
-                    scenario_id: scenario_id.clone(),
-                    schedule_id: schedule_id.clone(),
-                    occurrence_key,
+                    scenario_id: record.scenario_id.clone(),
+                    schedule_id: record.id.clone(),
+                    occurrence_key: occurrence.key,
+                    due_at: occurrence.at,
                 });
             }
         }
@@ -2149,6 +2317,21 @@ impl Registry {
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// The newest claimed slot of one schedule and whether it was skipped
+    /// because a run of its Scenario was active.
+    pub fn last_schedule_slot(&self, schedule_id: &str) -> Result<Option<(String, bool)>> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT occurrence_key,skipped_active_run_id IS NOT NULL
+                 FROM schedule_occurrences WHERE schedule_id=?1
+                 ORDER BY rowid DESC LIMIT 1",
+                [schedule_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
     }
 
     /// Record a manual run whose batch the user confirmed from a plan.
@@ -3371,28 +3554,6 @@ fn decode_confirmed_version(
     }
 }
 
-fn validate_schedule(timezone: &str, weekday: u8, hour: u8, minute: u8) -> Result<()> {
-    let timezone = Tz::from_str(timezone).map_err(|_| RegistryError::InvalidSchedule)?;
-    let weekday = match weekday {
-        0 => Weekday::Mon,
-        1 => Weekday::Tue,
-        2 => Weekday::Wed,
-        3 => Weekday::Thu,
-        4 => Weekday::Fri,
-        5 => Weekday::Sat,
-        6 => Weekday::Sun,
-        _ => return Err(RegistryError::InvalidSchedule),
-    };
-    WeeklySchedule {
-        timezone,
-        weekday,
-        hour: hour as u32,
-        minute: minute as u32,
-    }
-    .validate()
-    .map_err(|_| RegistryError::InvalidSchedule)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4223,7 +4384,8 @@ mod tests {
             .unwrap();
         let schedules = db.list_scenario_schedules(&scenario).unwrap();
         assert_eq!(schedules.len(), 2);
-        assert_eq!(schedules[0].timezone, "Europe/Samara");
+        // The list is ordered by local time.
+        assert_eq!(schedules[0].timezone, "Europe/Berlin");
         assert!(matches!(
             db.create_scenario_schedule(&scenario, "not/a-zone", 0, 9, 0),
             Err(RegistryError::InvalidSchedule)
@@ -4312,6 +4474,7 @@ mod tests {
             scenario_id: scenario.clone(),
             schedule_id: schedule.clone(),
             occurrence_key: OccurrenceKey("2026-10-25 02:30@Europe/Berlin".into()),
+            due_at: utc("2026-10-25T00:30:00Z"),
         }];
         assert_eq!(
             db.due_schedule_occurrences(after, through).unwrap(),
@@ -4792,6 +4955,111 @@ mod tests {
         assert!(!db.get(&ids[1]).unwrap().unwrap().enabled);
         assert!(db.get(&ids[2]).unwrap().unwrap().enabled);
         assert!(db.get(&ids[0]).unwrap().is_none());
+    }
+
+    #[test]
+    fn migration_26_turns_a_weekly_row_into_one_day_without_a_repeated_slot() {
+        let db = Registry::in_memory().unwrap();
+        let left = db.add("local_filesystem", "Left").unwrap();
+        let right = db.add("local_filesystem", "Right").unwrap();
+        let scenario = db
+            .create_scenario("Weekly", &left, "/source", &right, "/target", "left_to_right")
+            .unwrap();
+        let schedule = db
+            .create_scenario_schedule(&scenario, "Europe/Berlin", 6, 2, 30)
+            .unwrap();
+        let key = "2026-10-25 02:30@Europe/Berlin";
+        assert!(db.claim_schedule_occurrence(&schedule, key).unwrap());
+        // Make the version 25 table: weekday only.
+        let connection = db.db;
+        connection
+            .execute_batch(
+                "ALTER TABLE scenario_schedules DROP COLUMN kind;
+                 ALTER TABLE scenario_schedules DROP COLUMN days_mask;
+                 ALTER TABLE scenario_schedules DROP COLUMN interval_hours;
+                 ALTER TABLE scenario_schedules DROP COLUMN anchor_utc;
+                 PRAGMA user_version = 25;",
+            )
+            .unwrap();
+        let db = Registry::initialize(connection).unwrap();
+        let migrated = &db.list_scenario_schedules(&scenario).unwrap()[0];
+        assert_eq!(
+            (migrated.kind, migrated.days_mask, migrated.hour, migrated.minute),
+            (ScheduleKind::DaysAtTime, 1 << 6, 2, 30)
+        );
+        let after: DateTime<Utc> = "2026-10-24T00:00:00Z".parse().unwrap();
+        let through: DateTime<Utc> = "2026-11-02T00:00:00Z".parse().unwrap();
+        let due = db.due_schedule_occurrences(after, through).unwrap();
+        assert_eq!(
+            due.iter()
+                .map(|slot| slot.occurrence_key.0.as_str())
+                .collect::<Vec<_>>(),
+            [key, "2026-11-01 02:30@Europe/Berlin"]
+        );
+        // The slot claimed before the migration is not staged again.
+        assert_eq!(db.stage_due_schedule_occurrences(after, through).unwrap(), 1);
+        assert_eq!(db.stage_due_schedule_occurrences(after, through).unwrap(), 0);
+    }
+
+    #[test]
+    fn every_hours_schedule_stages_each_slot_once_across_restarts() {
+        let path = std::env::temp_dir().join(format!(
+            "qadren-every-hours-{}.sqlite3",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let db = Registry::open(&path).unwrap();
+        let left = db.add("local_filesystem", "Left").unwrap();
+        let right = db.add("local_filesystem", "Right").unwrap();
+        let scenario = db
+            .create_scenario("Hourly", &left, "/source", &right, "/target", "left_to_right")
+            .unwrap();
+        let created: DateTime<Utc> = "2026-10-20T10:00:00Z".parse().unwrap();
+        let schedule = db
+            .create_scenario_hours_schedule_at(
+                &scenario,
+                "Europe/Berlin",
+                6,
+                0,
+                0,
+                crate::scheduler::ALL_DAYS,
+                created,
+            )
+            .unwrap();
+        let listed = &db.list_scenario_schedules(&scenario).unwrap()[0];
+        assert_eq!(listed.id, schedule);
+        assert_eq!(
+            listed.kind,
+            ScheduleKind::EveryHours {
+                interval_hours: 6,
+                anchor: "2026-10-19T22:00:00Z".parse().unwrap()
+            }
+        );
+        for (interval, days) in [(0, 0x7f), (25, 0x7f), (6, 0)] {
+            assert!(matches!(
+                db.create_scenario_hours_schedule_at(
+                    &scenario, "Europe/Berlin", interval, 0, 0, days, created
+                ),
+                Err(RegistryError::InvalidSchedule)
+            ));
+        }
+        // A sleep across the DST change: one catch-up run, each slot claimed once.
+        let after: DateTime<Utc> = "2026-10-24T12:00:00Z".parse().unwrap();
+        let through: DateTime<Utc> = "2026-10-25T12:00:00Z".parse().unwrap();
+        let due = db.due_schedule_occurrences(after, through).unwrap();
+        assert_eq!(due.len(), 4);
+        assert_eq!(db.stage_due_schedule_occurrences(after, through).unwrap(), 1);
+        drop(db);
+        let db = Registry::open(&path).unwrap();
+        assert_eq!(db.stage_due_schedule_occurrences(after, through).unwrap(), 0);
+        assert_eq!(
+            db.last_schedule_slot(&schedule).unwrap(),
+            Some(("every-6h@2026-10-25T10:00Z".to_owned(), false))
+        );
+        drop(db);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! No OAuth tokens or file contents are persisted by these methods.
 use crate::jobs::JobStore;
 use crate::model::{DeletionMode, ScenarioReference, ScenarioScope};
-use crate::registry::{Registry, RegistryError, ScenarioUpdate};
+use crate::registry::{Registry, RegistryError, ScenarioUpdate, ScheduleKind};
 use crate::scenario_planner::{ObservedFile, PlanAction, PlanItem, SideChange};
 use crate::schedule_dispatch::dispatch_pending_schedule_jobs;
 use chrono::{DateTime, Utc};
@@ -783,16 +783,30 @@ pub extern "C" fn qadren_scenario_schedules_list(
     let Some(scenario_id) = input(scenario_id) else {
         return output(json!({"ok":false,"error":"invalid_input"}));
     };
+    let now = DateTime::<Utc>::from(std::time::SystemTime::now());
     with_registry(path, |db| {
-        Ok(json!(db
-            .list_scenario_schedules(&scenario_id)?
-            .into_iter()
-            .map(|item| json!({
+        let mut schedules = Vec::new();
+        for item in db.list_scenario_schedules(&scenario_id)? {
+            let interval_hours = match item.kind {
+                ScheduleKind::DaysAtTime => None,
+                ScheduleKind::EveryHours { interval_hours, .. } => Some(interval_hours),
+            };
+            let next_at = item
+                .schedule()?
+                .next_after(now)
+                .map_err(|_| RegistryError::InvalidSchedule)?
+                .map(|slot| slot.at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+            let last_slot = db.last_schedule_slot(&item.id)?.map(
+                |(key, skipped)| json!({"occurrence_key": key, "skipped_active_run": skipped}),
+            );
+            schedules.push(json!({
                 "id": item.id, "scenario_id": item.scenario_id, "timezone": item.timezone,
-                "weekday": item.weekday, "hour": item.hour, "minute": item.minute,
-                "enabled": item.enabled
-            }))
-            .collect::<Vec<Value>>()))
+                "interval_hours": interval_hours, "days_mask": item.days_mask,
+                "hour": item.hour, "minute": item.minute, "enabled": item.enabled,
+                "next_at": next_at, "last_slot": last_slot
+            }));
+        }
+        Ok(json!(schedules))
     })
 }
 
@@ -913,7 +927,8 @@ pub extern "C" fn qadren_scenario_schedules_due(
             .map(|item| json!({
                 "scenario_id": item.scenario_id,
                 "schedule_id": item.schedule_id,
-                "occurrence_key": item.occurrence_key.0
+                "occurrence_key": item.occurrence_key.0,
+                "due_at": item.due_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
             }))
             .collect::<Vec<Value>>()))
     })
@@ -975,17 +990,30 @@ pub extern "C" fn qadren_scenario_schedules_create(
     path: *const c_char,
     scenario_id: *const c_char,
     timezone: *const c_char,
-    weekday: u8,
+    interval_hours: u8,
+    days_mask: u8,
     hour: u8,
     minute: u8,
 ) -> *mut c_char {
     let (Some(scenario_id), Some(timezone)) = (input(scenario_id), input(timezone)) else {
         return output(json!({"ok":false,"error":"invalid_input"}));
     };
+    // `interval_hours` 0 is a days-at-time schedule; 1–24 is every N hours
+    // from the local time `hour:minute`. Core validates every field.
     with_registry(path, |db| {
-        Ok(json!({"id": db.create_scenario_schedule(
-            &scenario_id, &timezone, weekday, hour, minute
-        )?}))
+        let id = if interval_hours == 0 {
+            db.create_scenario_days_schedule(&scenario_id, &timezone, days_mask, hour, minute)?
+        } else {
+            db.create_scenario_hours_schedule(
+                &scenario_id,
+                &timezone,
+                interval_hours,
+                hour,
+                minute,
+                days_mask,
+            )?
+        };
+        Ok(json!({ "id": id }))
     })
 }
 
@@ -1557,6 +1585,7 @@ mod tests {
             scenario_id.as_ptr(),
             timezone.as_ptr(),
             0,
+            1,
             9,
             30,
         );
@@ -1577,6 +1606,8 @@ mod tests {
         .unwrap();
         unsafe { qadren_registry_free_string(listed_schedules) };
         assert_eq!(schedules["data"][0]["timezone"], "Europe/Samara");
+        assert_eq!(schedules["data"][0]["days_mask"], 1);
+        assert!(schedules["data"][0]["next_at"].is_string());
         let after = CString::new("2026-10-12T04:00:00Z").unwrap();
         let through = CString::new("2026-10-12T06:00:00Z").unwrap();
         let due_pointer =

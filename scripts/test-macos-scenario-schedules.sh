@@ -25,6 +25,7 @@ xcrun swiftc -O -target "$ARCH-apple-macos13.0" \
   platform/macos/QADREN/JobInventory.swift \
   platform/macos/QADREN/WorkerIPC.swift \
   platform/macos/QADREN/StorageRegistry.swift \
+  platform/macos/QADREN/Bridge.swift \
   platform/macos/Tests/ScenarioScheduleBridgeTests.swift \
   "$ROOT/core/target/$TARGET/release/libqadren_core.a" \
   -o "$TEST_ROOT/scenario-schedule-tests"

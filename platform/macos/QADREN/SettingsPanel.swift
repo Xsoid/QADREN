@@ -131,11 +131,6 @@ final class ScenarioScheduleSettings: ObservableObject {
         }
     }
 
-    /// The newest slot of a schedule that was skipped during a run.
-    func lastSkippedSlot(scheduleID: String) -> ScenarioRunState.SkippedSlot? {
-        runState.skipped.first { $0.schedule_id == scheduleID }
-    }
-
     /// "Остановить": the Worker stops the active run (D-025). A planning run
     /// ends now; an executing run ends after the current file.
     func stopRun(scenarioID: String) {
@@ -161,10 +156,13 @@ final class ScenarioScheduleSettings: ObservableObject {
         }
     }
 
-    func create(scenarioID: String, timezone: String, weekday: UInt8, hour: UInt8, minute: UInt8) {
+    func create(
+        scenarioID: String, timezone: String, intervalHours: UInt8, daysMask: UInt8, hour: UInt8, minute: UInt8
+    ) {
         do {
             try StorageRegistryBridge.createScenarioSchedule(
-                scenarioID: scenarioID, timezone: timezone, weekday: weekday, hour: hour, minute: minute
+                scenarioID: scenarioID, timezone: timezone, intervalHours: intervalHours,
+                daysMask: daysMask, hour: hour, minute: minute
             )
             refresh(scenarioID: scenarioID)
         } catch {
@@ -2500,11 +2498,13 @@ private struct ScenarioSchedulesView: View {
     let done: () -> Void
     @StateObject private var schedules = ScenarioScheduleSettings()
     @State private var timezone = TimeZone.current.identifier
-    @State private var weekday: UInt8 = 0
-    @State private var time = Date()
+    @State private var everyHours = false
+    @State private var intervalHours = 6
+    @State private var daysMask: UInt8 = ScheduleWording.allDays
+    @State private var time = Calendar.current.date(bySettingHour: 3, minute: 0, second: 0, of: Date()) ?? Date()
     @State private var confirmStop = false
 
-    private let weekdays = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
+    private static let timezones = TimeZone.knownTimeZoneIdentifiers.sorted()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -2519,8 +2519,8 @@ private struct ScenarioSchedulesView: View {
             }
 
             SettingsNotice(
-                text: "Показаны только кандидаты на 14 дней. Просмотр не создаёт Job и не передаёт файлы.",
-                symbol: "clock.badge.exclamationmark"
+                text: "Запуски по расписанию выполняет фоновая служба QADREN. Окно приложения можно не открывать.",
+                symbol: "clock.badge.checkmark"
             )
 
             Form {
@@ -2555,17 +2555,34 @@ private struct ScenarioSchedulesView: View {
                         .foregroundStyle(.secondary)
                 }
                 Section("Новое расписание") {
-                    Picker("День", selection: $weekday) {
-                        ForEach(Array(weekdays.enumerated()), id: \.offset) { index, title in
-                            Text(title).tag(UInt8(index))
+                    Picker("Вид", selection: $everyHours) {
+                        Text("Каждый день / по дням недели").tag(false)
+                        Text("Каждые N часов").tag(true)
+                    }
+                    .pickerStyle(.radioGroup)
+                    if everyHours {
+                        Stepper(value: $intervalHours, in: 1...24) {
+                            Text("Каждые \(intervalHours) ч")
                         }
                     }
-                    DatePicker("Время", selection: $time, displayedComponents: .hourAndMinute)
-                    TextField("IANA timezone", text: $timezone)
+                    DatePicker(
+                        everyHours ? "Начиная с" : "Время",
+                        selection: $time,
+                        displayedComponents: .hourAndMinute
+                    )
+                    LabeledContent(everyHours ? "Активные дни" : "Дни") {
+                        dayToggles
+                    }
+                    Picker("Часовой пояс", selection: $timezone) {
+                        ForEach(Self.timezones, id: \.self) { Text($0).tag($0) }
+                    }
+                    Text(draftTitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     HStack {
                         Spacer()
                         Button("Добавить расписание", action: create)
-                            .disabled(timezone.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            .disabled(daysMask == 0)
                     }
                 }
             }
@@ -2576,18 +2593,19 @@ private struct ScenarioSchedulesView: View {
             }
 
             if !schedules.upcoming.isEmpty {
-                GroupBox("Ближайшие кандидаты") {
+                GroupBox("Ближайшие запуски") {
                     VStack(alignment: .leading, spacing: 8) {
                         ForEach(schedules.upcoming.prefix(5)) { occurrence in
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(occurrence.occurrence_key)
-                                    .font(.body.monospaced())
-                                Text("Расписание " + String(occurrence.schedule_id.prefix(8)))
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                Text(ScheduleWording.dateTitle(occurrence.due_at))
+                                if let entry = schedules.entries.first(where: { $0.id == occurrence.schedule_id }) {
+                                    Text(ScheduleWording.title(entry))
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
                             }
                         }
-                        Text("Local Worker сохраняет наступивший weekly slot в существующую очередь Job и выполняет безопасные Create без открытого окна. Замены, удаления и конфликты остаются в WAITING_FOR_DECISION до явного решения.")
+                        Text("Если в момент слота идёт предыдущий запуск этого сценария, слот пропускается.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -2598,7 +2616,7 @@ private struct ScenarioSchedulesView: View {
             if schedules.entries.isEmpty {
                 SettingsEmptyState(
                     title: "Расписаний пока нет",
-                    detail: "Добавьте одно или несколько weekly расписаний. Их время хранится с явной IANA timezone.",
+                    detail: "Добавьте одно или несколько расписаний: по дням недели или каждые N часов.",
                     symbol: "calendar"
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -2608,15 +2626,27 @@ private struct ScenarioSchedulesView: View {
                         Image(systemName: entry.enabled ? "calendar.badge.clock" : "calendar.badge.exclamationmark")
                             .foregroundStyle(entry.enabled ? QDTheme.cyan : .secondary)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(weekdays[Int(entry.weekday)] + " · " + timeTitle(entry))
-                            Text(entry.timezone).font(.caption.monospaced()).foregroundStyle(.secondary)
-                            if let skipped = schedules.lastSkippedSlot(scheduleID: entry.id) {
-                                Label(
-                                    "Пропущено: идёт предыдущий запуск · " + skipped.occurrence_key,
-                                    systemImage: "forward.end"
-                                )
-                                .font(.caption)
-                                .foregroundStyle(QDTheme.warning)
+                            Text(ScheduleWording.title(entry))
+                            if entry.enabled, let next = entry.next_at {
+                                Text("Следующий запуск: " + ScheduleWording.dateTitle(next))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            if let last = entry.last_slot {
+                                if last.skipped_active_run {
+                                    Label(
+                                        "Пропущено: идёт предыдущий запуск · "
+                                            + ScheduleWording.slotTitle(last.occurrence_key),
+                                        systemImage: "forward.end"
+                                    )
+                                    .font(.caption)
+                                    .foregroundStyle(QDTheme.warning)
+                                } else {
+                                    Text("Последний слот запустил синхронизацию: "
+                                        + ScheduleWording.slotTitle(last.occurrence_key))
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
                             }
                         }
                         Spacer()
@@ -2664,20 +2694,108 @@ private struct ScenarioSchedulesView: View {
         return "Начат " + started + " · ждёт: " + waiting
     }
 
-    private func create() {
+    /// Seven day buttons; "Каждый день" selects all of them.
+    private var dayToggles: some View {
+        HStack(spacing: 4) {
+            ForEach(0..<7, id: \.self) { day in
+                let bit = UInt8(1) << UInt8(day)
+                Toggle(ScheduleWording.dayNames[day], isOn: Binding(
+                    get: { daysMask & bit != 0 },
+                    set: { daysMask = $0 ? daysMask | bit : daysMask & ~bit }
+                ))
+                .toggleStyle(.button)
+            }
+            Button("Каждый день") { daysMask = ScheduleWording.allDays }
+                .disabled(daysMask == ScheduleWording.allDays)
+        }
+    }
+
+    private var draftComponents: (hour: UInt8, minute: UInt8) {
         let components = Calendar.current.dateComponents([.hour, .minute], from: time)
-        guard let hour = components.hour, let minute = components.minute else { return }
-        schedules.create(
-            scenarioID: scenario.id,
-            timezone: timezone.trimmingCharacters(in: .whitespacesAndNewlines),
-            weekday: weekday,
-            hour: UInt8(hour),
-            minute: UInt8(minute)
+        return (UInt8(components.hour ?? 0), UInt8(components.minute ?? 0))
+    }
+
+    private var draftTitle: String {
+        guard daysMask != 0 else { return "Выберите хотя бы один день." }
+        let (hour, minute) = draftComponents
+        return ScheduleWording.title(
+            intervalHours: everyHours ? UInt8(intervalHours) : nil,
+            daysMask: daysMask, hour: hour, minute: minute, timezone: timezone
         )
     }
 
-    private func timeTitle(_ entry: ScenarioScheduleEntry) -> String {
-        String(format: "%02d:%02d", entry.hour, entry.minute)
+    private func create() {
+        let (hour, minute) = draftComponents
+        schedules.create(
+            scenarioID: scenario.id,
+            timezone: timezone,
+            intervalHours: everyHours ? UInt8(intervalHours) : 0,
+            daysMask: daysMask,
+            hour: hour,
+            minute: minute
+        )
+    }
+}
+
+/// Plain Russian wording of schedules, for example "Пн–Пт в 03:00
+/// (Europe/Moscow)" or "Каждые 6 ч с 00:00 (UTC)".
+enum ScheduleWording {
+    static let allDays: UInt8 = 0x7f
+    static let dayNames = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+    static func title(_ entry: ScenarioScheduleEntry) -> String {
+        title(
+            intervalHours: entry.interval_hours, daysMask: entry.days_mask,
+            hour: entry.hour, minute: entry.minute, timezone: entry.timezone
+        )
+    }
+
+    static func title(
+        intervalHours: UInt8?, daysMask: UInt8, hour: UInt8, minute: UInt8, timezone: String
+    ) -> String {
+        let time = String(format: "%02d:%02d", hour, minute)
+        let base: String
+        if let intervalHours {
+            base = "Каждые \(intervalHours) ч с " + time
+                + (daysMask == allDays ? "" : ", " + days(daysMask))
+        } else {
+            base = (daysMask == allDays ? "Каждый день" : days(daysMask)) + " в " + time
+        }
+        return base + " (" + timezone + ")"
+    }
+
+    /// Selected days; a run of three or more days is a range: "Пн–Пт, Вс".
+    static func days(_ mask: UInt8) -> String {
+        var parts: [String] = []
+        var day = 0
+        while day < 7 {
+            guard mask & (1 << UInt8(day)) != 0 else { day += 1; continue }
+            var end = day
+            while end + 1 < 7, mask & (1 << UInt8(end + 1)) != 0 { end += 1 }
+            if end - day >= 2 {
+                parts.append(dayNames[day] + "–" + dayNames[end])
+            } else {
+                parts.append(contentsOf: dayNames[day...end])
+            }
+            day = end + 1
+        }
+        return parts.joined(separator: ", ")
+    }
+
+    /// An RFC 3339 instant in the local time of this Mac.
+    static func dateTitle(_ value: String) -> String {
+        guard let date = ISO8601DateFormatter().date(from: value) else { return value }
+        return date.formatted(date: .abbreviated, time: .shortened)
+    }
+
+    /// A slot key: "2026-10-25 02:30@Europe/Berlin" or "every-6h@2026-10-25T10:00Z".
+    static func slotTitle(_ key: String) -> String {
+        guard let at = key.firstIndex(of: "@") else { return key }
+        if key.hasPrefix("every-") {
+            let instant = String(key[key.index(after: at)...]).replacingOccurrences(of: "Z", with: ":00Z")
+            return dateTitle(instant)
+        }
+        return String(key[..<at])
     }
 }
 

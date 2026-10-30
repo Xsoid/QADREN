@@ -29,8 +29,8 @@ struct SettingsE2ERegistryTool {
                 rightID: connection, rightRoot: arguments[4], direction: "left_to_right"
             )
             try StorageRegistryBridge.createScenarioSchedule(
-                scenarioID: scenario, timezone: arguments[5],
-                weekday: UInt8(arguments[6])!, hour: UInt8(arguments[7])!, minute: UInt8(arguments[8])!
+                scenarioID: scenario, timezone: arguments[5], intervalHours: 0,
+                daysMask: 1 << UInt8(arguments[6])!, hour: UInt8(arguments[7])!, minute: UInt8(arguments[8])!
             )
             print(scenario)
             return

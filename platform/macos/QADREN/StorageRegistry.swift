@@ -133,7 +133,7 @@ private func scenarioAutomationSetPaused(
 @_silgen_name("qadren_scenario_schedules_create")
 private func scenarioSchedulesCreate(
     _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?, _ timezone: UnsafePointer<CChar>?,
-    _ weekday: UInt8, _ hour: UInt8, _ minute: UInt8
+    _ intervalHours: UInt8, _ daysMask: UInt8, _ hour: UInt8, _ minute: UInt8
 ) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_scenario_schedules_set_enabled")
 private func scenarioSchedulesSetEnabled(
@@ -226,18 +226,30 @@ private func scenarioScopeJSON(selectedPaths: [String], deletionMode: ScenarioDe
     return String(decoding: data, as: UTF8.self)
 }
 struct ScenarioScheduleEntry: Decodable, Identifiable {
+    struct LastSlot: Decodable {
+        let occurrence_key: String
+        let skipped_active_run: Bool
+    }
+
     let id: String
     let scenario_id: String
     let timezone: String
-    let weekday: UInt8
+    /// `nil` for selected days at a time; 1–24 for every N hours.
+    let interval_hours: UInt8?
+    /// Active local days. Monday is bit 0 and Sunday is bit 6.
+    let days_mask: UInt8
     let hour: UInt8
     let minute: UInt8
     let enabled: Bool
+    /// The next slot as an RFC 3339 UTC instant.
+    let next_at: String?
+    let last_slot: LastSlot?
 }
 struct ScenarioScheduleOccurrence: Decodable, Identifiable, Equatable {
     let scenario_id: String
     let schedule_id: String
     let occurrence_key: String
+    let due_at: String
 
     var id: String { scenario_id + ":" + schedule_id + ":" + occurrence_key }
 }
@@ -1137,14 +1149,15 @@ enum StorageRegistryBridge {
     }
 
     static func createScenarioSchedule(
-        scenarioID: String, timezone: String, weekday: UInt8, hour: UInt8, minute: UInt8
+        scenarioID: String, timezone: String, intervalHours: UInt8, daysMask: UInt8,
+        hour: UInt8, minute: UInt8
     ) throws {
         let database = try path
         let _: NewConnection = try database.withCString { db in
             try scenarioID.withCString { id in
                 try timezone.withCString { timezone in
                     try unwrap(
-                        scenarioSchedulesCreate(db, id, timezone, weekday, hour, minute),
+                        scenarioSchedulesCreate(db, id, timezone, intervalHours, daysMask, hour, minute),
                         as: NewConnection.self
                     )
                 }

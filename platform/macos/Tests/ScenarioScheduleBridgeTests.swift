@@ -14,7 +14,7 @@ private func scenarioCreateForTest(
 @_silgen_name("qadren_scenario_schedules_create")
 private func scheduleCreateForTest(
     _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?, _ timezone: UnsafePointer<CChar>?,
-    _ weekday: UInt8, _ hour: UInt8, _ minute: UInt8
+    _ intervalHours: UInt8, _ daysMask: UInt8, _ hour: UInt8, _ minute: UInt8
 ) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_free_string")
 private func freeRegistryStringForTest(_ ptr: UnsafeMutablePointer<CChar>?)
@@ -76,7 +76,7 @@ private func createSchedule(database: String, scenarioID: String) throws {
         try scenarioID.withCString { scenario in
             try "UTC".withCString { timezone in
                 _ = try decode(
-                    scheduleCreateForTest(db, scenario, timezone, 0, 12, 0), as: CreatedID.self
+                    scheduleCreateForTest(db, scenario, timezone, 0, 1, 12, 0), as: CreatedID.self
                 )
             }
         }
