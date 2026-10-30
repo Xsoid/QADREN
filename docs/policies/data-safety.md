@@ -4,7 +4,7 @@ Status: product policy v0.2, implementation of separate mechanisms requires test
 
 ## Guarantee Boundaries
 
-QADREN performs synchronization. It **does not store its own previous versions of content** in MVP. It does not guarantee the recovery of overwritten or permanently deleted files. BackupSet, retention, and recovery of historical versions are deferred: [project of future capabilities](../architecture/backup-model.md).
+QADREN performs synchronization. It **does not store its own previous versions of content** in MVP. A replaced or deleted file goes into the system Trash of its volume when the volume has one (D-025). It does not guarantee the recovery of overwritten or permanently deleted files. BackupSet, retention, and recovery of historical versions are deferred: [project of future capabilities](../architecture/backup-model.md).
 
 ## Risk Classification and User Decisions
 

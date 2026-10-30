@@ -161,6 +161,18 @@ pub fn rename_file_noreplace(root: &File, from: &Path, to: &Path) -> Result<()> 
 /// attempt before this effect. This primitive never follows a destination
 /// symlink and reports a post-publication identity mismatch as UNKNOWN.
 pub fn rename_file_replace(root: &File, from: &Path, to: &Path) -> Result<()> {
+    replace_checked(root, from, to, 1)
+}
+
+/// Like `rename_file_replace`, for a destination that has exactly one more
+/// name: the Trash link that `link_file_into_trash` made. After the rename the
+/// previous version exists only in the Trash.
+#[cfg(target_os = "macos")]
+pub fn rename_file_replace_linked(root: &File, from: &Path, to: &Path) -> Result<()> {
+    replace_checked(root, from, to, 2)
+}
+
+fn replace_checked(root: &File, from: &Path, to: &Path, target_links: u64) -> Result<()> {
     let (source_dir, source_name) = parent(root, from)?;
     let (target_dir, target_name) = parent(root, to)?;
     let source = file_identity(root, from)?;
@@ -202,7 +214,9 @@ pub fn rename_file_replace(root: &File, from: &Path, to: &Path) -> Result<()> {
     let target_info = unsafe { target_info.assume_init() };
     #[cfg(target_os = "macos")]
     reject_dataless_mutation(&target_info)?;
-    if target_info.st_mode & libc::S_IFMT != libc::S_IFREG || target_info.st_nlink != 1 {
+    if target_info.st_mode & libc::S_IFMT != libc::S_IFREG
+        || target_info.st_nlink as u64 != target_links
+    {
         return Err(LocalError::UnsafeEntry);
     }
     #[cfg(target_os = "linux")]
@@ -523,6 +537,7 @@ pub fn delete_file(root: &File, target: &Path) -> Result<()> {
 /// only the per-user directory inside an existing `.Trashes` or the home
 /// `.Trash`. The result is a pinned directory owned by this user.
 #[cfg(target_os = "macos")]
+#[cfg_attr(test, allow(dead_code))]
 pub fn system_trash_directory(near: &File, device: u64) -> Result<Option<File>> {
     let uid = unsafe { libc::getuid() };
     let owned_on_device = |directory: &File| -> Result<bool> {
@@ -682,6 +697,83 @@ pub fn trash_file_into(root: &File, target: &Path, trash: &File) -> Result<()> {
         sync(&directory).map_err(LocalError::OutcomeUnknown)?;
         sync(trash).map_err(LocalError::OutcomeUnknown)?;
         return Ok(());
+    }
+    Err(LocalError::AlreadyExists)
+}
+
+/// Put a second name for one checked regular file into `trash`, which must
+/// be on the same volume. The file stays in place, so a later atomic replace
+/// of its name leaves the previous version only in the Trash. A name in the
+/// Trash is never replaced. Returns `Ok(false)` before any effect when the
+/// volume has no hard links. The caller must persist an attempt first.
+#[cfg(target_os = "macos")]
+pub fn link_file_into_trash(root: &File, target: &Path, trash: &File) -> Result<bool> {
+    let (directory, leaf) = parent(root, target)?;
+    let source = file_identity(root, target)?;
+    let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            leaf.as_ptr(),
+            info.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return Err(LocalError::Io(io::Error::last_os_error()));
+    }
+    let info = unsafe { info.assume_init() };
+    reject_dataless_mutation(&info)?;
+    if info.st_mode & libc::S_IFMT != libc::S_IFREG
+        || info.st_nlink != 1
+        || info.st_dev as u64 != source.device
+        || info.st_ino != source.inode
+        || trash.metadata()?.dev() != source.device
+    {
+        return Err(LocalError::UnsafeEntry);
+    }
+    for attempt in 0..100 {
+        let candidate = trash_name(&leaf, attempt)?;
+        let outcome = unsafe {
+            libc::linkat(
+                directory.as_raw_fd(),
+                leaf.as_ptr(),
+                trash.as_raw_fd(),
+                candidate.as_ptr(),
+                0,
+            )
+        };
+        if outcome != 0 {
+            let error = io::Error::last_os_error();
+            match error.raw_os_error() {
+                Some(libc::EEXIST) => continue,
+                Some(libc::ENOTSUP | libc::EOPNOTSUPP) => return Ok(false),
+                _ => return Err(LocalError::Io(error)),
+            }
+        }
+        let mut linked = std::mem::MaybeUninit::<libc::stat>::uninit();
+        let status = unsafe {
+            libc::fstatat(
+                trash.as_raw_fd(),
+                candidate.as_ptr(),
+                linked.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        let unconfirmed = || {
+            LocalError::OutcomeUnknown(io::Error::other(
+                "the Trash link identity differs from preflight",
+            ))
+        };
+        if status != 0 {
+            return Err(unconfirmed());
+        }
+        let linked = unsafe { linked.assume_init() };
+        if linked.st_dev as u64 != source.device || linked.st_ino != source.inode {
+            return Err(unconfirmed());
+        }
+        sync(trash).map_err(LocalError::OutcomeUnknown)?;
+        return Ok(true);
     }
     Err(LocalError::AlreadyExists)
 }

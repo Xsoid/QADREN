@@ -64,9 +64,8 @@ pub enum DeletionMode {
     /// Every deletion waits for an explicit user decision and consent.
     #[default]
     Paranoid,
-    /// The user approved one durable rule: delete the same confirmed,
-    /// unchanged object on the other side. A plan with more deletions than
-    /// `MASS_DELETION_THRESHOLD` still waits for an explicit decision.
+    /// The user approved one durable rule: delete the confirmed object on
+    /// the other side. There is no mass-deletion threshold (D-025).
     Simple,
 }
 
@@ -86,10 +85,6 @@ impl DeletionMode {
         }
     }
 }
-
-/// A plan with more automatic deletions than this is a mass deletion. All of
-/// its deletions then require an explicit decision (owner decision D-019).
-pub const MASS_DELETION_THRESHOLD: usize = 20;
 
 /// The objects of a Scenario revision and its deletion rule. An empty
 /// selection means the complete root folder on both sides.

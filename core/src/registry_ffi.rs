@@ -796,6 +796,27 @@ pub extern "C" fn qadren_scenario_schedules_list(
     })
 }
 
+/// Read or record the one-time confirmation of the one-way rule "the
+/// source always wins" for one Scenario revision (D-025 section 4).
+/// `confirm` 1 records it; 0 only reads it.
+#[no_mangle]
+pub extern "C" fn qadren_scenario_source_wins(
+    path: *const c_char,
+    scenario_id: *const c_char,
+    revision: u64,
+    confirm: u8,
+) -> *mut c_char {
+    let Some(scenario_id) = input(scenario_id) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    with_registry(path, |db| {
+        if confirm == 1 {
+            db.confirm_scenario_source_wins(&scenario_id, revision)?;
+        }
+        Ok(json!({"confirmed": db.scenario_source_wins_confirmed(&scenario_id, revision)?}))
+    })
+}
+
 /// The active run of one Scenario and its slots that were skipped during a
 /// run (D-025 section 2). This only reads the Registry.
 #[no_mangle]

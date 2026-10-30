@@ -1393,6 +1393,9 @@ private struct ScenarioDryRunView: View {
     @State private var planProgress: String?
     /// When the shown plan was built.
     @State private var planBuiltAt: Date?
+    /// The complete stored plan that "Синхронизировать" executes (D-025).
+    @State private var storedPlan: WorkerPlanInfo?
+    @State private var confirmSourceWins = false
     /// A stored plan with more rows than the screen loads at once (D-024).
     @State private var largePlan: WorkerPlanInfo?
     @State private var largeRows: [WorkerPlanRow] = []
@@ -1475,15 +1478,11 @@ private struct ScenarioDryRunView: View {
                 let creates = plan.filter { $0.action.kind == "create" }
                 let updates = plan.filter { $0.action.kind == "update" }
                 let ruleDeletes = plan.filter { $0.action.kind == "delete" }
-                if scenario.deletion_mode == ScenarioDeletionMode.simple.rawValue,
-                   plan.contains(where: { $0.action.kind == "delete_requires_decision" }) {
-                    SettingsNotice(
-                        text: "В плане больше 20 удалений. Простая синхронизация не выполняет массовое удаление сама: решите по каждому удалению отдельно.",
-                        symbol: "exclamationmark.triangle"
-                    )
-                }
                 if !creates.isEmpty || !updates.isEmpty || !ruleDeletes.isEmpty {
                     HStack {
+                        if let storedPlan {
+                            synchronizeButton(storedPlan)
+                        }
                         if !ruleDeletes.isEmpty {
                             Button("Удалить по правилу: \(ruleDeletes.count)", role: .destructive) {
                                 executeRuleDeletions()
@@ -1731,6 +1730,7 @@ private struct ScenarioDryRunView: View {
         var shown = true
         defer { isLoading = false; hasRequestedPreview = hasRequestedPreview || shown; planProgress = nil }
         largePlan = nil
+        storedPlan = nil
         largeRows = []
         do {
             // A plan for a superseded revision must not offer actions.
@@ -1777,6 +1777,7 @@ private struct ScenarioDryRunView: View {
                 throw StorageError.operation(QADRENUserMessage.text(for: reason))
             }
             planBuiltAt = info.finished_at.map { Date(timeIntervalSince1970: TimeInterval($0)) }
+            storedPlan = info
             let total = info.counts?.values.reduce(0) { $0 + $1.count } ?? 0
             if total <= Self.largePlanRowLimit {
                 var rows: [WorkerPlanRow] = []
@@ -1856,14 +1857,13 @@ private struct ScenarioDryRunView: View {
                         Text("\(title): \(count.count)" + (count.bytes > 0 ? " · \(Self.bytes(count.bytes))" : ""))
                             .font(.callout.monospacedDigit())
                     }
-                    if (counts["update"]?.count ?? 0) + (counts["conflict"]?.count ?? 0)
-                        + (counts["delete"]?.count ?? 0) + (counts["delete_requires_decision"]?.count ?? 0) > 0 {
-                        Text("Замены, конфликты и удаления в большом плане пока не выполняются пакетом. Сейчас доступно создание новых файлов.")
+                    if (counts["conflict"]?.count ?? 0) + (counts["needs_verification"]?.count ?? 0)
+                        + (counts["delete_requires_decision"]?.count ?? 0) > 0 {
+                        Text("Конфликты, удаления с отдельным решением и объекты, которые требуют проверки, синхронизация не выполняет.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
-                    if let creates = counts["create"], creates.count > 0 {
-                        Button("Создать все: \(creates.count)") { executeLargeCreates(info) }
-                            .disabled(activeBatch != nil || !resumedCreateBatches.isEmpty)
+                    if ["create", "update", "delete"].contains(where: { (counts[$0]?.count ?? 0) > 0 }) {
+                        synchronizeButton(info)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -1904,7 +1904,39 @@ private struct ScenarioDryRunView: View {
         }
     }
 
-    /// The Worker makes one batch of all Create rows of the stored plan.
+    /// "Синхронизировать": one run of all Create, Update, and Delete rows of
+    /// the stored plan (D-025). A one-way Update or Delete first needs the
+    /// one-time confirmation of "the source always wins".
+    private func synchronizeButton(_ info: WorkerPlanInfo) -> some View {
+        Button("Синхронизировать") { synchronize(info) }
+            .buttonStyle(.borderedProminent)
+            .disabled(activeBatch != nil || !resumedCreateBatches.isEmpty)
+            .confirmationDialog("Источник главный", isPresented: $confirmSourceWins) {
+                Button("Подтвердить и синхронизировать") {
+                    do {
+                        _ = try StorageRegistryBridge.scenarioSourceWins(scenario: scenario, confirm: true)
+                        executeLargeCreates(info)
+                    } catch {
+                        self.error = "Не удалось сохранить подтверждение: " + error.localizedDescription
+                    }
+                }
+            } message: {
+                Text("В этом сценарии источник всегда главный. QADREN заменяет файлы назначения версией из источника, также если файл изменили в назначении. При «Простой синхронизации» QADREN удаляет в назначении файлы, которые удалены в источнике.\n\nЗаменённая версия и удалённые файлы попадают в Корзину, если она есть на томе назначения. На сетевом диске Корзины обычно нет, тогда замена и удаление безвозвратны.\n\nПодтверждение действует, пока не изменятся папка назначения или выбранные объекты.")
+            }
+    }
+
+    private func synchronize(_ info: WorkerPlanInfo) {
+        let counts = info.counts ?? [:]
+        let replacesOrDeletes = (counts["update"]?.count ?? 0) + (counts["delete"]?.count ?? 0) > 0
+        if scenario.direction != "bidirectional", replacesOrDeletes,
+           (try? StorageRegistryBridge.scenarioSourceWins(scenario: scenario, confirm: false)) != true {
+            confirmSourceWins = true
+            return
+        }
+        executeLargeCreates(info)
+    }
+
+    /// The Worker makes one batch of the stored plan and runs it.
     private func executeLargeCreates(_ info: WorkerPlanInfo) {
         let scenario = scenario
         Task {

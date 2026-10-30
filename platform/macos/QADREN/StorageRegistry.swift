@@ -118,6 +118,10 @@ private func scenarioSchedulesDispatch(
 private func scenarioAutomationGet(
     _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_scenario_source_wins")
+private func scenarioSourceWinsCall(
+    _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?, _ revision: UInt64, _ confirm: UInt8
+) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_scenario_run_state")
 private func scenarioRunStateGet(
     _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?
@@ -1027,6 +1031,20 @@ enum StorageRegistryBridge {
         return try database.withCString { db in
             try scenarioID.withCString { id in
                 try unwrap(scenarioSchedulesList(db, id), as: [ScenarioScheduleEntry].self)
+            }
+        }
+    }
+
+    /// Read the one-time confirmation of "the source always wins" (D-025),
+    /// or record it when `confirm` is true.
+    static func scenarioSourceWins(scenario: ScenarioEntry, confirm: Bool) throws -> Bool {
+        struct Answer: Decodable { let confirmed: Bool }
+        let database = try path
+        return try database.withCString { db in
+            try scenario.id.withCString { id in
+                try unwrap(
+                    scenarioSourceWinsCall(db, id, scenario.revision, confirm ? 1 : 0), as: Answer.self
+                ).confirmed
             }
         }
     }

@@ -19,7 +19,7 @@ The `trash` capability means that a deletion can move an object into a recoverab
 
 ## Release 1 adapters
 
-Local Filesystem is the only Release 1 executor. An SMB share reaches it through a QADREN mount (D-022). It reads selected source content without an extra `read_content` prompt. It must validate roots and paths, keep new destinations no-overwrite, use the approved replacement protocol for existing destinations, and reconcile uncertain effects without mutation.
+Local Filesystem is the only Release 1 executor. An SMB share reaches it through a QADREN mount (D-022). It reads selected source content without an extra `read_content` prompt. It must validate roots and paths, keep new destinations no-overwrite, use the approved replacement protocol for existing destinations and keep the replaced version in the Trash of the volume where it exists (D-025), and reconcile uncertain effects without mutation.
 
 The SMB share connector (`smb_share`, [D-021](../decisions/D-021-smb-network-drive-connector.md), [D-022](../decisions/D-022-smb-in-release-1-scenarios.md)) stores an address, a Keychain login and password, and a status. Scenarios use it through a QADREN mount at `~/.qadren/mounts/<connection_id>` and the Local Filesystem executor. Core refuses an SMB plan or effect unless that directory is an `smbfs` mount point now (`storage_access`). Write rules for smbfs (flush, publish by reservation, name and identity checks) are in D-022, item 9. Large transfers (Transfer Runs, stored snapshots and plans, retry classes) follow [D-024](../decisions/D-024-large-transfers.md). The Worker mounts the share itself when a run needs it, with a login that the app gives it in memory ([D-025](../decisions/D-025-autonomous-scheduled-scenarios.md)).
 

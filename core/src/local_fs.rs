@@ -37,6 +37,19 @@ impl From<io::Error> for LocalError {
 }
 pub type Result<T> = std::result::Result<T, LocalError>;
 
+#[cfg(debug_assertions)]
+static TRASH_OVERRIDE: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
+/// Debug builds only: use `directory` as the Trash of every volume, so that
+/// Worker tests never touch the real Trash of the user.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn override_trash_directory_for_tests(directory: PathBuf) {
+    if let Ok(mut value) = TRASH_OVERRIDE.write() {
+        *value = Some(directory);
+    }
+}
+
 fn replacement_staging_path(target: &Path) -> Result<PathBuf> {
     let parent = target.parent().unwrap_or_else(|| Path::new(""));
     let leaf = target
@@ -649,6 +662,7 @@ impl LocalFilesystem {
 
     /// Copy one regular source file to a new private staging name in the
     /// destination root, then atomically replace the existing destination.
+    /// The previous version goes into the Trash when the volume has one.
     /// A staging or publish error after the content stream starts is UNKNOWN:
     /// callers must not retry or remove a possible staging artifact blindly.
     pub fn copy_file_to_replace(&self, from: &Path, destination: &Self, to: &Path) -> Result<u64> {
@@ -662,7 +676,7 @@ impl LocalFilesystem {
         }
         let staging = replacement_staging_path(to)?;
         let bytes = self.copy_file_to_new(from, destination, &staging)?;
-        match destination.rename_file_replace(&staging, to) {
+        match destination.rename_file_replace_keeping_previous(&staging, to) {
             Ok(()) => Ok(bytes),
             Err(LocalError::OutcomeUnknown(error)) => Err(LocalError::OutcomeUnknown(error)),
             Err(error) => Err(LocalError::OutcomeUnknown(io::Error::other(format!(
@@ -672,7 +686,8 @@ impl LocalFilesystem {
     }
 
     /// Write `input` to a private staging name, then atomically replace the
-    /// existing regular file `to`. An error before the staging file is
+    /// existing regular file `to`, keeping the previous version in the Trash
+    /// when the volume has one. An error before the staging file is
     /// published leaves `to` unchanged. A publish error is UNKNOWN.
     pub fn create_from_reader_to_replace<R: io::Read>(
         &self,
@@ -685,7 +700,7 @@ impl LocalFilesystem {
         }
         let staging = replacement_staging_path(to)?;
         let bytes = self.create_from_reader(&staging, input)?;
-        match self.rename_file_replace(&staging, to) {
+        match self.rename_file_replace_keeping_previous(&staging, to) {
             Ok(()) => Ok(bytes),
             Err(LocalError::OutcomeUnknown(error)) => Err(LocalError::OutcomeUnknown(error)),
             Err(error) => Err(LocalError::OutcomeUnknown(io::Error::other(format!(
@@ -1112,6 +1127,43 @@ impl LocalFilesystem {
         }
     }
 
+    /// Replace the regular file `to` with the staged file `from` and keep the
+    /// previous version in the system Trash of the volume (D-025). The Trash
+    /// gets a hard link first, so the replace stays atomic and an interrupted
+    /// replace loses nothing. A volume without hard links moves the previous
+    /// version first; `to` is then absent until the rename. A volume without
+    /// a Trash replaces permanently. The caller must persist an attempt first.
+    pub fn rename_file_replace_keeping_previous(&self, from: &Path, to: &Path) -> Result<()> {
+        Self::relative(from)?;
+        Self::relative(to)?;
+        #[cfg(target_os = "macos")]
+        {
+            if from == to {
+                return Err(LocalError::AlreadyExists);
+            }
+            if matches!(self.stat(to), Ok(entry) if entry.is_directory) {
+                return Err(LocalError::UnsafeEntry);
+            }
+            let Some(trash) = self.trash_directory(to)? else {
+                return secure::rename_file_replace(&self.root_fd, from, to);
+            };
+            if secure::link_file_into_trash(&self.root_fd, to, &trash)? {
+                return secure::rename_file_replace_linked(&self.root_fd, from, to);
+            }
+            secure::trash_file_into(&self.root_fd, to, &trash)?;
+            secure::rename_file_noreplace(&self.root_fd, from, to).map_err(|error| match error {
+                LocalError::OutcomeUnknown(error) => LocalError::OutcomeUnknown(error),
+                error => LocalError::OutcomeUnknown(io::Error::other(format!(
+                    "the destination is in the Trash, the new version was not published: {error:?}"
+                ))),
+            })
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.rename_file_replace(from, to)
+        }
+    }
+
     /// Atomically replace an existing regular file with a staged regular file.
     /// The caller must persist a durable attempt and reconcile an uncertain
     /// post-effect result. This is not a no-overwrite creation primitive.
@@ -1286,6 +1338,17 @@ impl LocalFilesystem {
         if let Some(directory) = tests::TEST_TRASH.with(|value| value.borrow().clone()) {
             return secure::root(&directory).map(Some);
         }
+        #[cfg(debug_assertions)]
+        if let Some(directory) = TRASH_OVERRIDE.read().ok().and_then(|value| value.clone()) {
+            return secure::root(&directory).map(Some);
+        }
+        // Unit tests must never use the real Trash of the user.
+        #[cfg(test)]
+        {
+            let _ = identity;
+            Ok(None)
+        }
+        #[cfg(not(test))]
         secure::system_trash_directory(&self.root_fd, identity.device)
     }
 
@@ -3230,6 +3293,58 @@ pub(crate) mod tests {
         assert_eq!(fs::read(trash_root.join("a 2.txt")).unwrap(), b"new");
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(trash_root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn replace_keeps_the_previous_version_in_the_trash() {
+        let root = sandbox();
+        let source_root = sandbox();
+        let trash_root = sandbox();
+        fs::write(source_root.join("source.txt"), b"new version").unwrap();
+        fs::write(root.join("a.txt"), b"previous").unwrap();
+        fs::write(trash_root.join("a.txt"), b"older trash entry").unwrap();
+        TEST_TRASH.with(|value| *value.borrow_mut() = Some(trash_root.clone()));
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        let source = LocalFilesystem::open(&source_root).unwrap();
+        let bytes = source
+            .copy_file_to_replace(Path::new("source.txt"), &adapter, Path::new("a.txt"))
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        assert_eq!(bytes, 11);
+        assert_eq!(fs::read(root.join("a.txt")).unwrap(), b"new version");
+        assert_eq!(fs::read(trash_root.join("a 2.txt")).unwrap(), b"previous");
+        assert_eq!(
+            fs::read(trash_root.join("a.txt")).unwrap(),
+            b"older trash entry"
+        );
+        assert_eq!(
+            std::os::unix::fs::MetadataExt::nlink(&fs::metadata(trash_root.join("a 2.txt")).unwrap()),
+            1
+        );
+        adapter
+            .create_from_reader_to_replace(Path::new("a.txt"), &mut io::Cursor::new(b"third"))
+            .unwrap();
+        assert_eq!(fs::read(root.join("a.txt")).unwrap(), b"third");
+        assert_eq!(fs::read(trash_root.join("a 3.txt")).unwrap(), b"new version");
+        TEST_TRASH.with(|value| *value.borrow_mut() = None);
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(source_root).unwrap();
+        fs::remove_dir_all(trash_root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn replace_without_a_trash_is_permanent() {
+        let root = sandbox();
+        fs::write(root.join("staged.txt"), b"new").unwrap();
+        fs::write(root.join("a.txt"), b"previous").unwrap();
+        let adapter = LocalFilesystem::open(&root).unwrap();
+        adapter
+            .rename_file_replace_keeping_previous(Path::new("staged.txt"), Path::new("a.txt"))
+            .unwrap();
+        assert_eq!(fs::read(root.join("a.txt")).unwrap(), b"new");
+        assert!(!root.join("staged.txt").exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(target_os = "macos")]

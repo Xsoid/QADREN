@@ -202,6 +202,33 @@ pub enum BatchChildDue {
     NotDue,
 }
 
+/// The effect of one batch child (D-025 section 6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchChildKind {
+    Create,
+    Update,
+    Delete,
+}
+
+impl BatchChildKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Update => "update",
+            Self::Delete => "delete",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "create" => Some(Self::Create),
+            "update" => Some(Self::Update),
+            "delete" => Some(Self::Delete),
+            _ => None,
+        }
+    }
+}
+
 /// A batch child that the Worker can start now.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DueBatchChild {
@@ -209,6 +236,7 @@ pub struct DueBatchChild {
     pub scenario: ScenarioReference,
     pub relative_path: String,
     pub source_is_left: bool,
+    pub kind: BatchChildKind,
     pub job_id: String,
     pub retries: u32,
     pub cancellation_requested: bool,
@@ -288,7 +316,7 @@ impl Registry {
         }
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 24 {
+        if version > 25 {
             return Err(RegistryError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -693,6 +721,27 @@ impl Registry {
                    ON scenario_runs(scenario_id) WHERE state IN ('planning','executing');
                  ALTER TABLE schedule_occurrences ADD COLUMN skipped_active_run_id TEXT;
                  PRAGMA user_version = 24;
+                 COMMIT;",
+            )?;
+        }
+        if version <= 24 {
+            // D-025 section 6: a batch child is a Create, an Update, or a
+            // Delete. One-way Updates and Deletes need the one-time
+            // confirmation of the "source always wins" rule (section 4).
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE scenario_create_batch_children
+                   ADD COLUMN kind TEXT NOT NULL DEFAULT 'create'
+                   CHECK(kind IN ('create','update','delete'));
+                 CREATE TABLE scenario_source_wins_consents (
+                    scenario_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL CHECK(revision > 0),
+                    confirmed_at INTEGER NOT NULL,
+                    PRIMARY KEY(scenario_id, revision),
+                    FOREIGN KEY(scenario_id,revision)
+                      REFERENCES scenario_revisions(scenario_id,revision) ON DELETE CASCADE
+                 );
+                 PRAGMA user_version = 25;
                  COMMIT;",
             )?;
         }
@@ -1565,21 +1614,98 @@ impl Registry {
         batch_id: &str,
         children: &[(String, bool)],
     ) -> Result<usize> {
+        let children = children
+            .iter()
+            .map(|(path, source_is_left)| (path.clone(), *source_is_left, BatchChildKind::Create))
+            .collect::<Vec<_>>();
+        self.append_scenario_batch_children(batch_id, &children)
+    }
+
+    /// Add Create, Update, and Delete children to a batch (D-025 section
+    /// 6). For a Delete, `source_is_left` names the side whose object is
+    /// absent; the effect acts on the other side.
+    pub fn append_scenario_batch_children(
+        &mut self,
+        batch_id: &str,
+        children: &[(String, bool, BatchChildKind)],
+    ) -> Result<usize> {
         let transaction = self.db.transaction()?;
         let mut added = 0;
         {
             let mut insert = transaction.prepare_cached(
-                "INSERT OR IGNORE INTO scenario_create_batch_children(batch_id,relative_path,source_is_left,job_id)
-                 VALUES(?1,?2,?3,'scenario-batch-copy-' || lower(hex(randomblob(16))))",
+                "INSERT OR IGNORE INTO scenario_create_batch_children(
+                    batch_id,relative_path,source_is_left,kind,job_id
+                 ) VALUES(?1,?2,?3,?4,'scenario-batch-copy-' || lower(hex(randomblob(16))))",
             )?;
-            for (path, source_is_left) in children {
+            for (path, source_is_left, kind) in children {
                 if valid_sync_path(path) {
-                    added += insert.execute(params![batch_id, path, source_is_left])?;
+                    added +=
+                        insert.execute(params![batch_id, path, source_is_left, kind.as_str()])?;
                 }
             }
         }
         transaction.commit()?;
         Ok(added)
+    }
+
+    /// Record the one-time confirmation of the one-way rule "the source
+    /// always wins" for a revision (D-025 section 4).
+    pub fn confirm_scenario_source_wins(&self, scenario_id: &str, revision: u64) -> Result<()> {
+        let scenario = self
+            .get_scenario_revision(scenario_id, revision)?
+            .ok_or(RegistryError::NotFound)?;
+        if scenario.direction == "bidirectional" {
+            return Err(RegistryError::InvalidSyncState);
+        }
+        self.db.execute(
+            "INSERT OR IGNORE INTO scenario_source_wins_consents(scenario_id,revision,confirmed_at)
+             VALUES(?1,?2,?3)",
+            params![scenario_id, revision as i64, unix_seconds()],
+        )?;
+        Ok(())
+    }
+
+    /// True when the user confirmed "the source always wins" for this
+    /// revision, or for an earlier revision with the same direction,
+    /// destination, and selection. A change of these asks again.
+    pub fn scenario_source_wins_confirmed(&self, scenario_id: &str, revision: u64) -> Result<bool> {
+        let confirmed: Option<i64> = self
+            .db
+            .query_row(
+                "SELECT max(revision) FROM scenario_source_wins_consents
+                 WHERE scenario_id=?1 AND revision<=?2",
+                params![scenario_id, revision as i64],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        let Some(confirmed) = confirmed else {
+            return Ok(false);
+        };
+        if confirmed as u64 == revision {
+            return Ok(true);
+        }
+        // (direction, destination connection, destination root, selection)
+        type Destination = (String, String, String, Vec<String>);
+        let destination = |revision: u64| -> Result<Option<Destination>> {
+            let Some(scenario) = self.get_scenario_revision(scenario_id, revision)? else {
+                return Ok(None);
+            };
+            let (connection, root) = match scenario.direction.as_str() {
+                "left_to_right" => (scenario.right_connection_id, scenario.right_root),
+                "right_to_left" => (scenario.left_connection_id, scenario.left_root),
+                _ => return Ok(None),
+            };
+            let scope = self.get_scenario_revision_scope(scenario_id, revision)?;
+            Ok(Some((
+                scenario.direction,
+                connection,
+                root,
+                scope.selected_paths,
+            )))
+        };
+        let current = destination(revision)?;
+        Ok(current.is_some() && current == destination(confirmed as u64)?)
     }
 
     /// Paths are immutable and get stable Job IDs, so a controller reconnect
@@ -1744,7 +1870,7 @@ impl Registry {
     ) -> Result<Vec<DueBatchChild>> {
         let mut statement = self.db.prepare(
             "SELECT c.batch_id,b.scenario_id,b.scenario_revision,c.relative_path,c.source_is_left,
-                    c.job_id,c.retries,b.cancellation_requested
+                    c.job_id,c.retries,b.cancellation_requested,c.kind
              FROM scenario_create_batch_children c
              JOIN scenario_create_batches b ON b.id=c.batch_id
              WHERE c.state='pending' AND b.paused=0
@@ -1765,6 +1891,8 @@ impl Registry {
                     job_id: row.get(5)?,
                     retries: row.get(6)?,
                     cancellation_requested: row.get(7)?,
+                    kind: BatchChildKind::parse(&row.get::<_, String>(8)?)
+                        .unwrap_or(BatchChildKind::Create),
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;

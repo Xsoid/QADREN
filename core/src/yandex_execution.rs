@@ -10,8 +10,9 @@
 use crate::confirmation::Confirmation;
 use crate::job_execution::{
     enabled_local_connection, local_root_identity_key, matches_conflict_snapshot,
-    require_selected_path, valid_job_id, LocalDirectoryCreateError, LocalFileCopyError,
-    LocalFileCopyStatus,
+    require_selected_path, run_scenario_rule_delete_after_remote_check,
+    scenario_update_destination, valid_job_id, LocalDirectoryCreateError, LocalFileCopyError,
+    LocalFileCopyStatus, LocalRuleDeleteStatus,
 };
 use crate::jobs::{JobStore, ScenarioCopyBaselineOutboxEntry};
 use crate::local_fs::{LocalError, LocalFilesystem};
@@ -285,6 +286,140 @@ pub fn run_yandex_scenario_file_download(
         let _ = dispatch_pending_scenario_copy_baselines(&registry, &mut store);
     }
     Ok(LocalFileCopyStatus::Completed)
+}
+
+/// The Yandex Disk source root of a one-way Scenario revision.
+fn yandex_source_root(
+    registry: &Registry,
+    scenario: &crate::registry::Scenario,
+) -> Result<String, LocalFileCopyError> {
+    let (connection, root) = match scenario.direction.as_str() {
+        "left_to_right" => (&scenario.left_connection_id, &scenario.left_root),
+        "right_to_left" => (&scenario.right_connection_id, &scenario.right_root),
+        _ => return Err(LocalFileCopyError::ScenarioScopeMismatch),
+    };
+    let adapter = registry
+        .get(connection)
+        .ok()
+        .flatten()
+        .filter(|connection| connection.enabled)
+        .map(|connection| connection.adapter);
+    if adapter.as_deref() != Some(YANDEX_DISK) {
+        return Err(LocalFileCopyError::ConnectionUnavailable);
+    }
+    if !valid_yandex_root(root) {
+        return Err(LocalFileCopyError::ScenarioScopeMismatch);
+    }
+    Ok(root.clone())
+}
+
+/// One Update of a Yandex Disk to Mac run (D-025 section 6.3). The source
+/// metadata and the destination are read again here; the download then
+/// checks the size and MD5 and replaces through the approved protocol.
+#[allow(clippy::too_many_arguments)]
+pub fn run_yandex_scenario_update(
+    database_path: &Path,
+    registry_path: &Path,
+    scenario_id: &str,
+    scenario_revision: u64,
+    relative_path: &str,
+    job_id: &str,
+    token: &str,
+    client: &YandexMetadataClient,
+) -> Result<LocalFileCopyStatus, LocalFileCopyError> {
+    if !plain_relative(relative_path) || token.is_empty() {
+        return Err(LocalFileCopyError::InvalidRequest);
+    }
+    let registry =
+        Registry::open(registry_path).map_err(|_| LocalFileCopyError::ScenarioUnavailable)?;
+    let scenario = registry
+        .get_scenario_revision(scenario_id, scenario_revision)
+        .map_err(|_| LocalFileCopyError::ScenarioUnavailable)?
+        .ok_or(LocalFileCopyError::ScenarioUnavailable)?;
+    let source_root = yandex_source_root(&registry, &scenario)?;
+    let source_is_left = scenario.direction == "left_to_right";
+    let destination_root = if source_is_left {
+        &scenario.right_root
+    } else {
+        &scenario.left_root
+    };
+    let resource = client
+        .resource_metadata(token, &yandex_path(&source_root, relative_path))
+        .map_err(LocalFileCopyError::Remote)?;
+    let (Some(size), Some(md5)) = (resource.size, resource.md5.as_deref()) else {
+        return Err(LocalFileCopyError::Remote(YandexError::ContentMismatch));
+    };
+    let source_version = yandex_file_version(size, &md5.to_ascii_lowercase());
+    let destination =
+        LocalFilesystem::open(Path::new(destination_root)).map_err(LocalFileCopyError::Local)?;
+    let current = match destination.stat(Path::new(relative_path)) {
+        Ok(entry) => entry,
+        Err(LocalError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(LocalFileCopyError::ConflictStale)
+        }
+        Err(error) => return Err(LocalFileCopyError::Local(error)),
+    };
+    let expected_destination = scenario_update_destination(
+        &registry,
+        &scenario,
+        relative_path,
+        source_is_left,
+        &current,
+    )?;
+    drop(registry);
+    run_yandex_scenario_file_download(
+        database_path,
+        registry_path,
+        scenario_id,
+        scenario_revision,
+        relative_path,
+        job_id,
+        token,
+        client,
+        Some((&source_version, &expected_destination, true)),
+    )
+}
+
+/// One Delete of a Yandex Disk to Mac run (D-025 section 6.3). The provider
+/// must answer that the source object is absent; any other answer stops
+/// the deletion. The effect acts only on the Mac or SMB side.
+#[allow(clippy::too_many_arguments)]
+pub fn run_yandex_scenario_delete(
+    database_path: &Path,
+    registry_path: &Path,
+    scenario_id: &str,
+    scenario_revision: u64,
+    relative_path: &str,
+    job_id: &str,
+    token: &str,
+    client: &YandexMetadataClient,
+) -> Result<LocalRuleDeleteStatus, LocalFileCopyError> {
+    if !plain_relative(relative_path) || token.is_empty() {
+        return Err(LocalFileCopyError::InvalidRequest);
+    }
+    let registry =
+        Registry::open(registry_path).map_err(|_| LocalFileCopyError::ScenarioUnavailable)?;
+    let scenario = registry
+        .get_scenario_revision(scenario_id, scenario_revision)
+        .map_err(|_| LocalFileCopyError::ScenarioUnavailable)?
+        .ok_or(LocalFileCopyError::ScenarioUnavailable)?;
+    let source_root = yandex_source_root(&registry, &scenario)?;
+    let on_left = scenario.direction == "right_to_left";
+    drop(registry);
+    match client.resource_metadata(token, &yandex_path(&source_root, relative_path)) {
+        Err(YandexError::NotFound) => {}
+        Ok(_) => return Err(LocalFileCopyError::ConflictStale),
+        Err(error) => return Err(LocalFileCopyError::Remote(error)),
+    }
+    run_scenario_rule_delete_after_remote_check(
+        database_path,
+        registry_path,
+        scenario_id,
+        scenario_revision,
+        relative_path,
+        on_left,
+        job_id,
+    )
 }
 
 #[cfg(test)]

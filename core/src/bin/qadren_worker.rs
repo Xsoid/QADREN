@@ -11,15 +11,17 @@ use qadren_core::job_execution::{
     remove_interrupted_staging, require_current_scenario_revision, run_local_directory_create,
     run_local_file_copy, run_local_file_replace, run_local_scenario_conflict_delete,
     run_local_scenario_conflict_replace, run_local_scenario_file_copy,
-    run_local_scenario_file_replace_planned, run_local_scenario_rule_delete, LocalFileCopyError,
-    LocalFileCopyReconciliationStatus, LocalFileCopyStatus, LocalRuleDeleteStatus,
+    run_local_scenario_file_replace_planned, run_local_scenario_rule_delete,
+    run_local_scenario_update, LocalFileCopyError, LocalFileCopyReconciliationStatus,
+    LocalFileCopyStatus, LocalRuleDeleteStatus,
 };
 use qadren_core::jobs::JobStore;
 use qadren_core::local_fs::LocalFilesystem;
 use qadren_core::model::{ConfirmedFileVersion, JobState, ScenarioReference};
 use qadren_core::plan_store;
 use qadren_core::registry::{
-    BatchChildDue, DueBatchChild, Registry, RegistryError, ScenarioRun, ScheduleRunStart,
+    BatchChildDue, BatchChildKind, DueBatchChild, Registry, RegistryError, ScenarioRun,
+    ScheduleRunStart,
 };
 use qadren_core::scenario_planner::{ObservedFile, PlanAction};
 use qadren_core::schedule_dispatch::dispatch_pending_schedule_jobs;
@@ -28,7 +30,9 @@ use qadren_core::snapshot::{
 };
 use qadren_core::storage_access::YANDEX_DISK;
 use qadren_core::yandex::{YandexError, YandexMetadataClient};
-use qadren_core::yandex_execution::run_yandex_scenario_file_download;
+use qadren_core::yandex_execution::{
+    run_yandex_scenario_delete, run_yandex_scenario_file_download, run_yandex_scenario_update,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
@@ -731,9 +735,8 @@ fn advance_planning_run(
     match info {
         None => registry.set_scenario_run_plan(&run.id, None),
         Some(info) if info.state == "complete" => {
-            let deferred = deferred_plan_items(&info);
             return match batch_from_plan(paths, plan_id) {
-                Ok((_, batch, _)) => {
+                Ok((_, batch, _, deferred)) => {
                     registry
                         .set_scenario_run_executing(&run.id, &batch, deferred)
                         .and_then(|_| registry.set_scenario_create_batch_paused(&batch, false))
@@ -835,21 +838,6 @@ fn finish_run_job(paths: &WorkerPaths, run_id: &str) -> Result<(), String> {
     }
     let unknown = run.error.as_deref() == Some("items_unknown");
     finish_schedule_job_for_run(&mut jobs, job_id, &run, unknown)
-}
-
-/// Plan items that a run does not execute yet: everything except Create and
-/// no action. Update, deletion, and conflict execution is Xsoid/QADREN#31.
-fn deferred_plan_items(info: &plan_store::PlanInfo) -> u64 {
-    info.counts
-        .as_ref()
-        .and_then(|counts| counts.as_object())
-        .map_or(0, |counts| {
-            counts
-                .iter()
-                .filter(|(action, _)| !matches!(action.as_str(), "create" | "no_action"))
-                .filter_map(|(_, value)| value["count"].as_u64())
-                .sum()
-        })
 }
 
 fn remove_stale_socket(socket: &Path) -> Result<(), String> {
@@ -1258,10 +1246,14 @@ fn plan_page(paths: &WorkerPaths, request: &Request) -> serde_json::Value {
 /// Make one paused Create batch of all Create rows of a complete plan, page
 /// by page. The caller records the run and then resumes the batch, so a
 /// crash in between leaves a paused batch that never runs.
+/// Make a paused batch of the executable rows of a complete plan: Create,
+/// and Update and Delete when the run may execute them (D-025). Returns the
+/// Scenario, the batch, the number of children, and the number of plan
+/// items that the run does not execute.
 fn batch_from_plan(
     paths: &WorkerPaths,
     plan: &str,
-) -> Result<(ScenarioReference, String, usize), &'static str> {
+) -> Result<(ScenarioReference, String, usize, u64), &'static str> {
     let store = SnapshotStore::open_for_reading(&SnapshotStore::path_for(&paths.registry))
         .map_err(|_| "snapshot_store_unavailable")?;
     let Ok(Some(info)) = plan_store::plan_info(store.connection(), plan) else {
@@ -1284,25 +1276,70 @@ fn batch_from_plan(
         )
         .map_err(|_| "plan_unavailable")?;
     let mut registry = Registry::open(&paths.registry).map_err(|_| "registry_unavailable")?;
+    let actions = executable_actions(&registry, &reference)?;
     let batch = registry
         .begin_scenario_create_batch(&reference)
         .map_err(|_| "scenario_revision_stale")?;
     let mut after = 0;
     let mut added = 0;
     loop {
-        let page = plan_store::plan_creates_page(store.connection(), plan, after, 5_000)
-            .map_err(|_| "snapshot_store_unavailable")?;
-        let Some(last) = page.last() else { break };
-        after = last.0;
-        let children: Vec<(String, bool)> = page
+        let (page, last) =
+            plan_store::plan_effects_page(store.connection(), plan, &actions, after, 5_000)
+                .map_err(|_| "snapshot_store_unavailable")?;
+        let Some(last) = last else { break };
+        after = last;
+        let children: Vec<(String, bool, BatchChildKind)> = page
             .into_iter()
-            .map(|(_, path, from_left)| (path, from_left))
+            .filter_map(|(path, action, source_is_left)| {
+                BatchChildKind::parse(&action).map(|kind| (path, source_is_left, kind))
+            })
             .collect();
         added += registry
-            .append_scenario_create_batch_children(&batch, &children)
+            .append_scenario_batch_children(&batch, &children)
             .map_err(|_| "registry_unavailable")?;
     }
-    Ok((reference, batch, added))
+    let planned: u64 = info
+        .counts
+        .as_ref()
+        .and_then(|counts| counts.as_object())
+        .map_or(0, |counts| {
+            counts
+                .iter()
+                .filter(|(action, _)| action.as_str() != "no_action")
+                .filter_map(|(_, value)| value["count"].as_u64())
+                .sum()
+        });
+    Ok((
+        reference,
+        batch,
+        added,
+        planned.saturating_sub(added as u64),
+    ))
+}
+
+/// The plan actions that a run of this revision executes. A one-way Update
+/// or Delete replaces or removes data in the destination, so it needs the
+/// one-time confirmation of "the source always wins" (D-025 section 4).
+/// Without it these items stay in the plan and the run does not execute
+/// them.
+fn executable_actions(
+    registry: &Registry,
+    reference: &ScenarioReference,
+) -> Result<Vec<&'static str>, &'static str> {
+    let scenario = registry
+        .get_scenario_revision(&reference.scenario_id, reference.revision)
+        .ok()
+        .flatten()
+        .ok_or("scenario_unavailable")?;
+    let confirmed = scenario.direction == "bidirectional"
+        || registry
+            .scenario_source_wins_confirmed(&reference.scenario_id, reference.revision)
+            .map_err(|_| "registry_unavailable")?;
+    Ok(if confirmed {
+        vec!["create", "update", "delete"]
+    } else {
+        vec!["create"]
+    })
 }
 
 /// The Scenario of a stored plan.
@@ -1342,7 +1379,7 @@ fn execute_plan_creates(paths: &WorkerPaths, request: &Request) -> serde_json::V
     }) {
         return run_active_answer(&active);
     }
-    let (reference, batch, added) = match batch_from_plan(paths, plan) {
+    let (reference, batch, added, deferred) = match batch_from_plan(paths, plan) {
         Ok(made) => made,
         Err(status) => return serde_json::json!({"ok": false, "status": status}),
     };
@@ -1355,14 +1392,6 @@ fn execute_plan_creates(paths: &WorkerPaths, request: &Request) -> serde_json::V
     ) {
         runner().remember_token(&connection, token);
     }
-    let deferred = SnapshotStore::open_for_reading(&SnapshotStore::path_for(&paths.registry))
-        .ok()
-        .and_then(|store| {
-            plan_store::plan_info(store.connection(), plan)
-                .ok()
-                .flatten()
-        })
-        .map_or(0, |info| deferred_plan_items(&info));
     match registry.begin_manual_run(&reference, plan, &batch, deferred) {
         Ok(_) => {}
         // A run started between the check and now. Its paused batch never
@@ -1599,16 +1628,73 @@ fn run_batch_child(paths: &WorkerPaths, child: &DueBatchChild, yandex: Option<(&
         if let Some(state) = job_state(paths, &child.job_id) {
             return Ok(LocalFileCopyStatus::Existing(state));
         }
+        let (scenario_id, revision) = (&child.scenario.scenario_id, child.scenario.revision);
+        let deleted = |status: LocalRuleDeleteStatus| match status {
+            LocalRuleDeleteStatus::MovedToTrash | LocalRuleDeleteStatus::DeletedPermanently => {
+                LocalFileCopyStatus::Completed
+            }
+            LocalRuleDeleteStatus::Existing(state) => LocalFileCopyStatus::Existing(state),
+        };
         if let Some((_, token)) = yandex {
-            return run_yandex_download(
-                paths,
-                &child.scenario.scenario_id,
-                child.scenario.revision,
-                &child.relative_path,
-                &child.job_id,
-                Some(token),
-                None,
-            );
+            let client = YandexMetadataClient::new().map_err(LocalFileCopyError::Remote)?;
+            return match child.kind {
+                BatchChildKind::Create => run_yandex_download(
+                    paths,
+                    scenario_id,
+                    revision,
+                    &child.relative_path,
+                    &child.job_id,
+                    Some(token),
+                    None,
+                ),
+                BatchChildKind::Update => run_yandex_scenario_update(
+                    &paths.jobs,
+                    &paths.registry,
+                    scenario_id,
+                    revision,
+                    &child.relative_path,
+                    &child.job_id,
+                    token,
+                    &client,
+                ),
+                BatchChildKind::Delete => run_yandex_scenario_delete(
+                    &paths.jobs,
+                    &paths.registry,
+                    scenario_id,
+                    revision,
+                    &child.relative_path,
+                    &child.job_id,
+                    token,
+                    &client,
+                )
+                .map(deleted),
+            };
+        }
+        match child.kind {
+            BatchChildKind::Create => {}
+            BatchChildKind::Update => {
+                return run_local_scenario_update(
+                    &paths.jobs,
+                    &paths.registry,
+                    scenario_id,
+                    revision,
+                    &child.relative_path,
+                    child.source_is_left,
+                    &child.job_id,
+                )
+            }
+            BatchChildKind::Delete => {
+                return run_local_scenario_rule_delete(
+                    &paths.jobs,
+                    &paths.registry,
+                    scenario_id,
+                    revision,
+                    &child.relative_path,
+                    !child.source_is_left,
+                    &child.job_id,
+                )
+                .map(deleted)
+            }
         }
         let registry =
             Registry::open(&paths.registry).map_err(|_| LocalFileCopyError::ScenarioUnavailable)?;
@@ -1732,9 +1818,10 @@ fn record_batch_child_outcome(
     let (failure, code) = classify(&error);
     // Diagnostics: the error kind only, never a path, a token, or a link.
     eprintln!(
-        "qadren-worker: {} batch child {} failed: {code}",
+        "qadren-worker: {} batch child {} ({}) failed: {code}",
         log_time(),
-        child.job_id
+        child.job_id,
+        child.kind.as_str()
     );
     // A retry needs proof that the failed Job made no effect: no Job, or a
     // Job closed as failed before any effect.
@@ -2848,6 +2935,11 @@ mod tests {
         // roots under the system temporary directory so an exported checkout
         // cannot make the private Worker socket unbindable.
         let temporary = std::env::temp_dir().canonicalize().unwrap();
+        // A replacement keeps the previous version in the Trash. Worker tests
+        // must never use the real Trash of the user.
+        let trash = temporary.join("qw-trash");
+        fs::create_dir_all(&trash).unwrap();
+        qadren_core::local_fs::override_trash_directory_for_tests(trash);
         let path = temporary.join(format!(
             "qw-{name}-{}",
             SystemTime::now()
@@ -3119,8 +3211,9 @@ mod tests {
         assert_eq!(run.deferred_items, 0);
         assert_eq!(coordinator_states(&paths), vec![JobState::Completed]);
 
-        // An Update is not executed by a run yet (Xsoid/QADREN#31). The run
-        // reports it as deferred and changes no file.
+        // Without the confirmation of "the source always wins" a one-way
+        // run does not replace a file (D-025 section 4). The run reports
+        // the Update as deferred and changes no file.
         fs::write(left_root.join("report.txt"), b"second version").unwrap();
         schedule_current_minute(&paths, &scenario);
         drive_runs(&paths);
@@ -3135,6 +3228,80 @@ mod tests {
             coordinator_states(&paths),
             vec![JobState::Completed, JobState::Completed]
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// D-025 sections 3 to 6: a one-way run updates a changed file and
+    /// restores a destination change after the one-time confirmation of
+    /// "the source always wins". A deletion is deferred in Paranoid mode.
+    /// The library tests check Delete with a test Trash; this binary would
+    /// use the real Trash of the user.
+    #[test]
+    fn one_way_run_updates_after_the_source_wins_confirmation() {
+        let root = root("source-wins");
+        let left_root = root.join("left");
+        let right_root = root.join("right");
+        fs::create_dir_all(&left_root).unwrap();
+        fs::create_dir_all(&right_root).unwrap();
+        let paths = WorkerPaths {
+            socket: root.join("worker.sock"),
+            registry: root.join("registry.sqlite3"),
+            jobs: root.join("jobs.sqlite3"),
+        };
+        let registry = Registry::open(&paths.registry).unwrap();
+        let left = registry.add("local_filesystem", "Left").unwrap();
+        let right = registry.add("local_filesystem", "Right").unwrap();
+        let scenario = registry
+            .create_scenario_with_scope(
+                "Source wins",
+                &left,
+                left_root.to_str().unwrap(),
+                &right,
+                right_root.to_str().unwrap(),
+                "left_to_right",
+                &qadren_core::model::ScenarioScope::default(),
+            )
+            .unwrap();
+        drop(registry);
+        fs::write(left_root.join("changed.txt"), b"one").unwrap();
+        fs::write(left_root.join("edited.txt"), b"source").unwrap();
+        fs::write(left_root.join("removed.txt"), b"gone soon").unwrap();
+        schedule_current_minute(&paths, &scenario);
+        drive_runs(&paths);
+        assert_eq!(latest_run(&paths, &scenario).state, "completed");
+        assert!(right_root.join("removed.txt").exists());
+
+        fs::write(left_root.join("changed.txt"), b"two, longer").unwrap();
+        fs::write(right_root.join("edited.txt"), b"edited in the destination").unwrap();
+        fs::remove_file(left_root.join("removed.txt")).unwrap();
+
+        // Without the confirmation the run replaces and deletes nothing.
+        schedule_current_minute(&paths, &scenario);
+        drive_runs(&paths);
+        let run = latest_run(&paths, &scenario);
+        assert_eq!((run.state.as_str(), run.deferred_items), ("completed", 3));
+        assert_eq!(fs::read(right_root.join("changed.txt")).unwrap(), b"one");
+        assert!(right_root.join("removed.txt").exists());
+
+        Registry::open(&paths.registry)
+            .unwrap()
+            .confirm_scenario_source_wins(&scenario, 1)
+            .unwrap();
+        schedule_current_minute(&paths, &scenario);
+        drive_runs(&paths);
+        let run = latest_run(&paths, &scenario);
+        assert_eq!((run.state.as_str(), run.deferred_items), ("completed", 1));
+        assert_eq!(
+            fs::read(right_root.join("changed.txt")).unwrap(),
+            b"two, longer"
+        );
+        assert_eq!(fs::read(right_root.join("edited.txt")).unwrap(), b"source");
+        assert!(right_root.join("removed.txt").exists());
+        // The replaced destination version is kept in the Trash.
+        let trash = std::env::temp_dir().canonicalize().unwrap().join("qw-trash");
+        assert!(fs::read_dir(trash).unwrap().any(|entry| {
+            fs::read(entry.unwrap().path()).unwrap() == b"edited in the destination"
+        }));
         fs::remove_dir_all(root).unwrap();
     }
 

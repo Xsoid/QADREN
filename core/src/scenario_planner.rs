@@ -3,7 +3,7 @@
 //! here. Callers must supply already-authorized metadata snapshots.
 use crate::model::{
     ConfirmedFileVersion, DeletionMode, FileSyncState, ScenarioDraft, ScenarioReference,
-    ScenarioScope, ScopeMatch, SyncDirection, MASS_DELETION_THRESHOLD,
+    ScenarioScope, ScopeMatch, SyncDirection,
 };
 use icu_normalizer::ComposingNormalizerBorrowed;
 use std::collections::{BTreeMap, BTreeSet};
@@ -63,9 +63,9 @@ pub enum PlanAction {
     DeleteRequiresDecision {
         on_left: bool,
     },
-    /// The revision's approved simple deletion rule covers this deletion:
-    /// the object was confirmed, is unchanged on `on_left`'s side, and the
-    /// plan is not a mass deletion. The executor rechecks all of this.
+    /// The revision's approved simple deletion rule covers this deletion of
+    /// a confirmed object. The executor checks again that the source object
+    /// is absent.
     Delete {
         on_left: bool,
     },
@@ -166,11 +166,14 @@ fn same_confirmed_content(left: &ObservedFile, right: &ObservedFile) -> bool {
         )
 }
 
+/// One-way Scenario: the source always wins (D-025 section 3.1). A change
+/// in the destination is replaced, and a destination removal is restored.
+/// Only objects with a confirmed state are deleted (D-019 rule 4).
 fn directional_action(
     source: SideChange,
     destination: SideChange,
-    source_present: bool,
-    destination_present: bool,
+    source_file: Option<&ObservedFile>,
+    destination_file: Option<&ObservedFile>,
     from_left: bool,
 ) -> PlanAction {
     if source == SideChange::NeedsVerification || destination == SideChange::NeedsVerification {
@@ -178,25 +181,32 @@ fn directional_action(
             reason: "metadata does not prove the confirmed object identity",
         };
     }
-    if destination != SideChange::Unchanged {
-        return PlanAction::Conflict {
-            reason: "destination changed since the confirmed baseline",
-        };
-    }
-    match source {
-        SideChange::Unchanged => PlanAction::NoAction,
-        SideChange::Added | SideChange::Changed if source_present && !destination_present => {
+    match (source_file, destination_file) {
+        // Equal content on both sides needs no effect.
+        (Some(source_file), Some(destination_file))
+            if same_confirmed_content(source_file, destination_file) =>
+        {
+            PlanAction::NoAction
+        }
+        (Some(_), None)
+            if source != SideChange::Unchanged || destination == SideChange::Removed =>
+        {
             PlanAction::Create { from_left }
         }
-        SideChange::Added | SideChange::Changed if source_present => {
+        (Some(_), Some(_))
+            if source != SideChange::Unchanged || destination != SideChange::Unchanged =>
+        {
             PlanAction::Update { from_left }
         }
-        SideChange::Removed => PlanAction::DeleteRequiresDecision {
-            on_left: !from_left,
-        },
-        _ => PlanAction::NeedsVerification {
-            reason: "source observation is incomplete",
-        },
+        // The source removed a confirmed object: delete it in the
+        // destination under the deletion mode. A destination object without
+        // a confirmed state was never synchronized and does not change.
+        (None, Some(_)) if source == SideChange::Removed && destination != SideChange::Added => {
+            PlanAction::DeleteRequiresDecision {
+                on_left: !from_left,
+            }
+        }
+        _ => PlanAction::NoAction,
     }
 }
 
@@ -292,8 +302,7 @@ pub fn plan_with_skipped(
 /// Like `plan_with_skipped`, limited to the revision's selected objects and
 /// with its deletion rule. A path outside the selection is not in the plan.
 /// A name variant of a selected object is never executable. The simple rule
-/// makes a deletion executable only when the plan has at most
-/// `MASS_DELETION_THRESHOLD` deletions; otherwise all of them need a decision.
+/// makes every rule deletion executable (D-025 section 5).
 #[allow(clippy::too_many_arguments)]
 pub fn plan_scoped(
     scenario: &ScenarioDraft,
@@ -386,16 +395,11 @@ pub fn plan_scoped(
             )
         })
         .collect::<Vec<_>>();
+    // D-025 section 5: the simple rule has no mass-deletion threshold.
     if scope.deletion_mode == DeletionMode::Simple {
-        let deletions = items
-            .iter()
-            .filter(|item| matches!(item.action, PlanAction::DeleteRequiresDecision { .. }))
-            .count();
-        if deletions <= MASS_DELETION_THRESHOLD {
-            for item in &mut items {
-                if let PlanAction::DeleteRequiresDecision { on_left } = item.action {
-                    item.action = PlanAction::Delete { on_left };
-                }
+        for item in &mut items {
+            if let PlanAction::DeleteRequiresDecision { on_left } = item.action {
+                item.action = PlanAction::Delete { on_left };
             }
         }
     }
@@ -446,20 +450,12 @@ pub fn plan_path(
         }
     } else {
         match direction {
-            SyncDirection::LeftToRight => directional_action(
-                left_change,
-                right_change,
-                left_file.is_some(),
-                right_file.is_some(),
-                true,
-            ),
-            SyncDirection::RightToLeft => directional_action(
-                right_change,
-                left_change,
-                right_file.is_some(),
-                left_file.is_some(),
-                false,
-            ),
+            SyncDirection::LeftToRight => {
+                directional_action(left_change, right_change, left_file, right_file, true)
+            }
+            SyncDirection::RightToLeft => {
+                directional_action(right_change, left_change, right_file, left_file, false)
+            }
             SyncDirection::Bidirectional => {
                 bidirectional_action(left_change, right_change, left_file, right_file)
             }
@@ -632,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn changed_destination_is_a_conflict_not_an_overwrite() {
+    fn a_change_on_both_sides_is_an_update_one_way_and_a_conflict_two_way() {
         let old = file("file.txt", "old", Some("abcdef0123456789abcdef0123456789"));
         let baseline = FileSyncState {
             scenario: reference(),
@@ -650,15 +646,188 @@ mod tests {
             "new-right",
             Some("22222222222222222222222222222222"),
         );
+        let action = |direction| {
+            plan(
+                &scenario(direction),
+                &reference(),
+                std::slice::from_ref(&baseline),
+                std::slice::from_ref(&left),
+                std::slice::from_ref(&right),
+            )
+            .unwrap()[0]
+                .action
+                .clone()
+        };
+        assert_eq!(
+            action(SyncDirection::LeftToRight),
+            PlanAction::Update { from_left: true }
+        );
+        assert!(matches!(
+            action(SyncDirection::Bidirectional),
+            PlanAction::Conflict { .. }
+        ));
+    }
+
+    /// D-025 section 3.1: each row of the one-way table, from the left.
+    #[test]
+    fn one_way_source_always_wins() {
+        let md5 = |digit: char| Some(digit.to_string().repeat(32));
+        let v = |revision: &str, digit: char| file("f.txt", revision, md5(digit).as_deref());
+        let state = |left: Option<&ObservedFile>, right: Option<&ObservedFile>| FileSyncState {
+            scenario: reference(),
+            relative_path: "f.txt".into(),
+            left: left.map(confirmed),
+            right: right.map(confirmed),
+        };
+        let (s0, s1, d0, d1) = (v("s0", '1'), v("s1", '2'), v("d0", '1'), v("d1", '3'));
+        let same = v("other", '2');
+        #[allow(clippy::type_complexity)]
+        let rows: Vec<(
+            &str,
+            Option<FileSyncState>,
+            Option<&ObservedFile>,
+            Option<&ObservedFile>,
+            PlanAction,
+        )> = vec![
+            (
+                "added, destination absent",
+                None,
+                Some(&s1),
+                None,
+                PlanAction::Create { from_left: true },
+            ),
+            (
+                "changed, destination absent",
+                Some(state(Some(&s0), None)),
+                Some(&s1),
+                None,
+                PlanAction::Create { from_left: true },
+            ),
+            (
+                "changed, destination unchanged",
+                Some(state(Some(&s0), Some(&d0))),
+                Some(&s1),
+                Some(&d0),
+                PlanAction::Update { from_left: true },
+            ),
+            (
+                "changed, destination changed",
+                Some(state(Some(&s0), Some(&d0))),
+                Some(&s1),
+                Some(&d1),
+                PlanAction::Update { from_left: true },
+            ),
+            (
+                "added, destination added",
+                None,
+                Some(&s1),
+                Some(&d1),
+                PlanAction::Update { from_left: true },
+            ),
+            (
+                "unchanged, destination changed",
+                Some(state(Some(&s0), Some(&d0))),
+                Some(&s0),
+                Some(&d1),
+                PlanAction::Update { from_left: true },
+            ),
+            (
+                "unchanged, destination removed",
+                Some(state(Some(&s0), Some(&d0))),
+                Some(&s0),
+                None,
+                PlanAction::Create { from_left: true },
+            ),
+            (
+                "removed, destination unchanged",
+                Some(state(Some(&s0), Some(&d0))),
+                None,
+                Some(&d0),
+                PlanAction::DeleteRequiresDecision { on_left: false },
+            ),
+            (
+                "removed, destination changed",
+                Some(state(Some(&s0), Some(&d0))),
+                None,
+                Some(&d1),
+                PlanAction::DeleteRequiresDecision { on_left: false },
+            ),
+            (
+                "removed, destination removed",
+                Some(state(Some(&s0), Some(&d0))),
+                None,
+                None,
+                PlanAction::NoAction,
+            ),
+            (
+                "same content, no confirmed state",
+                None,
+                Some(&s1),
+                Some(&same),
+                PlanAction::NoAction,
+            ),
+            (
+                "destination only, no confirmed state",
+                None,
+                None,
+                Some(&d1),
+                PlanAction::NoAction,
+            ),
+            (
+                "unchanged on both sides",
+                Some(state(Some(&s0), Some(&d0))),
+                Some(&s0),
+                Some(&d0),
+                PlanAction::NoAction,
+            ),
+        ];
+        for (name, baseline, left, right, expected) in rows {
+            let items = plan(
+                &scenario(SyncDirection::LeftToRight),
+                &reference(),
+                &baseline.into_iter().collect::<Vec<_>>(),
+                &left.cloned().into_iter().collect::<Vec<_>>(),
+                &right.cloned().into_iter().collect::<Vec<_>>(),
+            )
+            .unwrap();
+            let action = items
+                .first()
+                .map_or(PlanAction::NoAction, |item| item.action.clone());
+            assert_eq!(action, expected, "{name}");
+        }
+    }
+
+    /// The same table from the right side mirrors every action.
+    #[test]
+    fn one_way_right_to_left_mirrors_the_rules() {
+        let old = file("f.txt", "old", None);
+        let baseline = FileSyncState {
+            scenario: reference(),
+            relative_path: "f.txt".into(),
+            left: Some(confirmed(&old)),
+            right: Some(confirmed(&old)),
+        };
         let items = plan(
-            &scenario(SyncDirection::LeftToRight),
+            &scenario(SyncDirection::RightToLeft),
             &reference(),
-            &[baseline],
-            &[left],
-            &[right],
+            std::slice::from_ref(&baseline),
+            &[file("f.txt", "left-changed", None)],
+            std::slice::from_ref(&old),
         )
         .unwrap();
-        assert!(matches!(items[0].action, PlanAction::Conflict { .. }));
+        assert_eq!(items[0].action, PlanAction::Update { from_left: false });
+        let items = plan(
+            &scenario(SyncDirection::RightToLeft),
+            &reference(),
+            &[baseline],
+            std::slice::from_ref(&old),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            items[0].action,
+            PlanAction::DeleteRequiresDecision { on_left: true }
+        );
     }
 
     #[test]
@@ -799,9 +968,10 @@ mod tests {
         );
     }
 
+    /// D-025 section 5: the simple rule has no mass-deletion threshold.
     #[test]
-    fn simple_rule_makes_deletions_executable_up_to_the_threshold() {
-        let (baseline, right) = deleted_on_left(MASS_DELETION_THRESHOLD);
+    fn simple_rule_has_no_mass_deletion_threshold() {
+        let (baseline, right) = deleted_on_left(500);
         let items = plan_scoped(
             &scenario(SyncDirection::LeftToRight),
             &reference(),
@@ -813,33 +983,17 @@ mod tests {
             &simple(&[]),
         )
         .unwrap();
-        assert_eq!(items.len(), MASS_DELETION_THRESHOLD);
+        assert_eq!(items.len(), 500);
         assert!(items
             .iter()
             .all(|item| item.action == PlanAction::Delete { on_left: false }));
     }
 
+    /// One-way: the source wins, so a changed destination object of a
+    /// removed source object is deleted. Two-way: a change against a
+    /// removal stays a conflict.
     #[test]
-    fn a_mass_deletion_needs_a_decision_even_with_the_simple_rule() {
-        let (baseline, right) = deleted_on_left(MASS_DELETION_THRESHOLD + 1);
-        let items = plan_scoped(
-            &scenario(SyncDirection::LeftToRight),
-            &reference(),
-            &baseline,
-            &[],
-            &right,
-            &[],
-            &[],
-            &simple(&[]),
-        )
-        .unwrap();
-        assert!(items
-            .iter()
-            .all(|item| item.action == PlanAction::DeleteRequiresDecision { on_left: false }));
-    }
-
-    #[test]
-    fn simple_rule_never_deletes_an_object_changed_on_the_other_side() {
+    fn simple_rule_deletes_a_changed_destination_only_one_way() {
         let old = file("gone.txt", "old", None);
         let changed = file("gone.txt", "new", None);
         let baseline = FileSyncState {
@@ -848,17 +1002,28 @@ mod tests {
             left: Some(confirmed(&old)),
             right: Some(confirmed(&old)),
         };
-        let items = plan_scoped(
-            &scenario(SyncDirection::LeftToRight),
-            &reference(),
-            &[baseline],
-            &[],
-            &[changed],
-            &[],
-            &[],
-            &simple(&[]),
-        )
-        .unwrap();
-        assert!(matches!(items[0].action, PlanAction::Conflict { .. }));
+        let action = |direction| {
+            plan_scoped(
+                &scenario(direction),
+                &reference(),
+                std::slice::from_ref(&baseline),
+                &[],
+                std::slice::from_ref(&changed),
+                &[],
+                &[],
+                &simple(&[]),
+            )
+            .unwrap()[0]
+                .action
+                .clone()
+        };
+        assert_eq!(
+            action(SyncDirection::LeftToRight),
+            PlanAction::Delete { on_left: false }
+        );
+        assert!(matches!(
+            action(SyncDirection::Bidirectional),
+            PlanAction::Conflict { .. }
+        ));
     }
 }

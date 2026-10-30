@@ -12,7 +12,7 @@
 //! The tables live in `snapshots.sqlite3`. The Worker is the only writer.
 use crate::model::{
     ConfirmedFileVersion, DeletionMode, FileSyncState, ScenarioReference, ScenarioScope,
-    ScopeMatch, SyncDirection, MASS_DELETION_THRESHOLD,
+    ScopeMatch, SyncDirection,
 };
 use crate::registry::Registry;
 use crate::scenario_planner::{
@@ -442,19 +442,12 @@ pub fn build_plan(store_path: &std::path::Path, registry: &Registry, id: &str) -
         }
         flush(&mut group, &mut seq)?;
     }
-    // 3. The simple deletion rule over the whole plan, from a count.
+    // 3. The simple deletion rule, with no mass-deletion threshold (D-025).
     if scope.deletion_mode == DeletionMode::Simple {
-        let deletions: i64 = tx.query_row(
-            "SELECT count(*) FROM plan_items WHERE plan_id=?1 AND action='delete_requires_decision'",
+        tx.execute(
+            "UPDATE plan_items SET action='delete' WHERE plan_id=?1 AND action='delete_requires_decision'",
             [id],
-            |row| row.get(0),
         )?;
-        if deletions as usize <= MASS_DELETION_THRESHOLD {
-            tx.execute(
-                "UPDATE plan_items SET action='delete' WHERE plan_id=?1 AND action='delete_requires_decision'",
-                [id],
-            )?;
-        }
     }
     // 4. Counts and bytes for each action, from the source side.
     let source_left = !matches!(direction, SyncDirection::RightToLeft);
@@ -579,6 +572,43 @@ pub fn plan_page(
         )?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+/// One page of the executable rows after `after_seq` (D-025 section 6).
+/// Returns the rows of the listed actions as (path, action, source_is_left)
+/// and the last `seq` read, or `None` at the end. `action` is `create`,
+/// `update`, or `delete`. For a Delete, `source_is_left` names the side
+/// whose object is absent.
+#[allow(clippy::type_complexity)]
+pub fn plan_effects_page(
+    db: &Connection,
+    id: &str,
+    actions: &[&str],
+    after_seq: i64,
+    limit: usize,
+) -> Result<(Vec<(String, String, bool)>, Option<i64>)> {
+    let mut statement = db.prepare(
+        "SELECT seq,relative_path,action,from_left,on_left FROM plan_items
+         WHERE plan_id=?1 AND action IN ('create','update','delete') AND seq>?2
+         ORDER BY seq LIMIT ?3",
+    )?;
+    let mut rows = Vec::new();
+    let mut last = None;
+    let mut query = statement.query(params![id, after_seq, limit as i64])?;
+    while let Some(row) = query.next()? {
+        last = Some(row.get::<_, i64>(0)?);
+        let action: String = row.get(2)?;
+        if !actions.contains(&action.as_str()) {
+            continue;
+        }
+        let source_is_left = if action == "delete" {
+            !row.get::<_, Option<bool>>(4)?.unwrap_or(false)
+        } else {
+            row.get::<_, Option<bool>>(3)?.unwrap_or(true)
+        };
+        rows.push((row.get(1)?, action, source_is_left));
+    }
+    Ok((rows, last))
 }
 
 /// One page of the Create rows after `after_seq`: (seq, path, from_left).

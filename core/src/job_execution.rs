@@ -829,6 +829,158 @@ fn run_local_scenario_file_replace_checked(
     )
 }
 
+/// The side roots of a Scenario revision: (source root, source connection,
+/// destination root, destination connection) for a source on `source_is_left`.
+fn scenario_sides(
+    scenario: &crate::registry::Scenario,
+    source_is_left: bool,
+) -> (&str, &str, &str, &str) {
+    if source_is_left {
+        (
+            &scenario.left_root,
+            &scenario.left_connection_id,
+            &scenario.right_root,
+            &scenario.right_connection_id,
+        )
+    } else {
+        (
+            &scenario.right_root,
+            &scenario.right_connection_id,
+            &scenario.left_root,
+            &scenario.left_connection_id,
+        )
+    }
+}
+
+/// True when a revision lets `source_is_left` be the source: a one-way
+/// Scenario has one source side, a two-way Scenario has two.
+fn scenario_source_side(scenario: &crate::registry::Scenario, source_is_left: bool) -> bool {
+    match scenario.direction.as_str() {
+        "left_to_right" => source_is_left,
+        "right_to_left" => !source_is_left,
+        "bidirectional" => true,
+        _ => false,
+    }
+}
+
+/// The metadata of a Local object, as the replacement protocol compares it.
+pub fn local_version(entry: &crate::local_fs::LocalEntry) -> ConfirmedFileVersion {
+    ConfirmedFileVersion {
+        object_revision: entry.object_revision.clone(),
+        size: entry.size,
+        checksum_md5: None,
+    }
+}
+
+/// The expected destination of a Scenario Update (D-025 section 6.2). A
+/// one-way Scenario needs the confirmed rule "the source always wins" and
+/// then replaces the current destination. A two-way Scenario replaces only
+/// a destination that still matches its confirmed state; another one is
+/// `ConflictStale`.
+pub fn scenario_update_destination(
+    registry: &Registry,
+    scenario: &crate::registry::Scenario,
+    relative_path: &str,
+    source_is_left: bool,
+    current: &crate::local_fs::LocalEntry,
+) -> Result<ConfirmedFileVersion, LocalFileCopyError> {
+    if scenario.direction != "bidirectional" {
+        return if registry
+            .scenario_source_wins_confirmed(&scenario.id, scenario.revision)
+            .map_err(|_| LocalFileCopyError::ScenarioUnavailable)?
+        {
+            Ok(local_version(current))
+        } else {
+            Err(LocalFileCopyError::ConsentRequired)
+        };
+    }
+    let reference = ScenarioReference {
+        scenario_id: scenario.id.clone(),
+        revision: scenario.revision,
+    };
+    registry
+        .list_confirmed_file_states(&reference)
+        .map_err(|_| LocalFileCopyError::ScenarioUnavailable)?
+        .into_iter()
+        .find(|state| state.relative_path == relative_path)
+        .and_then(|state| {
+            if source_is_left {
+                state.right
+            } else {
+                state.left
+            }
+        })
+        .ok_or(LocalFileCopyError::ConflictStale)
+}
+
+/// Execute one Update of a Scenario run between Local roots (D-025 section
+/// 6). The source metadata is read again before the effect. The approved
+/// replacement protocol publishes the new content atomically; a change of
+/// either file after these reads is `ConflictStale`.
+pub fn run_local_scenario_update(
+    database_path: &Path,
+    registry_path: &Path,
+    scenario_id: &str,
+    scenario_revision: u64,
+    relative_path: &str,
+    source_is_left: bool,
+    job_id: &str,
+) -> Result<LocalFileCopyStatus, LocalFileCopyError> {
+    require_current_scenario_revision(registry_path, scenario_id, scenario_revision)?;
+    let registry =
+        Registry::open(registry_path).map_err(|_| LocalFileCopyError::ScenarioUnavailable)?;
+    let scenario = registry
+        .get_scenario_revision(scenario_id, scenario_revision)
+        .map_err(|_| LocalFileCopyError::ScenarioUnavailable)?
+        .ok_or(LocalFileCopyError::ScenarioUnavailable)?;
+    if !scenario_source_side(&scenario, source_is_left) {
+        return Err(LocalFileCopyError::ScenarioScopeMismatch);
+    }
+    let path = Path::new(relative_path);
+    require_selected_path(&registry, scenario_id, scenario_revision, path)?;
+    let (source_root, source_connection, destination_root, destination_connection) =
+        scenario_sides(&scenario, source_is_left);
+    if !enabled_local_connection(registry_path, source_connection)
+        || !enabled_local_connection(registry_path, destination_connection)
+    {
+        return Err(LocalFileCopyError::ConnectionUnavailable);
+    }
+    let source =
+        LocalFilesystem::open(Path::new(source_root)).map_err(LocalFileCopyError::Local)?;
+    let destination =
+        LocalFilesystem::open(Path::new(destination_root)).map_err(LocalFileCopyError::Local)?;
+    let source_entry = source.stat(path).map_err(LocalFileCopyError::Local)?;
+    let destination_entry = match destination.stat(path) {
+        Ok(entry) => entry,
+        Err(LocalError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(LocalFileCopyError::ConflictStale)
+        }
+        Err(error) => return Err(LocalFileCopyError::Local(error)),
+    };
+    let expected_destination = scenario_update_destination(
+        &registry,
+        &scenario,
+        relative_path,
+        source_is_left,
+        &destination_entry,
+    )?;
+    run_local_file_copy_inner(
+        database_path,
+        registry_path,
+        Path::new(source_root),
+        source_connection,
+        path,
+        Path::new(destination_root),
+        destination_connection,
+        path,
+        job_id,
+        true,
+        Some((scenario_id, scenario_revision, source_is_left)),
+        true,
+        Some((&local_version(&source_entry), &expected_destination)),
+    )
+}
+
 /// Execute the selected replacement decision from the independent conflict
 /// queue. Both dry-run snapshots must still match before a Job can be created.
 #[allow(clippy::too_many_arguments)]
@@ -1199,6 +1351,54 @@ pub fn run_local_scenario_rule_delete(
     on_left: bool,
     job_id: &str,
 ) -> Result<LocalRuleDeleteStatus, LocalFileCopyError> {
+    run_local_scenario_rule_delete_checked(
+        database_path,
+        registry_path,
+        scenario_id,
+        scenario_revision,
+        relative_path,
+        on_left,
+        job_id,
+        false,
+    )
+}
+
+/// A rule deletion whose source is not a Local root, for example Yandex
+/// Disk. The caller has just checked with the provider that the source
+/// object is absent (D-025 section 6.3).
+#[allow(clippy::too_many_arguments)]
+pub fn run_scenario_rule_delete_after_remote_check(
+    database_path: &Path,
+    registry_path: &Path,
+    scenario_id: &str,
+    scenario_revision: u64,
+    relative_path: &str,
+    on_left: bool,
+    job_id: &str,
+) -> Result<LocalRuleDeleteStatus, LocalFileCopyError> {
+    run_local_scenario_rule_delete_checked(
+        database_path,
+        registry_path,
+        scenario_id,
+        scenario_revision,
+        relative_path,
+        on_left,
+        job_id,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_local_scenario_rule_delete_checked(
+    database_path: &Path,
+    registry_path: &Path,
+    scenario_id: &str,
+    scenario_revision: u64,
+    relative_path: &str,
+    on_left: bool,
+    job_id: &str,
+    source_absence_checked_remotely: bool,
+) -> Result<LocalRuleDeleteStatus, LocalFileCopyError> {
     if !valid_job_id(job_id) {
         return Err(LocalFileCopyError::InvalidRequest);
     }
@@ -1236,8 +1436,15 @@ pub fn run_local_scenario_rule_delete(
             &scenario.left_connection_id,
         )
     };
+    // A one-way Scenario deletes only in its destination.
+    if !scenario_source_side(&scenario, !on_left) {
+        return Err(LocalFileCopyError::ScenarioScopeMismatch);
+    }
+    // The source connection must be ready: an unmounted or disabled source
+    // never gives a deletion (D-025 section 5.3).
     if !enabled_local_connection(registry_path, target_connection)
-        || !enabled_local_connection(registry_path, other_connection)
+        || (!source_absence_checked_remotely
+            && !enabled_local_connection(registry_path, other_connection))
     {
         return Err(LocalFileCopyError::ConnectionUnavailable);
     }
@@ -1261,18 +1468,32 @@ pub fn run_local_scenario_rule_delete(
     ) else {
         return Err(LocalFileCopyError::ConflictStale);
     };
-    let other = LocalFilesystem::open(Path::new(other_root)).map_err(LocalFileCopyError::Local)?;
-    if !matches!(other.stat(path), Err(LocalError::Io(ref error)) if error.kind() == std::io::ErrorKind::NotFound)
-    {
-        return Err(LocalFileCopyError::ConflictStale);
+    if !source_absence_checked_remotely {
+        let other =
+            LocalFilesystem::open(Path::new(other_root)).map_err(LocalFileCopyError::Local)?;
+        if !matches!(other.stat(path), Err(LocalError::Io(ref error)) if error.kind() == std::io::ErrorKind::NotFound)
+        {
+            return Err(LocalFileCopyError::ConflictStale);
+        }
     }
     let target =
         LocalFilesystem::open(Path::new(target_root)).map_err(LocalFileCopyError::Local)?;
     if !target.capabilities().operations.delete {
         return Err(LocalFileCopyError::CapabilityUnavailable);
     }
+    // One-way with the confirmed rule: the source wins, so a changed
+    // destination object is deleted too (D-025 section 3.1).
+    let source_wins = scenario.direction != "bidirectional"
+        && registry
+            .scenario_source_wins_confirmed(scenario_id, scenario_revision)
+            .map_err(|_| LocalFileCopyError::ScenarioUnavailable)?;
     let current = match target.stat(path) {
-        Ok(entry) if matches_conflict_snapshot(&entry, confirmed_target) => entry,
+        Ok(entry)
+            if !entry.is_directory
+                && (source_wins || matches_conflict_snapshot(&entry, confirmed_target)) =>
+        {
+            entry
+        }
         Ok(_) | Err(LocalError::Io(_)) => return Err(LocalFileCopyError::ConflictStale),
         Err(error) => return Err(LocalFileCopyError::Local(error)),
     };
@@ -3433,7 +3654,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn rule_delete_never_removes_an_object_changed_after_synchronization() {
+    fn rule_delete_removes_a_changed_object_only_after_the_source_wins_confirmation() {
         let scope = crate::model::ScenarioScope {
             selected_paths: Vec::new(),
             deletion_mode: DeletionMode::Simple,
@@ -3461,6 +3682,41 @@ mod tests {
             fs::read(right_root.join("report.txt")).unwrap(),
             b"edited after the last synchronization"
         );
+
+        // D-025: a one-way Scenario deletes only in its destination.
+        assert!(matches!(
+            run_local_scenario_rule_delete(
+                &database,
+                &registry_path,
+                &scenario_id,
+                1,
+                "report.txt",
+                true,
+                "rule-delete-source-side",
+            ),
+            Err(LocalFileCopyError::ScenarioScopeMismatch)
+        ));
+
+        // With the confirmed rule "the source always wins" the changed
+        // destination object goes to the Trash.
+        Registry::open(&registry_path)
+            .unwrap()
+            .confirm_scenario_source_wins(&scenario_id, 1)
+            .unwrap();
+        assert_eq!(
+            run_local_scenario_rule_delete(
+                &database,
+                &registry_path,
+                &scenario_id,
+                1,
+                "report.txt",
+                false,
+                "rule-delete-5",
+            )
+            .unwrap(),
+            LocalRuleDeleteStatus::MovedToTrash
+        );
+        assert!(!right_root.join("report.txt").exists());
     }
 
     #[test]

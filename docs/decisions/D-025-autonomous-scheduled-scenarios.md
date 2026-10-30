@@ -56,6 +56,7 @@ The run creates, updates, and deletes files on the destination so that the desti
 
 - A change made in the destination is replaced or deleted.
 - The replaced version or the deleted object goes into the Trash of the connection when the connection has a `trash` capability. Otherwise the loss is permanent. An SMB share usually has no Trash (D-022 rule 10).
+- To keep the replaced version, the executor first puts a hard link to the destination file into the Trash, then does the atomic replace. The replace stays atomic, and an interrupted replace loses nothing. A volume without hard links moves the previous version into the Trash first; the destination name is then absent until the new version is published.
 
 QADREN does not store old content versions. The Trash is not a backup history.
 
