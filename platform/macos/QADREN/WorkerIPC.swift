@@ -210,6 +210,24 @@ enum WorkerIPC {
         guard response.ok, response.status == "updated" else { throw WorkerIPCError.invalidResponse }
     }
 
+    /// Give the Worker the SMB login of one connection, so that it can mount
+    /// the share without the app (issue #32). It stays in Worker memory only.
+    static func provideSMBCredentials(
+        connectionID: String, login: String, password: String, socketPath: String? = nil
+    ) throws {
+        struct Request: Encodable {
+            let command = "provide_smb_credentials"
+            let connection_id: String
+            let login: String
+            let password: String
+        }
+        let payload = try JSONEncoder().encode(
+            Request(connection_id: connectionID, login: login, password: password)
+        ) + Data([0x0a])
+        let response = try send(payload, socketPath: socketPath ?? defaultSocketPath(), timeoutSeconds: 2)
+        guard response.ok, response.status == "updated" else { throw WorkerIPCError.invalidResponse }
+    }
+
     /// Rule deletions still run inside the IPC request, so wait long enough
     /// for a large set instead of reporting a false failure after 5 s.
     static let batchAnswerTimeoutSeconds = 6 * 60 * 60

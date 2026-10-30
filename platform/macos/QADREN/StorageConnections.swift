@@ -104,6 +104,10 @@ final class StorageConnections: ObservableObject {
         }
         try StorageRegistryBridge.setCredential(id: id)
         try StorageRegistryBridge.setStatus(id: id, status: outcome?.registryStatus ?? "disconnected")
+        // The Worker mounts the share for scheduled runs (issue #32).
+        try? WorkerIPC.provideSMBCredentials(
+            connectionID: id, login: credentials.login, password: credentials.password
+        )
     }
 
     @discardableResult

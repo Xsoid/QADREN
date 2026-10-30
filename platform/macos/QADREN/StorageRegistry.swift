@@ -433,6 +433,14 @@ enum QADRENUserMessage {
             "Файлы изменились после создания задачи конфликта. Обновите снимок конфликта."
         case "this_mac_required":
             "Подключение «Этот Mac» есть всегда, его нельзя удалить. Его можно переименовать или выключить."
+        case "smb_mounted_elsewhere":
+            "Сетевая папка уже подключена в macOS в другом месте, например в Finder или Time Machine. macOS подключает одну папку только один раз. Отключите её там или откройте сценарий в QADREN и нажмите «Отключить там и подключить для QADREN»."
+        case "smb_login_refused":
+            "Нужен вход: сервер не принял логин или пароль сетевого диска. Проверьте их в разделе «Подключения»."
+        case "smb_offline":
+            "Сервер сетевого диска не отвечает. QADREN повторит подключение позже."
+        case "smb_mount_failed":
+            "Фоновая служба не смогла подключить сетевой диск. Откройте сценарий в QADREN, чтобы подключить его."
         case "invalid_smb_address":
             "Адрес сетевой папки должен иметь вид smb://сервер/папка. Логин и пароль в адрес не вписывайте: для них есть отдельные поля."
         case "invalid_selection":
@@ -497,17 +505,13 @@ enum YandexScenarioAccess {
         return entries.first { $0.id == id }?.adapter == "yandex_disk" ? id : nil
     }
 
-    /// Give the Worker the tokens of all enabled Yandex Disk connections now
-    /// and every minute while the app runs. A Worker restart loses them; this
+    /// Give the Worker the credentials of all enabled connections now and
+    /// every minute while the app runs. A Worker restart loses them; this
     /// lets a waiting run continue as soon as the app is open (D-024 stage A).
     static func startTokenDelivery() {
         Task.detached(priority: .utility) {
             while true {
-                for entry in (try? StorageRegistryBridge.list()) ?? []
-                where entry.adapter == "yandex_disk" && entry.enabled {
-                    guard let token = try? YandexKeychain.read(entry.id) else { continue }
-                    try? WorkerIPC.provideAccessToken(connectionID: entry.id, token: token)
-                }
+                _ = WorkerCredentials.deliverAll()
                 try? await Task.sleep(for: .seconds(60))
             }
         }

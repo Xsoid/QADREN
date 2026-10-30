@@ -28,7 +28,7 @@ use qadren_core::schedule_dispatch::dispatch_pending_schedule_jobs;
 use qadren_core::snapshot::{
     walk_local_step, walk_yandex_step, SnapshotError, SnapshotKey, SnapshotStore,
 };
-use qadren_core::storage_access::YANDEX_DISK;
+use qadren_core::storage_access::{SMB_SHARE, YANDEX_DISK};
 use qadren_core::yandex::{YandexError, YandexMetadataClient};
 use qadren_core::yandex_execution::{
     run_yandex_scenario_delete, run_yandex_scenario_file_download, run_yandex_scenario_update,
@@ -165,9 +165,15 @@ struct Request {
     /// Scenario (D-023). It lives in memory for this request only.
     #[serde(default)]
     access_token: Option<AccessToken>,
-    /// The connection of `provide_access_token`.
+    /// The connection of `provide_access_token` and `provide_smb_credentials`.
     #[serde(default)]
     connection_id: Option<String>,
+    /// SMB login and password from the app Keychain (issue #32). The Worker
+    /// keeps them in memory only.
+    #[serde(default)]
+    login: Option<String>,
+    #[serde(default)]
+    password: Option<AccessToken>,
     /// Plan requests (D-024 stage 4).
     #[serde(default)]
     plan_id: Option<String>,
@@ -685,9 +691,119 @@ fn internal_request(command: &str, scenario: &ScenarioReference) -> Option<Reque
     .ok()
 }
 
+/// Pauses between mount attempts while the server does not answer (D-024).
+const SMB_RETRY_SECONDS: [u64; 5] = [60, 300, 900, 3600, 21600];
+
+/// Mount each SMB endpoint of a Scenario revision that is not mounted now
+/// (issue #32). Returns the waiting reason when an endpoint stays absent.
+fn ensure_smb_mounts(
+    paths: &WorkerPaths,
+    registry: &Registry,
+    scenario: &ScenarioReference,
+) -> Option<&'static str> {
+    use qadren_core::smb_mount::{self, MountOutcome};
+    let revision = registry
+        .get_scenario_revision(&scenario.scenario_id, scenario.revision)
+        .ok()??;
+    for id in [revision.left_connection_id, revision.right_connection_id] {
+        let Ok(Some(connection)) = registry.get(&id) else {
+            continue;
+        };
+        if connection.adapter != SMB_SHARE || !connection.enabled {
+            continue;
+        }
+        let dir = qadren_core::storage_access::smb_mount_dir(&paths.registry, &id);
+        if qadren_core::storage_access::is_smb_mount(&dir) {
+            continue;
+        }
+        let address = connection.endpoint_url.clone().unwrap_or_default();
+        if smb_mount::mounted_elsewhere(&address, &dir).is_some() {
+            return Some("smb_mounted_elsewhere");
+        }
+        let now = std::time::Instant::now();
+        let paused = runner()
+            .smb_retry
+            .lock()
+            .ok()
+            .and_then(|retry| retry.get(&id).copied());
+        if paused.is_some_and(|(next, _)| now < next) {
+            return Some("smb_offline");
+        }
+        let login = runner()
+            .smb_logins
+            .lock()
+            .ok()
+            .and_then(|logins| logins.get(&id).cloned());
+        let Some((login, password)) = login else {
+            let refused = runner()
+                .smb_refused
+                .lock()
+                .is_ok_and(|refused| refused.contains_key(&id));
+            return Some(if refused {
+                "smb_login_refused"
+            } else {
+                "needs_sign_in"
+            });
+        };
+        if std::fs::create_dir_all(&dir).is_err() {
+            return Some("smb_mount_failed");
+        }
+        let outcome = smb_mount::mount(&address, &dir, &login, &password);
+        eprintln!(
+            "qadren-worker: {} smb_mount connection={id} outcome={}",
+            log_time(),
+            match &outcome {
+                MountOutcome::Mounted => "mounted".to_string(),
+                MountOutcome::MountedElsewhere(_) => "mounted_elsewhere".to_string(),
+                MountOutcome::LoginRefused => "login_refused".to_string(),
+                MountOutcome::Offline => "offline".to_string(),
+                MountOutcome::NotFound => "not_found".to_string(),
+                MountOutcome::Failed(code) => format!("failed({code})"),
+            }
+        );
+        match outcome {
+            MountOutcome::Mounted if qadren_core::storage_access::is_smb_mount(&dir) => {
+                if let Ok(mut retry) = runner().smb_retry.lock() {
+                    retry.remove(&id);
+                }
+            }
+            MountOutcome::Mounted => return Some("smb_mount_failed"),
+            MountOutcome::MountedElsewhere(_) => return Some("smb_mounted_elsewhere"),
+            // A refused login is not tried again until the app gives new
+            // credentials: no retry loop against the server.
+            MountOutcome::LoginRefused => {
+                if let (Ok(mut logins), Ok(mut refused)) =
+                    (runner().smb_logins.lock(), runner().smb_refused.lock())
+                {
+                    logins.remove(&id);
+                    refused.insert(id.clone(), (login, password));
+                }
+                return Some("smb_login_refused");
+            }
+            MountOutcome::Offline => {
+                if let Ok(mut retry) = runner().smb_retry.lock() {
+                    let step = paused.map_or(0, |(_, step)| step + 1);
+                    let pause = SMB_RETRY_SECONDS[(step as usize).min(SMB_RETRY_SECONDS.len() - 1)];
+                    retry.insert(id.clone(), (now + Duration::from_secs(pause), step));
+                }
+                return Some("smb_offline");
+            }
+            MountOutcome::NotFound | MountOutcome::Failed(_) => return Some("smb_mount_failed"),
+        }
+    }
+    None
+}
+
 fn advance_scenario_run(paths: &WorkerPaths, run: &ScenarioRun) -> Result<(), String> {
     let registry =
         Registry::open(&paths.registry).map_err(|_| "registry_unavailable".to_string())?;
+    // An SMB endpoint is mounted before a plan or an effect. While it stays
+    // absent the run waits; the Core mount gate still checks each effect.
+    if let Some(reason) = ensure_smb_mounts(paths, &registry, &run.scenario) {
+        return registry
+            .set_scenario_run_waiting(&run.id, Some(reason))
+            .map_err(|_| "registry_unavailable".to_string());
+    }
     // A Yandex Disk run without a token from the app waits (D-024 stage A).
     let needs_sign_in =
         yandex_source_connection(&registry, &run.scenario.scenario_id, run.scenario.revision)
@@ -1478,6 +1594,14 @@ const YANDEX_PARALLEL_DOWNLOADS: usize = 2;
 struct Runner {
     /// Yandex Disk access tokens by connection ID, from the app. Memory only.
     tokens: Mutex<HashMap<String, String>>,
+    /// SMB logins and passwords by connection ID, from the app. Memory only.
+    smb_logins: Mutex<HashMap<String, (String, String)>>,
+    /// The login that the server refused, by connection ID. The app sends
+    /// the same login again every minute; it is not used again.
+    smb_refused: Mutex<HashMap<String, (String, String)>>,
+    /// The next allowed mount attempt and the current pause, by connection ID,
+    /// after the server did not answer.
+    smb_retry: Mutex<HashMap<String, (std::time::Instant, u64)>>,
     /// Batch children that run now.
     active: AtomicUsize,
 }
@@ -1498,12 +1622,35 @@ impl Runner {
             tokens.remove(connection_id);
         }
     }
+
+    fn remember_smb_login(&self, connection_id: &str, login: &str, password: &str) {
+        let credentials = (login.to_owned(), password.to_owned());
+        if let Ok(mut refused) = self.smb_refused.lock() {
+            if refused.get(connection_id) == Some(&credentials) {
+                return;
+            }
+            refused.remove(connection_id);
+        }
+        let Ok(mut logins) = self.smb_logins.lock() else {
+            return;
+        };
+        // Changed credentials allow an attempt now.
+        if logins.get(connection_id) != Some(&credentials) {
+            if let Ok(mut retry) = self.smb_retry.lock() {
+                retry.remove(connection_id);
+            }
+        }
+        logins.insert(connection_id.to_owned(), credentials);
+    }
 }
 
 fn runner() -> &'static Runner {
     static RUNNER: OnceLock<Runner> = OnceLock::new();
     RUNNER.get_or_init(|| Runner {
         tokens: Mutex::new(HashMap::new()),
+        smb_logins: Mutex::new(HashMap::new()),
+        smb_refused: Mutex::new(HashMap::new()),
+        smb_retry: Mutex::new(HashMap::new()),
         active: AtomicUsize::new(0),
     })
 }
@@ -2482,6 +2629,30 @@ fn handle_client(mut stream: UnixStream, paths: &WorkerPaths, stop: &mut bool) {
                 },
             );
         }
+        "provide_smb_credentials" => {
+            let ok = match (
+                request.connection_id.as_deref(),
+                request.login.as_deref(),
+                request.password.as_ref(),
+            ) {
+                (Some(connection), Some(login), Some(AccessToken(password)))
+                    if !connection.is_empty() && !login.is_empty() =>
+                {
+                    runner().remember_smb_login(connection, login, password);
+                    true
+                }
+                _ => false,
+            };
+            respond(
+                &mut stream,
+                &Response {
+                    ok,
+                    status: if ok { "updated" } else { "invalid_request" },
+                    staged: None,
+                    dispatched: None,
+                },
+            );
+        }
         "poll" => match dispatch_due(paths) {
             Ok((staged, dispatched)) => respond(
                 &mut stream,
@@ -2929,6 +3100,39 @@ mod tests {
     use qadren_core::local_fs::LocalFilesystem;
     use qadren_core::model::{ConfirmedFileVersion, JobState, ScenarioReference};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn a_refused_smb_login_is_not_used_again_until_it_changes() {
+        let runner = Runner {
+            tokens: Mutex::new(HashMap::new()),
+            smb_logins: Mutex::new(HashMap::new()),
+            smb_refused: Mutex::new(HashMap::new()),
+            smb_retry: Mutex::new(HashMap::new()),
+            active: AtomicUsize::new(0),
+        };
+        let login = |runner: &Runner| runner.smb_logins.lock().unwrap().get("nas").cloned();
+        runner.remember_smb_login("nas", "alice", "wrong");
+        assert_eq!(login(&runner), Some(("alice".into(), "wrong".into())));
+        // The server refused it: the Worker moves it aside.
+        let refused = runner.smb_logins.lock().unwrap().remove("nas").unwrap();
+        runner.smb_refused.lock().unwrap().insert("nas".into(), refused);
+        // The app sends the same login every minute: it is ignored.
+        runner.remember_smb_login("nas", "alice", "wrong");
+        assert_eq!(login(&runner), None);
+        // A pause for an offline server stays for the same login...
+        runner.remember_smb_login("nas", "alice", "right");
+        runner
+            .smb_retry
+            .lock()
+            .unwrap()
+            .insert("nas".into(), (std::time::Instant::now(), 1));
+        runner.remember_smb_login("nas", "alice", "right");
+        assert!(runner.smb_retry.lock().unwrap().contains_key("nas"));
+        // ...and a changed login allows an attempt now.
+        runner.remember_smb_login("nas", "alice", "newer");
+        assert!(!runner.smb_retry.lock().unwrap().contains_key("nas"));
+        assert!(runner.smb_refused.lock().unwrap().is_empty());
+    }
 
     fn root(name: &str) -> PathBuf {
         // Unix-domain socket paths have a small platform limit. Keep test
@@ -4304,6 +4508,8 @@ mod tests {
             batch_id: None,
             access_token: None,
             connection_id: None,
+            login: None,
+            password: None,
             plan_id: None,
             action: None,
             search: None,
@@ -4368,6 +4574,8 @@ mod tests {
             batch_id: None,
             access_token: None,
             connection_id: None,
+            login: None,
+            password: None,
             plan_id: None,
             action: None,
             search: None,

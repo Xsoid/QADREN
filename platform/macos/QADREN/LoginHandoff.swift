@@ -50,18 +50,7 @@ enum LoginHandoff {
         while (try? WorkerIPC.probeStatus(timeoutSeconds: 2)) == nil, Date() < deadline {
             Thread.sleep(forTimeInterval: 2)
         }
-        var missing = false
-        for entry in (try? StorageRegistryBridge.list()) ?? []
-        where entry.adapter == "yandex_disk" && entry.enabled {
-            guard let token = try? YandexKeychain.read(entry.id) else {
-                missing = true
-                continue
-            }
-            if (try? WorkerIPC.provideAccessToken(connectionID: entry.id, token: token)) == nil {
-                missing = true
-            }
-        }
-        if missing {
+        if !WorkerCredentials.deliverAll() {
             notifySignInRequired()
         }
         exit(0)
@@ -78,10 +67,45 @@ enum LoginHandoff {
             }
             let content = UNMutableNotificationContent()
             content.title = "Нужен вход"
-            content.body = "QADREN не передал фоновой службе данные для входа. Сценарии с Яндекс Диском ждут, пока вы откроете QADREN."
+            content.body = "QADREN не передал фоновой службе данные для входа. Сценарии с Яндекс Диском или сетевым диском ждут, пока вы откроете QADREN."
             let request = UNNotificationRequest(identifier: "qadren.login-handoff", content: content, trigger: nil)
             center.add(request) { _ in done.signal() }
         }
         _ = done.wait(timeout: .now() + 10)
+    }
+}
+
+/// Gives the Worker the credentials of every enabled Yandex Disk and SMB
+/// connection from the Keychain. The Worker keeps them in memory only.
+enum WorkerCredentials {
+    /// Returns false when a Keychain item is missing or locked, or when the
+    /// Worker did not take a credential.
+    static func deliverAll() -> Bool {
+        var complete = true
+        for entry in (try? StorageRegistryBridge.list()) ?? [] where entry.enabled {
+            switch entry.adapter {
+            case "yandex_disk":
+                guard let token = try? YandexKeychain.read(entry.id) else {
+                    complete = false
+                    continue
+                }
+                if (try? WorkerIPC.provideAccessToken(connectionID: entry.id, token: token)) == nil {
+                    complete = false
+                }
+            case "smb_share" where entry.credential_ref != nil:
+                guard let credentials = try? SMBKeychain.read(entry.id) else {
+                    complete = false
+                    continue
+                }
+                if (try? WorkerIPC.provideSMBCredentials(
+                    connectionID: entry.id, login: credentials.login, password: credentials.password
+                )) == nil {
+                    complete = false
+                }
+            default:
+                continue
+            }
+        }
+        return complete
     }
 }

@@ -83,8 +83,10 @@ A Yandex Disk Scenario can have schedules. The Worker executes its runs with the
 1. When a run or a snapshot needs an SMB connection and its QADREN mount directory is not mounted, the Worker mounts the share there through the NetFS framework, without a dialog. This revises D-022 rule 7.
 2. The app gives the SMB login and password to the Worker over the Worker socket. The Worker keeps them in memory only, bound to `connection_id`. They never enter SQLite, logs, a command line, or a URL.
 3. The Worker never unmounts a mount that it did not make. When macOS has the share mounted at another place, or a Time Machine backup uses it, the run waits with the reason. The app offers "Отключить там и подключить для QADREN" as now.
-4. A refused login (`EAUTH`) makes the run wait with "Нужен вход". The Worker forgets those credentials. It does not retry the login in a loop.
+4. A refused login (`EAUTH` or `EACCES`) makes the run wait with "Нужен вход" (`smb_login_refused`). The Worker forgets those credentials and does not use the same login again until the app gives a changed one. It does not retry the login in a loop.
 5. The Core mount gate (`storage_access`) stays the last check before each effect.
+6. When the server does not answer, the run waits with `smb_offline`. The Worker tries again after 1, 5, 15, and 60 minutes, then every 6 hours.
+7. The mount is made before a plan or an effect of the run. The Worker does not unmount after a run; the mount stays visible in Finder (D-022).
 
 ### 9. Launch at login
 
