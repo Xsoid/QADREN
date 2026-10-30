@@ -22,6 +22,7 @@ pub mod smb_mount;
 pub mod snapshot;
 pub mod storage_access;
 pub mod verification;
+pub mod write_roots;
 pub mod yandex;
 pub mod yandex_execution;
 pub mod yandex_ffi;

@@ -20,7 +20,7 @@ use qadren_core::local_fs::LocalFilesystem;
 use qadren_core::model::{ConfirmedFileVersion, JobState, ScenarioReference};
 use qadren_core::plan_store;
 use qadren_core::registry::{
-    BatchChildDue, BatchChildKind, DueBatchChild, Registry, RegistryError, ScenarioRun,
+    BatchChildDue, BatchChildKind, DueBatchChild, Registry, RegistryError, RunWriteLock, ScenarioRun,
     ScheduleRunStart,
 };
 use qadren_core::scenario_planner::{ObservedFile, PlanAction};
@@ -803,6 +803,17 @@ fn advance_scenario_run(paths: &WorkerPaths, run: &ScenarioRun) -> Result<(), St
         return registry
             .set_scenario_run_waiting(&run.id, Some(reason))
             .map_err(|_| "registry_unavailable".to_string());
+    }
+    // D-025 section 11: a run whose roots overlap the write root of another
+    // active run waits until that run ends. It does not plan in the meantime.
+    match registry.acquire_scenario_run_write_lock(&run.id) {
+        Ok(RunWriteLock::Acquired) => {}
+        Ok(RunWriteLock::WaitFor { .. }) => {
+            return registry
+                .set_scenario_run_waiting(&run.id, Some("waiting_for_scenario"))
+                .map_err(|_| "registry_unavailable".to_string());
+        }
+        Err(_) => return Err("registry_unavailable".to_string()),
     }
     // A Yandex Disk run without a token from the app waits (D-024 stage A).
     let needs_sign_in =
@@ -1674,12 +1685,14 @@ fn run_due_batch_children(paths: &WorkerPaths) {
         return;
     };
     // D-024 scale rules: one bounded page per pass, read through an index.
+    // D-025 section 11: the page takes children of each batch in turn.
     let Ok(due) = registry.due_scenario_create_batch_children(unix_now(), DUE_PAGE) else {
         return;
     };
-    let mut sources: HashMap<String, Option<String>> = HashMap::new();
-    let mut local = Vec::new();
-    let mut remote: HashMap<String, Vec<DueBatchChild>> = HashMap::new();
+    // The Yandex Disk source and the left and right connections of each batch.
+    type Endpoints = (Option<String>, Option<(String, String)>);
+    let mut endpoints: HashMap<String, Endpoints> = HashMap::new();
+    let mut queue = std::collections::VecDeque::new();
     for child in due {
         if child.cancellation_requested {
             let _ = registry.finish_scenario_create_batch_child(
@@ -1690,49 +1703,132 @@ fn run_due_batch_children(paths: &WorkerPaths) {
             );
             continue;
         }
-        let source = sources
+        let (source, sides) = endpoints
             .entry(child.batch_id.clone())
             .or_insert_with(|| {
-                yandex_source_connection(
-                    &registry,
-                    &child.scenario.scenario_id,
-                    child.scenario.revision,
-                )
+                let (scenario, revision) = (&child.scenario.scenario_id, child.scenario.revision);
+                let sides = registry
+                    .get_scenario_revision(scenario, revision)
+                    .ok()
+                    .flatten()
+                    .map(|scenario| (scenario.left_connection_id, scenario.right_connection_id));
+                (yandex_source_connection(&registry, scenario, revision), sides)
             })
             .clone();
-        match source {
-            Some(connection) => remote.entry(connection).or_default().push(child),
-            None => local.push(child),
+        let Some((left, right)) = sides else {
+            continue;
+        };
+        let destination = if child.source_is_left { right } else { left };
+        let mut slots = vec![format!("write:{destination}")];
+        if let Some(connection) = &source {
+            // A Yandex batch waits for its token; its children stay pending.
+            if runner().token(connection).is_none() {
+                continue;
+            }
+            slots.push(format!("yandex:{connection}"));
         }
+        queue.push_back(PoolItem {
+            child,
+            yandex: source,
+            slots,
+        });
     }
     drop(registry);
-    for child in &local {
-        if still_due(paths, child) {
-            run_batch_child(paths, child, None);
-        }
+    run_pool(paths, queue);
+}
+
+/// Effect threads for each pass (D-025 section 11).
+const EFFECT_THREADS: usize = 4;
+/// Parallel effects in one destination connection (Local Filesystem or SMB).
+const DESTINATION_PARALLEL_EFFECTS: usize = 2;
+
+struct PoolItem {
+    child: DueBatchChild,
+    yandex: Option<String>,
+    /// Limited resources that this child uses: its destination connection
+    /// and, for a Yandex Disk source, the download slots of that connection.
+    slots: Vec<String>,
+}
+
+fn slot_limit(slot: &str) -> usize {
+    if slot.starts_with("yandex:") {
+        YANDEX_PARALLEL_DOWNLOADS
+    } else {
+        DESTINATION_PARALLEL_EFFECTS
     }
-    for (connection, children) in remote {
-        if runner().token(&connection).is_none() {
-            continue;
-        }
-        let queue = Mutex::new(std::collections::VecDeque::from(children));
-        thread::scope(|scope| {
-            for _ in 0..YANDEX_PARALLEL_DOWNLOADS {
-                scope.spawn(|| loop {
-                    let Some(child) = queue.lock().ok().and_then(|mut queue| queue.pop_front())
-                    else {
-                        break;
-                    };
-                    // A 401 removes the token; the batch then waits.
-                    let Some(token) = runner().token(&connection) else {
-                        break;
-                    };
-                    if still_due(paths, &child) {
-                        run_batch_child(paths, &child, Some((&connection, &token)));
+}
+
+/// Run the queue on a fixed pool of threads. A thread takes the first child
+/// whose connections have a free slot, so a full connection does not block
+/// children of other connections.
+fn run_pool(paths: &WorkerPaths, queue: std::collections::VecDeque<PoolItem>) {
+    struct State {
+        queue: std::collections::VecDeque<PoolItem>,
+        busy: HashMap<String, usize>,
+    }
+    let state = Mutex::new(State {
+        queue,
+        busy: HashMap::new(),
+    });
+    let freed = std::sync::Condvar::new();
+    thread::scope(|scope| {
+        for _ in 0..EFFECT_THREADS {
+            scope.spawn(|| loop {
+                let Ok(mut guard) = state.lock() else {
+                    return;
+                };
+                let item = loop {
+                    if guard.queue.is_empty() {
+                        return;
                     }
-                });
+                    let free = guard.queue.iter().position(|item| {
+                        item.slots
+                            .iter()
+                            .all(|slot| guard.busy.get(slot).copied().unwrap_or(0) < slot_limit(slot))
+                    });
+                    if let Some(index) = free {
+                        let item = guard.queue.remove(index).expect("position is in range");
+                        for slot in &item.slots {
+                            *guard.busy.entry(slot.clone()).or_default() += 1;
+                        }
+                        break item;
+                    }
+                    let Ok(next) = freed.wait(guard) else {
+                        return;
+                    };
+                    guard = next;
+                };
+                drop(guard);
+                run_pool_item(paths, &item);
+                if let Ok(mut guard) = state.lock() {
+                    for slot in &item.slots {
+                        if let Some(count) = guard.busy.get_mut(slot) {
+                            *count -= 1;
+                        }
+                    }
+                }
+                freed.notify_all();
+            });
+        }
+    });
+}
+
+fn run_pool_item(paths: &WorkerPaths, item: &PoolItem) {
+    match &item.yandex {
+        Some(connection) => {
+            // A 401 removes the token; the batch then waits.
+            let Some(token) = runner().token(connection) else {
+                return;
+            };
+            if still_due(paths, &item.child) {
+                run_batch_child(paths, &item.child, Some((connection, &token)));
             }
-        });
+        }
+        None => {
+            if still_due(paths, &item.child) {
+                run_batch_child(paths, &item.child, None);
+            }
+        }
     }
 }
 
@@ -3172,11 +3268,18 @@ mod tests {
 
     /// Drive every run to its end without the Worker threads: poll, walk
     /// and plan, then execute due batch children (D-025).
+    /// One pass of the run thread. The Worker claims the JobStore for its
+    /// process at start, so that the effect threads share it; do the same.
+    fn run_pass(paths: &WorkerPaths) {
+        let _ = JobStore::claim_for_process(&paths.jobs);
+        run_due_batch_children(paths);
+    }
+
     fn drive_runs(paths: &WorkerPaths) {
         for _ in 0..6 {
             dispatch_due(paths).unwrap();
             while run_snapshot_pass(paths) {}
-            run_due_batch_children(paths);
+            run_pass(paths);
         }
     }
 
@@ -3291,7 +3394,7 @@ mod tests {
         // Worker process polls it from the existing Registry and owns effects.
         // The run thread executes batch children (D-024).
         assert_eq!(dispatch_due(&paths).unwrap(), (0, 0));
-        run_due_batch_children(&paths);
+        run_pass(&paths);
         assert_eq!(fs::read(right_root.join("first.txt")).unwrap(), b"first");
         assert_eq!(fs::read(right_root.join("second.txt")).unwrap(), b"second");
         let registry = Registry::open(&paths.registry).unwrap();
@@ -3315,7 +3418,7 @@ mod tests {
         // A subsequent restart finds no pending child and therefore creates no
         // duplicate Job or replacement effect.
         assert_eq!(dispatch_due(&paths).unwrap(), (0, 0));
-        run_due_batch_children(&paths);
+        run_pass(&paths);
         assert_eq!(
             JobStore::open(&paths.jobs)
                 .unwrap()
@@ -3369,7 +3472,7 @@ mod tests {
         drop(registry);
 
         assert_eq!(dispatch_due(&paths).unwrap(), (0, 0));
-        run_due_batch_children(&paths);
+        run_pass(&paths);
         assert!(!right_root.join("first.txt").exists());
         assert!(!right_root.join("second.txt").exists());
         let stored = Registry::open(&paths.registry)
@@ -3582,6 +3685,56 @@ mod tests {
 
     /// Add one more weekly rule for the current minute. Each call produces one
     /// new due slot for the next `dispatch_due`.
+    #[test]
+    fn two_runs_with_one_destination_execute_one_after_the_other() {
+        let root = root("write-lock");
+        let (photos, music, shared) = (root.join("photos"), root.join("music"), root.join("shared"));
+        for dir in [&photos, &music, &shared] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(photos.join("photo.jpg"), b"photo").unwrap();
+        fs::write(music.join("song.mp3"), b"song").unwrap();
+        let paths = WorkerPaths {
+            socket: root.join("worker.sock"),
+            registry: root.join("registry.sqlite3"),
+            jobs: root.join("jobs.sqlite3"),
+        };
+        let registry = Registry::open(&paths.registry).unwrap();
+        let mac = registry.add("local_filesystem", "Mac").unwrap();
+        let create = |name: &str, source: &Path| {
+            registry
+                .create_scenario(
+                    name,
+                    &mac,
+                    source.to_str().unwrap(),
+                    &mac,
+                    shared.to_str().unwrap(),
+                    "left_to_right",
+                )
+                .unwrap()
+        };
+        let (first, second) = (create("Photos", &photos), create("Music", &music));
+        drop(registry);
+        schedule_current_minute(&paths, &first);
+        schedule_current_minute(&paths, &second);
+        dispatch_due(&paths).unwrap();
+        let waiting = [&first, &second]
+            .into_iter()
+            .map(|scenario| latest_run(&paths, scenario))
+            .filter(|run| run.waiting_reason.as_deref() == Some("waiting_for_scenario"))
+            .count();
+        assert_eq!(waiting, 1, "one run waits for the write-root lock");
+        drive_runs(&paths);
+        drive_runs(&paths);
+        for scenario in [&first, &second] {
+            let run = latest_run(&paths, scenario);
+            assert_eq!((run.state.as_str(), run.error), ("completed", None));
+        }
+        assert_eq!(fs::read(shared.join("photo.jpg")).unwrap(), b"photo");
+        assert_eq!(fs::read(shared.join("song.mp3")).unwrap(), b"song");
+        fs::remove_dir_all(root).unwrap();
+    }
+
     fn schedule_current_minute(paths: &WorkerPaths, scenario: &str) {
         let current = now();
         Registry::open(&paths.registry)

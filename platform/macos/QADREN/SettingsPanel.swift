@@ -2727,7 +2727,12 @@ private struct ScenarioSchedulesView: View {
         let started = Date(timeIntervalSince1970: TimeInterval(run.created_at))
             .formatted(date: .abbreviated, time: .shortened)
         guard let reason = run.waiting_reason else { return "Начат " + started }
-        let waiting = reason == "needs_sign_in" ? "Нужен вход: откройте QADREN" : QADRENUserMessage.text(for: reason)
+        let waiting = switch reason {
+        case "needs_sign_in": "Нужен вход: откройте QADREN"
+        case "waiting_for_scenario":
+            run.waiting_for_scenario.map { "ждёт сценарий «\($0)»" } ?? QADRENUserMessage.text(for: reason)
+        default: QADRENUserMessage.text(for: reason)
+        }
         return "Начат " + started + " · ждёт: " + waiting
     }
 
@@ -2851,6 +2856,8 @@ private struct ScenarioEditorView: View {
     @State private var scope = ScenarioScopeDraft()
     @State private var confirmSimpleDeletions = false
     @State private var error: String?
+    /// Scenarios whose roots overlap these roots (D-025 section 11).
+    @State private var overlaps: [String] = []
 
     var body: some View {
         ScrollView {
@@ -2911,6 +2918,14 @@ private struct ScenarioEditorView: View {
                         excludesYandex: true
                     )
                 }
+                if !overlaps.isEmpty {
+                    SettingsNotice(
+                        text: "Папки пересекаются со сценарием "
+                            + overlaps.map { "«\($0)»" }.joined(separator: ", ")
+                            + ". Их запуски не выполняются одновременно: запуск, который начался позже, ждёт окончания другого.",
+                        symbol: "square.on.square.intersection.dashed"
+                    )
+                }
                 ScenarioDeletionModeBox(
                     mode: scope.deletionMode,
                     bidirectional: direction == "bidirectional",
@@ -2933,6 +2948,16 @@ private struct ScenarioEditorView: View {
                 }
             }
             .padding(24)
+        }
+        .task(id: [leftID, leftRoot, rightID, rightRoot, direction]) {
+            guard !leftRoot.isEmpty, !rightRoot.isEmpty else {
+                overlaps = []
+                return
+            }
+            overlaps = (try? StorageRegistryBridge.scenarioRootOverlaps(
+                scenarioID: scenario?.id, leftID: leftID, leftRoot: leftRoot,
+                rightID: rightID, rightRoot: rightRoot, direction: direction
+            )) ?? []
         }
         .onAppear {
             if let scenario {

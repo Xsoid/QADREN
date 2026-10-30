@@ -842,12 +842,25 @@ pub extern "C" fn qadren_scenario_run_state(
         return output(json!({"ok":false,"error":"invalid_input"}));
     };
     with_registry(path, |db| {
-        let active = db.active_scenario_run(&scenario_id)?.map(|run| {
-            json!({
-                "id": run.id, "trigger": run.trigger, "state": run.state,
-                "waiting_reason": run.waiting_reason, "created_at": run.created_at
-            })
-        });
+        let active = match db.active_scenario_run(&scenario_id)? {
+            Some(run) => {
+                // The name of the Scenario whose run holds the write-root lock.
+                let waiting_for = match run.waiting_for_scenario_id.as_deref() {
+                    Some(id) => db
+                        .list_scenarios()?
+                        .into_iter()
+                        .find(|scenario| scenario.id == id)
+                        .map(|scenario| scenario.name),
+                    None => None,
+                };
+                Some(json!({
+                    "id": run.id, "trigger": run.trigger, "state": run.state,
+                    "waiting_reason": run.waiting_reason, "created_at": run.created_at,
+                    "waiting_for_scenario": waiting_for
+                }))
+            }
+            None => None,
+        };
         let skipped = db
             .skipped_schedule_slots(&scenario_id, 20)?
             .into_iter()
@@ -860,6 +873,76 @@ pub extern "C" fn qadren_scenario_run_state(
             .collect::<Vec<Value>>();
         Ok(json!({"active": active, "skipped": skipped}))
     })
+}
+
+/// Names of enabled Scenarios whose runs cannot execute at the same time as
+/// runs of the edited Scenario (D-025 section 11). `scenario_id` excludes the
+/// edited Scenario itself; it can be empty for a new Scenario.
+#[no_mangle]
+pub extern "C" fn qadren_scenario_root_overlaps(
+    path: *const c_char,
+    scenario_id: *const c_char,
+    left_connection_id: *const c_char,
+    left_root: *const c_char,
+    right_connection_id: *const c_char,
+    right_root: *const c_char,
+    direction: *const c_char,
+) -> *mut c_char {
+    let (
+        Some(scenario_id),
+        Some(left_connection_id),
+        Some(left_root),
+        Some(right_connection_id),
+        Some(right_root),
+        Some(direction),
+    ) = (
+        input(scenario_id),
+        input(left_connection_id),
+        input(left_root),
+        input(right_connection_id),
+        input(right_root),
+        input(direction),
+    )
+    else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    with_registry(path, |db| {
+        let candidate = candidate_scenario(
+            &scenario_id,
+            left_connection_id,
+            left_root,
+            right_connection_id,
+            right_root,
+            direction,
+        );
+        let exclude = (!scenario_id.is_empty()).then_some(scenario_id.as_str());
+        Ok(json!(db
+            .overlapping_scenarios(&candidate, exclude)?
+            .into_iter()
+            .map(|scenario| scenario.name)
+            .collect::<Vec<String>>()))
+    })
+}
+
+fn candidate_scenario(
+    id: &str,
+    left_connection_id: String,
+    left_root: String,
+    right_connection_id: String,
+    right_root: String,
+    direction: String,
+) -> crate::registry::Scenario {
+    crate::registry::Scenario {
+        id: id.to_owned(),
+        name: String::new(),
+        left_connection_id,
+        left_root,
+        right_connection_id,
+        right_root,
+        direction,
+        enabled: true,
+        revision: 0,
+    }
 }
 
 /// Read durable automatic-trigger state for one Scenario. This is registry

@@ -8,6 +8,7 @@ use crate::model::{
 };
 use crate::scenario_planner::{self, ObservedFile, PlanItem};
 use crate::scheduler::{every_hours_anchor, OccurrenceKey, Schedule, ScheduleRule};
+use crate::write_roots::{conflict, scenario_roots, ScenarioRoot};
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -307,12 +308,23 @@ pub struct ScenarioRun {
     pub state: String,
     /// Why an active run makes no progress now, for example `needs_sign_in`.
     pub waiting_reason: Option<String>,
+    /// The Scenario whose run holds the write-root lock that this run waits
+    /// for (`waiting_reason` is `waiting_for_scenario`).
+    pub waiting_for_scenario_id: Option<String>,
     pub error: Option<String>,
     /// Plan items that this run does not execute yet (Update, deletion,
     /// conflict), until the executor supports them.
     pub deferred_items: u64,
     pub created_at: i64,
     pub finished_at: Option<i64>,
+}
+
+/// The result of a write-root lock request (D-025 section 11).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunWriteLock {
+    Acquired,
+    /// An active run of this Scenario holds a conflicting lock.
+    WaitFor { scenario_id: String },
 }
 
 /// A user-owned conflict task. It is Registry metadata, not a JobStore Job;
@@ -357,7 +369,7 @@ impl Registry {
         }
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 26 {
+        if version > 27 {
             return Err(RegistryError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -807,6 +819,20 @@ impl Registry {
                  COMMIT;",
             )?;
         }
+        if version <= 26 {
+            // D-025 section 11: the write-root lock. Only an active run can
+            // hold it, so the end of a run releases it. A run that executes
+            // now already writes and keeps its lock.
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE scenario_runs
+                   ADD COLUMN write_lock INTEGER NOT NULL DEFAULT 0 CHECK(write_lock IN (0,1));
+                 ALTER TABLE scenario_runs ADD COLUMN waiting_for_scenario_id TEXT;
+                 UPDATE scenario_runs SET write_lock=1 WHERE state='executing';
+                 PRAGMA user_version = 27;
+                 COMMIT;",
+            )?;
+        }
         Ok(Self { db })
     }
 
@@ -1170,7 +1196,7 @@ impl Registry {
         let id: String = self
             .db
             .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
-        let transaction = self.db.unchecked_transaction()?;
+        let transaction = rusqlite::Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?;
         transaction.execute(
             "INSERT INTO scenarios(id,name,left_connection_id,left_root,right_connection_id,right_root,direction,deletion_mode) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
             params![id, name.trim(), left_connection_id, left_root, right_connection_id, right_root, direction, scope.deletion_mode.as_str()],
@@ -1197,7 +1223,7 @@ impl Registry {
     }
 
     pub fn set_scenario_enabled(&self, id: &str, enabled: bool) -> Result<()> {
-        let transaction = self.db.unchecked_transaction()?;
+        let transaction = rusqlite::Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?;
         let changed = transaction.execute(
             "UPDATE scenarios SET enabled=?1 WHERE id=?2",
             params![enabled, id],
@@ -1514,7 +1540,7 @@ impl Registry {
         due: Vec<DueScheduleOccurrence>,
         observed_through: Option<DateTime<Utc>>,
     ) -> Result<usize> {
-        let transaction = self.db.unchecked_transaction()?;
+        let transaction = rusqlite::Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?;
         let mut claimed_by_scenario: Vec<DueScheduleOccurrence> = Vec::new();
         let mut claimed: Vec<DueScheduleOccurrence> = Vec::new();
         for occurrence in due {
@@ -2030,41 +2056,77 @@ impl Registry {
     /// At most `limit` children that the Worker can start at `now`:
     /// `pending`, without a retry time in the future, in a batch that is not
     /// paused. A cancelled batch is included, so that the Worker records
-    /// `cancelled`. The query uses the `batch_children_due` index.
+    /// `cancelled`.
     pub fn due_scenario_create_batch_children(
         &self,
         now: i64,
         limit: usize,
     ) -> Result<Vec<DueBatchChild>> {
+        // D-025 section 11: a bounded page from each batch in turn, so that
+        // one large run does not stop the others. Each query reads through
+        // the `batch_children_by_batch` index in row order.
+        let batches = {
+            let mut statement = self.db.prepare(
+                "SELECT b.id FROM scenario_create_batches b
+                 WHERE b.paused=0 AND EXISTS (
+                   SELECT 1 FROM scenario_create_batch_children c
+                   WHERE c.batch_id=b.id AND c.state='pending'
+                     AND (c.next_retry_at IS NULL OR c.next_retry_at<=?1
+                          OR b.cancellation_requested=1))
+                 ORDER BY b.rowid",
+            )?;
+            let rows = statement
+                .query_map([now], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
+        if batches.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let share = (limit / batches.len()).max(1);
         let mut statement = self.db.prepare(
             "SELECT c.batch_id,b.scenario_id,b.scenario_revision,c.relative_path,c.source_is_left,
                     c.job_id,c.retries,b.cancellation_requested,c.kind
              FROM scenario_create_batch_children c
              JOIN scenario_create_batches b ON b.id=c.batch_id
-             WHERE c.state='pending' AND b.paused=0
-               AND (c.next_retry_at IS NULL OR c.next_retry_at<=?1 OR b.cancellation_requested=1)
-             ORDER BY c.batch_id, c.relative_path
-             LIMIT ?2",
+             WHERE c.batch_id=?1 AND c.state='pending' AND b.paused=0
+               AND (c.next_retry_at IS NULL OR c.next_retry_at<=?2 OR b.cancellation_requested=1)
+             ORDER BY c.rowid
+             LIMIT ?3",
         )?;
-        let rows = statement
-            .query_map(params![now, limit as i64], |row| {
-                Ok(DueBatchChild {
-                    batch_id: row.get(0)?,
-                    scenario: ScenarioReference {
-                        scenario_id: row.get(1)?,
-                        revision: row.get::<_, i64>(2)? as u64,
-                    },
-                    relative_path: row.get(3)?,
-                    source_is_left: row.get(4)?,
-                    job_id: row.get(5)?,
-                    retries: row.get(6)?,
-                    cancellation_requested: row.get(7)?,
-                    kind: BatchChildKind::parse(&row.get::<_, String>(8)?)
-                        .unwrap_or(BatchChildKind::Create),
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
+        let mut pages = Vec::with_capacity(batches.len());
+        for batch in batches.iter().take(limit) {
+            let page = statement
+                .query_map(params![batch, now, share as i64], |row| {
+                    Ok(DueBatchChild {
+                        batch_id: row.get(0)?,
+                        scenario: ScenarioReference {
+                            scenario_id: row.get(1)?,
+                            revision: row.get::<_, i64>(2)? as u64,
+                        },
+                        relative_path: row.get(3)?,
+                        source_is_left: row.get(4)?,
+                        job_id: row.get(5)?,
+                        retries: row.get(6)?,
+                        cancellation_requested: row.get(7)?,
+                        kind: BatchChildKind::parse(&row.get::<_, String>(8)?)
+                            .unwrap_or(BatchChildKind::Create),
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            pages.push(page.into_iter());
+        }
+        // Interleave the pages: one child of each batch in turn.
+        let mut due = Vec::new();
+        loop {
+            let before = due.len();
+            for page in &mut pages {
+                due.extend(page.next());
+            }
+            if due.len() == before {
+                return Ok(due);
+            }
+        }
     }
 
     /// When true, a batch child of this Scenario with a transient failure is
@@ -2222,7 +2284,7 @@ impl Registry {
         let reference = self
             .schedule_job_reference(schedule_job_id)?
             .ok_or(RegistryError::NotFound)?;
-        let transaction = self.db.unchecked_transaction()?;
+        let transaction = rusqlite::Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?;
         let existing: Option<String> = transaction
             .query_row(
                 "SELECT id FROM scenario_runs WHERE schedule_job_id=?1",
@@ -2390,12 +2452,13 @@ impl Registry {
             deferred_items: row.get::<_, i64>(10)? as u64,
             created_at: row.get(11)?,
             finished_at: row.get(12)?,
+            waiting_for_scenario_id: row.get(13)?,
         })
     }
 
     const SCENARIO_RUN_COLUMNS: &'static str =
         "id,scenario_id,scenario_revision,trigger,schedule_job_id,plan_id,batch_id,state,
-         waiting_reason,error,deferred_items,created_at,finished_at";
+         waiting_reason,error,deferred_items,created_at,finished_at,waiting_for_scenario_id";
 
     pub fn scenario_run(&self, id: &str) -> Result<Option<ScenarioRun>> {
         Ok(self
@@ -2422,6 +2485,78 @@ impl Registry {
             .query_map([], Self::scenario_run_from_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// The roots of a Scenario revision for the write-root lock.
+    fn revision_roots(&self, scenario_id: &str, revision: u64) -> Result<Vec<ScenarioRoot>> {
+        let scenario = self
+            .get_scenario_revision(scenario_id, revision)?
+            .ok_or(RegistryError::NotFound)?;
+        Ok(scenario_roots(&scenario, |id| {
+            self.get(id).ok().flatten().map(|connection| connection.adapter)
+        }))
+    }
+
+    /// Take the write-root lock for an active run, or name the Scenario whose
+    /// run holds a conflicting lock (D-025 section 11). Only active runs hold
+    /// a lock, so the end of a run releases it and a Worker restart keeps it.
+    pub fn acquire_scenario_run_write_lock(&self, run_id: &str) -> Result<RunWriteLock> {
+        let transaction = rusqlite::Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?;
+        let run = self.scenario_run(run_id)?.ok_or(RegistryError::NotFound)?;
+        if !matches!(run.state.as_str(), "planning" | "executing") {
+            return Err(RegistryError::NotFound);
+        }
+        let holds: bool = transaction.query_row(
+            "SELECT write_lock FROM scenario_runs WHERE id=?1",
+            [run_id],
+            |row| row.get(0),
+        )?;
+        if holds {
+            return Ok(RunWriteLock::Acquired);
+        }
+        let mine = self.revision_roots(&run.scenario.scenario_id, run.scenario.revision)?;
+        let holders = {
+            let mut statement = transaction.prepare(
+                "SELECT scenario_id,scenario_revision FROM scenario_runs
+                 WHERE write_lock=1 AND state IN ('planning','executing') AND id<>?1
+                 ORDER BY created_at, rowid",
+            )?;
+            let rows = statement
+                .query_map([run_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
+        for (scenario_id, revision) in holders {
+            if conflict(&mine, &self.revision_roots(&scenario_id, revision)?) {
+                transaction.execute(
+                    "UPDATE scenario_runs SET waiting_for_scenario_id=?2 WHERE id=?1",
+                    params![run_id, scenario_id],
+                )?;
+                transaction.commit()?;
+                return Ok(RunWriteLock::WaitFor { scenario_id });
+            }
+        }
+        transaction.execute(
+            "UPDATE scenario_runs SET write_lock=1, waiting_for_scenario_id=NULL WHERE id=?1",
+            [run_id],
+        )?;
+        transaction.commit()?;
+        Ok(RunWriteLock::Acquired)
+    }
+
+    /// Enabled Scenarios other than `exclude` whose runs cannot execute at the
+    /// same time as runs of `candidate`, for the editor warning.
+    pub fn overlapping_scenarios(&self, candidate: &Scenario, exclude: Option<&str>) -> Result<Vec<Scenario>> {
+        let adapter = |id: &str| self.get(id).ok().flatten().map(|connection| connection.adapter);
+        let mine = scenario_roots(candidate, adapter);
+        Ok(self
+            .list_scenarios()?
+            .into_iter()
+            .filter(|other| other.enabled && Some(other.id.as_str()) != exclude)
+            .filter(|other| conflict(&mine, &scenario_roots(other, adapter)))
+            .collect())
     }
 
     /// The newest run of each listed Scenario is what the interface shows.
@@ -2639,7 +2774,7 @@ impl Registry {
     /// occurrence receipts are removed in the same transaction; no Job is
     /// submitted, cancelled, or otherwise modified here.
     pub fn remove_scenario_schedule(&self, scenario_id: &str, schedule_id: &str) -> Result<()> {
-        let transaction = self.db.unchecked_transaction()?;
+        let transaction = rusqlite::Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?;
         let exists: Option<String> = transaction
             .query_row(
                 "SELECT id FROM scenario_schedules WHERE id=?1 AND scenario_id=?2",
@@ -2716,7 +2851,7 @@ impl Registry {
         id: &str,
         active_job: bool,
     ) -> Result<AutomaticTriggerResult> {
-        let transaction = self.db.unchecked_transaction()?;
+        let transaction = rusqlite::Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?;
         let state = transaction
             .query_row(
                 "SELECT s.enabled,COALESCE(a.locally_paused,0),COALESCE(a.pending_automatic_run,0)
@@ -2789,7 +2924,7 @@ impl Registry {
         )? {
             return Err(RegistryError::ScenarioRootsOverlap);
         }
-        let transaction = self.db.unchecked_transaction()?;
+        let transaction = rusqlite::Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?;
         let changed = transaction.execute(
             "UPDATE scenarios
              SET name=?1,left_connection_id=?2,left_root=?3,
@@ -4800,6 +4935,105 @@ mod tests {
     /// The database, not only code, allows one active run for each
     /// Scenario. A slot whose run starts after a manual run stays skipped.
     #[test]
+    fn due_children_take_each_batch_in_turn() {
+        let mut db = Registry::in_memory().unwrap();
+        let mac = db.add("local_filesystem", "Mac").unwrap();
+        let mut batches = Vec::new();
+        for (name, files) in [("Large", 50), ("Small", 2)] {
+            let scenario = db
+                .create_scenario(name, &mac, &format!("/{name}/a"), &mac, &format!("/{name}/b"), "left_to_right")
+                .unwrap();
+            let reference = ScenarioReference {
+                scenario_id: scenario,
+                revision: 1,
+            };
+            let batch = db.begin_scenario_create_batch(&reference).unwrap();
+            let children: Vec<(String, bool)> =
+                (0..files).map(|index| (format!("{index:03}.txt"), true)).collect();
+            db.append_scenario_create_batch_children(&batch, &children).unwrap();
+            db.set_scenario_create_batch_paused(&batch, false).unwrap();
+            batches.push(batch);
+        }
+        // The large batch was created first, but the small one is not starved.
+        let due = db.due_scenario_create_batch_children(0, 4).unwrap();
+        assert_eq!(
+            due.iter().map(|child| child.batch_id.as_str()).collect::<Vec<_>>(),
+            [&batches[0], &batches[1], &batches[0], &batches[1]]
+        );
+        db.set_scenario_create_batch_paused(&batches[0], true).unwrap();
+        assert!(db
+            .due_scenario_create_batch_children(0, 4)
+            .unwrap()
+            .iter()
+            .all(|child| child.batch_id == batches[1]));
+    }
+
+    #[test]
+    fn a_run_waits_for_the_write_root_lock_of_an_overlapping_run() {
+        let mut db = Registry::in_memory().unwrap();
+        let mac = db.add("local_filesystem", "Mac").unwrap();
+        let base = std::env::temp_dir().join("qadren-lock-test");
+        let path = |name: &str| base.join(name).to_string_lossy().into_owned();
+        let create = |name: &str, source: &str, destination: &str| {
+            db.create_scenario(name, &mac, &path(source), &mac, &path(destination), "left_to_right")
+                .unwrap()
+        };
+        let photos = create("Photos", "photos", "backup");
+        let music = create("Music", "music", "backup/music");
+        let other = create("Other", "photos", "elsewhere");
+        fn run(db: &mut Registry, scenario: &str) -> String {
+            let reference = ScenarioReference {
+                scenario_id: scenario.to_owned(),
+                revision: 1,
+            };
+            let batch = db.begin_scenario_create_batch(&reference).unwrap();
+            db.begin_manual_run(&reference, "plan", &batch, 0).unwrap()
+        }
+        let first = run(&mut db, &photos);
+        let second = run(&mut db, &music);
+        let third = run(&mut db, &other);
+        assert_eq!(
+            db.acquire_scenario_run_write_lock(&first).unwrap(),
+            RunWriteLock::Acquired
+        );
+        assert_eq!(
+            db.acquire_scenario_run_write_lock(&second).unwrap(),
+            RunWriteLock::WaitFor {
+                scenario_id: photos.clone()
+            }
+        );
+        assert_eq!(
+            db.scenario_run(&second).unwrap().unwrap().waiting_for_scenario_id,
+            Some(photos.clone())
+        );
+        // Both read "photos", but they write to different folders.
+        assert_eq!(
+            db.acquire_scenario_run_write_lock(&third).unwrap(),
+            RunWriteLock::Acquired
+        );
+        // The lock is durable: a Worker restart keeps it.
+        assert_eq!(
+            db.acquire_scenario_run_write_lock(&first).unwrap(),
+            RunWriteLock::Acquired
+        );
+        db.finish_scenario_run(&first, "completed", None).unwrap();
+        assert_eq!(
+            db.acquire_scenario_run_write_lock(&second).unwrap(),
+            RunWriteLock::Acquired
+        );
+        assert_eq!(db.scenario_run(&second).unwrap().unwrap().waiting_for_scenario_id, None);
+        let candidate = db.get_scenario_revision(&music, 1).unwrap().unwrap();
+        assert_eq!(
+            db.overlapping_scenarios(&candidate, Some(&music))
+                .unwrap()
+                .into_iter()
+                .map(|scenario| scenario.name)
+                .collect::<Vec<_>>(),
+            ["Photos"]
+        );
+    }
+
+    #[test]
     fn one_active_run_per_scenario_is_a_database_constraint() {
         let mut db = Registry::in_memory().unwrap();
         let scenario = schedule_fixture(&db, "constraint");
@@ -4978,6 +5212,8 @@ mod tests {
                  ALTER TABLE scenario_schedules DROP COLUMN days_mask;
                  ALTER TABLE scenario_schedules DROP COLUMN interval_hours;
                  ALTER TABLE scenario_schedules DROP COLUMN anchor_utc;
+                 ALTER TABLE scenario_runs DROP COLUMN write_lock;
+                 ALTER TABLE scenario_runs DROP COLUMN waiting_for_scenario_id;
                  PRAGMA user_version = 25;",
             )
             .unwrap();

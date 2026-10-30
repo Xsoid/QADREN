@@ -126,6 +126,13 @@ private func scenarioSourceWinsCall(
 private func scenarioRunStateGet(
     _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_scenario_root_overlaps")
+private func scenarioRootOverlapsGet(
+    _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?,
+    _ leftID: UnsafePointer<CChar>?, _ leftRoot: UnsafePointer<CChar>?,
+    _ rightID: UnsafePointer<CChar>?, _ rightRoot: UnsafePointer<CChar>?,
+    _ direction: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_scenario_automation_set_paused")
 private func scenarioAutomationSetPaused(
     _ path: UnsafePointer<CChar>?, _ scenarioID: UnsafePointer<CChar>?, _ paused: UInt8
@@ -265,6 +272,8 @@ struct ScenarioRunState: Decodable, Equatable {
         let state: String
         let waiting_reason: String?
         let created_at: Int64
+        /// The Scenario whose run this run waits for (write-root lock).
+        let waiting_for_scenario: String?
     }
     struct SkippedSlot: Decodable, Equatable {
         let schedule_id: String
@@ -433,6 +442,8 @@ enum QADRENUserMessage {
             "Файлы изменились после создания задачи конфликта. Обновите снимок конфликта."
         case "this_mac_required":
             "Подключение «Этот Mac» есть всегда, его нельзя удалить. Его можно переименовать или выключить."
+        case "waiting_for_scenario":
+            "Запуск ждёт окончания другого сценария с пересекающимися папками."
         case "smb_mounted_elsewhere":
             "Сетевая папка уже подключена в macOS в другом месте, например в Finder или Time Machine. macOS подключает одну папку только один раз. Отключите её там или откройте сценарий в QADREN и нажмите «Отключить там и подключить для QADREN»."
         case "smb_login_refused":
@@ -1062,6 +1073,24 @@ enum StorageRegistryBridge {
                     scenarioSourceWinsCall(db, id, scenario.revision, confirm ? 1 : 0), as: Answer.self
                 ).confirmed
             }
+        }
+    }
+
+    /// Names of enabled Scenarios whose runs cannot execute at the same time
+    /// as runs of these roots (D-025 section 11).
+    static func scenarioRootOverlaps(
+        scenarioID: String?, leftID: String, leftRoot: String,
+        rightID: String, rightRoot: String, direction: String
+    ) throws -> [String] {
+        let database = try path
+        let values = [scenarioID ?? "", leftID, leftRoot, rightID, rightRoot, direction]
+        let strings = values.map { strdup($0) }
+        defer { strings.forEach { free($0) } }
+        return try database.withCString { db in
+            try unwrap(
+                scenarioRootOverlapsGet(db, strings[0], strings[1], strings[2], strings[3], strings[4], strings[5]),
+                as: [String].self
+            )
         }
     }
 
