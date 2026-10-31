@@ -2384,186 +2384,203 @@ private struct ScenarioSchedulesView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack(alignment: .firstTextBaseline) {
-                Button("Назад", systemImage: "chevron.left", action: done)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Расписания").font(.largeTitle.bold())
-                    Text(scenario.name + " · ревизия " + String(scenario.revision))
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-            }
-
-            SettingsNotice(
-                text: "Запуски по расписанию выполняет фоновая служба QADREN. Окно приложения можно не открывать.",
-                symbol: "clock.badge.checkmark"
-            )
-
-            if needsLoginHandoff, !schedules.entries.isEmpty, loginState != .enabled {
-                SettingsNotice(
-                    text: loginState == .requiresApproval
-                        ? "Запуск при входе в систему ждёт разрешения в Системных настройках › Объекты входа. Пока его нет, после перезагрузки Mac запуски этого сценария ждут, пока вы откроете QADREN."
-                        : "Этому сценарию нужны данные для входа. После перезагрузки Mac его запуски ждут, пока вы откроете QADREN. Включите «Запускать QADREN при входе в систему», чтобы они шли сами.",
-                    symbol: "person.badge.key"
-                ) {
-                    if loginState == .requiresApproval {
-                        Button("Открыть настройки") { LoginHandoff.openLoginItemsSettings() }
-                    } else {
-                        Button("Включить") {
-                            do {
-                                try LoginHandoff.setEnabled(true)
-                            } catch {
-                                schedules.report(error.localizedDescription)
-                            }
-                            loginState = LoginHandoff.state
-                        }
-                    }
-                }
-            }
-
-            Form {
-                if let run = schedules.runState.active {
-                    Section("Текущий запуск") {
-                        HStack(alignment: .center, spacing: 12) {
-                            Image(systemName: "arrow.triangle.2.circlepath")
-                                .foregroundStyle(QDTheme.cyan)
-                                .accessibilityHidden(true)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(runTitle(run))
-                                Text(runDetail(run))
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Button("Остановить", role: .cancel) { confirmStop = true }
-                                .disabled(schedules.isStopping)
-                        }
-                        Text("Пока идёт этот запуск, слоты расписаний пропускаются. Новый запуск начнётся со следующего слота после его окончания.")
-                            .font(.caption)
+        // One scroll for the whole screen: no inner scroll areas.
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack(alignment: .firstTextBaseline) {
+                    Button("Назад", systemImage: "chevron.left", action: done)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Расписания").font(.largeTitle.bold())
+                        Text(scenario.name + " · ревизия " + String(scenario.revision))
                             .foregroundStyle(.secondary)
                     }
+                    Spacer()
                 }
-                Section("Автоматизация") {
-                    Toggle("Приостановить автоматические триггеры", isOn: Binding(
-                        get: { schedules.automation.locally_paused },
-                        set: { schedules.setLocallyPaused(scenarioID: scenario.id, paused: $0) }
-                    ))
-                    Text("Приостановка сохраняется локально, очищает только ожидающий автоматический запуск и не меняет существующие Job. Ручные запросы остаются отдельным путём.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Section("Новое расписание") {
-                    Picker("Вид", selection: $everyHours) {
-                        Text("Каждый день / по дням недели").tag(false)
-                        Text("Каждые N часов").tag(true)
-                    }
-                    .pickerStyle(.radioGroup)
-                    if everyHours {
-                        Stepper(value: $intervalHours, in: 1...24) {
-                            Text("Каждые \(intervalHours) ч")
+
+                SettingsNotice(
+                    text: "Запуски по расписанию выполняет фоновая служба QADREN. Окно приложения можно не открывать.",
+                    symbol: "clock.badge.checkmark"
+                )
+
+                if needsLoginHandoff, !schedules.entries.isEmpty, loginState != .enabled {
+                    SettingsNotice(
+                        text: loginState == .requiresApproval
+                        ? "Запуск при входе в систему ждёт разрешения в Системных настройках › Объекты входа. Пока его нет, после перезагрузки Mac запуски этого сценария ждут, пока вы откроете QADREN."
+                        : "Этому сценарию нужны данные для входа. После перезагрузки Mac его запуски ждут, пока вы откроете QADREN. Включите «Запускать QADREN при входе в систему», чтобы они шли сами.",
+                        symbol: "person.badge.key"
+                    ) {
+                        if loginState == .requiresApproval {
+                            Button("Открыть настройки") { LoginHandoff.openLoginItemsSettings() }
+                        } else {
+                            Button("Включить") {
+                                do {
+                                    try LoginHandoff.setEnabled(true)
+                                } catch {
+                                    schedules.report(error.localizedDescription)
+                                }
+                                loginState = LoginHandoff.state
+                            }
                         }
                     }
-                    DatePicker(
-                        everyHours ? "Начиная с" : "Время",
-                        selection: $time,
-                        displayedComponents: .hourAndMinute
-                    )
-                    LabeledContent(everyHours ? "Активные дни" : "Дни") {
-                        dayToggles
-                    }
-                    Picker("Часовой пояс", selection: $timezone) {
-                        ForEach(Self.timezones, id: \.self) { Text($0).tag($0) }
-                    }
-                    Text(draftTitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    HStack {
-                        Spacer()
-                        Button("Добавить расписание", action: create)
-                            .disabled(daysMask == 0)
-                    }
                 }
-            }
-            .formStyle(.grouped)
 
-            if let error = schedules.error {
-                SettingsNotice(text: error, symbol: "exclamationmark.triangle")
-            }
-
-            if !schedules.upcoming.isEmpty {
-                GroupBox("Ближайшие запуски") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(schedules.upcoming.prefix(5)) { occurrence in
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(ScheduleWording.dateTitle(occurrence.due_at))
-                                if let entry = schedules.entries.first(where: { $0.id == occurrence.schedule_id }) {
-                                    Text(ScheduleWording.title(entry))
+                if let run = schedules.runState.active {
+                    GroupBox("Текущий запуск") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack(alignment: .center, spacing: 12) {
+                                Image(systemName: "arrow.triangle.2.circlepath")
+                                    .foregroundStyle(QDTheme.cyan)
+                                    .accessibilityHidden(true)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(runTitle(run))
+                                    Text(runDetail(run))
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
+                                Spacer()
+                                Button("Остановить", role: .cancel) { confirmStop = true }
+                                    .disabled(schedules.isStopping)
                             }
+                            Text("Пока идёт этот запуск, слоты расписаний пропускаются. Новый запуск начнётся со следующего слота после его окончания.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
-                        Text("Если в момент слота идёт предыдущий запуск этого сценария, слот пропускается.")
+                        .padding(8)
+                    }
+                }
+                GroupBox("Автоматизация") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Toggle("Приостановить автоматические триггеры", isOn: Binding(
+                            get: { schedules.automation.locally_paused },
+                            set: { schedules.setLocallyPaused(scenarioID: scenario.id, paused: $0) }
+                        ))
+                        Text("Приостановка сохраняется локально, очищает только ожидающий автоматический запуск и не меняет существующие Job. Ручные запросы остаются отдельным путём.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
                 }
-            }
-
-            if schedules.entries.isEmpty {
-                SettingsEmptyState(
-                    title: "Расписаний пока нет",
-                    detail: "Добавьте одно или несколько расписаний: по дням недели или каждые N часов.",
-                    symbol: "calendar"
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                List(schedules.entries) { entry in
-                    HStack(spacing: 12) {
-                        Image(systemName: entry.enabled ? "calendar.badge.clock" : "calendar.badge.exclamationmark")
-                            .foregroundStyle(entry.enabled ? QDTheme.cyan : .secondary)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(ScheduleWording.title(entry))
-                            if entry.enabled, let next = entry.next_at {
-                                Text("Следующий запуск: " + ScheduleWording.dateTitle(next))
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            if let last = entry.last_slot {
-                                if last.skipped_active_run {
-                                    Label(
-                                        "Пропущено: идёт предыдущий запуск · "
-                                            + ScheduleWording.slotTitle(last.occurrence_key),
-                                        systemImage: "forward.end"
-                                    )
-                                    .font(.caption)
-                                    .foregroundStyle(QDTheme.warning)
-                                } else {
-                                    Text("Последний слот запустил синхронизацию: "
-                                        + ScheduleWording.slotTitle(last.occurrence_key))
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
+                GroupBox("Новое расписание") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Picker("Вид", selection: $everyHours) {
+                            Text("Каждый день / по дням недели").tag(false)
+                            Text("Каждые N часов").tag(true)
+                        }
+                        .pickerStyle(.radioGroup)
+                        if everyHours {
+                            Stepper(value: $intervalHours, in: 1...24) {
+                                Text("Каждые \(intervalHours) ч")
                             }
                         }
-                        Spacer()
-                        Toggle("Включено", isOn: Binding(
-                            get: { entry.enabled },
-                            set: { schedules.setEnabled(scenarioID: scenario.id, scheduleID: entry.id, enabled: $0) }
-                        ))
-                        .labelsHidden()
-                        Button("Удалить", role: .destructive) {
-                            schedules.remove(scenarioID: scenario.id, scheduleID: entry.id)
+                        DatePicker(
+                            everyHours ? "Начиная с" : "Время",
+                            selection: $time,
+                            displayedComponents: .hourAndMinute
+                        )
+                        LabeledContent(everyHours ? "Активные дни" : "Дни") {
+                            dayToggles
+                        }
+                        Picker("Часовой пояс", selection: $timezone) {
+                            ForEach(Self.timezones, id: \.self) { Text($0).tag($0) }
+                        }
+                        Text(draftTitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        HStack {
+                            Spacer()
+                            Button("Добавить расписание", action: create)
+                                .disabled(daysMask == 0)
                         }
                     }
-                    .padding(.vertical, 4)
+                    .padding(8)
                 }
-                .listStyle(.inset)
+
+                if let error = schedules.error {
+                    SettingsNotice(text: error, symbol: "exclamationmark.triangle")
+                }
+
+                if !schedules.upcoming.isEmpty {
+                    GroupBox("Ближайшие запуски") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(schedules.upcoming.prefix(5)) { occurrence in
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(ScheduleWording.dateTitle(occurrence.due_at))
+                                    if let entry = schedules.entries.first(where: { $0.id == occurrence.schedule_id }) {
+                                        Text(ScheduleWording.title(entry))
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                            Text("Если в момент слота идёт предыдущий запуск этого сценария, слот пропускается.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+
+                if schedules.entries.isEmpty {
+                    SettingsEmptyState(
+                        title: "Расписаний пока нет",
+                        detail: "Добавьте одно или несколько расписаний: по дням недели или каждые N часов.",
+                        symbol: "calendar"
+                    )
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 24)
+                } else {
+                    GroupBox("Расписания") {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(schedules.entries) { entry in
+                                if entry.id != schedules.entries.first?.id { Divider() }
+                                HStack(spacing: 12) {
+                                    Image(systemName: entry.enabled ? "calendar.badge.clock" : "calendar.badge.exclamationmark")
+                                        .foregroundStyle(entry.enabled ? QDTheme.cyan : .secondary)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(ScheduleWording.title(entry))
+                                        if entry.enabled, let next = entry.next_at {
+                                            Text("Следующий запуск: " + ScheduleWording.dateTitle(next))
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        if let last = entry.last_slot {
+                                            if last.skipped_active_run {
+                                                Label(
+                                                    "Пропущено: идёт предыдущий запуск · "
+                                                        + ScheduleWording.slotTitle(last.occurrence_key),
+                                                    systemImage: "forward.end"
+                                                )
+                                                .font(.caption)
+                                                .foregroundStyle(QDTheme.warning)
+                                            } else {
+                                                Text("Последний слот запустил синхронизацию: "
+                                                    + ScheduleWording.slotTitle(last.occurrence_key))
+                                                    .font(.caption)
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                        }
+                                    }
+                                    Spacer()
+                                    Toggle("Включено", isOn: Binding(
+                                        get: { entry.enabled },
+                                        set: { schedules.setEnabled(scenarioID: scenario.id, scheduleID: entry.id, enabled: $0) }
+                                    ))
+                                    .labelsHidden()
+                                    Button("Удалить", role: .destructive) {
+                                        schedules.remove(scenarioID: scenario.id, scheduleID: entry.id)
+                                    }
+                                }
+                                .padding(.vertical, 8)
+                            }
+                        }
+                        .padding(.horizontal, 8)
+                    }
+                }
             }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(24)
         .onAppear { schedules.refresh(scenarioID: scenario.id) }
         .task {
             // The Worker advances runs in the background; keep the state current.
