@@ -2,7 +2,7 @@
 //! It never contacts a provider or reads user/cloud content.
 use crate::confirmation::{Confirmation, EvidenceLevel};
 use crate::jobs::{JobStore, JobStoreError, ScenarioCopyBaselineOutboxEntry};
-use crate::local_fs::{LocalError, LocalFilesystem};
+use crate::local_fs::{LocalError, LocalFilesystem, LocalRootIdentity};
 use crate::model::{ConfirmedFileVersion, DeletionMode, JobState, ScenarioReference, ScopeMatch};
 use crate::policy::{Decision, OperationScope, ProtectedOperation};
 use crate::registry::Registry;
@@ -208,6 +208,49 @@ pub(crate) fn local_root_identity_key(
         .root_identity()
         .map_err(LocalDirectoryCreateError::Local)?;
     Ok(format!("unix:{}:{}", identity.device, identity.inode))
+}
+
+/// How a persisted root identity matches an opened destination root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RootBinding {
+    /// The same device and inode: the same root.
+    Exact,
+    /// An SMB share mounted again: a new device number and the same root
+    /// inode. On smbfs the inode follows the path name, so this proves only
+    /// the same root path. Completion then also needs the exact content.
+    SmbRemount,
+    Different,
+}
+
+fn root_binding(stored: Option<&str>, current: LocalRootIdentity, smb: bool) -> RootBinding {
+    let Some(stored) = stored else {
+        return RootBinding::Different;
+    };
+    if stored == format!("unix:{}:{}", current.device, current.inode) {
+        return RootBinding::Exact;
+    }
+    let stored_inode = stored
+        .strip_prefix("unix:")
+        .and_then(|rest| rest.split_once(':'))
+        .and_then(|(_, inode)| inode.parse::<u64>().ok());
+    if smb && stored_inode == Some(current.inode) {
+        RootBinding::SmbRemount
+    } else {
+        RootBinding::Different
+    }
+}
+
+/// True only when the file has exactly the expected size and MD5. This reads
+/// the content of the one target file of the reconciled effect.
+fn content_matches(
+    destination: &LocalFilesystem,
+    path: &Path,
+    expected_size: u64,
+    expected_md5: &str,
+) -> bool {
+    let mut digest = md5::Context::new();
+    matches!(destination.read_to_writer(path, &mut digest), Ok(bytes) if bytes == expected_size)
+        && format!("{:x}", digest.compute()).eq_ignore_ascii_case(expected_md5)
 }
 
 impl From<JobStoreError> for MockCreateError {
@@ -1921,9 +1964,10 @@ fn run_local_file_copy_inner(
     Ok(LocalFileCopyStatus::Completed)
 }
 
-/// Reconcile one UNKNOWN Local copy without reading content, writing, or
-/// retrying. Completion requires the durable destination-root binding and an
-/// existing regular file with the exact stored size.
+/// Reconcile one UNKNOWN Local copy without writing or retrying. Completion
+/// requires the durable destination-root binding and an existing regular file
+/// with the exact stored size. After an SMB remount the root inode alone binds
+/// the root, so completion also requires the exact stored MD5 of the file.
 pub fn reconcile_local_file_copy(
     database_path: &Path,
     registry_path: &Path,
@@ -1941,7 +1985,6 @@ pub fn reconcile_local_file_copy(
     let identity = destination
         .root_identity()
         .map_err(LocalFileCopyError::Local)?;
-    let root_identity = format!("unix:{}:{}", identity.device, identity.inode);
     let mut store = JobStore::open(database_path)?;
     let Some(job) = store.get(job_id)? else {
         return Err(LocalFileCopyError::Store(JobStoreError::NotFound));
@@ -1969,16 +2012,24 @@ pub fn reconcile_local_file_copy(
     let Some(operation_kind) = attempt.operation_kind.as_deref() else {
         return Ok(LocalFileCopyReconciliationStatus::StillUnknown);
     };
+    let binding = root_binding(
+        store.attempt_root_identity(job_id, &attempt.attempt_id)?.as_deref(),
+        identity,
+        destination.root_on_smb_share(),
+    );
     if expected.operation_kind != operation_kind
         || expected.target_connection_id != destination_connection_id
-        || store
-            .attempt_root_identity(job_id, &attempt.attempt_id)?
-            .as_deref()
-            != Some(root_identity.as_str())
+        || binding == RootBinding::Different
     {
         return Ok(LocalFileCopyReconciliationStatus::StillUnknown);
     }
-    if !matches!(destination.stat(Path::new(&expected.target_path)), Ok(entry) if !entry.is_directory && entry.size == expected.expected_size)
+    let target = Path::new(&expected.target_path);
+    if !matches!(destination.stat(target), Ok(entry) if !entry.is_directory && entry.size == expected.expected_size)
+    {
+        return Ok(LocalFileCopyReconciliationStatus::StillUnknown);
+    }
+    if binding == RootBinding::SmbRemount
+        && !content_matches(&destination, target, expected.expected_size, &expected.expected_md5)
     {
         return Ok(LocalFileCopyReconciliationStatus::StillUnknown);
     }
@@ -2047,7 +2098,7 @@ pub fn remove_interrupted_staging(
     let identity = destination
         .root_identity()
         .map_err(LocalFileCopyError::Local)?;
-    let root_identity = format!("unix:{}:{}", identity.device, identity.inode);
+    let smb = destination.root_on_smb_share();
     let store = JobStore::open(database_path)?;
     if store.get(job_id)?.map(|job| job.state) != Some(JobState::Unknown) {
         return Ok(0);
@@ -2059,10 +2110,11 @@ pub fn remove_interrupted_staging(
             && is_local_file_copy_operation(attempt.operation_kind.as_deref())
             && attempt.target_connection_id.as_deref() == Some(destination_connection_id)
     }) {
-        if store
-            .attempt_root_identity(job_id, &attempt.attempt_id)?
-            .as_deref()
-            != Some(root_identity.as_str())
+        if root_binding(
+            store.attempt_root_identity(job_id, &attempt.attempt_id)?.as_deref(),
+            identity,
+            smb,
+        ) == RootBinding::Different
         {
             continue;
         }
@@ -2111,17 +2163,20 @@ pub fn local_file_copy_reconciliation_candidates(
     let identity = destination
         .root_identity()
         .map_err(LocalFileCopyError::Local)?;
-    let root_identity = format!("unix:{}:{}", identity.device, identity.inode);
+    let smb = destination.root_on_smb_share();
     let store = JobStore::open(database_path)?;
     let mut candidates = Vec::new();
     for attempt in store.unresolved_attempts()? {
         if attempt.status != "unknown"
             || !is_local_file_copy_operation(attempt.operation_kind.as_deref())
             || attempt.target_connection_id.as_deref() != Some(destination_connection_id)
-            || store
-                .attempt_root_identity(&attempt.job_id, &attempt.attempt_id)?
-                .as_deref()
-                != Some(root_identity.as_str())
+            || root_binding(
+                store
+                    .attempt_root_identity(&attempt.job_id, &attempt.attempt_id)?
+                    .as_deref(),
+                identity,
+                smb,
+            ) == RootBinding::Different
         {
             continue;
         }

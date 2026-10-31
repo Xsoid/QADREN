@@ -856,11 +856,19 @@ pub extern "C" fn qadren_scenario_run_state(
                 Some(json!({
                     "id": run.id, "trigger": run.trigger, "state": run.state,
                     "waiting_reason": run.waiting_reason, "created_at": run.created_at,
-                    "waiting_for_scenario": waiting_for
+                    "waiting_for_scenario": waiting_for, "batch_id": run.batch_id
                 }))
             }
             None => None,
         };
+        // The result of the newest finished run, for the monitoring widget.
+        let last = db.last_finished_scenario_run(&scenario_id)?.map(|run| {
+            json!({
+                "id": run.id, "trigger": run.trigger, "state": run.state,
+                "error": run.error, "batch_id": run.batch_id,
+                "created_at": run.created_at, "finished_at": run.finished_at
+            })
+        });
         let skipped = db
             .skipped_schedule_slots(&scenario_id, 20)?
             .into_iter()
@@ -871,7 +879,7 @@ pub extern "C" fn qadren_scenario_run_state(
                 })
             })
             .collect::<Vec<Value>>();
-        Ok(json!({"active": active, "skipped": skipped}))
+        Ok(json!({"active": active, "last": last, "skipped": skipped}))
     })
 }
 

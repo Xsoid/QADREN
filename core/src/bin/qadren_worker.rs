@@ -41,12 +41,15 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(60);
+/// The longest time that `prepare_restart` holds new effects back. A restart
+/// that the app abandons must not stop synchronization.
+const RESTART_DRAIN_LIMIT: i64 = 600;
 const POLL_OVERLAP: Duration = Duration::from_secs(90);
 const MAX_RULE_DELETION_SCAN_ENTRIES: usize = 10_000;
 
@@ -1618,9 +1621,20 @@ struct Runner {
     smb_retry: Mutex<HashMap<String, (std::time::Instant, u64)>>,
     /// Batch children that run now.
     active: AtomicUsize,
+    /// Until this Unix time the Worker starts no new effect, so that the app
+    /// can restart it between files (`prepare_restart`). 0: no restart waits.
+    drain_until: AtomicI64,
+    /// The Unix time when this Worker process started. The app gives the
+    /// credentials again when it sees a new value.
+    started: i64,
 }
 
 impl Runner {
+    /// True while a restart waits: running effects finish, new ones wait.
+    fn draining(&self) -> bool {
+        unix_now() < self.drain_until.load(Ordering::SeqCst)
+    }
+
     fn remember_token(&self, connection_id: &str, token: &str) {
         if let Ok(mut tokens) = self.tokens.lock() {
             tokens.insert(connection_id.to_owned(), token.to_owned());
@@ -1666,6 +1680,8 @@ fn runner() -> &'static Runner {
         smb_refused: Mutex::new(HashMap::new()),
         smb_retry: Mutex::new(HashMap::new()),
         active: AtomicUsize::new(0),
+        drain_until: AtomicI64::new(0),
+        started: unix_now(),
     })
 }
 
@@ -1684,6 +1700,9 @@ fn run_batches_forever(paths: WorkerPaths) {
 /// One pass over the batch children that are due now. A Yandex Disk batch
 /// without a token waits until the app sends one.
 fn run_due_batch_children(paths: &WorkerPaths) {
+    if runner().draining() {
+        return;
+    }
     let Ok(registry) = Registry::open(&paths.registry) else {
         return;
     };
@@ -1781,7 +1800,8 @@ fn run_pool(paths: &WorkerPaths, queue: std::collections::VecDeque<PoolItem>) {
                     return;
                 };
                 let item = loop {
-                    if guard.queue.is_empty() {
+                    // A waiting restart takes effect before the next child.
+                    if guard.queue.is_empty() || runner().draining() {
                         return;
                     }
                     let free = guard.queue.iter().position(|item| {
@@ -2187,6 +2207,51 @@ fn stop_scenario_run(paths: &WorkerPaths, request: &Request) -> serde_json::Valu
         let _ = finish_run_job(paths, &run.id);
     }
     serde_json::json!({"ok": true, "status": "stop_requested", "run": run.id})
+}
+
+/// "Запустить" of the monitoring Scenario widget: a manual run of the current
+/// revision that plans and executes like a scheduled run. During an active
+/// run it starts no second run and answers with the active one (D-025).
+fn run_scenario_now(paths: &WorkerPaths, request: &Request) -> serde_json::Value {
+    let Some(scenario_id) = request.scenario_id.as_deref() else {
+        return serde_json::json!({"ok": false, "status": "invalid_request"});
+    };
+    let Ok(registry) = Registry::open(&paths.registry) else {
+        return serde_json::json!({"ok": false, "status": "registry_unavailable"});
+    };
+    let scenario = match registry.list_scenarios() {
+        Ok(scenarios) => scenarios.into_iter().find(|scenario| scenario.id == scenario_id),
+        Err(_) => return serde_json::json!({"ok": false, "status": "registry_unavailable"}),
+    };
+    let Some(scenario) = scenario else {
+        return serde_json::json!({"ok": false, "status": "scenario_unavailable"});
+    };
+    if !scenario.enabled {
+        return serde_json::json!({"ok": false, "status": "scenario_disabled"});
+    }
+    match registry.active_scenario_run(scenario_id) {
+        Ok(Some(active)) => return run_active_answer(&active),
+        Ok(None) => {}
+        Err(_) => return serde_json::json!({"ok": false, "status": "registry_unavailable"}),
+    }
+    let reference = ScenarioReference {
+        scenario_id: scenario.id,
+        revision: scenario.revision,
+    };
+    if let (Some(connection), Some(AccessToken(token))) = (
+        yandex_source_connection(&registry, &reference.scenario_id, reference.revision),
+        request.access_token.as_ref(),
+    ) {
+        runner().remember_token(&connection, token);
+    }
+    match registry.begin_manual_planning_run(&reference) {
+        Ok(run) => serde_json::json!({"ok": true, "status": "accepted", "run": run}),
+        Err(RegistryError::ScenarioRunActive) => match registry.active_scenario_run(scenario_id) {
+            Ok(Some(active)) => run_active_answer(&active),
+            _ => serde_json::json!({"ok": false, "status": "run_active"}),
+        },
+        Err(_) => serde_json::json!({"ok": false, "status": "registry_unavailable"}),
+    }
 }
 
 fn request_create_batch_cancellation(
@@ -2674,6 +2739,40 @@ fn handle_client(mut stream: UnixStream, paths: &WorkerPaths, stop: &mut bool) {
                     "ok": true,
                     "status": "running",
                     "active": runner().active.load(Ordering::SeqCst),
+                    "draining": runner().draining(),
+                    "started": runner().started,
+                })
+            );
+        }
+        "prepare_restart" => {
+            // Running effects finish; no new effect starts until the limit.
+            // The app restarts the Worker when `active` is 0.
+            runner()
+                .drain_until
+                .store(unix_now() + RESTART_DRAIN_LIMIT, Ordering::SeqCst);
+            let _ = writeln!(
+                stream,
+                "{}",
+                serde_json::json!({
+                    "ok": true,
+                    "status": "running",
+                    "active": runner().active.load(Ordering::SeqCst),
+                    "draining": true,
+                    "started": runner().started,
+                })
+            );
+        }
+        "cancel_restart" => {
+            runner().drain_until.store(0, Ordering::SeqCst);
+            let _ = writeln!(
+                stream,
+                "{}",
+                serde_json::json!({
+                    "ok": true,
+                    "status": "running",
+                    "active": runner().active.load(Ordering::SeqCst),
+                    "draining": false,
+                    "started": runner().started,
                 })
             );
         }
@@ -2695,6 +2794,10 @@ fn handle_client(mut stream: UnixStream, paths: &WorkerPaths, stop: &mut bool) {
         }
         "stop_run" => {
             let answer = stop_scenario_run(paths, &request);
+            let _ = writeln!(stream, "{answer}");
+        }
+        "run_now" => {
+            let answer = run_scenario_now(paths, &request);
             let _ = writeln!(stream, "{answer}");
         }
         "start_snapshot" => {
@@ -3066,7 +3169,9 @@ fn run(paths: WorkerPaths, once: bool) -> Result<(), String> {
     {
         let paths = paths.clone();
         thread::spawn(move || loop {
-            let _ = dispatch_due(&paths);
+            if !runner().draining() {
+                let _ = dispatch_due(&paths);
+            }
             thread::sleep(POLL_INTERVAL);
         });
     }

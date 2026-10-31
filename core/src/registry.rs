@@ -2399,6 +2399,55 @@ impl Registry {
             .optional()?)
     }
 
+    /// Record a manual run that plans and executes like a scheduled run: the
+    /// Worker builds the plan and starts the batch. It serves the "Запустить"
+    /// action of the monitoring Scenario widget (D-025 section 2). The batch
+    /// step still requires the confirmed source-wins rule.
+    pub fn begin_manual_planning_run(&self, scenario: &ScenarioReference) -> Result<String> {
+        let id: String = self
+            .db
+            .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
+        self.db
+            .execute(
+                "INSERT INTO scenario_runs(
+                id,scenario_id,scenario_revision,trigger,state,created_at
+             ) VALUES(?1,?2,?3,'manual','planning',?4)",
+                params![
+                    id,
+                    scenario.scenario_id,
+                    scenario.revision as i64,
+                    unix_seconds()
+                ],
+            )
+            .map_err(|error| match error {
+                // `scenario_runs_one_active`: another run of the Scenario is active.
+                rusqlite::Error::SqliteFailure(failure, _)
+                    if failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
+                {
+                    RegistryError::ScenarioRunActive
+                }
+                other => other.into(),
+            })?;
+        Ok(id)
+    }
+
+    /// The newest finished run of a Scenario, for the monitoring widget.
+    pub fn last_finished_scenario_run(&self, scenario_id: &str) -> Result<Option<ScenarioRun>> {
+        Ok(self
+            .db
+            .query_row(
+                &format!(
+                    "SELECT {} FROM scenario_runs WHERE scenario_id=?1
+                       AND state IN ('completed','failed','cancelled')
+                     ORDER BY coalesce(finished_at,created_at) DESC, rowid DESC LIMIT 1",
+                    Self::SCENARIO_RUN_COLUMNS
+                ),
+                [scenario_id],
+                Self::scenario_run_from_row,
+            )
+            .optional()?)
+    }
+
     /// Record a manual run whose batch the user confirmed from a plan.
     pub fn begin_manual_run(
         &self,

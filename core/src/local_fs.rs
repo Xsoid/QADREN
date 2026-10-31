@@ -386,6 +386,20 @@ impl LocalFilesystem {
         }
     }
 
+    /// True when this root is on smbfs. There the root inode number follows
+    /// the path name and the device number changes on each mount, so a stored
+    /// root identity cannot prove the same root without other evidence.
+    pub fn root_on_smb_share(&self) -> bool {
+        #[cfg(unix)]
+        {
+            secure::inode_follows_name(&self.root_fd)
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
     fn relative(path: &Path) -> Result<()> {
         if path.as_os_str().is_empty() {
             return Err(LocalError::InvalidPath);
