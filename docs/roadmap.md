@@ -17,6 +17,7 @@ Release 1 uses Local Filesystem and SMB network drives through a QADREN mount (D
 2. Large transfers (D-024): Worker-owned Transfer Runs with retries, then stored snapshots, then stored paged plans, then MD5 reconciliation.
 3. Autonomous scheduled Scenarios (D-025): one run path, one active run for each Scenario, automatic Update and Delete, Yandex Disk schedules, Worker SMB mount, launch at login, daily and every-N-hours schedules, parallel runs. This includes deletion on the Mac side for a Yandex Disk source.
 4. Mac to Yandex Disk and two-way Yandex Disk Scenarios (D-023, stage 2).
+5. Monitoring control panel (2026-10-31): cybercn style and the cyber plate mark, a widget catalog (System, Scenario, Scenarios, Connections), Worker restart between files, and `UNKNOWN` reconciliation after an SMB remount ([design](design/README.md), [D-022](decisions/D-022-smb-in-release-1-scenarios.md)).
 
 ## Post-release
 

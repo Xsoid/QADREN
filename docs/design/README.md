@@ -17,7 +17,7 @@ In case of discrepancy: safety from `docs/policies/` and domain solutions from `
 
 ## Do Not Change During Implementation
 
-- Monitoring — **a canvas of interactive widgets without a permanent Sidebar or section navigation**. The fixed widget set supports order and density changes in layout mode.
+- Monitoring — **a canvas of interactive widgets without a permanent Sidebar or section navigation**. Layout mode adds widgets from the catalog (several instances of one type), removes, moves, and sets density and options ([widget system](widget-system.md)).
 - Two work windows are defined: monitoring and settings. Do not add a separate file-manager window. Scenario Settings owns local folder selection through `LocalWorkspace`. The macOS menu is the entry point and for quick actions. Closing the UI is not equal to stopping the background service after its implementation.
 - Dark cyberpunk theme — the primary artistic baseline. The monitoring window uses the cybercn style (owner decision, 2026-10-31): near-black canvas, yellow accent, mint edge, cut-corner frames, Advent Pro and VT323 ([visual language §0](visual-language.md)). The Settings window keeps the earlier cyan/blue rules until a separate decision. Light and system themes are also provided.
 - **Use only** the QADREN mark from `assets/brand/qadren-mark.svg` (raster `assets/qadren-logo.png`, app icon `assets/qadren.icns`; owner decision of 2026-10-31, see [visual language §2](visual-language.md)); do not create a "similar" mark, do not replace SF Symbols with a third-party product logo.

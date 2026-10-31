@@ -18,7 +18,7 @@ The monitoring window uses the dark theme of [cybercn-ui](https://github.com/szv
 
 **Cyberpunk Control Surface**: a technical dispatcher interface with modern native macOS mechanics. This is not a "gaming HUD": the content is read for hours; decorative light contours must not compete with data. Active operations, selected focus and blocking events are more prominent. Successful and historical events receive less attention. No constant artificial flickering or "scanning" lines.
 
-The working window content occupies the maximum area. NO giant hero-headers, wide empty fields, constant right palette, side menu in monitoring, or decorative diagrams. One header + adaptive grid + narrow status bar. macOS titlebar/traffic lights remain native.
+The working window content occupies the maximum area. NO giant hero-headers, wide empty fields, constant right palette, side menu in monitoring, or decorative diagrams. One header + adaptive grid; no status bar. The traffic lights remain native; the monitoring window draws its own top bar (§0).
 
 ## 2. Brand — strictly from repository
 

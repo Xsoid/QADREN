@@ -35,7 +35,7 @@ Persist locally and atomically. If the layout is corrupted, open a safe default 
 Wide window: base grid of **12 columns** for client widths from 1180pt. Narrow window: **8 columns** for 900–1179pt. For other sizes/zoom, recalculate; do not fix the pixel width of the widget. External margins are 12pt, gap is 10pt, with no overlaps and no negative coordinates.
 
 - `widthSpan` is an integer from 2..12 (or less than the available number of columns on a narrow grid); height is determined by the integer grid or content with an agreed min height, without clipping commands.
-- Initial typical spans for **wide**: SystemHealth 3×2, Scenario 4×2, Attention 2×2, Connections 4×3, ResourceMetrics 4×3, UpcomingRuns 4×2, Timeline 4×3, Scenarios 4×3; this is an **example**, not a mandatory order.
+- Initial typical spans for **wide**: SystemHealth 3×2, Scenario 4×2, Connections 4×3, ResourceMetrics 4×3, UpcomingRuns 4×2, Timeline 4×3, Scenarios 4×3; this is an **example**, not a mandatory order.
 - For a narrow screen, first adapt spans, then move widgets down; never overlap, create horizontal scroll for the whole panel, or clip mandatory actions.
 - The layout engine searches for the nearest free area and performs deterministic reflow; the tab-navigation order matches the visual reading order.
 
@@ -51,7 +51,7 @@ Example for a Scenario: compact shows the stage and the progress ring, regular a
 
 **Layout** (explicitly enabled in the top bar of the window, `MonitoringHeader`): the top bar shows `+ Виджет` and `Готово`. `Add widget` opens the widget catalog; a click on a type adds a new instance at the end of the panel. Each widget shows move controls, density choices, and a remove control. Auto-save every valid change; Undo/Redo use Cmd-Z/Shift-Cmd-Z without toolbar buttons; optional layout recovery, but not without warning upon layout loss. These changes do not delete jobs, scenarios, connections, or their history. A panel with no widgets shows an empty state that tells how to add a widget.
 
-The monitoring toolbar has only the layout controls. The panel has no status footer: Worker state lives in the `system-health` widget. If that widget is not on the panel, a Worker service failure shows in the panel attention banner. Data refreshes on its own interval, and the Settings window opens from the QADREN menu bar menu.
+The monitoring top bar (`MonitoringHeader`) has only the layout controls. The panel has no status footer: Worker state lives in the `system-health` widget. If that widget is not on the panel, a Worker service failure shows in the panel attention banner. Data refreshes on its own interval, and the Settings window opens from the QADREN menu bar menu.
 
 Order: select → move → choose density → validate bounds/unique `widgetID` → persist view state. If save errors occur, show a message and the previous layout; do not report success. Future widget types remain unavailable until an approved product decision adds them.
 
@@ -67,7 +67,6 @@ Metadata reads use only the permitted source. They do not start hidden content r
 |---|---|---|---|
 | `system-health` | one fixed size: Worker service state, active operations, last check, app version | start, restart (the Worker first finishes the files that run now and starts no new one; the status line shows "Перезапуск" meanwhile), open Login Items | launchd registration + IPC `status`; attention state tints the status zone and border |
 | `scenario` | one selected Scenario: stage, three-zone progress ring (copied, remaining, errors) | regular: copied/remaining/error counts, next run when idle, Stop during a run, Run when idle | Registry `scenario_runs` + batch summary; expanded adds the source and destination (connection, type, root, selected objects); Run uses Worker `run_now` (a manual run that plans and executes like a scheduled run, D-025); failed files never color the frame, only a failed run does; a file that waits for a retry after a failed transfer (for example Yandex Disk HTTP 500) is in the error zone until a retry copies it, and regular shows "Ждут повтора: N" with the next retry time; a file that still fails after all retries is planned again by the next run |
-| `attention` | critical count + first item | conflict / consent / failure context | signal even if widget is hidden |
 | `scenarios` | one fixed size: all Scenarios in the order of the nearest run (running, waiting for a write root, by next scheduled run, manual, paused, disabled); each row: marker, name, direction (source → destination; ⇄ for two-way), first schedule rule (+N), next run time with today/tomorrow/date, or "идёт", "ждёт", "вручную", "пауза", "выкл" | Layout mode sets the row count; a running row shows `QDCyberActivityBar`; a failed last run colors only its marker, never the frame | Registry: Scenarios, schedules (`next_at`), run state, local automation pause; read every 5 s |
 | `connections` | compact: status line ("В сети", "Нужен вход", "Ошибка", "Нет связи"), online count N/M of enabled connections, one cut marker per connection | regular: up to 4 rows (marker, name, type; a status word only when the state is not ready) + "Ещё N"; expanded: all rows and the SMB share address (no login) | local Registry; a switched-off or empty registry keeps the frame quiet; a connection that needs sign-in or failed colors the frame |
 
@@ -84,7 +83,7 @@ Do not include the following in MVP: topology graph, global Worker speed, quota 
 
 ## 8. Default Layout
 
-First start panel (if data is available): at the top, a brief system-health line and `attention` and `scenario` widgets; below them, `connections`, `upcoming-runs`, `event-timeline`, `scenarios`. Widgets have an explicit `empty/unavailable` state if Core is not yet implemented. The primary layout must survive resizing while preserving user rearrangements.
+First start panel: `system-health`, `scenario`, `scenarios`, `connections` in catalog order. No catch-all attention widget (owner decision, 2026-10-31): each signal stays in the widget that it belongs to. Worker service state is in `system-health`, file outcomes (including `UNKNOWN` and retries) are in `scenario`, sign-in and connection failures are in `connections`. The panel attention banner shows only a Worker service failure when no `system-health` widget is on the panel, a store read error, or a recovered layout. `upcoming-runs` and `event-timeline` stay planned. Widgets have an explicit `empty/unavailable` state if Core is not yet implemented. The primary layout must survive resizing while preserving user rearrangements.
 
 ## 9. Complex and Negative Cases
 

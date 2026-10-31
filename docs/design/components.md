@@ -58,7 +58,7 @@ The structure is strictly: `frame → header → content → optional footer →
 | Frame | background, thin border, clip, focus | uniform radius 8pt; normal state without glow |
 | Header (32pt) | 14pt icon, title 13pt semibold, optional count, trailing actions | menu "...", refresh, expand; actions may be hidden until hover, but keyboard access is available |
 | Content | layout based on type and density | scroll only if content exists; no nested scroll-jank; empty state occupies a meaningful height |
-| Footer | freshness, units, additional actions | do not duplicate global statusbar |
+| Footer | freshness, units, additional actions | do not duplicate another widget |
 | Overlay | loading/stale/disabled, selected/edit handles | the message covers **only** the unavailable area and does not hide critical actions |
 
 Border enhancement is allowed on hover; a widget selected in edit-mode draws a focus stroke + resize handles. For warning/error, highlight a narrow zone of the header/border; do not turn the whole widget into a red glowing panel.
