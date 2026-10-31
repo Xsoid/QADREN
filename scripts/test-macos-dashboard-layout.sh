@@ -21,7 +21,6 @@ xcrun swiftc -O -target "$ARCH-apple-macos13.0" \
   platform/macos/QADREN/DesignSystem.swift \
   platform/macos/QADREN/DashboardLayout.swift \
   platform/macos/QADREN/ConnectionPresentationStatus.swift \
-  platform/macos/QADREN/JobPresentationStatus.swift \
   platform/macos/Tests/DashboardLayoutTests.swift \
   -o "$TEST_ROOT/dashboard-layout-tests"
 "$TEST_ROOT/dashboard-layout-tests"

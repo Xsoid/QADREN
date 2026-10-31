@@ -2,6 +2,18 @@ import AppKit
 import Foundation
 import ServiceManagement
 
+/// The launchd registration of the Worker service. It does not prove that the
+/// Worker answers; the IPC `status` request proves that.
+enum WorkerServiceRegistration: Equatable {
+    case enabled
+    case requiresApproval
+    case stoppedByUser
+    case notRegistered
+    case registrationFailed
+    case notFound
+    case unknown
+}
+
 /// Registers the bundled local Worker as a LaunchAgent through SMAppService.
 /// The service owns schedule polling and JobStore dispatch, so it keeps
 /// running after the user quits the UI. This controller does not report the
@@ -9,6 +21,12 @@ import ServiceManagement
 enum LocalWorkerController {
     private static let service = SMAppService.agent(plistName: "dev.qadren.worker.plist")
     private static var registrationFailed = false
+    /// True while a registration waits for the Worker of this build to answer.
+    private(set) static var isRestarting = false
+    /// True while a restart waits for the Worker to finish its running files.
+    private(set) static var isDraining = false
+    /// A little less than the Worker limit (`RESTART_DRAIN_LIMIT`, 600 s).
+    private static let drainLimit: TimeInterval = 590
 
     /// A test instance with QADREN_DATA_ROOT must not register the production
     /// service unless the test asks for it with QADREN_REGISTER_AGENT=1.
@@ -32,10 +50,9 @@ enum LocalWorkerController {
         // build and refuses another one (OS_REASON_CODESIGNING); with a Team
         // ID signature the binding is the Team ID and the first attempt works.
         if service.status == .enabled, registeredBuild != currentBuild {
-            // D-024: never stop a Worker while it writes a file. The running
-            // Worker continues; the next app start registers the new build.
-            if let active = try? WorkerIPC.activeItems(), active > 0 { return }
-            registerVerified(build: currentBuild, attempt: 0, unregisterFirst: true)
+            // D-024: never stop a Worker while it writes a file. The restart
+            // waits until the files that run now finish.
+            restart()
             return
         }
         // Before the first registration, some macOS versions report .notFound
@@ -58,19 +75,26 @@ enum LocalWorkerController {
     /// with growing pauses. The build counts as registered only after the
     /// Worker answers; otherwise the next launch tries again.
     private static func registerVerified(build: String, attempt: Int, unregisterFirst: Bool) {
+        isRestarting = true
         let registerAndProbe = {
             // The unregistration is applied a moment after the call returns.
             DispatchQueue.main.asyncAfter(deadline: .now() + (unregisterFirst ? 3 : 0)) {
-                guard register() else { return }
+                guard register() else {
+                    isRestarting = false
+                    return
+                }
                 DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 5) {
                     let answers = (try? WorkerIPC.probeStatus(timeoutSeconds: 2)) != nil
                     DispatchQueue.main.async {
                         if answers {
                             registeredBuild = build
+                            isRestarting = false
                         } else if attempt < retryDelays.count {
                             DispatchQueue.main.asyncAfter(deadline: .now() + retryDelays[attempt]) {
                                 registerVerified(build: build, attempt: attempt + 1, unregisterFirst: true)
                             }
+                        } else {
+                            isRestarting = false
                         }
                     }
                 }
@@ -118,6 +142,80 @@ enum LocalWorkerController {
     }
 
     static var isRegistered: Bool { service.status == .enabled }
+
+    static var registration: WorkerServiceRegistration {
+        switch service.status {
+        case .enabled: .enabled
+        case .requiresApproval: .requiresApproval
+        case .notRegistered:
+            if UserDefaults.standard.bool(forKey: stoppedByUserKey) { .stoppedByUser }
+            else if registrationFailed { .registrationFailed }
+            else { .notRegistered }
+        case .notFound: .notFound
+        @unknown default: .unknown
+        }
+    }
+
+    /// The registered Worker is from an earlier build of the app. The restart
+    /// to the new build waits until the running files finish (D-024).
+    static var runsPreviousBuild: Bool {
+        service.status == .enabled && registeredBuild != currentBuild
+    }
+
+    /// The bundle version that the build script sets (UTC `yyyyMMddHHmmss`).
+    static var buildVersion: String { currentBuild }
+
+    /// Starts the Worker of this build, or restarts a registered one. A
+    /// restart never stops a Worker that writes a file now (D-024); a Worker
+    /// that does not answer at all is not running and cannot write.
+    static func restart() {
+        guard !isRestarting else { return }
+        isRestarting = true
+        isDraining = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            let idle = waitForIdleWorker()
+            DispatchQueue.main.async {
+                isDraining = false
+                guard idle else {
+                    isRestarting = false
+                    return
+                }
+                registerVerified(build: currentBuild, attempt: 0, unregisterFirst: service.status == .enabled)
+            }
+        }
+    }
+
+    /// Asks the Worker to finish its running files and to start no new one,
+    /// then waits until no file runs. A long copy then cannot block an
+    /// update. A Worker of an earlier build has no `prepare_restart`; it is
+    /// restarted in a moment between two files. Returns false when files
+    /// still run at the limit; the Worker then continues normally.
+    private static func waitForIdleWorker() -> Bool {
+        let drains: Bool
+        do {
+            try WorkerIPC.prepareRestart()
+            drains = true
+        } catch WorkerIPCError.unavailable {
+            return true
+        } catch {
+            drains = false
+        }
+        let deadline = Date().addingTimeInterval(drainLimit)
+        while Date() < deadline {
+            do {
+                if try WorkerIPC.activeItems() == 0 { return true }
+            } catch WorkerIPCError.unavailable {
+                return true
+            } catch {}
+            Thread.sleep(forTimeInterval: drains ? 1 : 0.2)
+        }
+        if drains { WorkerIPC.cancelRestart() }
+        return false
+    }
+
+    static func openLoginItemsSettings() {
+        SMAppService.openSystemSettingsLoginItems()
+    }
 
     static var statusText: String {
         switch service.status {

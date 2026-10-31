@@ -49,6 +49,8 @@ Control follows this chain: UI intent → availability/permission check → exis
 
 ## 4. `QDWidgetFrame`: unified shell
 
+The monitoring frame uses the cyber shape from [visual language §0](visual-language.md): the title is in a raised tab, layout controls ride above the edge to the right of the tab, and the table below describes the structure only. Shared cyber components: `QDCyberFrameShape`, `QDCyberCutShape`, `QDCyberButtonStyle`, `QDCyberOutlineButtonStyle` (the secondary button: accent edge and words on the card color), `QDCyberLinkStyle` (a quiet accent text action over a mint underline, for a secondary action such as "Настроить подключения"), `QDCyberHeadline`, `QDCyberRing`, `QDCyberActivityBar`, and the `qdGlitch()` modifier.
+
 The structure is strictly: `frame → header → content → optional footer → contextual overlay`.
 
 | Part | Composition | UX |

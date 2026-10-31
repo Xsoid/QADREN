@@ -31,6 +31,9 @@ cp platform/macos/Info.plist "$APP/Contents/Info.plist"
 plutil -replace CFBundleVersion -string "$(date -u +%Y%m%d%H%M%S)" "$APP/Contents/Info.plist"
 cp assets/qadren.icns "$APP/Contents/Resources/qadren.icns"
 cp assets/qadren-logo.png "$APP/Contents/Resources/qadren-logo.png"
+# Interface fonts (OFL). Info.plist ATSApplicationFontsPath registers them.
+mkdir -p "$APP/Contents/Resources/Fonts"
+cp assets/fonts/*.ttf assets/fonts/*-OFL.txt "$APP/Contents/Resources/Fonts/"
 # Replace the executable with a new inode. An in-place overwrite keeps the old
 # code-signature cache for the inode, and the kernel then kills the new Worker
 # with SIGKILL at launch.
@@ -62,6 +65,7 @@ plutil -lint "$APP/Contents/Info.plist"
 xcrun swiftc -O -target "$ARCH-apple-macos13.0" \
   -framework SwiftUI -framework AppKit -framework Foundation -framework ServiceManagement -framework NetFS -framework Network -framework UserNotifications \
   platform/macos/QADREN/*.swift \
+  platform/macos/QADREN/Widgets/*.swift \
   "$ROOT/core/target/$TARGET/release/libqadren_core.a" \
   -o "$APP/Contents/MacOS/QADREN"
 

@@ -1,11 +1,15 @@
 import SwiftUI
 
 struct MainView: View {
-    @Environment(\.openWindow) private var openWindow
     @Environment(\.colorScheme) private var colorScheme
     @StateObject private var connections = StorageConnections()
     @StateObject private var dashboardLayout = DashboardLayoutStore()
-    @SceneStorage("qadren.monitoring.panel-id") private var monitoringPanelID = ""
+    /// Release 1 has one monitoring window, so its panel ID is an app
+    /// preference. Window state is not restored after a forced quit, and a
+    /// window-scoped ID then opened a new default panel every launch.
+    @AppStorage("qadren.monitoring.panel-id") private var monitoringPanelID = ""
+    /// The former window-scoped ID; read once to keep the current layout.
+    @SceneStorage("qadren.monitoring.panel-id") private var windowPanelID = ""
     @StateObject private var feed = MonitoringFeed()
     @State private var isEditingLayout = false
     /// Survives a recreated window content and remembers the user's choice.
@@ -19,56 +23,19 @@ struct MainView: View {
     var body: some View {
         Group {
             switch workspace {
-            case .monitoring: monitoringWorkspace
+            case .monitoring: monitoringDashboard
             case .scenarios: scenarioSettingsWorkspace
             }
         }
         .qadrenAccessibilityPresentation()
         .tint(QDTheme.color(.focus, for: colorScheme))
         .navigationTitle(workspace.title)
-        .background(
-            TitlebarLogoAccessory(
-                toggleSidebar: workspace == .scenarios ? toggleSettingsSidebar : nil,
-                sidebarVisible: !settingsSidebarHidden
-            )
-            .frame(width: 0, height: 0)
-        )
+        .background(titlebarAccessory)
         .background(InitialFocusReset().frame(width: 0, height: 0))
-        .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                // The Settings window has no toolbar actions: each action
-                // lives in the section that it changes.
-                if workspace == .monitoring {
-                    Menu {
-                        Button("Контрольная панель") { openWindow(id: "monitoring") }
-                        Button("Настройки") { openWindow(id: "scenario-settings") }
-                    } label: {
-                        Label("Пространство", systemImage: "rectangle.3.group")
-                    }
-                    Button("Обновить", systemImage: "arrow.clockwise") { refreshCurrentWorkspace() }
-                    if workspace == .monitoring {
-                        Button(isEditingLayout ? "Готово" : "Компоновка", systemImage: "rectangle.3.group.bubble") {
-                            isEditingLayout.toggle()
-                        }
-                        Button("Отменить компоновку", systemImage: "arrow.uturn.backward") {
-                            dashboardLayout.undo()
-                        }
-                        .disabled(!isEditingLayout || !dashboardLayout.canUndo)
-                        .keyboardShortcut("z", modifiers: .command)
-                        .help("Отменить последнее изменение компоновки")
-                        Button("Вернуть компоновку", systemImage: "arrow.uturn.forward") {
-                            dashboardLayout.redo()
-                        }
-                        .disabled(!isEditingLayout || !dashboardLayout.canRedo)
-                        .keyboardShortcut("z", modifiers: [.command, .shift])
-                        .help("Вернуть отменённое изменение компоновки")
-                    }
-                }
-            }
-        }
+        .background(layoutUndoShortcuts)
         .onAppear {
             if workspace == .monitoring {
-                let panelID = monitoringPanelID.isEmpty ? UUID().uuidString : monitoringPanelID
+                let panelID = [monitoringPanelID, windowPanelID].first { !$0.isEmpty } ?? UUID().uuidString
                 monitoringPanelID = panelID
                 dashboardLayout.load(panelID: panelID)
                 feed.start()
@@ -80,154 +47,92 @@ struct MainView: View {
         }
     }
 
-    private var monitoringWorkspace: some View {
-        monitoringDashboard
+    /// The Settings window keeps the system title bar with the logo and the
+    /// sidebar button; the monitoring window draws `MonitoringHeader`.
+    @ViewBuilder
+    private var titlebarAccessory: some View {
+        if workspace == .scenarios {
+            TitlebarLogoAccessory(toggleSidebar: toggleSettingsSidebar, sidebarVisible: !settingsSidebarHidden)
+                .frame(width: 0, height: 0)
+        }
+    }
+
+    /// Cmd-Z and Shift-Cmd-Z undo layout edits, including a removed widget,
+    /// without separate toolbar buttons.
+    @ViewBuilder
+    private var layoutUndoShortcuts: some View {
+        if workspace == .monitoring && isEditingLayout {
+            ZStack {
+                Button("Отменить компоновку") { dashboardLayout.undo() }
+                    .keyboardShortcut("z", modifiers: .command)
+                    .disabled(!dashboardLayout.canUndo)
+                Button("Вернуть компоновку") { dashboardLayout.redo() }
+                    .keyboardShortcut("z", modifiers: [.command, .shift])
+                    .disabled(!dashboardLayout.canRedo)
+            }
+            .opacity(0)
+            .accessibilityHidden(true)
+        }
     }
 
     private var monitoringDashboard: some View {
+        VStack(spacing: 0) {
+            MonitoringHeader(isEditing: $isEditingLayout) { dashboardLayout.add($0) }
+            monitoringCanvas
+                .overlay(MonitoringScreenFrame())
+        }
+        .background(QDCyber.color(.canvas, for: colorScheme))
+        .ignoresSafeArea(.container, edges: .top)
+    }
+
+    private var monitoringCanvas: some View {
         ScrollView {
             VStack(spacing: 10) {
                 if let alert = monitoringAlert {
-                    HStack(alignment: .top, spacing: 8) {
-                        QDStatusLabel(kind: .failed, text: "Требуется внимание")
+                    let failed = QDStatusKind.failed.cyberColor(for: colorScheme)
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Text("Требуется внимание")
+                            .font(QDCyber.heading(13))
+                            .tracking(1.8)
+                            .textCase(.uppercase)
+                            .foregroundStyle(failed)
                         Text(alert)
-                            .font(.caption)
-                            .foregroundStyle(QDTheme.color(.primaryText, for: colorScheme))
+                            .font(QDCyber.heading(14, weight: .medium))
+                            .foregroundStyle(QDCyber.color(.primaryText, for: colorScheme))
                             .textSelection(.enabled)
                         Spacer(minLength: 0)
                     }
-                    .padding(12)
-                    .background(QDTheme.color(.panel, for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .stroke(QDTheme.semanticColor(.failed, for: colorScheme), lineWidth: 1)
-                    }
-                    .padding(.horizontal, 12).padding(.top, 12)
+                    .padding(.vertical, 10).padding(.leading, 18).padding(.trailing, 12)
+                    .background(failed.opacity(0.12))
+                    .overlay(QDCyberCutShape().stroke(failed, lineWidth: 1.5))
+                    .clipShape(QDCyberCutShape())
+                    .padding(.horizontal, 16).padding(.top, 16)
                     .accessibilityElement(children: .combine)
                 }
 
-                // Top alignment: widgets of different heights start on one line.
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 270), spacing: 10, alignment: .top)], spacing: 10) {
-                    ForEach(dashboardLayout.widgets) { widget in
-                        monitoringWidget(widget)
-                    }
-                }
-                .padding(12)
-
-                TimelineView(.periodic(from: .now, by: MonitoringFeed.refreshInterval)) { context in
-                    HStack(spacing: 8) {
-                        QDStatusLabel(kind: workerStatusKind, text: workerStatus)
-                        Divider().frame(height: 14)
-                        Text("Служба: \(LocalWorkerController.statusText)").font(.caption).foregroundStyle(.secondary)
-                        Spacer()
-                        freshnessLabel(now: context.date)
-                    }
-                }
-                .padding(.horizontal, 12).padding(.bottom, 8)
-            }
-        }
-        .background(QDTheme.color(.canvas, for: colorScheme))
-    }
-
-    @ViewBuilder
-    private func monitoringWidget(_ widget: MonitoringWidgetLayout) -> some View {
-        switch widget.kind {
-        case .system:
-            QDWidgetFrame(title: "Система", symbol: "cpu", status: workerStatusKind, actions: {
-                layoutActions(for: widget)
-            }) {
-                VStack(alignment: .leading, spacing: 10) {
-                    QDStatusLabel(kind: workerStatusKind, text: workerStatus)
-                    LabeledContent("Ядро", value: coreStatus)
-                    if widget.density != .compact {
-                        Text("Источник: запрос status к Worker и локальный JobStore; содержимое файлов не читается.")
-                            .font(.caption2).foregroundStyle(.secondary)
-                    }
-                    if widget.density == .expanded {
-                        LabeledContent("Режим", value: "только метаданные")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-        case .jobs:
-            QDWidgetFrame(title: "Задания", symbol: "arrow.triangle.2.circlepath", status: jobWidgetStatus, actions: {
-                layoutActions(for: widget)
-            }) {
-                QDStatusLabel(kind: jobWidgetStatus, text: "Задания: \(jobPresentationStatus.title)")
-                if widget.density == .compact {
-                    QDMetric(value: "\(feed.jobTotal)", label: "в инвентаре", provenance: "локальный JobStore")
-                } else if visibleJobs.isEmpty {
-                    QDEmptyState(title: "Заданий нет", detail: "Задания появятся, когда Worker выполнит сценарий по вашему запросу или по расписанию.", symbol: "tray")
+                if dashboardLayout.widgets.isEmpty {
+                    QDEmptyState(
+                        title: "На панели нет виджетов",
+                        detail: isEditingLayout
+                            ? "Нажмите «+ Виджет» в верхней панели."
+                            : "Нажмите «Компоновка», затем «+ Виджет».",
+                        symbol: "square.dashed"
+                    )
+                    .padding(12)
                 } else {
-                    JobList(jobs: visibleJobs)
-                }
-            }
-        case .queue:
-            QDWidgetFrame(title: "Очередь", symbol: "list.number", status: jobWidgetStatus, actions: {
-                layoutActions(for: widget)
-            }) {
-                if let jobError {
-                    QDEmptyState(title: "Очередь недоступна", detail: jobError, symbol: "exclamationmark.triangle")
-                } else {
-                    QDStatusLabel(kind: jobWidgetStatus, text: "Очередь: \(jobPresentationStatus.title)")
-                    if widget.density == .compact {
-                        QDMetric(value: "\(feed.jobTotal)", label: "в инвентаре", provenance: "локальный JobStore")
-                    } else {
-                        LazyVGrid(
-                            columns: [GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 12)],
-                            alignment: .leading,
-                            spacing: 8
-                        ) {
-                            QDMetric(value: "\(jobQueueSummary.active)", label: "выполняется", provenance: "локальный JobStore")
-                            QDMetric(value: "\(jobQueueSummary.waiting)", label: "в очереди", provenance: "локальный JobStore")
-                            QDMetric(value: "\(jobQueueSummary.unknown)", label: "неизвестно", provenance: "требует сверки")
-                        }
-                    }
-                    if widget.density != .compact {
-                        Text("Порядок, прогресс и оценка времени появятся только когда их подтвердит Core.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    if widget.density == .expanded {
-                        Text("Источник: локальный JobStore; Worker выполняет запуски сценариев по расписанию.")
-                            .font(.caption2).foregroundStyle(.secondary)
-                    }
-                }
-            }
-        case .connections:
-            QDWidgetFrame(title: "Подключения", symbol: "externaldrive", status: connectionWidgetStatus, actions: {
-                layoutActions(for: widget)
-            }) {
-                if let error = connections.error {
-                    QDEmptyState(title: "Подключения недоступны", detail: error, symbol: "exclamationmark.triangle")
-                } else if widget.density == .compact {
-                    QDMetric(value: "\(connections.entries.count)", label: "подключений", provenance: "локальный Registry")
-                } else if connections.entries.isEmpty {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Подключения ещё не настроены.").foregroundStyle(.secondary)
-                        Button("Открыть настройки") { openWindow(id: "scenario-settings") }
-                    }
-                } else {
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(widget.density == .expanded ? connections.entries : Array(connections.entries.prefix(4))) { entry in
-                            let status = connectionStatusKind(for: entry)
-                            let statusTitle = connectionStatusTitle(for: entry)
-                            HStack(spacing: 8) {
-                                Image(systemName: status.symbol)
-                                    .foregroundStyle(status.color(for: colorScheme))
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(entry.name).lineLimit(1)
-                                    Text("\(adapterTitle(entry.adapter)) · \(statusTitle)")
-                                        .font(.caption).foregroundStyle(.secondary)
-                                }
-                                Spacer()
+                    // Top alignment: widgets of different heights start on one line.
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 270), spacing: 10, alignment: .top)], spacing: 10) {
+                        ForEach(dashboardLayout.widgets) { widget in
+                            MonitoringWidgetView(
+                                widget: widget, feed: feed, connections: connections,
+                                isEditing: isEditingLayout,
+                                onSelectScenario: { dashboardLayout.setScenario(widget.id, scenarioID: $0) }
+                            ) {
+                                layoutActions(for: widget)
                             }
-                            .accessibilityElement(children: .ignore)
-                            .accessibilityLabel("\(entry.name), \(adapterTitle(entry.adapter)), \(statusTitle)")
                         }
-                        Button("Настроить подключения") { openWindow(id: "scenario-settings") }
-                            .font(.caption)
                     }
+                    .padding(16)
                 }
             }
         }
@@ -237,48 +142,57 @@ struct MainView: View {
     private func layoutActions(for widget: MonitoringWidgetLayout) -> some View {
         if isEditingLayout {
             Button("Переместить раньше", systemImage: "arrow.left") {
-                dashboardLayout.move(widget.kind, by: -1)
+                dashboardLayout.move(widget.id, by: -1)
             }
-            .disabled(dashboardLayout.widgets.first?.kind == widget.kind)
+            .disabled(dashboardLayout.widgets.first?.id == widget.id)
             .labelStyle(.iconOnly)
             .help("Переместить раньше")
             Button("Переместить позже", systemImage: "arrow.right") {
-                dashboardLayout.move(widget.kind, by: 1)
+                dashboardLayout.move(widget.id, by: 1)
             }
-            .disabled(dashboardLayout.widgets.last?.kind == widget.kind)
+            .disabled(dashboardLayout.widgets.last?.id == widget.id)
             .labelStyle(.iconOnly)
             .help("Переместить позже")
-            Menu("Плотность виджета", systemImage: "rectangle.3.group") {
-                ForEach(MonitoringWidgetDensity.allCases) { density in
-                    Button {
-                        dashboardLayout.setDensity(widget.kind, density: density)
-                    } label: {
-                        if widget.density == density {
-                            Label(density.title, systemImage: "checkmark")
-                        } else {
-                            Text(density.title)
+            if widget.kind.supportedDensities.count > 1 {
+                Menu("Плотность виджета", systemImage: "rectangle.3.group") {
+                    ForEach(widget.kind.supportedDensities) { density in
+                        Button {
+                            dashboardLayout.setDensity(widget.id, density: density)
+                        } label: {
+                            if widget.density == density {
+                                Label(density.title, systemImage: "checkmark")
+                            } else {
+                                Text(density.title)
+                            }
                         }
                     }
                 }
+                .labelStyle(.iconOnly)
+                .help("Плотность виджета")
             }
-            .labelStyle(.iconOnly)
-            .help("Плотность виджета")
-        }
-    }
-
-    private var jobsWorkspace: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                WorkspaceHeader(title: "Очередь заданий", subtitle: "Долговременные попытки и их текущее локальное состояние") { EmptyView() }
-                if let jobError { Notice(text: jobError, symbol: "exclamationmark.triangle") }
-                WorkspaceCard(title: "Очередь", subtitle: "Эти действия не создают постоянный сценарий") {
-                    if visibleJobs.isEmpty {
-                        EmptyWorkspaceState(title: "Очередь пуста", detail: "Задания появятся после реализации реальных сценариев или безопасных ручных файловых операций.", symbol: "tray")
-                    } else {
-                        JobList(jobs: visibleJobs)
+            if widget.kind == .scenarios {
+                Menu("Сколько сценариев показывать", systemImage: "list.number") {
+                    ForEach(ScenariosWidgetLimit.choices, id: \.self) { limit in
+                        Button {
+                            dashboardLayout.setLimit(widget.id, limit: limit)
+                        } label: {
+                            let title = ScenariosWidgetLimit.title(limit)
+                            if widget.limit == limit {
+                                Label(title, systemImage: "checkmark")
+                            } else {
+                                Text(title)
+                            }
+                        }
                     }
                 }
-            }.padding(28)
+                .labelStyle(.iconOnly)
+                .help("Сколько сценариев показывать")
+            }
+            Button("Убрать с панели", systemImage: "xmark") {
+                dashboardLayout.remove(widget.id)
+            }
+            .labelStyle(.iconOnly)
+            .help("Убрать виджет с панели. Задания и подключения не изменятся.")
         }
     }
 
@@ -298,114 +212,18 @@ struct MainView: View {
         }
     }
 
-    private func refreshCurrentWorkspace() {
-        switch workspace {
-        case .monitoring:
-            Task { await feed.refresh() }
-            connections.refresh()
-        case .scenarios:
-            connections.refresh()
-        }
-    }
-
-    private var jobs: [JobRow] { feed.jobs }
-    private var jobError: String? { feed.jobError }
-
-    /// Worker state comes only from the IPC `status` request. The in-process
-    /// Core library cannot see the separate Worker process.
-    private var workerStatus: String {
-        guard let checked = feed.lastWorkerCheck else { return feed.worker.title }
-        return "\(feed.worker.title) · \(checked.formatted(date: .omitted, time: .standard))"
-    }
-    private var workerStatusKind: QDStatusKind {
-        switch feed.worker {
-        case .unchecked: .unknown
-        case .responding: .ready
-        case .notResponding: .needsAction
-        case .unavailable: .offline
-        }
-    }
-
-    @ViewBuilder
-    private func freshnessLabel(now: Date) -> some View {
-        switch MonitoringFreshness.evaluate(
-            lastSuccess: feed.lastInventoryRead, now: now, interval: MonitoringFeed.refreshInterval
-        ) {
-        case .never:
-            QDStatusLabel(kind: .unknown, text: "Данные ещё не прочитаны")
-        case let .fresh(date):
-            Text("Обновлено \(date.formatted(date: .omitted, time: .standard))")
-                .font(.caption).foregroundStyle(.secondary)
-        case let .stale(date):
-            QDStatusLabel(kind: .needsAction, text: "Данные устарели: последнее чтение \(date.formatted(date: .omitted, time: .standard))")
-        }
-    }
-    private var jobPresentationStatus: JobPresentationStatus {
-        // D-024: the states present in the counts of all Jobs.
-        JobPresentationStatus.aggregate(
-            feed.jobCounts.filter { $0.value > 0 }.map(\.key), inventoryFailed: jobError != nil
-        )
-    }
-    private var jobWidgetStatus: QDStatusKind {
-        jobStatusKind(for: jobPresentationStatus)
-    }
-    private var jobQueueSummary: JobQueueSummary {
-        JobQueueSummary(counts: feed.jobCounts)
-    }
-    private var connectionWidgetStatus: QDStatusKind {
-        statusKind(for: connectionPresentationStatus)
-    }
-
-    private func connectionStatusKind(for entry: StorageEntry) -> QDStatusKind {
-        statusKind(for: ConnectionPresentationStatus(adapter: entry.adapter, enabled: entry.enabled, registryStatus: entry.status))
-    }
-
-    private func connectionStatusTitle(for entry: StorageEntry) -> String {
-        ConnectionPresentationStatus(adapter: entry.adapter, enabled: entry.enabled, registryStatus: entry.status).title
-    }
-
-    private var connectionPresentationStatus: ConnectionPresentationStatus {
-        ConnectionPresentationStatus.aggregate(
-            connections.entries.map {
-                ConnectionPresentationStatus(adapter: $0.adapter, enabled: $0.enabled, registryStatus: $0.status)
-            },
-            registryFailed: connections.error != nil
-        )
-    }
-
-    private func statusKind(for status: ConnectionPresentationStatus) -> QDStatusKind {
-        switch status {
-        case .ready: .ready
-        case .needsAction: .needsAction
-        case .failed: .failed
-        case .offline: .offline
-        case .disconnected: .offline
-        case .paused: .paused
-        case .waiting: .waiting
-        case .unknown: .unknown
-        }
-    }
-
     private var monitoringAlert: String? {
-        if let jobError { return "Журнал заданий: " + jobError }
+        // A service failure stays visible when the System widget is not on the panel.
+        let service = feed.serviceHealth
+        if service.kind.usesAttentionBorder, !dashboardLayout.widgets.contains(where: { $0.kind == .system }) {
+            return "Фоновая служба: " + service.title
+        }
+        if let jobError = feed.jobError { return "Журнал заданий: " + jobError }
         if let error = connections.error { return "Подключения: " + error }
         if dashboardLayout.recoveredFromInvalidLayout {
             return "Сохранённую раскладку не удалось прочитать. Показана безопасная стандартная панель; исходная запись не удалена."
         }
         return nil
-    }
-    private var coreStatus: String {
-        switch CoreBridge.status {
-        case "ready - worker idle", "Core ready - worker idle": "Библиотека Core загружена"
-        default: CoreBridge.status
-        }
-    }
-    private func adapterTitle(_ adapter: String) -> String { StorageConnector(adapter: adapter)?.title ?? adapter }
-
-    /// `g1-*` is a test-only durable fixture created by the early mock runner.
-    /// It is retained for safe diagnostics, but is never product queue data.
-    private var visibleJobs: [JobRow] {
-        jobs.filter { !$0.id.hasPrefix("g1-") }
     }
 }
 
@@ -413,141 +231,10 @@ enum DispatcherSection: String, CaseIterable, Hashable, Identifiable {
     case monitoring, scenarios
     var id: Self { self }
     var title: String {
-        switch self { case .monitoring: "Контрольная панель"; case .scenarios: "Настройки" }
+        switch self { case .monitoring: "Q.A.D.R.E.N. Контрольная панель"; case .scenarios: "Настройки" }
     }
     var symbol: String {
         switch self { case .monitoring: "rectangle.3.group"; case .scenarios: "slider.horizontal.3" }
-    }
-}
-
-private enum MonitoringView {
-    case dashboard, jobs
-}
-
-private struct StatusTile: View {
-    let title: String
-    let value: String
-    let detail: String
-    let symbol: String
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Image(systemName: symbol).foregroundStyle(.tint)
-            Text(value).font(.title2.bold())
-            Text(title).font(.headline)
-            Text(detail).font(.caption).foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, minHeight: 108, alignment: .leading)
-        .padding(16)
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-    }
-}
-
-private struct WorkspaceCard<Content: View>: View {
-    let title: String
-    let subtitle: String
-    @ViewBuilder let content: Content
-    @Environment(\.colorScheme) private var colorScheme
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(.system(size: 13, weight: .semibold))
-                Text(subtitle).font(.caption).foregroundStyle(.secondary)
-            }
-            content
-        }
-        .frame(maxWidth: .infinity, alignment: .leading).padding(12)
-        .background(QDTheme.color(.panel, for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(QDTheme.color(.stroke, for: colorScheme)))
-    }
-}
-
-private struct WorkspaceHeader<Actions: View>: View {
-    let title: String
-    let subtitle: String
-    @ViewBuilder let actions: Actions
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 16) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title).font(.largeTitle.bold())
-                Text(subtitle).foregroundStyle(.secondary)
-            }
-            Spacer()
-            actions
-        }
-    }
-}
-
-private struct Notice<Actions: View>: View {
-    let text: String
-    let symbol: String
-    @ViewBuilder let actions: Actions
-    init(text: String, symbol: String, @ViewBuilder actions: () -> Actions = { EmptyView() }) {
-        self.text = text; self.symbol = symbol; self.actions = actions()
-    }
-    var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: symbol).foregroundStyle(.orange)
-            Text(text).font(.callout)
-            Spacer(minLength: 0)
-            actions
-        }
-        .padding(14)
-        .background(.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-    }
-}
-
-private struct EmptyWorkspaceState: View {
-    let title: String
-    let detail: String
-    let symbol: String
-    var body: some View {
-        VStack(spacing: 10) {
-            Image(systemName: symbol).font(.system(size: 28)).foregroundStyle(.secondary)
-            Text(title).font(.headline)
-            Text(detail).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
-        }
-        .frame(maxWidth: .infinity, minHeight: 150)
-        .padding()
-    }
-}
-
-private struct JobList: View {
-    let jobs: [JobRow]
-    @Environment(\.colorScheme) private var colorScheme
-    var body: some View {
-        VStack(spacing: 0) {
-            ForEach(jobs) { job in
-                let presentation = JobPresentationStatus(state: job.state)
-                let status = jobStatusKind(for: presentation)
-                HStack(spacing: 12) {
-                    Image(systemName: status.symbol).foregroundStyle(status.color(for: colorScheme))
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(job.id).textSelection(.enabled)
-                        Text(job.scenario_id == nil ? "Разовое задание" : "Задание сценария").font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Text(presentation.title).font(.callout.weight(.medium))
-                }.padding(.vertical, 10)
-                    .accessibilityElement(children: .combine)
-                    .accessibilityLabel("\(job.id), \(presentation.title)")
-                if job.id != jobs.last?.id { Divider() }
-            }
-        }
-    }
-}
-
-private func jobStatusKind(for status: JobPresentationStatus) -> QDStatusKind {
-    switch status {
-    case .empty: .ready
-    case .ready: .ready
-    case .active: .active
-    case .waiting: .waiting
-    case .paused: .paused
-    case .needsAction: .needsAction
-    case .failed: .failed
-    case .unknown: .unknown
-    case .completed: .ready
-    case .cancelled: .paused
     }
 }
 
@@ -628,3 +315,4 @@ struct YandexConnectionCard: View {
         }
     }
 }
+

@@ -12,11 +12,14 @@ struct QADRENApp: App {
     }
 
     var body: some Scene {
-        Window("Контрольная панель", id: "monitoring") {
+        Window(DispatcherSection.monitoring.title, id: "monitoring") {
             MainView(workspace: .monitoring)
                 .frame(minWidth: 900, minHeight: 620)
                 .preferredColorScheme(QDThemeMode(rawValue: themeRaw)?.preferredColorScheme)
         }
+        // The monitoring window draws its own cyber top bar
+        // (`MonitoringHeader`); the system traffic lights stay.
+        .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1180, height: 760)
 
         Window("Настройки", id: "scenario-settings") {

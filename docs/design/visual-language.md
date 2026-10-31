@@ -1,5 +1,19 @@
 # QADREN — visual language, brand and tokens
 
+## 0. Monitoring style (owner decision, 2026-10-31)
+
+The monitoring window uses the dark theme of [cybercn-ui](https://github.com/szvitek/cybercn-ui) (MIT), ported to SwiftUI in `platform/macos/QADREN/CyberDesign.swift`. The values are in the `monitoringCyber` group of [tokens.json](tokens.json). This section has priority over sections 1, 4, 5, and 6 for the monitoring window. The Settings window keeps the rules below until a separate decision.
+
+- Canvas: near black. Do not use the yellow canvas of the library light theme.
+- Yellow is an accent only: widget titles, primary values, and the active control.
+- Widget frame: a cut top-left corner, a raised title tab, a bottom notch, and a 1.5 pt edge. Warning and failure color the edge, the title, and a top wash of 90 pt. They do not fill the whole widget.
+- Fonts: Advent Pro for all words (it has Cyrillic); VT323 for digits, times, and IDs only (it has no Cyrillic). Both fonts are OFL and are in `assets/fonts/`.
+- Status line: a large uppercase word with a soft glow and a `_` cursor.
+- Buttons: a solid fill, a cut bottom-left corner, and a mint right edge.
+- Activity motion (owner decision, 2026-10-31): a widget that shows a running process (for example a copying Scenario) shows constant motion: `QDCyberActivityBar` (marching segments) and a sweep arc on `QDCyberRing`. Motion shows only while the Worker reports the process as running. When the progress counters and the current file do not change for 3 minutes, the motion stops, turns to the warning color, and the widget shows "Нет прогресса N мин". Motion must never hide a hang. Reduce Motion draws the bar without motion.
+- Window chrome (owner decision, 2026-10-31): the monitoring window hides the system title bar and keeps the system traffic lights. An empty unified `NSToolbar` without items makes the title bar as tall as the top bar, so macOS centers the traffic lights in it; a SwiftUI toolbar item is not used because it draws a separator. Full screen shows a toolbar as a separate bar over the content, so the toolbar is removed when the window enters full screen and comes back when it exits. `MonitoringHeader` draws the top bar: the logo, "Q.A.D.R.E.N." in accent with a glow, "// КОНТРОЛЬНАЯ ПАНЕЛЬ", and the layout actions as cyber buttons ("Компоновка" outline; in Layout mode "+ Виджет" outline and "Готово" filled). A thin edge with an accent bar under the title and a step at the trailing side closes the bar. `MonitoringScreenFrame` draws a thin edge and accent corner marks 6 pt inside the window corners. The window title is "Q.A.D.R.E.N. Контрольная панель". In full screen the bar drops the room of the traffic lights. The Settings window keeps the system title bar.
+- Glitch effects: an optional application setting, off by default. When on, short bursts (about 300 ms, every 4–9 s) shift widget titles and the status line, and the cursor blinks. The purpose is to keep a panel that stays on screen for hours from showing a static image. Reduce Motion turns the effects off.
+
 ## 1. Artistic principle
 
 **Cyberpunk Control Surface**: a technical dispatcher interface with modern native macOS mechanics. This is not a "gaming HUD": the content is read for hours; decorative light contours must not compete with data. Active operations, selected focus and blocking events are more prominent. Successful and historical events receive less attention. No constant artificial flickering or "scanning" lines.
@@ -8,12 +22,17 @@ The working window content occupies the maximum area. NO giant hero-headers, wid
 
 ## 2. Brand — strictly from repository
 
-Canonical graphic resource: **`assets/qadren-logo.png`** (192×192 PNG, transparent background, existing cyan/blue sign). In SwiftUI — load asset catalog image from **this file without redrawing**; for HTML prototype — `../../assets/qadren-logo.png`. It is used in the project README. Do not add another brand symbol, do not make an SVG "replica" and do not distort the original proportions.
+The owner replaced the mark on 2026-10-31 with the cyber "plate" mark: a yellow `#F9F002` plate with cut top-left and bottom-right corners, a mint `#8AE66E` right edge, and a black `#0B0B0B` letter Q made of an octagon ring and a cut tail. It follows §0 (widget frame and button shapes). The former cyan/blue sign stays only in the Git history.
+
+- Source: **`assets/brand/qadren-mark.svg`** (144×144 units). Do not change its geometry or colors without an owner decision.
+- Raster: **`assets/qadren-logo.png`** (192×192 PNG, transparent background, 6% margin). SwiftUI loads this file; the HTML prototype uses `../../assets/qadren-logo.png`. The README uses it.
+- App icon: **`assets/qadren.icns`**, made from the same geometry with a 10% margin (16–1024 px).
+- Do not add another brand symbol and do not distort the proportions.
 
 - Typical sizes: 20 pt next to the name in compact menu; 24–28 pt in titlebar/header; 48–64 pt only for the welcome screen/empty configuration.
 - Margin around the sign: not less than 1/8 of the visible width, maintain aspect ratio, without cropping or clipping.
-- Dark and light themes use the same file; if there is a contrast problem, change the background/margin, **not the logo colors**.
-- The name "QADREN" — plain text SF Pro Semibold, without arbitrary decorative fonts or slogans ("SYNC WHAT MATTERS" is not approved by the brand book).
+- Dark and light themes use the same file; if there is a contrast problem, change the background/margin, **not the logo colors**. The plate carries its own background, so it reads on both themes.
+- The name "QADREN" — plain text SF Pro Semibold, without arbitrary decorative fonts or slogans ("SYNC WHAT MATTERS" is not approved by the brand book). Exception (owner decision, 2026-10-31): the monitoring top bar writes "Q.A.D.R.E.N." in Advent Pro (§0).
 - System MenuBarExtra may use SF Symbol in template rendering if the color logo is unreadable there. This is a **system indicator**, not a change to the brand logo in windows.
 
 ## 3. Source of numerical values
@@ -24,13 +43,13 @@ Machine-readable table — [tokens.json](tokens.json). Below is the semantics; d
 |---|---|
 | canvas, panel, raised, overlay | layer depth, not a stack of opaque cards |
 | stroke, strokeHover, focus | 1 pt border and selected element accent |
-| brandCyan, brandBlue | actions, progress and navigation accent, visually compatible with logo |
+| brandCyan, brandBlue | actions, progress and navigation accent of the Settings window (the monitoring window uses `monitoringCyber`, §0) |
 | success, warning, danger, unknown, neutral | strictly semantic states |
 | textPrimary, textSecondary, textDisabled | hierarchy without loss of readability |
 | grid, gap, inset, header, corner | general rhythmic space |
 | compact, regular, expanded | **content** density, not total window scale |
 
-The main dark palette is almost black with a blue undertone, layers are dark blue. The main accent is electric cyan `#0CB9F2`, additional blue `#2A80FF`. Red — only for danger/errors, amber — user decisions, lilac-grey — uncertainty; green — only for verified compliant status. Do not replace everything with green in `Worker report` without evidence. The light theme uses the separate darker `semantic.light` status tokens from `tokens.json`; it does not place the bright dark-theme accents as regular text on a white panel.
+This paragraph applies to the Settings window; the monitoring window uses §0. The main dark palette is almost black with a blue undertone, layers are dark blue. The main accent is electric cyan `#0CB9F2`, additional blue `#2A80FF`. Red — only for danger/errors, amber — user decisions, lilac-grey — uncertainty; green — only for verified compliant status. Do not replace everything with green in `Worker report` without evidence. The light theme uses the separate darker `semantic.light` status tokens from `tokens.json`; it does not place the bright dark-theme accents as regular text on a white panel.
 
 ## 4. Geometry and grid
 

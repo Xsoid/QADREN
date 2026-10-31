@@ -1,10 +1,12 @@
 import Combine
 import Foundation
 
+/// The widget type registry. The raw value is the saved `typeID`; the view for
+/// each type lives in `Widgets/` and is selected by `MonitoringWidgetView`.
 enum MonitoringWidgetKind: String, CaseIterable, Codable, Identifiable {
     case system
-    case jobs
-    case queue
+    case scenario
+    case scenarios
     case connections
 
     var id: String { rawValue }
@@ -12,9 +14,36 @@ enum MonitoringWidgetKind: String, CaseIterable, Codable, Identifiable {
     var title: String {
         switch self {
         case .system: "Система"
-        case .jobs: "Задания"
-        case .queue: "Очередь"
+        case .scenario: "Сценарий"
+        case .scenarios: "Сценарии"
         case .connections: "Подключения"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .system: "cpu"
+        case .scenario: "arrow.triangle.2.circlepath"
+        case .scenarios: "list.bullet.rectangle"
+        case .connections: "externaldrive"
+        }
+    }
+
+    /// The sizes that the widget type draws. One size means no choice.
+    var supportedDensities: [MonitoringWidgetDensity] {
+        switch self {
+        case .system, .scenarios: [.regular]
+        case .scenario, .connections: MonitoringWidgetDensity.allCases
+        }
+    }
+
+    /// One line for the widget catalog.
+    var summary: String {
+        switch self {
+        case .system: "Фоновая служба Worker: работает ли синхронизация"
+        case .scenario: "Один выбранный сценарий: этап, прогресс, запуск и остановка"
+        case .scenarios: "Все сценарии по ближайшему запуску: направление и расписание"
+        case .connections: "Подключения хранилищ и их состояние"
         }
     }
 }
@@ -37,34 +66,69 @@ enum MonitoringWidgetDensity: String, CaseIterable, Codable, Identifiable {
     }
 }
 
+/// One widget instance on the panel. A panel can hold several instances of
+/// one type, so the instance `id` and not the `kind` identifies it.
 struct MonitoringWidgetLayout: Codable, Identifiable, Equatable {
+    let id: UUID
     let kind: MonitoringWidgetKind
     var density: MonitoringWidgetDensity
-
-    var id: MonitoringWidgetKind { kind }
+    /// The Scenario that a `scenario` widget shows; `nil` until selected.
+    var scenarioID: String? = nil
+    /// The rows that a `scenarios` widget shows; `nil` shows all.
+    var limit: Int? = nil
 
     init(
+        id: UUID = UUID(),
         kind: MonitoringWidgetKind,
         density: MonitoringWidgetDensity = .regular
     ) {
+        self.id = id
         self.kind = kind
         self.density = density
     }
 
     private enum CodingKeys: String, CodingKey {
+        case id
         case kind
         case density
+        case scenarioID
+        case limit
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        // Layouts saved before widget instances had no `id`.
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         kind = try container.decode(MonitoringWidgetKind.self, forKey: .kind)
         density = try container.decodeIfPresent(MonitoringWidgetDensity.self, forKey: .density) ?? .regular
+        scenarioID = try container.decodeIfPresent(String.self, forKey: .scenarioID)
+        limit = try container.decodeIfPresent(Int.self, forKey: .limit).map { max(1, $0) }
     }
 }
 
 private struct MonitoringLayoutState: Codable, Equatable {
     var widgets: [MonitoringWidgetLayout]
+
+    init(widgets: [MonitoringWidgetLayout]) {
+        self.widgets = widgets
+    }
+
+    /// A widget of a removed type (for example the former `jobs`) is dropped;
+    /// the rest of the saved layout stays.
+    init(from decoder: Decoder) throws {
+        struct Element: Decodable {
+            let widget: MonitoringWidgetLayout?
+            init(from decoder: Decoder) throws {
+                widget = try? MonitoringWidgetLayout(from: decoder)
+            }
+        }
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        widgets = try container.decode([Element].self, forKey: .widgets).compactMap(\.widget)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case widgets
+    }
 }
 
 /// Local-only presentation state for one monitoring window. It never owns Jobs,
@@ -117,8 +181,23 @@ final class DashboardLayoutStore: ObservableObject {
         recoveredFromInvalidLayout = true
     }
 
-    func move(_ kind: MonitoringWidgetKind, by offset: Int) {
-        guard let index = widgets.firstIndex(where: { $0.kind == kind }) else { return }
+    func add(_ kind: MonitoringWidgetKind) {
+        recordUndoState()
+        widgets.append(MonitoringWidgetLayout(kind: kind))
+        save()
+    }
+
+    /// Removes the widget from the panel only. Jobs, connections, and their
+    /// history do not change.
+    func remove(_ id: UUID) {
+        guard let index = widgets.firstIndex(where: { $0.id == id }) else { return }
+        recordUndoState()
+        widgets.remove(at: index)
+        save()
+    }
+
+    func move(_ id: UUID, by offset: Int) {
+        guard let index = widgets.firstIndex(where: { $0.id == id }) else { return }
         let destination = index + offset
         guard widgets.indices.contains(destination) else { return }
         recordUndoState()
@@ -126,11 +205,27 @@ final class DashboardLayoutStore: ObservableObject {
         save()
     }
 
-    func setDensity(_ kind: MonitoringWidgetKind, density: MonitoringWidgetDensity) {
-        guard let index = widgets.firstIndex(where: { $0.kind == kind }) else { return }
+    func setDensity(_ id: UUID, density: MonitoringWidgetDensity) {
+        guard let index = widgets.firstIndex(where: { $0.id == id }) else { return }
         guard widgets[index].density != density else { return }
         recordUndoState()
         widgets[index].density = density
+        save()
+    }
+
+    func setScenario(_ id: UUID, scenarioID: String) {
+        guard let index = widgets.firstIndex(where: { $0.id == id }) else { return }
+        guard widgets[index].scenarioID != scenarioID else { return }
+        recordUndoState()
+        widgets[index].scenarioID = scenarioID
+        save()
+    }
+
+    func setLimit(_ id: UUID, limit: Int?) {
+        guard let index = widgets.firstIndex(where: { $0.id == id }) else { return }
+        guard widgets[index].limit != limit else { return }
+        recordUndoState()
+        widgets[index].limit = limit
         save()
     }
 
@@ -157,8 +252,7 @@ final class DashboardLayoutStore: ObservableObject {
     }
 
     private func isValid(_ candidate: [MonitoringWidgetLayout]) -> Bool {
-        candidate.count == MonitoringWidgetKind.allCases.count
-            && Set(candidate.map(\.kind)) == Set(MonitoringWidgetKind.allCases)
+        Set(candidate.map(\.id)).count == candidate.count
     }
 
     private func recordUndoState() {

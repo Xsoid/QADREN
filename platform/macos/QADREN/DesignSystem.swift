@@ -244,6 +244,9 @@ struct QDMetric: View {
     }
 }
 
+/// The shared widget shell in the cyber language (`QDCyber`): a cut-corner
+/// frame with the title in a raised tab. Warning and failure states color the
+/// edge, the title, and a narrow wash at the top; other states stay quiet.
 struct QDWidgetFrame<Content: View, Actions: View>: View {
     let title: String
     let symbol: String
@@ -252,6 +255,7 @@ struct QDWidgetFrame<Content: View, Actions: View>: View {
     @ViewBuilder let content: Content
     @Environment(\.colorScheme) private var colorScheme
     @State private var increasedContrast = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+    @State private var titleWidth: CGFloat? = nil
 
     init(
         title: String,
@@ -268,34 +272,51 @@ struct QDWidgetFrame<Content: View, Actions: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Image(systemName: symbol)
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(QDTheme.color(.focus, for: colorScheme))
-                Text(title).font(.system(size: 13, weight: .semibold))
-                if let status {
-                    Image(systemName: status.symbol)
-                        .font(.caption)
-                        .foregroundStyle(status.color(for: colorScheme))
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(QDCyber.heading(14))
+                .tracking(2.2)
+                .textCase(.uppercase)
+                .foregroundStyle(accent)
+                .lineLimit(1)
+                .qdGlitch()
+                .frame(maxWidth: titleWidth, alignment: .leading)
+                .padding(.leading, 26 - 12)
+                .frame(maxWidth: .infinity, maxHeight: QDCyberFrameShape.tabHeight, alignment: .leading)
+                // Layout controls ride above the edge, right of the tab, and
+                // never move the title or the content.
+                .overlay(alignment: .trailing) {
+                    HStack(spacing: 4) { actions }
+                        .buttonStyle(.borderless)
+                        .menuIndicator(.hidden)
+                        .controlSize(.small)
+                        .foregroundStyle(QDCyber.color(.secondaryText, for: colorScheme))
+                        .fixedSize()
                 }
-                Spacer(minLength: 0)
-                actions
-            }
-            .frame(height: 20)
+                .frame(height: QDCyberFrameShape.tabHeight)
             content
+                .padding(.bottom, 12)
         }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(QDTheme.color(.panel, for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(
-                    borderColor,
-                    lineWidth: QDAccessibilityPresentation.widgetBorderWidth(
-                        increasedContrast: increasedContrast
-                    )
-                )
+        .padding(.horizontal, 12)
+        .padding(.bottom, 10)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        // A long title stays inside the raised tab.
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
+            titleWidth = max(40, width * QDCyberFrameShape.tabFraction - 30)
+        }
+        .background {
+            ZStack {
+                QDCyberFrameShape().fill(QDCyber.color(.card, for: colorScheme))
+                if let attention {
+                    // A narrow wash at the top, not a filled widget.
+                    LinearGradient(colors: [attention.opacity(0.2), .clear], startPoint: .top, endPoint: .bottom)
+                        .frame(height: 90)
+                        .frame(maxHeight: .infinity, alignment: .top)
+                        .clipShape(QDCyberFrameShape())
+                }
+                QDCyberFrameShape()
+                    .strokeBorder(edge, lineWidth: increasedContrast ? 2 : 1.5)
+            }
         }
         .onReceive(
             NotificationCenter.default.publisher(
@@ -306,14 +327,18 @@ struct QDWidgetFrame<Content: View, Actions: View>: View {
         }
     }
 
-    private var borderColor: Color {
-        if let status, status.usesAttentionBorder {
-            return status.color(for: colorScheme)
-        }
-        return QDTheme.widgetStroke(
-            for: colorScheme,
-            increasedContrast: increasedContrast
-        )
+    private var attention: Color? {
+        guard let status, status.usesAttentionBorder else { return nil }
+        return status.cyberColor(for: colorScheme)
+    }
+
+    private var accent: Color {
+        attention ?? QDCyber.color(.accent, for: colorScheme)
+    }
+
+    private var edge: Color {
+        if let attention { return attention }
+        return increasedContrast ? QDCyber.color(.accent, for: colorScheme) : QDCyber.color(.edge, for: colorScheme)
     }
 }
 

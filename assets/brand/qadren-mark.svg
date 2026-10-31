@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 144 144" width="144" height="144">
+  <title>QADREN</title>
+  <!-- Plate: cybercn cut corners (top-left, bottom-right) and a mint right edge. -->
+  <polygon points="22,0 144,0 144,122 122,144 0,144 0,22" fill="#F9F002"/>
+  <rect x="140" y="0" width="4" height="122" fill="#8AE66E"/>
+  <!-- Q: an octagon ring like the widget frame and a cut tail. -->
+  <polygon points="52,30 94,30 110,46 110,90 94,106 52,106 36,90 36,46" fill="none" stroke="#0B0B0B" stroke-width="13" stroke-linejoin="miter"/>
+  <polygon points="78,80 94,80 122,118 106,118" fill="#F9F002" stroke="#F9F002" stroke-width="8"/>
+  <polygon points="78,80 94,80 122,118 106,118" fill="#0B0B0B"/>
+</svg>

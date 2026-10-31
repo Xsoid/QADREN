@@ -43,6 +43,8 @@ struct MonitoringSnapshot: Sendable {
     var jobTotal: Int? = nil
     let jobError: String?
     let worker: WorkerReachability
+    /// Batch files that the Worker runs now; `nil` when it did not answer.
+    var workerActive: Int? = nil
     let capturedAt: Date
 
     /// Reads the JobStore inventory and sends one IPC `status` request. Both
@@ -56,8 +58,9 @@ struct MonitoringSnapshot: Sendable {
             jobError = error.localizedDescription
         }
         let worker: WorkerReachability
+        var workerActive: Int?
         do {
-            try WorkerIPC.probeStatus(socketPath: socketPath)
+            workerActive = try WorkerIPC.probeStatus(socketPath: socketPath)
             worker = .responding
         } catch WorkerIPCError.unavailable {
             worker = .unavailable
@@ -66,7 +69,7 @@ struct MonitoringSnapshot: Sendable {
         }
         return MonitoringSnapshot(
             jobs: inventory?.recent, jobCounts: inventory?.counts, jobTotal: inventory?.total,
-            jobError: jobError, worker: worker, capturedAt: Date()
+            jobError: jobError, worker: worker, workerActive: workerActive, capturedAt: Date()
         )
     }
 }
@@ -83,6 +86,7 @@ final class MonitoringFeed: ObservableObject {
     @Published private(set) var jobTotal = 0
     @Published private(set) var jobError: String?
     @Published private(set) var worker: WorkerReachability = .unchecked
+    @Published private(set) var workerActive: Int?
     @Published private(set) var lastInventoryRead: Date?
     @Published private(set) var lastWorkerCheck: Date?
 
@@ -122,6 +126,7 @@ final class MonitoringFeed: ObservableObject {
         // Keep the last good rows after a failed read; freshness marks them stale.
         jobError = snapshot.jobError
         worker = snapshot.worker
+        workerActive = snapshot.workerActive
         lastWorkerCheck = snapshot.capturedAt
     }
 }

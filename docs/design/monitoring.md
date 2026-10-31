@@ -8,7 +8,7 @@ Existing entry points in `QADRENApp.swift`: one `Window("Контрольная 
 
 ## 2. Three horizontal zones
 
-1. **Native titlebar/toolbar**: traffic lights, actual logo asset (20–24pt) + panel name, compact system health, global filter popovers, layout button, and context actions. Do not insert an 80px "banner".
+1. **Top bar** (`MonitoringHeader`, 52 pt, see [visual language §0](visual-language.md)): system traffic lights, actual logo asset (24 pt) + "Q.A.D.R.E.N. // Контрольная панель", layout button, and Layout-mode actions. Do not insert an 80px "banner".
 2. **Canvas**: scrollable adaptive grid without a sidebar. All widget types reside here. Navigation is handled via context within a widget, an inspector, or a temporary separate window.
 3. **Status bar**: one line containing the local Worker, service status, last update, and the number of unresolved critical conditions. Use values with provenance and freshness. Do not simulate "running in background" until the lifecycle is complete.
 
@@ -18,7 +18,7 @@ The Worker value comes only from the IPC `status` request to the local Worker so
 
 | 12-column wide (conditional areas) | Content |
 |---|---|
-| First row: 3 + 5 + 2 + 2 | System · Active Jobs · Queue · Needs Attention |
+| First row: 3 + 5 + 4 | System · Scenario · Needs Attention |
 | Second row: 4 + 4 + 4 | Connections · Worker Resources · Upcoming Runs |
 | Third row: 4 + 4 + 4 | Events · Scenarios · Optional File Activity |
 | Bottom narrow line | Worker · service · update · global problems |
@@ -29,7 +29,7 @@ This is the **default user layout without a saved configuration**. The fixed wid
 
 Priority from first to last: (1) blocking consent/conflict/UNKNOWN and errors; (2) current operations and progress; (3) connection availability; (4) queue and future starts; (5) history and diagnostic metrics. Do not turn "SUCCESS" into a huge green card. The panel can be completely quiet when there is zero activity.
 
-**Cyberpunk** style is implemented with thin lines/cyan focus, a neon accent edge for the selected/active state, neat markers, and technical precision; the graphic background does not interfere with readability. When a widget is focused, adjacent widgets do not become dim automatically.
+**Cyberpunk** style follows [visual language §0](visual-language.md): cut-corner frames with a thin edge, a yellow accent, a mint edge on actions, glowing status lines, neat markers, and technical precision; the graphic background does not interfere with readability. When a widget is focused, adjacent widgets do not become dim automatically.
 
 ## 4. Interactions — without screen switching
 
@@ -55,25 +55,24 @@ Priority from first to last: (1) blocking consent/conflict/UNKNOWN and errors; (
 | Widget | Compact | Regular | Expanded |
 |---|---|---|---|
 | System | status + source/lastSeen | service status + Worker + last refresh | modules + provenance |
-| ActiveJobs | count and 1 current | 2–3 operations, progress/files/bytes | lazy list and current file tree |
-| Queue | active/waiting/unknown counters | 4–6 rows, badges | selection, priority, pause/resume |
+| Scenario | stage + progress ring of one selected Scenario | file counts, next run, Stop or Run | source and destination: connection, type, root, selected objects |
 | Attention | count + severity | top conflict + "More details" action | resolutions, errors, list of pending confirmations |
-| Connections | 1 selected + availability | 2–4 rows quota/status | paths, quotas/limits, adapter capabilities |
+| Scenarios | all Scenarios by nearest run: direction, schedule, next run | (one size; Layout mode sets the row count) | — |
+| Connections | status line + online N/M + markers | up to 4 rows: marker, name, type, a status word only on a deviation | all rows + SMB share address |
 | Resources | 2–3 actual metrics | CPU/RAM/disk + timestamp | telemetry, only if measured |
 | UpcomingRuns | 1 nearest run | 3–5 schedule rows | timezone, trigger status |
 | Timeline | last event | last 4–8 | lazy timeline with context filters |
 
 Do not degrade critical status indication in compact mode; if the full text does not fit, leave the icon + available name and put details in the inspector.
 
-The Queue derives its status and active/waiting/unknown counters only from the
-read-only JobStore inventory. If that inventory cannot be read, it shows an
-unavailable state instead of zero counters. Terminal history, failed Jobs, and
-Jobs awaiting a decision are not presented as active or queued work.
+The panel has no Queue widget (removed on 2026-10-31, see
+`widget-system.md`). A widget never derives its status from terminal Job
+history; old failed Jobs do not color a widget.
 
 ## 7. Mode specifications
 
 **Monitoring:** layout fixed; data may refresh; view interactions active; no edit grid.
-**Editing:** move controls, density choices, Undo/Redo, and save after each valid step. Entering this mode does not stop Jobs and does not change scenarios.
+**Editing:** `Add widget` catalog, move controls, density choices, remove control, keyboard Undo/Redo, and save after each valid step. Entering this mode does not stop Jobs and does not change scenarios.
 **Expanded widget:** expansion within the working area or in a separate window; the state of the original panel and scroll is preserved. Focus returns to the original widget upon return.
 **Offline/read-only:** stale data is marked, no live claim; unavailable commands are disabled.
 
@@ -85,6 +84,6 @@ The menu must quickly report health and actual values for active/waiting/attenti
 
 - 1180×760 and 900×620: no sidebar, no overflow/overlay, and no loss of critical indicators.
 - One monitoring window: one local layout and one shared Core job truth, with no duplicate executions.
-- Monitoring/edit switch: no dirty layout loss, no widget duplicates in one panel, undo/redo and recovery.
+- Monitoring/edit switch: no dirty layout loss, add and remove widget instances (several instances of one type are permitted), undo/redo and recovery.
 - 0 jobs, many jobs, auth failure, offline, unknown, consent, conflict: correct semantics, no false numbers/ETA.
 - No focus loss on refresh; keyboard, contrast, and Reduced Motion are verified. VoiceOver support is out of scope.

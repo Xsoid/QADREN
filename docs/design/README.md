@@ -2,7 +2,7 @@
 
 Status: **mandatory source specification for SwiftUI implementation**. The visual design direction is "cyberpunk instrument panel". Token values define the approved baseline. Patch-specific visual acceptance belongs in GitHub Issues.
 
-![Original QADREN logo](../../assets/qadren-logo.png)
+![QADREN logo](../../assets/qadren-logo.png)
 
 ## Entry Point and Priority
 
@@ -11,7 +11,7 @@ Status: **mandatory source specification for SwiftUI implementation**. The visua
 3. [Grid, registry and widget life cycle](widget-system.md).
 4. [Monitoring panel](monitoring.md) and [settings panel](settings.md).
 5. [Implementation and acceptance contract](implementation.md).
-6. [Static visual prototype](prototype.html) — **demonstration**, not application behavior and not an alternative specification.
+6. [Static visual prototype](prototype.html) — **historical demonstration** of the earlier cyan/blue style and the former logo. It is not application behavior and not an alternative specification. The monitoring window follows [visual language §0](visual-language.md).
 
 In case of discrepancy: safety from `docs/policies/` and domain solutions from `docs/architecture/`/ADR are higher priority than appearance. Within the design system, Markdown behavioral contracts have priority over the HTML example. The actual current `main` is verified before the code; the absence of a function is shown as unavailable/stub, not as "ready".
 
@@ -19,8 +19,8 @@ In case of discrepancy: safety from `docs/policies/` and domain solutions from `
 
 - Monitoring — **a canvas of interactive widgets without a permanent Sidebar or section navigation**. The fixed widget set supports order and density changes in layout mode.
 - Two work windows are defined: monitoring and settings. Do not add a separate file-manager window. Scenario Settings owns local folder selection through `LocalWorkspace`. The macOS menu is the entry point and for quick actions. Closing the UI is not equal to stopping the background service after its implementation.
-- Dark cyberpunk theme — the primary artistic baseline: dark depth, electric cyan/blue, controlled glow; light and system themes are also provided.
-- **Use only** `assets/qadren-logo.png` as the QADREN mark; do not create a "similar" mark, do not replace SF Symbols with a third-party product logo.
+- Dark cyberpunk theme — the primary artistic baseline. The monitoring window uses the cybercn style (owner decision, 2026-10-31): near-black canvas, yellow accent, mint edge, cut-corner frames, Advent Pro and VT323 ([visual language §0](visual-language.md)). The Settings window keeps the earlier cyan/blue rules until a separate decision. Light and system themes are also provided.
+- **Use only** the QADREN mark from `assets/brand/qadren-mark.svg` (raster `assets/qadren-logo.png`, app icon `assets/qadren.icns`; owner decision of 2026-10-31, see [visual language §2](visual-language.md)); do not create a "similar" mark, do not replace SF Symbols with a third-party product logo.
 - Fictitious graphs/numbers, replacing UNKNOWN with error/success, unrelated content prefetch to the main MacBook, and decorating an unavailable function with an active button are prohibited.
 - First the existing `MainView.swift`, `QADRENApp.swift`, `StorageConnections.swift`, `JobInventory.swift`, `LocalWorkspace.swift`, not a second UI layer and not a second Rust Job Engine.
 

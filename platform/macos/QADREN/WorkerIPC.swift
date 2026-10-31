@@ -116,8 +116,20 @@ struct WorkerPlanRow: Decodable {
     }
 }
 
+/// `status`, or `prepare_restart` / `cancel_restart`, which answer like it.
 struct WorkerStatusRequest: Encodable {
-    let command = "status"
+    var command = "status"
+}
+
+/// The answer to a `status` request.
+struct WorkerStatus: Equatable {
+    /// Batch files that the Worker runs now (D-024).
+    let active: Int
+    /// True while a restart waits: the Worker starts no new file.
+    let draining: Bool
+    /// The Unix time when the Worker process started; nil for a Worker of an
+    /// earlier build.
+    let started: Int64?
 }
 
 struct WorkerRegistryControlRequest: Encodable {
@@ -151,6 +163,8 @@ enum WorkerIPC {
         let status: String
         /// `status` only: batch files that run now (D-024).
         var active: Int?
+        var draining: Bool?
+        var started: Int64?
         var dispatched: Int?
     }
 
@@ -291,20 +305,40 @@ enum WorkerIPC {
 
     /// Sends the non-mutating `status` request. A short timeout keeps the
     /// monitoring refresh responsive while the Worker runs a long effect.
-    static func probeStatus(socketPath: String? = nil, timeoutSeconds: Int = 1) throws {
+    /// Returns the number of batch files that the Worker runs now (D-024).
+    @discardableResult
+    static func probeStatus(socketPath: String? = nil, timeoutSeconds: Int = 1) throws -> Int {
         let payload = try JSONEncoder().encode(WorkerStatusRequest()) + Data([0x0a])
         let response = try send(
             payload, socketPath: socketPath ?? defaultSocketPath(), timeoutSeconds: timeoutSeconds
         )
         guard response.ok, response.status == "running" else { throw WorkerIPCError.invalidResponse }
+        return response.active ?? 0
     }
 
     /// Batch files that the Worker runs now, from the `status` request.
     static func activeItems(socketPath: String? = nil) throws -> Int {
-        let payload = try JSONEncoder().encode(WorkerStatusRequest()) + Data([0x0a])
+        try status(socketPath: socketPath).active
+    }
+
+    static func status(command: String = "status", socketPath: String? = nil) throws -> WorkerStatus {
+        let payload = try JSONEncoder().encode(WorkerStatusRequest(command: command)) + Data([0x0a])
         let response = try send(payload, socketPath: socketPath ?? defaultSocketPath(), timeoutSeconds: 2)
         guard response.ok, response.status == "running" else { throw WorkerIPCError.invalidResponse }
-        return response.active ?? 0
+        return WorkerStatus(active: response.active ?? 0, draining: response.draining ?? false, started: response.started)
+    }
+
+    /// Asks the Worker to finish the files that run now and to start no new
+    /// one for at most 10 minutes, so that it can restart between files.
+    /// A Worker of an earlier build refuses the command (`invalidResponse`).
+    @discardableResult
+    static func prepareRestart() throws -> WorkerStatus {
+        try status(command: "prepare_restart")
+    }
+
+    /// Lets the Worker start new files again after an abandoned restart.
+    static func cancelRestart() {
+        _ = try? status(command: "cancel_restart")
     }
 
     private static func send(_ payload: Data, socketPath: String, timeoutSeconds: Int = 5) throws -> Response {
@@ -418,6 +452,13 @@ enum WorkerIPC {
     static func stopRun(scenarioID: String) throws {
         struct Answer: Decodable { let status: String }
         _ = try plan(PlanRequest(command: "stop_run", scenario_id: scenarioID), as: Answer.self)
+    }
+
+    /// "Запустить" of the Scenario widget: a manual run that plans and
+    /// executes like a scheduled run. During an active run it starts nothing.
+    static func runNow(scenarioID: String, accessToken: String?) throws {
+        struct Answer: Decodable { let status: String }
+        _ = try plan(PlanRequest(command: "run_now", scenario_id: scenarioID, access_token: accessToken), as: Answer.self)
     }
 
     /// Make one Create batch of all Create rows of a stored plan.

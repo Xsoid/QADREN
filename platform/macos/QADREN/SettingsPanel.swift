@@ -2675,15 +2675,22 @@ enum ScheduleWording {
     static func title(
         intervalHours: UInt8?, daysMask: UInt8, hour: UInt8, minute: UInt8, timezone: String
     ) -> String {
+        rule(intervalHours: intervalHours, daysMask: daysMask, hour: hour, minute: minute)
+            + " (" + timezone + ")"
+    }
+
+    /// The rule without the time zone, for a short line: "Пн–Пт в 03:00".
+    static func rule(_ entry: ScenarioScheduleEntry) -> String {
+        rule(intervalHours: entry.interval_hours, daysMask: entry.days_mask, hour: entry.hour, minute: entry.minute)
+    }
+
+    static func rule(intervalHours: UInt8?, daysMask: UInt8, hour: UInt8, minute: UInt8) -> String {
         let time = String(format: "%02d:%02d", hour, minute)
-        let base: String
         if let intervalHours {
-            base = "Каждые \(intervalHours) ч с " + time
+            return "Каждые \(intervalHours) ч с " + time
                 + (daysMask == allDays ? "" : ", " + days(daysMask))
-        } else {
-            base = (daysMask == allDays ? "Каждый день" : days(daysMask)) + " в " + time
         }
-        return base + " (" + timezone + ")"
+        return (daysMask == allDays ? "Каждый день" : days(daysMask)) + " в " + time
     }
 
     /// Selected days; a run of three or more days is a range: "Пн–Пт, Вс".
@@ -3511,6 +3518,7 @@ struct LaunchAtLoginSection: View {
 
 struct ApplicationSettingsView: View {
     @AppStorage("qadren.theme") private var themeRaw = QDThemeMode.dark.rawValue
+    @AppStorage(QDGlitchSetting.key) private var glitchEffects = false
 
     var body: some View {
         Form {
@@ -3522,6 +3530,9 @@ struct ApplicationSettingsView: View {
                     }
                 }
                 Text("Применяется ко всем окнам QADREN и не меняет подключения, сценарии или Worker.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Глитч-эффекты на контрольной панели", isOn: $glitchEffects)
+                Text("Короткие редкие помехи в заголовках виджетов, чтобы картинка панели не стояла неподвижно часами. Не работают, если в macOS включено «Уменьшение движения».")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Состояние приложения") {

@@ -274,6 +274,19 @@ struct ScenarioRunState: Decodable, Equatable {
         let created_at: Int64
         /// The Scenario whose run this run waits for (write-root lock).
         let waiting_for_scenario: String?
+        /// The file batch of an executing run.
+        var batch_id: String? = nil
+    }
+    /// The newest finished run, for the monitoring Scenario widget.
+    struct LastRun: Decodable, Equatable {
+        let id: String
+        let trigger: String
+        /// `completed`, `failed`, or `cancelled`.
+        let state: String
+        let error: String?
+        let batch_id: String?
+        let created_at: Int64
+        let finished_at: Int64?
     }
     struct SkippedSlot: Decodable, Equatable {
         let schedule_id: String
@@ -281,6 +294,7 @@ struct ScenarioRunState: Decodable, Equatable {
         let run_id: String
     }
     let active: Run?
+    var last: LastRun? = nil
     let skipped: [SkippedSlot]
 }
 struct ScenarioSnapshotItem: Codable {
@@ -426,6 +440,16 @@ enum QADRENUserMessage {
             "Файл назначения уже существует. QADREN не перезаписывает его без отдельного решения."
         case "local_connection_unavailable":
             "Подключение выключено или недоступно. Включите его в разделе «Подключения»."
+        case "scenario_disabled":
+            "Сценарий выключен. Включите его в настройках сценария."
+        case "scenario_unavailable":
+            "Сценарий не найден. Возможно, его удалили."
+        case "stopped_by_user":
+            "Запуск остановлен вручную."
+        case "items_failed":
+            "Часть файлов не скопирована."
+        case "items_unknown":
+            "Результат части файлов неизвестен: QADREN сверит их без повторной записи."
         case "run_active":
             "Сценарий уже выполняется. Второй запуск не начат: текущий запуск продолжается."
         case "plan_stale":
@@ -516,14 +540,25 @@ enum YandexScenarioAccess {
         return entries.first { $0.id == id }?.adapter == "yandex_disk" ? id : nil
     }
 
-    /// Give the Worker the credentials of all enabled connections now and
-    /// every minute while the app runs. A Worker restart loses them; this
-    /// lets a waiting run continue as soon as the app is open (D-024 stage A).
+    /// Give the Worker the credentials of all enabled connections now, every
+    /// minute while the app runs, and within 5 s of a Worker restart. A
+    /// restart loses them; the Worker reports its start time in `status`, so
+    /// a new Worker gets them before a waiting run shows "sign-in required"
+    /// for long (D-024 stage A).
     static func startTokenDelivery() {
         Task.detached(priority: .utility) {
+            var deliveredTo: Int64?
+            var deliveredAt = Date.distantPast
             while true {
-                _ = WorkerCredentials.deliverAll()
-                try? await Task.sleep(for: .seconds(60))
+                let started = try? WorkerIPC.status().started
+                if started != deliveredTo || Date().timeIntervalSince(deliveredAt) >= 60 {
+                    // An incomplete delivery (a locked Keychain) repeats
+                    // every minute, not every 5 s.
+                    _ = WorkerCredentials.deliverAll()
+                    deliveredTo = started
+                    deliveredAt = Date()
+                }
+                try? await Task.sleep(for: .seconds(5))
             }
         }
     }
