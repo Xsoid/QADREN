@@ -16,6 +16,7 @@ Read [D-018: Local-first priorities](decisions/D-018-local-first-priorities.md) 
 | Validation | [Testing and quality](development/testing-and-quality.md) |
 | Product sequence | [Roadmap](roadmap.md) |
 | Agent rules | [AGENTS.md](../AGENTS.md) |
+| Third-party licenses | [Third-party notices](../THIRD_PARTY_NOTICES.md) |
 
 Use GitHub Issues for active work, audits, and evidence for a specific SHA. Do not add operational status reports to this documentation.
 

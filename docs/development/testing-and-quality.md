@@ -31,4 +31,4 @@ Use the relevant `scripts/test-macos-*.sh` command for changed macOS, Worker, st
 
 ## Publication and release evidence
 
-Before commit, push, or PR, run the project-scoped AI Docs Hub pre-publish gate and repeat code and security review for the exact patch fingerprint. Record the base and final SHA, command, environment, result, evidence layer, and untested cases in the applicable GitHub Issue or handoff. Use `PASS`, `FAIL`, `BLOCKED`, or `SKIPPED`. Do not infer unavailable evidence.
+Before commit, push, or PR, run the project-scoped AI Docs Hub pre-publish gate and repeat code and security review for the exact patch fingerprint. Record the base and final SHA, command, environment, result, evidence layer, and untested cases in the applicable GitHub Issue or handoff. Use `PASS`, `FAIL`, `BLOCKED`, or `SKIPPED`. Do not infer unavailable evidence. Evidence from real user storage contains no names, paths, counts, or sizes of user data ([data safety](../policies/data-safety.md)).

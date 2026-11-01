@@ -8,14 +8,14 @@ The owner goal is to transfer very large volumes, much more than 10,000 files, f
 
 Facts from 2026-10-24 and 2026-10-25:
 
-- **Volume.** The selected folder `disk:/Xsoid [Архив]` has more than 61,946 files in more than 1,806 folders, and more than 160 GB. The metadata walk stopped at a test cap of 60,000 files after 19 minutes.
+- **Volume.** A real selected Yandex Disk folder has much more than 10,000 files. The metadata walk stopped at a test cap of 60,000 files.
 - **Snapshot.** A plan snapshot is one recursive metadata walk in one FFI call. Any error discards the full walk. Nothing is kept for the next run.
 - **Plan limits.** A dry run accepts at most 10,000 entries and 1 MB of JSON for each side (`registry_ffi`). The local snapshot, the Worker schedule scan, and the Yandex snapshot also stop at 10,000 entries. The plan screen shows one row for each file.
 - **Worker.** The Worker handles IPC requests one at a time on one thread. During a batch it does not answer `status` and does not poll schedules. The app treats a Worker that does not answer as not started.
 - **Token.** Only the app reads the Yandex Disk token from the Keychain. The background Worker cannot read it, so it refuses Yandex Jobs without a token from the app (D-023).
-- **Provider errors.** In a batch of 111 files, Yandex Disk returned HTTP 500 for the content of 17 files, again and again. 4 other files failed once and downloaded correctly later. A connection timeout to the download host also occurred.
+- **Provider errors.** In a batch, Yandex Disk returned HTTP 500 for the content of some files, again and again. Other files failed once and downloaded correctly later. A connection timeout to the download host also occurred.
 - **Retries.** A failed batch child stays failed. Nothing retries it.
-- **Reconciliation.** Reconciliation of an `UNKNOWN` copy checks only the size of the destination file. On 2026-10-25 it marked 24 old Jobs as completed because a later batch had written files of the same size at those names.
+- **Reconciliation.** Reconciliation of an `UNKNOWN` copy checks only the size of the destination file. On 2026-10-25 it marked old Jobs as completed because a later batch had written files of the same size at those names.
 - **Signing.** The developer build has an ad-hoc signature. Every build changes the Worker cdhash, and the app must register the LaunchAgent again (see [build and release](../development/build-and-release.md)).
 
 ## Decision
@@ -95,7 +95,7 @@ A retry is safe only because the executor closes the attempt as "failed before e
 
 1. Done (2026-10-25): Worker background run thread, durable runs with retries, token in memory (stage A), no re-registration during a run.
 2. Done (2026-10-25): scale pass on stage 1: indexed and paged due items, progress counts from the database, a single-row check before each item, the newest 200 Jobs and counts for the monitoring screen, indexed unknown-Job and attempt queries. Checked with 300,000 batch children and 300,000 Jobs.
-3. Done (2026-10-25): snapshot store and resumable Yandex and local walks. Checked: 300,000 generated local files in 3,031 folders in about 7 s; the real Yandex Disk folder "Xsoid [Архив]" (143,426 files, 8,197 folders) in 16.7 min with 4 requests in flight; `kill -9` during each walk, then the same snapshot continued without loss; Worker memory 11 MB. One name with a control character became a skipped object instead of a failed walk.
+3. Done (2026-10-25): snapshot store and resumable Yandex and local walks. Checked: 300,000 generated local files in 3,031 folders in about 7 s; a real Yandex Disk folder with much more than 10,000 files, with 4 requests in flight; `kill -9` during each walk, then the same snapshot continued without loss; Worker memory 11 MB. One name with a control character became a skipped object instead of a failed walk.
 4. Done (2026-10-25): streaming plan, plan store, and the paged plan screen; a Create run starts from the stored plan, not from a path list in the app. The Worker merges the two snapshots and the confirmed states in one sorted query and decides each name-key group with the same rule as the in-memory planner (`scenario_planner::plan_path`). The app loads a plan of at most 2,000 rows into the full screen with row actions; a larger plan shows counts and bytes by action, pages of 200 rows with a filter and a path search, and "Создать все". Replacements, conflicts, and deletions of a large plan are not yet executed as one batch. Checked: 300,000 files, snapshot and plan in 6 s (plan 1 s), a page in 0.1 s, a batch of 300,000 Create children from the plan in 5.1 s, Worker memory 27 MB.
 5. MD5 reconciliation for Yandex downloads.
 6. Deferred: Developer ID signing and the shared Keychain access group (stage B). It needs an Apple Developer account and a new owner decision.

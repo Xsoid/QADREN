@@ -43,6 +43,16 @@ For scheduled or unattended work, carry out ordinary reads, safe configured oper
 - Paths that differ only by letter case or Unicode form can name the same file on APFS. The plan marks them as "needs verification" and offers no Create or Update for them.
 - A Scenario with selected objects plans and executes only paths inside the selection. A path that differs from a selected object only by letter case or Unicode form is "needs verification". Every Scenario executor rechecks the selection of its revision before an effect.
 
+## User Content in Project Records
+
+Project records are the repository (documentation, code, comments, test fixtures, scripts, commit messages) and the work tracker (issues, pull requests, comments, attachments). Project records must not contain information about the content or the accounts of a user, the owner included:
+
+- Names and paths of real files and folders, share names, server and host names, account names, and e-mail addresses of storage accounts.
+- Counts, sizes, dates, durations, quota values, and other properties of real user files, folders, or storage.
+- File content, screenshots that show user content, and log or database excerpts with real user paths.
+
+Evidence from a real storage states only the storage type and the result, for example: "Checked on a real Yandex Disk folder: the walk continued after `kill -9`." Use generated data for each measurement with numbers. Use neutral sample names in code, tests, and examples (`disk:/Photos`, `smb://nas/share`). Before a commit or a tracker post, remove such information. Do not copy it from logs, the Registry, the JobStore, or screenshots.
+
 ## Main MacBook Limitations
 
 Follow the [content-read policy](local-downloads.md): file content needed by a requested/configured operation may be read without a separate prompt, including possible macOS File Provider materialization. This does not permit unrelated automatic mirroring or unsolicited prefetch. Do not interfere with native iCloud/macOS or other applications.
