@@ -29,6 +29,7 @@ Baseline date: **2026-10-08**. Records list agreements. They do not prove the fe
 | D-024 | Accepted (2026-10-25) | [Large transfers: Worker-owned Transfer Runs on a background thread, resumable snapshots, stored paged plans, retry classes, Worker token access (in memory now, shared Keychain group with a Team ID later), MD5 reconciliation](D-024-large-transfers.md) |
 | D-019 | Accepted (2026-10-23), threshold revised D-025 | [Inline Scenario folder browser, selected objects, and Paranoid / Simple synchronization deletion modes; the 20-deletion threshold is removed by D-025](D-019-scenario-selection-and-deletion-modes.md) |
 | D-025 | Accepted (2026-10-28) | [Autonomous scheduled Scenarios: one run path, one active run for each Scenario, automatic Update and Delete, one-way source wins, Worker SMB mount, Yandex schedules, launch at login, daily and every-N-hours schedules, parallel runs with a write-root lock; revises D-019, D-022, D-023, D-024](D-025-autonomous-scheduled-scenarios.md) |
+| D-026 | Accepted (2026-11-01) | [GitHub Releases: a `vX.Y.Z` tag starts a macOS workflow that builds an ad-hoc signed Apple silicon pre-release; Semantic Versioning from `v0.2.0`; Yandex client ID from a repository variable](D-026-github-releases.md) |
 
 ## Revision 2026-10-09 — specification v0.2
 

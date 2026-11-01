@@ -6,7 +6,22 @@ QADREN is a file transfer and synchronization system for independent storage con
 
 ## Status
 
-QADREN is in active development. There is no signed or notarized release. You can build a developer bundle from source on macOS 13 or later.
+QADREN is in active development. [GitHub Releases](https://github.com/Xsoid/QADREN/releases) contain pre-release builds for Apple silicon Macs with macOS 13 or later ([D-026](docs/decisions/D-026-github-releases.md)). These builds are not Developer ID signed and not notarized.
+
+## Install
+
+1. Download `QADREN-<version>-macos-arm64.zip` from the [latest release](https://github.com/Xsoid/QADREN/releases).
+2. Open the `.zip` file. Move `QADREN.app` to the Applications folder.
+3. Open QADREN. macOS blocks the first start.
+4. Open System Settings > Privacy & Security and click **Open Anyway**.
+
+You can also remove the quarantine attribute in Terminal:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/QADREN.app
+```
+
+After an update, macOS can ask again for permissions and Keychain access.
 
 ## Release 1 scope
 

@@ -1,0 +1,84 @@
+name: Release
+
+# D-026: a pushed vX.Y.Z tag publishes an ad-hoc signed Apple silicon
+# pre-release built from the tagged commit.
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-15
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+          components: clippy, rustfmt
+
+      - name: Check that the tag, app, and core versions are equal
+        run: |
+          VERSION="${TAG#v}"
+          APP_VERSION="$(plutil -extract CFBundleShortVersionString raw platform/macos/Info.plist)"
+          CORE_VERSION="$(awk -F'"' '/^version = / {print $2; exit}' core/Cargo.toml)"
+          if [[ "$APP_VERSION" != "$VERSION" || "$CORE_VERSION" != "$VERSION" ]]; then
+            echo "Tag $TAG, Info.plist $APP_VERSION, and Cargo.toml $CORE_VERSION must be equal." >&2
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Rust formatting, lint and tests
+        run: bash scripts/test-core.sh
+
+      - name: Write the public OAuth client ID
+        env:
+          YANDEX_CLIENT_ID: ${{ vars.YANDEX_CLIENT_ID }}
+        run: |
+          if [[ -z "$YANDEX_CLIENT_ID" ]]; then
+            echo "Set the repository variable YANDEX_CLIENT_ID." >&2
+            exit 1
+          fi
+          printf 'YANDEX_CLIENT_ID=%s\n' "$YANDEX_CLIENT_ID" > config/oauth.local.env
+
+      - name: Build the app bundle
+        run: bash scripts/build-macos.sh
+
+      - name: Package the bundle
+        run: |
+          ASSET="QADREN-$VERSION-macos-arm64.zip"
+          ditto -c -k --sequesterRsrc --keepParent dist/QADREN.app "$ASSET"
+          shasum -a 256 "$ASSET" > "$ASSET.sha256"
+          echo "ASSET=$ASSET" >> "$GITHUB_ENV"
+
+      - name: Publish the pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > "$RUNNER_TEMP/notes.md" <<'EOF'
+          Ad-hoc signed build for Apple silicon Macs with macOS 13 or later. It is not Developer ID signed and not notarized.
+
+          **Install**
+
+          1. Download and open the `.zip` file. Move `QADREN.app` to the Applications folder.
+          2. Open QADREN. macOS blocks the first start.
+          3. Open System Settings > Privacy & Security and click **Open Anyway**.
+
+          You can also remove the quarantine attribute in Terminal: `xattr -dr com.apple.quarantine /Applications/QADREN.app`.
+
+          After an update, macOS can ask again for permissions and Keychain access.
+          EOF
+          gh release create "$TAG" "$ASSET" "$ASSET.sha256" \
+            --verify-tag \
+            --prerelease \
+            --title "QADREN $VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --generate-notes
