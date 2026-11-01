@@ -1726,11 +1726,11 @@ private struct ScenarioDryRunView: View {
         largeRows = []
         do {
             // A plan for a superseded revision must not offer actions.
-            if let current = try StorageRegistryBridge.listScenarios().first(where: { $0.id == scenario.id }),
-               current.revision != scenario.revision {
+            if let current = try StorageRegistryBridge.listScenarios().first(where: { $0.id == self.scenario.id }),
+               current.revision != self.scenario.revision {
                 plan = []
                 planUnavailable = true
-                error = "Сценарий изменён (ревизия \(current.revision)). Этот план построен для ревизии \(scenario.revision). Вернитесь к списку сценариев и откройте план заново."
+                error = "Сценарий изменён (ревизия \(current.revision)). Этот план построен для ревизии \(self.scenario.revision). Вернитесь к списку сценариев и откройте план заново."
                 return
             }
             try StorageRegistryBridge.dispatchPendingScenarioCopyBaselines()
