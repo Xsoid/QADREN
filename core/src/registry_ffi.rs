@@ -190,6 +190,8 @@ fn registry_error_code(error: &RegistryError) -> &'static str {
         RegistryError::InvalidEndpoint => "invalid_smb_address",
         RegistryError::RootOutsideConnection => "smb_root_outside_mount",
         RegistryError::UnsupportedYandexScope => "yandex_source_only",
+        RegistryError::InvalidPanelUrl => "invalid_panel_url",
+        RegistryError::UnsupportedScenarioEndpoint => "unsupported_scenario_endpoint",
         _ => "registry_error",
     }
 }
@@ -1227,6 +1229,78 @@ pub extern "C" fn qadren_registry_set_smb_endpoint(
     };
     with_registry(path, |db| {
         db.set_smb_endpoint(&id, &url)?;
+        Ok(json!(true))
+    })
+}
+
+/// Add one ISPmanager panel connection (D-027). The URL carries no
+/// credentials; the platform keeps the login and the password.
+#[no_mangle]
+pub extern "C" fn qadren_registry_add_ispmanager(
+    path: *const c_char,
+    name: *const c_char,
+    url: *const c_char,
+) -> *mut c_char {
+    let (Some(name), Some(url)) = (input(name), input(url)) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    with_registry(path, |db| {
+        Ok(json!({"id": db.add_ispmanager(&name, &url)?}))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn qadren_registry_set_ispmanager_endpoint(
+    path: *const c_char,
+    id: *const c_char,
+    url: *const c_char,
+) -> *mut c_char {
+    let (Some(id), Some(url)) = (input(id), input(url)) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    with_registry(path, |db| {
+        db.set_ispmanager_endpoint(&id, &url)?;
+        Ok(json!(true))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn qadren_registry_ispmanager_settings(
+    path: *const c_char,
+    id: *const c_char,
+) -> *mut c_char {
+    let Some(id) = input(id) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    with_registry(path, |db| Ok(json!(db.ispmanager_settings(&id)?)))
+}
+
+#[no_mangle]
+pub extern "C" fn qadren_registry_set_ispmanager_ssh_port(
+    path: *const c_char,
+    id: *const c_char,
+    port: u16,
+) -> *mut c_char {
+    let Some(id) = input(id) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    with_registry(path, |db| {
+        db.set_ispmanager_ssh_port(&id, port)?;
+        Ok(json!(true))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn qadren_registry_confirm_ispmanager_host_key(
+    path: *const c_char,
+    id: *const c_char,
+    fingerprint: *const c_char,
+) -> *mut c_char {
+    let (Some(id), Some(fingerprint)) = (input(id), input(fingerprint)) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    with_registry(path, |db| {
+        db.confirm_ispmanager_host_key(&id, &fingerprint)?;
         Ok(json!(true))
     })
 }

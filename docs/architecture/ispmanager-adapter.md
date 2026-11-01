@@ -32,7 +32,7 @@ No live check exists yet. Every category is `unverified`. "Candidate functions" 
 
 | # | Category | Candidate read functions | Content or metadata | Open questions |
 |---|---|---|---|---|
-| 1 | Files and directories | `file` (list, key `name`), `file.download` | Content | How `file` addresses a nested folder (`plid` or path). Pagination of large folders. Dotfiles, symlinks, special files, owner and mode fields. Whether `file.download` of one file streams directly or packs an archive on the server. Download of a folder. |
+| 1 | Files and directories | SFTP when the account has SSH access (D-027 section 7a); otherwise `file` (list, key `name`), `file.download` | Content | How `file` addresses a nested folder (`plid` or path). Pagination of large folders. Dotfiles, symlinks, special files, owner and mode fields. Whether `file.download` of one file streams directly or packs an archive on the server. Download of a folder. |
 | 2 | Websites and web domains | `webdomain` (key `name`), `webproxy` | Metadata | Which fields the list returns. Whether a read-only view of site settings exists without `*.edit`. |
 | 3 | Databases | `db` (key `pair`), `db.server`, `db.users`, `db.dump` | Content and metadata | Whether `db.dump` selects exactly one database. Whether it writes a temporary file on the server. Format and compression. Consistency of the dump. Grants of `db.users`. Passwords are never recoverable. |
 | 4 | Mail domains | `emaildomain` (key `name`), `blacklist` | Metadata | Which delivery, DKIM, and DMARC fields are readable. |
@@ -42,7 +42,7 @@ No live check exists yet. Every category is `unverified`. "Candidate functions" 
 | 8 | SSL/TLS | `sslcert` (key `key`), `sslcert.csr` | Metadata | Whether the certificate and the chain are readable. Private keys are `unsupported` in this stage (D-027 section 9). |
 | 9 | FTP | `ftp.user` (key `name`) | Metadata | Roots and rights. FTP passwords are not exportable. |
 | 10 | ISPmanager accounts | `user` (key `name`), `admin`, `userrights`, `userstat`, `preset` | Metadata | Access level for each list. Template and limit fields. |
-| 11 | SSH | No dedicated function found. `file` for `~/.ssh` | Content through files | Whether `file` can read `~/.ssh` for the account. Otherwise `unsupported`. |
+| 11 | SSH | No API function for SSH keys or shell settings. `file` for `~/.ssh` | Content through files | SSH access of the account does not give an API function. Whether `file` can read `~/.ssh/authorized_keys` for the account. Otherwise `unsupported`. |
 | 12 | Web server services | `services` | Metadata | Configuration files are readable only through `file` with administrator rights. |
 | 13 | PHP and runtimes | `phpversions`, `phpextensions`, `phpconf` | Metadata | Access level. Effective `php.ini` files through `file`. |
 | 14 | Mail service settings | No dedicated read function found | Unknown | Configuration files through `file` with administrator rights. |

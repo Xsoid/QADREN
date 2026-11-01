@@ -1,7 +1,9 @@
 //! ISPmanager 6 adapter (D-027, proposed): a read-only API client for the
 //! Gate 0 capability probe. No function here changes panel state.
+use crate::ispmanager_sftp::{self, SftpCheck};
 use reqwest::blocking::Client;
 use reqwest::{StatusCode, Url};
+use serde::Serialize;
 use serde_json::Value;
 use std::fmt;
 use std::time::Duration;
@@ -116,7 +118,7 @@ fn is_allowed(func: &str) -> bool {
 pub enum IspError {
     Transport(reqwest::Error),
     /// The panel URL is not `https`, has no host, or carries user
-    /// information, a query, or a fragment.
+    /// information or a query.
     InvalidUrl,
     /// The function is not in the read-only allowlist. Nothing was sent.
     NotAllowed(String),
@@ -156,19 +158,29 @@ pub type Result<T> = std::result::Result<T, IspError>;
 pub struct PanelUrl(Url);
 
 impl PanelUrl {
+    /// A fragment, such as `#/` in the address that a browser shows, stays
+    /// in the browser and never reaches the panel, so it is removed.
     pub fn parse(text: &str) -> Result<Self> {
-        let url = Url::parse(text).map_err(|_| IspError::InvalidUrl)?;
+        let mut url = Url::parse(text).map_err(|_| IspError::InvalidUrl)?;
+        url.set_fragment(None);
         let valid = url.scheme() == "https"
             && url.host_str().is_some_and(|host| !host.is_empty())
             && url.username().is_empty()
             && url.password().is_none()
-            && url.query().is_none()
-            && url.fragment().is_none();
+            && url.query().is_none();
         if valid {
             Ok(Self(url))
         } else {
             Err(IspError::InvalidUrl)
         }
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    pub fn host(&self) -> &str {
+        self.0.host_str().unwrap_or_default()
     }
 }
 
@@ -301,5 +313,176 @@ impl Session {
         let session_id = self.session_id.as_deref().unwrap_or_default();
         let doc = self.post(func, &[("auth", session_id)])?;
         Ok(classify_list(&doc))
+    }
+}
+
+/// A capability state of D-027 section 4 that a connection check can set.
+/// A list read never proves a content export, so the check never sets
+/// `verified_export`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityState {
+    VerifiedMetadataOnly,
+    PermissionDenied,
+    Unverified,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FunctionReport {
+    pub function: &'static str,
+    /// `items`, `empty`, `denied` (panel error `access`), or `error`.
+    pub result: &'static str,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CategoryReport {
+    pub category: &'static str,
+    pub state: CapabilityState,
+    pub functions: Vec<FunctionReport>,
+}
+
+/// The file transport that a check confirmed (D-027 section 7a): `sftp`
+/// when SFTP is ready, otherwise `panel_api` with the SFTP reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FileTransport {
+    pub kind: &'static str,
+    /// `ready`, `host_key_unconfirmed`, `host_key_changed`,
+    /// `host_certificate_unsupported`, `auth_refused`, `unreachable`, or
+    /// `sftp_unavailable`.
+    pub reason: &'static str,
+    /// The host key that the server showed, for confirmation by the user.
+    pub fingerprint: Option<String>,
+    pub detail: Option<String>,
+}
+
+impl From<SftpCheck> for FileTransport {
+    fn from(check: SftpCheck) -> Self {
+        let api = |reason, fingerprint, detail| FileTransport {
+            kind: "panel_api",
+            reason,
+            fingerprint,
+            detail,
+        };
+        match check {
+            SftpCheck::Ready => FileTransport {
+                kind: "sftp",
+                reason: "ready",
+                fingerprint: None,
+                detail: None,
+            },
+            SftpCheck::HostKeyUnconfirmed { fingerprint } => {
+                api("host_key_unconfirmed", Some(fingerprint), None)
+            }
+            SftpCheck::HostKeyChanged { fingerprint } => {
+                api("host_key_changed", Some(fingerprint), None)
+            }
+            SftpCheck::HostCertificateUnsupported => {
+                api("host_certificate_unsupported", None, None)
+            }
+            SftpCheck::AuthRefused => api("auth_refused", None, None),
+            SftpCheck::Unreachable(detail) => api("unreachable", None, Some(detail)),
+            SftpCheck::SftpUnavailable(detail) => api("sftp_unavailable", None, Some(detail)),
+        }
+    }
+}
+
+/// The result of one connection check. `status` is a Registry status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CheckReport {
+    pub status: &'static str,
+    pub error: Option<String>,
+    pub categories: Vec<CategoryReport>,
+    pub file_transport: Option<FileTransport>,
+}
+
+fn category_state(functions: &[FunctionReport]) -> CapabilityState {
+    if functions
+        .iter()
+        .any(|report| matches!(report.result, "items" | "empty"))
+    {
+        CapabilityState::VerifiedMetadataOnly
+    } else if !functions.is_empty() && functions.iter().all(|report| report.result == "denied") {
+        CapabilityState::PermissionDenied
+    } else {
+        CapabilityState::Unverified
+    }
+}
+
+/// SFTP settings of a check: the port and the confirmed host key.
+#[derive(Debug, Clone, Copy)]
+pub struct SftpTarget<'a> {
+    pub port: u16,
+    pub host_key_sha256: Option<&'a str>,
+}
+
+/// Signs in, calls the list functions of every category, and checks the
+/// SFTP file transport. The check reads metadata only and changes nothing on
+/// the server.
+pub fn check(url: &str, login: &str, password: &str, sftp: SftpTarget<'_>) -> CheckReport {
+    let failed = |status, error: IspError| CheckReport {
+        status,
+        error: Some(error.to_string()),
+        categories: Vec::new(),
+        file_transport: None,
+    };
+    let url = match PanelUrl::parse(url.trim()) {
+        Ok(url) => url,
+        Err(error) => return failed("error", error),
+    };
+    let host = url.host().to_owned();
+    let mut session = match Session::new(url, login.to_owned(), password.to_owned()) {
+        Ok(session) => session,
+        Err(error) => return failed("error", error),
+    };
+    if let Err(error) = session.authenticate() {
+        let status = match &error {
+            IspError::Panel(kind) if kind == "auth" => "requires_auth",
+            IspError::Transport(_) => "offline",
+            _ => "error",
+        };
+        return failed(status, error);
+    }
+    let categories = Category::ALL
+        .iter()
+        .map(|category| {
+            let functions: Vec<FunctionReport> = category
+                .list_functions()
+                .iter()
+                .map(|function| match session.list(function) {
+                    Ok(ListOutcome::Items { .. }) => FunctionReport {
+                        function,
+                        result: "items",
+                        error: None,
+                    },
+                    Ok(ListOutcome::Empty) => FunctionReport {
+                        function,
+                        result: "empty",
+                        error: None,
+                    },
+                    Err(error) => FunctionReport {
+                        function,
+                        result: match &error {
+                            IspError::Panel(kind) if kind == "access" => "denied",
+                            _ => "error",
+                        },
+                        error: Some(error.to_string()),
+                    },
+                })
+                .collect();
+            CategoryReport {
+                category: category.key(),
+                state: category_state(&functions),
+                functions,
+            }
+        })
+        .collect();
+    let file_transport =
+        ispmanager_sftp::check(&host, sftp.port, login, password, sftp.host_key_sha256);
+    CheckReport {
+        status: "connected",
+        error: None,
+        categories,
+        file_transport: Some(file_transport.into()),
     }
 }

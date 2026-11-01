@@ -15,8 +15,8 @@ The ISPmanager API catalog is generated. The functions, parameters, and access l
 ### 1. Connection
 
 1. `ispmanager` is a new adapter type. Each connection is an independent `StorageConnection` (D-016). More than one connection can use the same panel, also with the same login.
-2. The Registry stores the display name, the panel URL, the login, the verification state, the last check time, and the detected capabilities. The panel URL uses `https`. It can have a port and a path. It has no user information, query, or fragment.
-3. The password is a Keychain item bound to `connection_id`. The app gives it to the Worker in memory, the same as the Yandex Disk token (D-024 stage A, D-025 section 7).
+2. The Registry stores the display name, the panel URL, the verification state, and the last check time. The capability report of a check is shown in the interface; a later step stores it. The panel URL uses `https`. It can have a port and a path. It has no user information or query. A fragment, such as `#/` in the address that a browser shows, never reaches the panel; QADREN removes it.
+3. The login and the password are one Keychain item bound to `connection_id`, as for an SMB share (D-021). The app gives it to the Worker in memory, the same as the Yandex Disk token (D-024 stage A, D-025 section 7).
 4. The connection is a **source only**. A Scenario with an `ispmanager` connection as the destination is invalid. The destination is a Local Filesystem connection ("This Mac") or an SMB share.
 
 ### 2. Transport and secrets
@@ -72,6 +72,19 @@ Only `verified_export` permits a content export. `verified_metadata_only` permit
 3. Remote reads can be retried. The connector makes no remote mutation, so no remote effect needs reconciliation. Reconciliation after a lost proof checks only the local destination. Insufficient evidence keeps `UNKNOWN`.
 4. A file streams from the panel to the staging name. QADREN does not use the main MacBook as an unapproved full-content mirror.
 
+### 7a. File transport: SFTP first, panel API as the fallback
+
+The owner decided on 2026-11-01: file content uses the transport with the best stability and coverage. When the account has SSH access, that transport is SFTP. When it has no SSH access, the panel API (`file`, `file.download`) is the transport.
+
+1. **Scope.** The file transport serves the Files category and every category whose data exists only as files: SSH keys (`~/.ssh`), and service configuration files when the account can read them. Other categories use the panel API.
+2. **Same account.** SFTP signs in with the login of the connection. By default it uses the same password and port 22. The connection form can set another port. QADREN never uses root, `su`, `sudo`, or another account.
+3. **SFTP only.** The client opens only the `sftp` subsystem. It never opens a shell or an `exec` channel and never runs a command on the server.
+4. **Read-only operations.** The client uses only open for read, read, readdir, stat, lstat, readlink, and close. It never writes, creates, removes, renames, or changes attributes.
+5. **Host key.** The first connection shows the host key fingerprint. The user confirms it one time. The Registry stores the confirmed fingerprint for that `connection_id`; it is not a secret. A different key later stops all SFTP work for that connection with an error. QADREN never accepts a changed key silently.
+6. **Choice per connection.** The connection check tries SFTP sign-in. The capability report states the file transport: `sftp`, or `panel_api` with the reason (no SSH access, sign-in refused, host key not confirmed). A run uses the transport that the last check confirmed and rechecks it before the effect.
+7. **Links and special files.** SFTP gives `lstat` and `readlink`. A symbolic link is recorded as a link with its target; QADREN does not follow it out of the selection. A device, socket, or pipe is an omission with a reason. Nothing is skipped silently.
+8. **Dependency.** SFTP needs an SSH client library in Rust Core. Choose a pure Rust library that uses the existing `tokio` and `ring` dependencies, and measure the binary size change (D-014) before the merge.
+
 ### 8. Native ISPmanager backups
 
 This stage does not use native ISPmanager backups (`backups.*`, `backup.plan.*`, `backup2.*`). They create archives on the server, use server disk space, or bundle more data than the selection. A later owner decision can allow one of them after a live check of its exact content and side effects. The native backup does not include Docker.
@@ -84,7 +97,8 @@ SSL private keys and other secrets that a panel can export are `unsupported` in 
 
 1. Approve the run folder name format in section 5.2.
 2. Approve the exclusion of native backups (section 8) and of exported secrets (section 9) in this stage.
-3. Give a test panel and test accounts (a user and an administrator) for Gate 0. The live checks run on the owner Mac with the read-only probe. Real names, paths, and counts stay outside the repository and the work tracker.
+3. Approve the SSH client library for section 7a (D-014).
+4. Give a test panel and test accounts (a user and an administrator) for Gate 0. The live checks run on the owner Mac with the read-only probe. Real names, paths, and counts stay outside the repository and the work tracker.
 
 ## Consequences (after approval)
 

@@ -382,6 +382,7 @@ enum StorageConnector: String, CaseIterable, Identifiable {
     case thisMac = "local_filesystem"
     case networkDrive = "smb_share"
     case yandexDisk = "yandex_disk"
+    case ispmanager = "ispmanager"
 
     var id: String { rawValue }
 
@@ -394,6 +395,7 @@ enum StorageConnector: String, CaseIterable, Identifiable {
         case .thisMac: "Этот Mac"
         case .networkDrive: "Сетевой диск (SMB)"
         case .yandexDisk: "Яндекс.Диск"
+        case .ispmanager: "ISPmanager"
         }
     }
 
@@ -402,6 +404,7 @@ enum StorageConnector: String, CaseIterable, Identifiable {
         case .thisMac: "laptopcomputer"
         case .networkDrive: "server.rack"
         case .yandexDisk: "cloud"
+        case .ispmanager: "globe"
         }
     }
 
@@ -410,6 +413,7 @@ enum StorageConnector: String, CaseIterable, Identifiable {
         case .thisMac: QDTheme.cyan
         case .networkDrive: QDTheme.blue
         case .yandexDisk: QDTheme.warning
+        case .ispmanager: QDTheme.success
         }
     }
 
@@ -418,6 +422,7 @@ enum StorageConnector: String, CaseIterable, Identifiable {
         case .thisMac: "Папки и диски этого Mac. Одно подключение на Mac, создаётся автоматически."
         case .networkDrive: "Общая папка по протоколу SMB: NAS, компьютер Windows или другой Mac. Логин и пароль хранятся в Keychain."
         case .yandexDisk: "Облачное хранилище. Подключений может быть сколько угодно."
+        case .ispmanager: "Панель хостинга ISPmanager 6. Только источник резервной копии: QADREN читает данные и ничего не меняет на сервере. Логин и пароль хранятся в Keychain."
         }
     }
 }
@@ -430,6 +435,8 @@ private enum ConnectionsRoute: Hashable {
     case connectors
     case newNetworkDrive
     case editNetworkDrive(String)
+    case newISPmanager
+    case editISPmanager(String)
 }
 
 private struct ConnectionsSettingsView: View {
@@ -448,6 +455,7 @@ private struct ConnectionsSettingsView: View {
                 case .connectors:
                     ConnectorListView(connections: connections) { connector in
                         if connector == .networkDrive { route = .newNetworkDrive }
+                        if connector == .ispmanager { route = .newISPmanager }
                         if connector == .yandexDisk {
                             // The new card has "Войти в Яндекс" (D-023).
                             connections.addYandex()
@@ -462,6 +470,18 @@ private struct ConnectionsSettingsView: View {
                 case let .editNetworkDrive(id):
                     if let entry = connections.entries.first(where: { $0.id == id }) {
                         SMBConnectionForm(
+                            connections: connections, editing: entry,
+                            onDone: { route = .list }, onCancel: { route = .list }
+                        )
+                    }
+                case .newISPmanager:
+                    ISPmanagerConnectionForm(
+                        connections: connections, editing: nil,
+                        onDone: { route = .list }, onCancel: { route = .connectors }
+                    )
+                case let .editISPmanager(id):
+                    if let entry = connections.entries.first(where: { $0.id == id }) {
+                        ISPmanagerConnectionForm(
                             connections: connections, editing: entry,
                             onDone: { route = .list }, onCancel: { route = .list }
                         )
@@ -481,6 +501,7 @@ private struct ConnectionsSettingsView: View {
         }
         .onChange(of: connections.entries.map(\.id)) { ids in
             if case let .editNetworkDrive(id) = route, !ids.contains(id) { route = .list }
+            if case let .editISPmanager(id) = route, !ids.contains(id) { route = .list }
         }
     }
 
@@ -497,7 +518,13 @@ private struct ConnectionsSettingsView: View {
                 .init(title: "Добавить подключение") { route = .connectors },
                 .init(title: StorageConnector.networkDrive.title)
             ]
-        case let .editNetworkDrive(id):
+        case .newISPmanager:
+            return [
+                root,
+                .init(title: "Добавить подключение") { route = .connectors },
+                .init(title: StorageConnector.ispmanager.title)
+            ]
+        case let .editNetworkDrive(id), let .editISPmanager(id):
             let name = connections.entries.first { $0.id == id }?.name ?? "Подключение"
             return [root, .init(title: name) { route = .list }, .init(title: "Адрес и вход")]
         }
@@ -539,7 +566,10 @@ private struct ConnectionsSettingsView: View {
                 onRemove: { connections.remove(entry.id) },
                 onRename: { connections.rename(entry.id, name: $0) },
                 onSetEnabled: { connections.setEnabled(entry.id, enabled: $0) },
-                onEditAddress: { route = .editNetworkDrive(entry.id) }
+                onEditAddress: {
+                    route = entry.adapter == StorageConnector.ispmanager.rawValue
+                        ? .editISPmanager(entry.id) : .editNetworkDrive(entry.id)
+                }
             )
             .id(entry.id + (entry.enabled ? ":enabled" : ":disabled") + ":" + entry.name)
         }
@@ -629,6 +659,8 @@ private struct ConnectionCard: View {
             "Будут удалены только локальная запись QADREN и её ключ в Keychain. Файлы на Яндекс.Диске не изменятся."
         case .networkDrive:
             "Будут удалены только локальная запись QADREN и логин с паролем в Keychain. Файлы на сетевом диске не изменятся."
+        case .ispmanager:
+            "Будут удалены только локальная запись QADREN и логин с паролем в Keychain. Данные на сервере ISPmanager не изменятся."
         default:
             "Будет удалена только лишняя локальная запись QADREN. Файлы на этом Mac не изменятся."
         }
@@ -666,7 +698,13 @@ private struct ConnectionCard: View {
             if connector == .networkDrive {
                 SMBConnectionDetails(entry: entry, connections: connections, onEdit: onEditAddress)
             }
-            if connector == .yandexDisk {
+            if connector == .ispmanager {
+                ISPmanagerConnectionDetails(entry: entry, connections: connections, onEdit: onEditAddress)
+            }
+            if connector == .ispmanager {
+                Text("Панель — только источник резервной копии. Сценарии резервного копирования с неё появятся на следующем этапе; сейчас доступны вход и список возможностей.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else if connector == .yandexDisk {
                 YandexConnectionDetails(entry: entry, connections: connections)
                     // The connection object reads `enabled` once.
                     .id(entry.id + (entry.enabled ? "-on" : "-off"))
@@ -724,7 +762,7 @@ private struct ConnectionCard: View {
                 }
             }
             Spacer()
-            if (connector == .networkDrive || connector == .yandexDisk) && entry.enabled {
+            if [.networkDrive, .yandexDisk, .ispmanager].contains(connector) && entry.enabled {
                 let state = SMBConnectionDetails.status(entry.status)
                 QDStatusLabel(kind: state.kind, text: state.text)
             } else if entry.enabled {
@@ -786,6 +824,8 @@ private struct ConnectorListView: View {
             return (.ready, "Доступен. Подключений может быть сколько угодно.")
         case .yandexDisk:
             return (.ready, "Доступен как источник: с Яндекс Диска на этот Mac. Подключений может быть сколько угодно.")
+        case .ispmanager:
+            return (.needsAction, "Первый этап: вход и список возможностей панели. Сценарии резервного копирования — на следующем этапе.")
         }
     }
 }
@@ -1224,6 +1264,356 @@ private struct SMBConnectionForm: View {
             } else {
                 try connections.addSMBShare(
                     name: name, address: address, credentials: credentials, outcome: result
+                )
+            }
+            onDone()
+        } catch {
+            problem = error.localizedDescription
+        }
+    }
+}
+
+/// The panel URL and the login of one ISPmanager connection (D-027), the
+/// sign-in check, and the capability list of the last check. The password is
+/// never shown.
+private struct ISPmanagerConnectionDetails: View {
+    let entry: StorageEntry
+    @ObservedObject var connections: StorageConnections
+    let onEdit: () -> Void
+    @State private var credentials: LoginCredentials?
+    @State private var settings = ISPmanagerSettings.defaults
+    @State private var checking = false
+    @State private var report: ISPmanagerCheckReport?
+    @State private var problem: String?
+    @State private var confirmChangedKey = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 10) {
+                GridRow {
+                    Text("Панель").foregroundStyle(.secondary)
+                    Text(entry.endpoint_url ?? "Не задана")
+                        .font(.body.monospaced())
+                        .textSelection(.enabled)
+                        .lineLimit(1).truncationMode(.middle)
+                }
+                GridRow {
+                    Text("Вход").foregroundStyle(.secondary)
+                    Text(credentials.map { "Логин «\($0.login)», пароль сохранён в Keychain" } ?? "Логин и пароль не сохранены")
+                        .foregroundStyle(credentials == nil ? .orange : .primary)
+                }
+                GridRow {
+                    Text("SSH").foregroundStyle(.secondary)
+                    Text(settings.host_key_sha256.map { "Порт \(settings.ssh_port), ключ сервера подтверждён: \($0)" }
+                        ?? "Порт \(settings.ssh_port), ключ сервера не подтверждён")
+                        .font(.callout)
+                        .textSelection(.enabled)
+                        .lineLimit(1).truncationMode(.middle)
+                }
+            }
+            HStack(spacing: 10) {
+                Button("Проверить вход и возможности", systemImage: "checkmark.shield") { check() }
+                    .disabled(checking || credentials == nil || !entry.enabled)
+                Button("Изменить адрес и вход", systemImage: "key", action: onEdit)
+                    .disabled(checking)
+                if checking {
+                    ProgressView().controlSize(.small)
+                    Text("Читаю списки панели…").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if let report {
+                SettingsNotice(
+                    text: report.message,
+                    symbol: report.status == "connected" ? "checkmark.circle" : "exclamationmark.triangle"
+                )
+                if let transport = report.file_transport {
+                    SettingsNotice(
+                        text: transport.message(port: settings.ssh_port),
+                        symbol: transport.isSFTP ? "lock.shield" : "arrow.triangle.branch"
+                    ) {
+                        if transport.reason == "host_key_unconfirmed", let fingerprint = transport.fingerprint {
+                            Button("Подтвердить ключ сервера") { confirm(fingerprint) }
+                                .disabled(checking)
+                        }
+                        if transport.reason == "host_key_changed" {
+                            Button("Подтвердить новый ключ…") { confirmChangedKey = true }
+                                .disabled(checking)
+                        }
+                    }
+                }
+                if !report.categories.isEmpty {
+                    ISPmanagerCapabilityList(categories: report.categories)
+                }
+            }
+            if let problem {
+                SettingsNotice(text: problem, symbol: "exclamationmark.triangle")
+            }
+        }
+        .onAppear(perform: load)
+        .confirmationDialog("Принять новый ключ SSH-сервера?", isPresented: $confirmChangedKey) {
+            if let fingerprint = report?.file_transport?.fingerprint {
+                Button("Принять новый ключ") { confirm(fingerprint) }
+            }
+        } message: {
+            Text("Принимайте новый ключ, только если вы знаете, что ключ сервера сменили. Иначе это может быть подмена сервера, и пароль уйдёт чужому серверу.")
+        }
+    }
+
+    private func load() {
+        do {
+            credentials = try ISPmanagerKeychain.read(entry.id)
+            settings = try StorageRegistryBridge.ispmanagerSettings(id: entry.id)
+            problem = nil
+        } catch {
+            credentials = nil
+            problem = "Не удалось прочитать настройки подключения: " + error.localizedDescription
+        }
+    }
+
+    private func check() {
+        guard let url = entry.endpoint_url, let credentials else { return load() }
+        checking = true
+        report = nil
+        let settings = settings
+        Task {
+            let result = await ISPmanagerCheck.run(url: url, credentials: credentials, settings: settings)
+            checking = false
+            report = result
+            connections.recordISPmanagerCheck(id: entry.id, outcome: result)
+        }
+    }
+
+    /// Stores the fingerprint that the user confirmed, then checks again so
+    /// that SFTP signs in with the confirmed key.
+    private func confirm(_ fingerprint: String) {
+        do {
+            try connections.confirmISPmanagerHostKey(id: entry.id, fingerprint: fingerprint)
+            load()
+            check()
+        } catch {
+            problem = "Не удалось сохранить ключ сервера: " + error.localizedDescription
+        }
+    }
+}
+
+/// The 18 resource categories of D-027 with the state that the check saw.
+/// A readable list is not a verified export, and the text says so.
+private struct ISPmanagerCapabilityList: View {
+    let categories: [ISPmanagerCategoryReport]
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Возможности аккаунта").font(.headline)
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 6) {
+                ForEach(categories) { category in
+                    let state = ISPmanagerCategory.state(category)
+                    GridRow {
+                        Text(ISPmanagerCategory.title(category.category))
+                        QDStatusLabel(kind: state.kind, text: state.text)
+                        // A failed row shows the error type itself, not only
+                        // in the tooltip, so that the reason is visible.
+                        Text(category.state == "verified_metadata_only"
+                            ? category.functions.map(\.function).joined(separator: ", ")
+                            : detail(category, separator: "; "))
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2).truncationMode(.tail)
+                            .textSelection(.enabled)
+                            .help(detail(category, separator: "\n"))
+                    }
+                }
+            }
+            Text("Проверка только читает списки. Экспорт содержимого будет проверяться отдельно для каждой категории.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(10)
+        .background(.quaternary.opacity(0.4), in: shape)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Возможности аккаунта ISPmanager")
+    }
+
+    /// Function results for the tooltip: no values from the panel.
+    private func detail(_ category: ISPmanagerCategoryReport, separator: String) -> String {
+        category.functions
+            .map { "\($0.function): \($0.error ?? $0.result)" }
+            .joined(separator: separator)
+    }
+}
+
+/// Adds an ISPmanager panel connection, or changes the URL, the login, and
+/// the password of an existing one. "Проверить и сохранить" signs in first;
+/// a failed check offers to save without the check.
+private struct ISPmanagerConnectionForm: View {
+    @ObservedObject var connections: StorageConnections
+    let editing: StorageEntry?
+    let onDone: () -> Void
+    let onCancel: () -> Void
+    @State private var name = "ISPmanager"
+    @State private var url = ""
+    @State private var sshPort = "22"
+    @State private var login = ""
+    @State private var password = ""
+    @State private var saved = ISPmanagerSettings.defaults
+    @State private var checking = false
+    @State private var outcome: ISPmanagerCheckReport?
+    @State private var problem: String?
+
+    private var urlValid: Bool { ISPmanagerAddress.isValid(url) }
+    private var port: UInt16? { UInt16(sshPort.trimmingCharacters(in: .whitespaces)).flatMap { $0 > 0 ? $0 : nil } }
+    /// The confirmed host key stays only for the same panel URL and port.
+    private var settings: ISPmanagerSettings {
+        let samePlace = editing?.endpoint_url == url.trimmingCharacters(in: .whitespaces)
+            && saved.ssh_port == port
+        return ISPmanagerSettings(ssh_port: port ?? 22, host_key_sha256: samePlace ? saved.host_key_sha256 : nil)
+    }
+    private var complete: Bool {
+        urlValid && port != nil && !login.trimmingCharacters(in: .whitespaces).isEmpty && !password.isEmpty
+            && (editing != nil || !name.trimmingCharacters(in: .whitespaces).isEmpty)
+    }
+    private var credentials: LoginCredentials {
+        LoginCredentials(login: login.trimmingCharacters(in: .whitespaces), password: password)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                Image(systemName: StorageConnector.ispmanager.symbol)
+                    .font(.title2)
+                    .foregroundStyle(StorageConnector.ispmanager.tint)
+                    .frame(width: 44, height: 44)
+                    .background(StorageConnector.ispmanager.tint.opacity(0.15), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(editing == nil ? "ISPmanager" : "Адрес и вход «\(editing?.name ?? "")»")
+                        .font(.largeTitle.bold())
+                    Text("Панель хостинга ISPmanager 6. Только чтение: QADREN ничего не меняет на сервере.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 10) {
+                if editing == nil {
+                    GridRow {
+                        Text("Название").foregroundStyle(.secondary)
+                        TextField("Название подключения", text: $name).textFieldStyle(.roundedBorder)
+                    }
+                }
+                GridRow {
+                    Text("Адрес").foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 4) {
+                        TextField("https://panel.example.com:1500/ispmgr", text: $url)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.body.monospaced())
+                        Text(url.isEmpty || urlValid
+                            ? "Адрес панели с портом и путём, например https://panel.example.com:1500/ispmgr."
+                            : QADRENUserMessage.text(for: "invalid_panel_url"))
+                            .font(.caption)
+                            .foregroundStyle(url.isEmpty || urlValid ? Color.secondary : Color.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                GridRow {
+                    Text("Порт SSH").foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 4) {
+                        TextField("22", text: $sshPort)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.body.monospaced())
+                            .frame(width: 90)
+                        Text(port == nil
+                            ? "Порт — число от 1 до 65535."
+                            : "Если у аккаунта есть SSH, файлы читаются по SFTP с этим логином и паролем. Иначе — через API панели.")
+                            .font(.caption)
+                            .foregroundStyle(port == nil ? Color.orange : Color.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                GridRow {
+                    Text("Логин").foregroundStyle(.secondary)
+                    TextField("Пользователь панели", text: $login)
+                        .textFieldStyle(.roundedBorder)
+                        .textContentType(.username)
+                }
+                GridRow {
+                    Text("Пароль").foregroundStyle(.secondary)
+                    SecureField("Пароль", text: $password)
+                        .textFieldStyle(.roundedBorder)
+                        .textContentType(.password)
+                }
+            }
+            Label("После сохранения нажмите «Проверить вход и возможности» на карточке: там один раз подтверждается ключ SSH-сервера.", systemImage: "lock.shield")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Label("QADREN запоминает логин и пароль в Keychain этого Mac и передаёт их панели только в теле HTTPS-запроса. В адрес, базу QADREN и журналы они не попадают. QADREN входит только с правами этого аккаунта.", systemImage: "key.fill")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let outcome, outcome.status != "connected" {
+                SettingsNotice(text: outcome.message + " Можно исправить данные или сохранить подключение без проверки.", symbol: "exclamationmark.triangle")
+            }
+            if let problem {
+                SettingsNotice(text: problem, symbol: "exclamationmark.triangle")
+            }
+            HStack {
+                if checking {
+                    ProgressView().controlSize(.small)
+                    Text("Вхожу в панель и читаю списки…").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Отмена", action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                if outcome != nil && outcome?.status != "connected" {
+                    Button("Сохранить без проверки") { save(outcome) }
+                        .disabled(checking || !complete)
+                }
+                Button("Проверить и сохранить", action: checkAndSave)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(checking || !complete)
+            }
+        }
+        .frame(maxWidth: 640, alignment: .leading)
+        .onAppear(perform: load)
+        .onChange(of: url) { _ in outcome = nil }
+        .onChange(of: sshPort) { _ in outcome = nil }
+        .onChange(of: login) { _ in outcome = nil }
+        .onChange(of: password) { _ in outcome = nil }
+    }
+
+    private func load() {
+        guard let editing else { return }
+        url = editing.endpoint_url ?? ""
+        if let settings = try? StorageRegistryBridge.ispmanagerSettings(id: editing.id) {
+            saved = settings
+            sshPort = String(settings.ssh_port)
+        }
+        if let credentials = try? ISPmanagerKeychain.read(editing.id) {
+            login = credentials.login
+            password = credentials.password
+        }
+    }
+
+    private func checkAndSave() {
+        checking = true
+        problem = nil
+        let url = url.trimmingCharacters(in: .whitespaces)
+        let credentials = credentials
+        let settings = settings
+        Task {
+            let result = await ISPmanagerCheck.run(url: url, credentials: credentials, settings: settings)
+            checking = false
+            outcome = result
+            if result.status == "connected" { save(result) }
+        }
+    }
+
+    private func save(_ result: ISPmanagerCheckReport?) {
+        let url = url.trimmingCharacters(in: .whitespaces)
+        do {
+            if let editing {
+                try connections.updateISPmanager(
+                    id: editing.id, url: url, sshPort: port ?? 22, credentials: credentials, outcome: result
+                )
+            } else {
+                try connections.addISPmanager(
+                    name: name, url: url, sshPort: port ?? 22, credentials: credentials, outcome: result
                 )
             }
             onDone()

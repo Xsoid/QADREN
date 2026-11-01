@@ -19,6 +19,8 @@ use std::path::{Component, Path, PathBuf};
 
 pub const LOCAL_FILESYSTEM: &str = "local_filesystem";
 pub const SMB_SHARE: &str = "smb_share";
+/// A read-only backup source (D-027). It is never a Scenario endpoint yet.
+pub const ISPMANAGER: &str = "ispmanager";
 pub const YANDEX_DISK: &str = "yandex_disk";
 
 /// A Yandex Disk Scenario root: `disk:/` or a path below it, without `.` or

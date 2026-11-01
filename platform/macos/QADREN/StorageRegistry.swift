@@ -159,6 +159,16 @@ private func registryAdd(_ path: UnsafePointer<CChar>?, _ adapter: UnsafePointer
 private func registryAddSMBShare(_ path: UnsafePointer<CChar>?, _ name: UnsafePointer<CChar>?, _ url: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_set_smb_endpoint")
 private func registrySetSMBEndpoint(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ url: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_registry_add_ispmanager")
+private func registryAddISPmanager(_ path: UnsafePointer<CChar>?, _ name: UnsafePointer<CChar>?, _ url: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_registry_set_ispmanager_endpoint")
+private func registrySetISPmanagerEndpoint(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ url: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_registry_ispmanager_settings")
+private func registryISPmanagerSettings(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_registry_set_ispmanager_ssh_port")
+private func registrySetISPmanagerSSHPort(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ port: UInt16) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_registry_confirm_ispmanager_host_key")
+private func registryConfirmISPmanagerHostKey(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ fingerprint: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_ensure_local_computer")
 private func registryEnsureLocalComputer(_ path: UnsafePointer<CChar>?, _ name: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_rename")
@@ -194,7 +204,8 @@ struct StorageEntry: Decodable, Identifiable {
     let status: String
     let credential_ref: String?
     let provider_account_id: String?
-    /// SMB share address (D-021). It never contains a login or a password.
+    /// SMB share address (D-021) or ISPmanager panel URL (D-027). It never
+    /// contains a login or a password.
     var endpoint_url: String?
 }
 struct ScenarioEntry: Decodable, Identifiable {
@@ -494,6 +505,10 @@ enum QADRENUserMessage {
             "Папка сценария недоступна. Проверьте, что диск подключён и папка существует."
         case "yandex_incomplete_metadata":
             "Яндекс Диск вернул неполные метаданные. Обход продолжится автоматически."
+        case "invalid_panel_url":
+            "Адрес панели должен иметь вид https://сервер:порт/путь, например https://panel.example.com:1500/ispmgr. Логин и пароль в адрес не вписывайте."
+        case "unsupported_scenario_endpoint":
+            "Панель ISPmanager пока нельзя выбрать в сценарии. Сценарии резервного копирования с неё появятся на следующем этапе."
         case "yandex_source_only":
             "Яндекс Диск пока может быть только источником сценария «В одну сторону», а назначением — этот Mac или сетевой диск."
         case "yandex_deletions_unsupported":
@@ -1312,6 +1327,59 @@ enum StorageRegistryBridge {
             try id.withCString { value in
                 try address.withCString { url in
                     try unwrap(registrySetSMBEndpoint(db, value, url), as: Bool.self)
+                }
+            }
+        }
+    }
+
+    /// One ISPmanager panel connection (D-027). The URL has no credentials.
+    static func addISPmanager(name: String, url: String) throws -> String {
+        let database = try path
+        let result: NewConnection = try database.withCString { db in
+            try name.withCString { label in
+                try url.withCString { value in
+                    try unwrap(registryAddISPmanager(db, label, value), as: NewConnection.self)
+                }
+            }
+        }
+        return result.id
+    }
+
+    static func setISPmanagerEndpoint(id: String, url: String) throws {
+        let database = try path
+        let _: Bool = try database.withCString { db in
+            try id.withCString { value in
+                try url.withCString { endpoint in
+                    try unwrap(registrySetISPmanagerEndpoint(db, value, endpoint), as: Bool.self)
+                }
+            }
+        }
+    }
+
+    static func ispmanagerSettings(id: String) throws -> ISPmanagerSettings {
+        let database = try path
+        return try database.withCString { db in
+            try id.withCString { value in
+                try unwrap(registryISPmanagerSettings(db, value), as: ISPmanagerSettings.self)
+            }
+        }
+    }
+
+    static func setISPmanagerSSHPort(id: String, port: UInt16) throws {
+        let database = try path
+        let _: Bool = try database.withCString { db in
+            try id.withCString { value in
+                try unwrap(registrySetISPmanagerSSHPort(db, value, port), as: Bool.self)
+            }
+        }
+    }
+
+    static func confirmISPmanagerHostKey(id: String, fingerprint: String) throws {
+        let database = try path
+        let _: Bool = try database.withCString { db in
+            try id.withCString { value in
+                try fingerprint.withCString { key in
+                    try unwrap(registryConfirmISPmanagerHostKey(db, value, key), as: Bool.self)
                 }
             }
         }

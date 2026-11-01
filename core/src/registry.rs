@@ -16,6 +16,13 @@ use serde::Serialize;
 use std::path::Path;
 use std::str::FromStr;
 
+/// SFTP settings of one ISPmanager connection (D-027 section 7a).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct IspmanagerSettings {
+    pub ssh_port: u16,
+    pub host_key_sha256: Option<String>,
+}
+
 #[derive(Debug)]
 pub enum RegistryError {
     Database(rusqlite::Error),
@@ -44,6 +51,12 @@ pub enum RegistryError {
     /// A Yandex Disk connection is not the source of a one-way Scenario
     /// with a destination on this Mac (D-023, stage 1).
     UnsupportedYandexScope,
+    /// An ISPmanager panel URL is not `https://host[:port][/path]`, or it
+    /// carries user information or a query (D-027).
+    InvalidPanelUrl,
+    /// The connection cannot be a Scenario endpoint yet. An ISPmanager
+    /// connection is a source of a Backup/export Scenario only (D-027).
+    UnsupportedScenarioEndpoint,
     /// Another run of the Scenario is active (D-025 section 2).
     ScenarioRunActive,
     /// A batch item of the Scenario has an unknown result. Its record must
@@ -374,7 +387,7 @@ impl Registry {
         }
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 27 {
+        if version > 28 {
             return Err(RegistryError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -838,6 +851,21 @@ impl Registry {
                  COMMIT;",
             )?;
         }
+        if version <= 27 {
+            // D-027 section 7a: the SFTP port and the confirmed host key of an
+            // ISPmanager connection. A fingerprint is not a secret.
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE ispmanager_settings (
+                     connection_id TEXT PRIMARY KEY NOT NULL
+                         REFERENCES storage_connections(id) ON DELETE CASCADE,
+                     ssh_port INTEGER NOT NULL DEFAULT 22 CHECK(ssh_port BETWEEN 1 AND 65535),
+                     host_key_sha256 TEXT
+                 );
+                 PRAGMA user_version = 28;
+                 COMMIT;",
+            )?;
+        }
         Ok(Self { db })
     }
 
@@ -963,6 +991,111 @@ impl Registry {
             "UPDATE storage_connections SET endpoint_url=?1 WHERE id=?2 AND adapter='smb_share'",
             params![url, id],
         )?)
+    }
+
+    /// Add one ISPmanager panel connection (D-027). The panel URL is
+    /// validated and has no credentials. The login and the password stay in
+    /// the platform credential store. Connections are never deduplicated.
+    pub fn add_ispmanager(&self, name: &str, url: &str) -> Result<String> {
+        if !valid_name(name) {
+            return Err(RegistryError::InvalidName);
+        }
+        let url = normalized_panel_url(url)?;
+        let id: String = self
+            .db
+            .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
+        self.db.execute(
+            "INSERT INTO storage_connections(id,adapter,name,endpoint_url)
+             VALUES (?1,'ispmanager',?2,?3)",
+            params![id, name.trim(), url],
+        )?;
+        Ok(id)
+    }
+
+    /// Change the panel URL of an ISPmanager connection. Another URL can be
+    /// another server, so the confirmed host key is cleared.
+    pub fn set_ispmanager_endpoint(&self, id: &str, url: &str) -> Result<()> {
+        let url = normalized_panel_url(url)?;
+        let current = self.get(id)?.ok_or(RegistryError::NotFound)?;
+        if current.adapter != crate::storage_access::ISPMANAGER {
+            return Err(RegistryError::NotFound);
+        }
+        if current.endpoint_url.as_deref() == Some(url.as_str()) {
+            return Ok(());
+        }
+        self.db.execute(
+            "UPDATE storage_connections SET endpoint_url=?1 WHERE id=?2",
+            params![url, id],
+        )?;
+        self.db.execute(
+            "UPDATE ispmanager_settings SET host_key_sha256=NULL WHERE connection_id=?1",
+            [id],
+        )?;
+        Ok(())
+    }
+
+    /// The SFTP port and the confirmed host key fingerprint (D-027 section
+    /// 7a). A connection without a settings row uses port 22 and has no key.
+    pub fn ispmanager_settings(&self, id: &str) -> Result<IspmanagerSettings> {
+        let row = self
+            .db
+            .query_row(
+                "SELECT ssh_port,host_key_sha256 FROM ispmanager_settings WHERE connection_id=?1",
+                [id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?;
+        Ok(match row {
+            Some((port, host_key_sha256)) => IspmanagerSettings {
+                ssh_port: u16::try_from(port).unwrap_or(crate::ispmanager_sftp::DEFAULT_PORT),
+                host_key_sha256,
+            },
+            None => IspmanagerSettings {
+                ssh_port: crate::ispmanager_sftp::DEFAULT_PORT,
+                host_key_sha256: None,
+            },
+        })
+    }
+
+    /// Another port can be another SSH server, so the confirmed host key is
+    /// cleared when the port changes.
+    pub fn set_ispmanager_ssh_port(&self, id: &str, port: u16) -> Result<()> {
+        if port == 0 {
+            return Err(RegistryError::InvalidEndpoint);
+        }
+        self.require_ispmanager(id)?;
+        self.db.execute(
+            "INSERT INTO ispmanager_settings(connection_id,ssh_port) VALUES (?1,?2)
+             ON CONFLICT(connection_id) DO UPDATE SET
+                 host_key_sha256=CASE WHEN ssh_port=excluded.ssh_port THEN host_key_sha256 END,
+                 ssh_port=excluded.ssh_port",
+            params![id, port],
+        )?;
+        Ok(())
+    }
+
+    /// Stores the host key fingerprint that the user confirmed.
+    pub fn confirm_ispmanager_host_key(&self, id: &str, fingerprint: &str) -> Result<()> {
+        let valid = fingerprint.starts_with("SHA256:")
+            && fingerprint.len() <= 128
+            && fingerprint.bytes().all(|byte| byte.is_ascii_graphic());
+        if !valid {
+            return Err(RegistryError::InvalidEndpoint);
+        }
+        self.require_ispmanager(id)?;
+        self.db.execute(
+            "INSERT INTO ispmanager_settings(connection_id,host_key_sha256) VALUES (?1,?2)
+             ON CONFLICT(connection_id) DO UPDATE SET host_key_sha256=excluded.host_key_sha256",
+            params![id, fingerprint],
+        )?;
+        Ok(())
+    }
+
+    fn require_ispmanager(&self, id: &str) -> Result<()> {
+        match self.get(id)? {
+            Some(entry) if entry.adapter == crate::storage_access::ISPMANAGER => Ok(()),
+            _ => Err(RegistryError::NotFound),
+        }
     }
 
     /// Provider account ID may repeat; connections are never deduplicated by it.
@@ -1102,7 +1235,8 @@ impl Registry {
     }
 
     /// Refuse a Yandex Disk endpoint that is not the source of a one-way
-    /// Scenario to this Mac (D-023, stage 1).
+    /// Scenario to this Mac (D-023, stage 1), and every ISPmanager endpoint
+    /// (D-027).
     fn require_yandex_scope(
         &self,
         left_connection_id: &str,
@@ -1120,11 +1254,12 @@ impl Registry {
                 .optional()?
                 .unwrap_or_default())
         };
-        if crate::storage_access::yandex_scope_allowed(
-            &adapter(left_connection_id)?,
-            &adapter(right_connection_id)?,
-            direction,
-        ) {
+        let (left, right) = (adapter(left_connection_id)?, adapter(right_connection_id)?);
+        // The Backup/export Scenario mode does not exist yet (D-027 section 5).
+        if left == crate::storage_access::ISPMANAGER || right == crate::storage_access::ISPMANAGER {
+            return Err(RegistryError::UnsupportedScenarioEndpoint);
+        }
+        if crate::storage_access::yandex_scope_allowed(&left, &right, direction) {
             Ok(())
         } else {
             Err(RegistryError::UnsupportedYandexScope)
@@ -3798,6 +3933,12 @@ fn normalized_smb_url(url: &str) -> Option<String> {
         return None;
     }
     Some(format!("smb://{}/{}", authority, segments.join("/")))
+}
+
+fn normalized_panel_url(url: &str) -> Result<String> {
+    crate::ispmanager::PanelUrl::parse(url.trim())
+        .map(|url| url.as_str().to_owned())
+        .map_err(|_| RegistryError::InvalidPanelUrl)
 }
 
 fn valid_adapter(adapter: &str) -> bool {
