@@ -56,7 +56,9 @@ pub fn mount_url(address: &str) -> Option<String> {
 fn encode(value: &str, keep: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) || keep.as_bytes().contains(&byte)
+        if byte.is_ascii_alphanumeric()
+            || b"-._~".contains(&byte)
+            || keep.as_bytes().contains(&byte)
         {
             out.push(byte as char);
         } else {
@@ -88,11 +90,15 @@ fn decode(value: &str) -> String {
 /// Host and share of an address or of an `smbfs` mount source
 /// (`//user@host/share`), lowercased, without a trailing dot on the host.
 fn host_and_share(value: &str) -> Option<(String, String)> {
-    let rest = value
-        .strip_prefix("//")
-        .or_else(|| value.get(6..).filter(|_| value[..6].eq_ignore_ascii_case("smb://")))?;
+    let rest = value.strip_prefix("//").or_else(|| {
+        value
+            .get(6..)
+            .filter(|_| value[..6].eq_ignore_ascii_case("smb://"))
+    })?;
     let (authority, path) = rest.split_once('/')?;
-    let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
     let host = host
         .rsplit_once(':')
         .filter(|(name, port)| !name.contains(':') && port.parse::<u16>().is_ok())
@@ -133,9 +139,8 @@ pub fn mounted_elsewhere(address: &str, own_dir: &Path) -> Option<String> {
         let on = unsafe { CStr::from_ptr(mount.f_mntonname.as_ptr()) }
             .to_string_lossy()
             .into_owned();
-        (host_and_share(&from).as_ref() == Some(&wanted)
-            && own.as_deref() != Some(Path::new(&on)))
-        .then_some(on)
+        (host_and_share(&from).as_ref() == Some(&wanted) && own.as_deref() != Some(Path::new(&on)))
+            .then_some(on)
     })
 }
 
@@ -180,8 +185,7 @@ pub fn mount(address: &str, dir: &Path, login: &str, password: &str) -> MountOut
             libc::ENOMEM
         } else {
             let mut mountpoints: *const std::ffi::c_void = std::ptr::null();
-            let status =
-                NetFSMountURLSync(url, dir, user, secret, open, options, &mut mountpoints);
+            let status = NetFSMountURLSync(url, dir, user, secret, open, options, &mut mountpoints);
             if !mountpoints.is_null() {
                 CFRelease(mountpoints);
             }

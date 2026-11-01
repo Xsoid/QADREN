@@ -296,7 +296,10 @@ mod tests {
         );
         // The 02:30 slot on 2026-03-29 does not exist; the other days do.
         let gap = Schedule {
-            rule: ScheduleRule::DaysAtTime { hour: 2, minute: 30 },
+            rule: ScheduleRule::DaysAtTime {
+                hour: 2,
+                minute: 30,
+            },
             ..berlin.clone()
         };
         assert_eq!(
@@ -309,7 +312,10 @@ mod tests {
         let new_york = Schedule {
             timezone: chrono_tz::America::New_York,
             days_mask: ALL_DAYS,
-            rule: ScheduleRule::DaysAtTime { hour: 1, minute: 30 },
+            rule: ScheduleRule::DaysAtTime {
+                hour: 1,
+                minute: 30,
+            },
         };
         // 2026-11-01 01:30 local occurs twice: one slot at the first instant.
         assert_eq!(

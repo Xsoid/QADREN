@@ -327,7 +327,9 @@ pub struct ScenarioRun {
 pub enum RunWriteLock {
     Acquired,
     /// An active run of this Scenario holds a conflicting lock.
-    WaitFor { scenario_id: String },
+    WaitFor {
+        scenario_id: String,
+    },
 }
 
 /// A user-owned conflict task. It is Registry metadata, not a JobStore Job;
@@ -1199,7 +1201,10 @@ impl Registry {
         let id: String = self
             .db
             .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
-        let transaction = rusqlite::Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?;
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
         transaction.execute(
             "INSERT INTO scenarios(id,name,left_connection_id,left_root,right_connection_id,right_root,direction,deletion_mode) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
             params![id, name.trim(), left_connection_id, left_root, right_connection_id, right_root, direction, scope.deletion_mode.as_str()],
@@ -1226,7 +1231,10 @@ impl Registry {
     }
 
     pub fn set_scenario_enabled(&self, id: &str, enabled: bool) -> Result<()> {
-        let transaction = rusqlite::Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?;
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
         let changed = transaction.execute(
             "UPDATE scenarios SET enabled=?1 WHERE id=?2",
             params![enabled, id],
@@ -1401,7 +1409,11 @@ impl Registry {
         )
     }
 
-    fn read_schedules(&self, filter: &str, scenario_id: Option<&str>) -> Result<Vec<ScenarioSchedule>> {
+    fn read_schedules(
+        &self,
+        filter: &str,
+        scenario_id: Option<&str>,
+    ) -> Result<Vec<ScenarioSchedule>> {
         let mut statement = self.db.prepare(&format!(
             "SELECT ss.id,ss.scenario_id,ss.timezone,ss.kind,ss.days_mask,ss.interval_hours,
                     ss.anchor_utc,ss.hour,ss.minute,ss.enabled
@@ -1543,7 +1555,10 @@ impl Registry {
         due: Vec<DueScheduleOccurrence>,
         observed_through: Option<DateTime<Utc>>,
     ) -> Result<usize> {
-        let transaction = rusqlite::Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?;
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
         let mut claimed_by_scenario: Vec<DueScheduleOccurrence> = Vec::new();
         let mut claimed: Vec<DueScheduleOccurrence> = Vec::new();
         for occurrence in due {
@@ -2287,7 +2302,10 @@ impl Registry {
         let reference = self
             .schedule_job_reference(schedule_job_id)?
             .ok_or(RegistryError::NotFound)?;
-        let transaction = rusqlite::Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?;
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
         let existing: Option<String> = transaction
             .query_row(
                 "SELECT id FROM scenario_runs WHERE schedule_job_id=?1",
@@ -2545,7 +2563,10 @@ impl Registry {
             .get_scenario_revision(scenario_id, revision)?
             .ok_or(RegistryError::NotFound)?;
         Ok(scenario_roots(&scenario, |id| {
-            self.get(id).ok().flatten().map(|connection| connection.adapter)
+            self.get(id)
+                .ok()
+                .flatten()
+                .map(|connection| connection.adapter)
         }))
     }
 
@@ -2553,7 +2574,10 @@ impl Registry {
     /// run holds a conflicting lock (D-025 section 11). Only active runs hold
     /// a lock, so the end of a run releases it and a Worker restart keeps it.
     pub fn acquire_scenario_run_write_lock(&self, run_id: &str) -> Result<RunWriteLock> {
-        let transaction = rusqlite::Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?;
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
         let run = self.scenario_run(run_id)?.ok_or(RegistryError::NotFound)?;
         if !matches!(run.state.as_str(), "planning" | "executing") {
             return Err(RegistryError::NotFound);
@@ -2600,8 +2624,17 @@ impl Registry {
 
     /// Enabled Scenarios other than `exclude` whose runs cannot execute at the
     /// same time as runs of `candidate`, for the editor warning.
-    pub fn overlapping_scenarios(&self, candidate: &Scenario, exclude: Option<&str>) -> Result<Vec<Scenario>> {
-        let adapter = |id: &str| self.get(id).ok().flatten().map(|connection| connection.adapter);
+    pub fn overlapping_scenarios(
+        &self,
+        candidate: &Scenario,
+        exclude: Option<&str>,
+    ) -> Result<Vec<Scenario>> {
+        let adapter = |id: &str| {
+            self.get(id)
+                .ok()
+                .flatten()
+                .map(|connection| connection.adapter)
+        };
         let mine = scenario_roots(candidate, adapter);
         Ok(self
             .list_scenarios()?
@@ -2826,7 +2859,10 @@ impl Registry {
     /// occurrence receipts are removed in the same transaction; no Job is
     /// submitted, cancelled, or otherwise modified here.
     pub fn remove_scenario_schedule(&self, scenario_id: &str, schedule_id: &str) -> Result<()> {
-        let transaction = rusqlite::Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?;
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
         let exists: Option<String> = transaction
             .query_row(
                 "SELECT id FROM scenario_schedules WHERE id=?1 AND scenario_id=?2",
@@ -2855,7 +2891,10 @@ impl Registry {
     /// object. The caller checks JobStore first; this check and the removal
     /// are one transaction, so a run cannot start in between.
     pub fn remove_scenario(&self, scenario_id: &str) -> Result<()> {
-        let transaction = rusqlite::Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?;
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
         let exists: bool = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM scenarios WHERE id=?1)",
             [scenario_id],
@@ -2966,7 +3005,10 @@ impl Registry {
         id: &str,
         active_job: bool,
     ) -> Result<AutomaticTriggerResult> {
-        let transaction = rusqlite::Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?;
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
         let state = transaction
             .query_row(
                 "SELECT s.enabled,COALESCE(a.locally_paused,0),COALESCE(a.pending_automatic_run,0)
@@ -3039,7 +3081,10 @@ impl Registry {
         )? {
             return Err(RegistryError::ScenarioRootsOverlap);
         }
-        let transaction = rusqlite::Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?;
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
         let changed = transaction.execute(
             "UPDATE scenarios
              SET name=?1,left_connection_id=?2,left_root=?3,
@@ -4667,11 +4712,23 @@ mod tests {
         let left = db.add("local_filesystem", "Left").unwrap();
         let right = db.add("local_filesystem", "Right").unwrap();
         let scenario = db
-            .create_scenario("Documents", &left, "/documents", &right, "/archive", "left_to_right")
+            .create_scenario(
+                "Documents",
+                &left,
+                "/documents",
+                &right,
+                "/archive",
+                "left_to_right",
+            )
             .unwrap();
-        let schedule = db.create_scenario_schedule(&scenario, "Europe/Samara", 0, 9, 30).unwrap();
+        let schedule = db
+            .create_scenario_schedule(&scenario, "Europe/Samara", 0, 9, 30)
+            .unwrap();
         assert!(db.claim_schedule_occurrence(&schedule, "slot").unwrap());
-        let reference = ScenarioReference { scenario_id: scenario.clone(), revision: 1 };
+        let reference = ScenarioReference {
+            scenario_id: scenario.clone(),
+            revision: 1,
+        };
         let batch = db
             .create_scenario_create_batch(&reference, &[("a.txt".into(), true)])
             .unwrap()
@@ -4679,9 +4736,13 @@ mod tests {
         let run = db.begin_manual_run(&reference, "plan", &batch, 0).unwrap();
 
         // An active run keeps the Scenario.
-        assert!(matches!(db.remove_scenario(&scenario), Err(RegistryError::ScenarioRunActive)));
+        assert!(matches!(
+            db.remove_scenario(&scenario),
+            Err(RegistryError::ScenarioRunActive)
+        ));
         db.finish_scenario_run(&run, "completed", None).unwrap();
-        db.set_scenario_create_batch_child_state(&batch, "a.txt", "completed").unwrap();
+        db.set_scenario_create_batch_child_state(&batch, "a.txt", "completed")
+            .unwrap();
 
         // An unknown item keeps the Scenario: reconciliation needs its record.
         let other = db
@@ -4689,12 +4750,16 @@ mod tests {
             .unwrap();
         let other_batch = db
             .create_scenario_create_batch(
-                &ScenarioReference { scenario_id: other.clone(), revision: 1 },
+                &ScenarioReference {
+                    scenario_id: other.clone(),
+                    revision: 1,
+                },
                 &[("b.txt".into(), true)],
             )
             .unwrap()
             .id;
-        db.set_scenario_create_batch_child_state(&other_batch, "b.txt", "unknown").unwrap();
+        db.set_scenario_create_batch_child_state(&other_batch, "b.txt", "unknown")
+            .unwrap();
         assert!(matches!(
             db.remove_scenario(&other),
             Err(RegistryError::ScenarioHasUnresolvedItems)
@@ -4703,7 +4768,10 @@ mod tests {
         db.remove_scenario(&scenario).unwrap();
         assert_eq!(db.list_scenarios().unwrap().len(), 1);
         assert!(db.get_scenario_revision(&scenario, 1).unwrap().is_none());
-        assert!(matches!(db.remove_scenario(&scenario), Err(RegistryError::NotFound)));
+        assert!(matches!(
+            db.remove_scenario(&scenario),
+            Err(RegistryError::NotFound)
+        ));
         // The connections stay; only the Scenario records are gone.
         assert_eq!(db.list().unwrap().len(), 2);
     }
@@ -5103,26 +5171,38 @@ mod tests {
         let mut batches = Vec::new();
         for (name, files) in [("Large", 50), ("Small", 2)] {
             let scenario = db
-                .create_scenario(name, &mac, &format!("/{name}/a"), &mac, &format!("/{name}/b"), "left_to_right")
+                .create_scenario(
+                    name,
+                    &mac,
+                    &format!("/{name}/a"),
+                    &mac,
+                    &format!("/{name}/b"),
+                    "left_to_right",
+                )
                 .unwrap();
             let reference = ScenarioReference {
                 scenario_id: scenario,
                 revision: 1,
             };
             let batch = db.begin_scenario_create_batch(&reference).unwrap();
-            let children: Vec<(String, bool)> =
-                (0..files).map(|index| (format!("{index:03}.txt"), true)).collect();
-            db.append_scenario_create_batch_children(&batch, &children).unwrap();
+            let children: Vec<(String, bool)> = (0..files)
+                .map(|index| (format!("{index:03}.txt"), true))
+                .collect();
+            db.append_scenario_create_batch_children(&batch, &children)
+                .unwrap();
             db.set_scenario_create_batch_paused(&batch, false).unwrap();
             batches.push(batch);
         }
         // The large batch was created first, but the small one is not starved.
         let due = db.due_scenario_create_batch_children(0, 4).unwrap();
         assert_eq!(
-            due.iter().map(|child| child.batch_id.as_str()).collect::<Vec<_>>(),
+            due.iter()
+                .map(|child| child.batch_id.as_str())
+                .collect::<Vec<_>>(),
             [&batches[0], &batches[1], &batches[0], &batches[1]]
         );
-        db.set_scenario_create_batch_paused(&batches[0], true).unwrap();
+        db.set_scenario_create_batch_paused(&batches[0], true)
+            .unwrap();
         assert!(db
             .due_scenario_create_batch_children(0, 4)
             .unwrap()
@@ -5137,8 +5217,15 @@ mod tests {
         let base = std::env::temp_dir().join("qadren-lock-test");
         let path = |name: &str| base.join(name).to_string_lossy().into_owned();
         let create = |name: &str, source: &str, destination: &str| {
-            db.create_scenario(name, &mac, &path(source), &mac, &path(destination), "left_to_right")
-                .unwrap()
+            db.create_scenario(
+                name,
+                &mac,
+                &path(source),
+                &mac,
+                &path(destination),
+                "left_to_right",
+            )
+            .unwrap()
         };
         let photos = create("Photos", "photos", "backup");
         let music = create("Music", "music", "backup/music");
@@ -5165,7 +5252,10 @@ mod tests {
             }
         );
         assert_eq!(
-            db.scenario_run(&second).unwrap().unwrap().waiting_for_scenario_id,
+            db.scenario_run(&second)
+                .unwrap()
+                .unwrap()
+                .waiting_for_scenario_id,
             Some(photos.clone())
         );
         // Both read "photos", but they write to different folders.
@@ -5183,7 +5273,13 @@ mod tests {
             db.acquire_scenario_run_write_lock(&second).unwrap(),
             RunWriteLock::Acquired
         );
-        assert_eq!(db.scenario_run(&second).unwrap().unwrap().waiting_for_scenario_id, None);
+        assert_eq!(
+            db.scenario_run(&second)
+                .unwrap()
+                .unwrap()
+                .waiting_for_scenario_id,
+            None
+        );
         let candidate = db.get_scenario_revision(&music, 1).unwrap().unwrap();
         assert_eq!(
             db.overlapping_scenarios(&candidate, Some(&music))
@@ -5359,7 +5455,14 @@ mod tests {
         let left = db.add("local_filesystem", "Left").unwrap();
         let right = db.add("local_filesystem", "Right").unwrap();
         let scenario = db
-            .create_scenario("Weekly", &left, "/source", &right, "/target", "left_to_right")
+            .create_scenario(
+                "Weekly",
+                &left,
+                "/source",
+                &right,
+                "/target",
+                "left_to_right",
+            )
             .unwrap();
         let schedule = db
             .create_scenario_schedule(&scenario, "Europe/Berlin", 6, 2, 30)
@@ -5382,7 +5485,12 @@ mod tests {
         let db = Registry::initialize(connection).unwrap();
         let migrated = &db.list_scenario_schedules(&scenario).unwrap()[0];
         assert_eq!(
-            (migrated.kind, migrated.days_mask, migrated.hour, migrated.minute),
+            (
+                migrated.kind,
+                migrated.days_mask,
+                migrated.hour,
+                migrated.minute
+            ),
             (ScheduleKind::DaysAtTime, 1 << 6, 2, 30)
         );
         let after: DateTime<Utc> = "2026-10-24T00:00:00Z".parse().unwrap();
@@ -5395,8 +5503,14 @@ mod tests {
             [key, "2026-11-01 02:30@Europe/Berlin"]
         );
         // The slot claimed before the migration is not staged again.
-        assert_eq!(db.stage_due_schedule_occurrences(after, through).unwrap(), 1);
-        assert_eq!(db.stage_due_schedule_occurrences(after, through).unwrap(), 0);
+        assert_eq!(
+            db.stage_due_schedule_occurrences(after, through).unwrap(),
+            1
+        );
+        assert_eq!(
+            db.stage_due_schedule_occurrences(after, through).unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -5412,7 +5526,14 @@ mod tests {
         let left = db.add("local_filesystem", "Left").unwrap();
         let right = db.add("local_filesystem", "Right").unwrap();
         let scenario = db
-            .create_scenario("Hourly", &left, "/source", &right, "/target", "left_to_right")
+            .create_scenario(
+                "Hourly",
+                &left,
+                "/source",
+                &right,
+                "/target",
+                "left_to_right",
+            )
             .unwrap();
         let created: DateTime<Utc> = "2026-10-20T10:00:00Z".parse().unwrap();
         let schedule = db
@@ -5438,7 +5559,13 @@ mod tests {
         for (interval, days) in [(0, 0x7f), (25, 0x7f), (6, 0)] {
             assert!(matches!(
                 db.create_scenario_hours_schedule_at(
-                    &scenario, "Europe/Berlin", interval, 0, 0, days, created
+                    &scenario,
+                    "Europe/Berlin",
+                    interval,
+                    0,
+                    0,
+                    days,
+                    created
                 ),
                 Err(RegistryError::InvalidSchedule)
             ));
@@ -5448,10 +5575,16 @@ mod tests {
         let through: DateTime<Utc> = "2026-10-25T12:00:00Z".parse().unwrap();
         let due = db.due_schedule_occurrences(after, through).unwrap();
         assert_eq!(due.len(), 4);
-        assert_eq!(db.stage_due_schedule_occurrences(after, through).unwrap(), 1);
+        assert_eq!(
+            db.stage_due_schedule_occurrences(after, through).unwrap(),
+            1
+        );
         drop(db);
         let db = Registry::open(&path).unwrap();
-        assert_eq!(db.stage_due_schedule_occurrences(after, through).unwrap(), 0);
+        assert_eq!(
+            db.stage_due_schedule_occurrences(after, through).unwrap(),
+            0
+        );
         assert_eq!(
             db.last_schedule_slot(&schedule).unwrap(),
             Some(("every-6h@2026-10-25T10:00Z".to_owned(), false))

@@ -20,8 +20,8 @@ use qadren_core::local_fs::LocalFilesystem;
 use qadren_core::model::{ConfirmedFileVersion, JobState, ScenarioReference};
 use qadren_core::plan_store;
 use qadren_core::registry::{
-    BatchChildDue, BatchChildKind, DueBatchChild, Registry, RegistryError, RunWriteLock, ScenarioRun,
-    ScheduleRunStart,
+    BatchChildDue, BatchChildKind, DueBatchChild, Registry, RegistryError, RunWriteLock,
+    ScenarioRun, ScheduleRunStart,
 };
 use qadren_core::scenario_planner::{ObservedFile, PlanAction};
 use qadren_core::schedule_dispatch::dispatch_pending_schedule_jobs;
@@ -1734,7 +1734,10 @@ fn run_due_batch_children(paths: &WorkerPaths) {
                     .ok()
                     .flatten()
                     .map(|scenario| (scenario.left_connection_id, scenario.right_connection_id));
-                (yandex_source_connection(&registry, scenario, revision), sides)
+                (
+                    yandex_source_connection(&registry, scenario, revision),
+                    sides,
+                )
             })
             .clone();
         let Some((left, right)) = sides else {
@@ -1805,9 +1808,9 @@ fn run_pool(paths: &WorkerPaths, queue: std::collections::VecDeque<PoolItem>) {
                         return;
                     }
                     let free = guard.queue.iter().position(|item| {
-                        item.slots
-                            .iter()
-                            .all(|slot| guard.busy.get(slot).copied().unwrap_or(0) < slot_limit(slot))
+                        item.slots.iter().all(|slot| {
+                            guard.busy.get(slot).copied().unwrap_or(0) < slot_limit(slot)
+                        })
                     });
                     if let Some(index) = free {
                         let item = guard.queue.remove(index).expect("position is in range");
@@ -2220,7 +2223,9 @@ fn run_scenario_now(paths: &WorkerPaths, request: &Request) -> serde_json::Value
         return serde_json::json!({"ok": false, "status": "registry_unavailable"});
     };
     let scenario = match registry.list_scenarios() {
-        Ok(scenarios) => scenarios.into_iter().find(|scenario| scenario.id == scenario_id),
+        Ok(scenarios) => scenarios
+            .into_iter()
+            .find(|scenario| scenario.id == scenario_id),
         Err(_) => return serde_json::json!({"ok": false, "status": "registry_unavailable"}),
     };
     let Some(scenario) = scenario else {
@@ -3313,13 +3318,19 @@ mod tests {
             smb_refused: Mutex::new(HashMap::new()),
             smb_retry: Mutex::new(HashMap::new()),
             active: AtomicUsize::new(0),
+            drain_until: AtomicI64::new(0),
+            started: 0,
         };
         let login = |runner: &Runner| runner.smb_logins.lock().unwrap().get("nas").cloned();
         runner.remember_smb_login("nas", "alice", "wrong");
         assert_eq!(login(&runner), Some(("alice".into(), "wrong".into())));
         // The server refused it: the Worker moves it aside.
         let refused = runner.smb_logins.lock().unwrap().remove("nas").unwrap();
-        runner.smb_refused.lock().unwrap().insert("nas".into(), refused);
+        runner
+            .smb_refused
+            .lock()
+            .unwrap()
+            .insert("nas".into(), refused);
         // The app sends the same login every minute: it is ignored.
         runner.remember_smb_login("nas", "alice", "wrong");
         assert_eq!(login(&runner), None);
@@ -3713,7 +3724,10 @@ mod tests {
         assert_eq!(fs::read(right_root.join("edited.txt")).unwrap(), b"source");
         assert!(right_root.join("removed.txt").exists());
         // The replaced destination version is kept in the Trash.
-        let trash = std::env::temp_dir().canonicalize().unwrap().join("qw-trash");
+        let trash = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join("qw-trash");
         assert!(fs::read_dir(trash).unwrap().any(|entry| {
             fs::read(entry.unwrap().path()).unwrap() == b"edited in the destination"
         }));
@@ -3796,7 +3810,8 @@ mod tests {
     #[test]
     fn two_runs_with_one_destination_execute_one_after_the_other() {
         let root = root("write-lock");
-        let (photos, music, shared) = (root.join("photos"), root.join("music"), root.join("shared"));
+        let (photos, music, shared) =
+            (root.join("photos"), root.join("music"), root.join("shared"));
         for dir in [&photos, &music, &shared] {
             fs::create_dir_all(dir).unwrap();
         }

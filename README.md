@@ -49,7 +49,7 @@ See [data safety](docs/policies/data-safety.md).
 
 ## Build from source
 
-Prerequisites: macOS 13 or later, a Rust toolchain, and Xcode or Xcode Command Line Tools.
+Prerequisites: a Rust toolchain, and Xcode 26 or later (or its Command Line Tools). The build needs the macOS 26 SDK. The app runs on macOS 13 or later.
 
 ```bash
 bash scripts/test-core.sh

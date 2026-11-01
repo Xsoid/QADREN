@@ -3332,14 +3332,19 @@ pub(crate) mod tests {
             b"older trash entry"
         );
         assert_eq!(
-            std::os::unix::fs::MetadataExt::nlink(&fs::metadata(trash_root.join("a 2.txt")).unwrap()),
+            std::os::unix::fs::MetadataExt::nlink(
+                &fs::metadata(trash_root.join("a 2.txt")).unwrap()
+            ),
             1
         );
         adapter
             .create_from_reader_to_replace(Path::new("a.txt"), &mut io::Cursor::new(b"third"))
             .unwrap();
         assert_eq!(fs::read(root.join("a.txt")).unwrap(), b"third");
-        assert_eq!(fs::read(trash_root.join("a 3.txt")).unwrap(), b"new version");
+        assert_eq!(
+            fs::read(trash_root.join("a 3.txt")).unwrap(),
+            b"new version"
+        );
         TEST_TRASH.with(|value| *value.borrow_mut() = None);
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(source_root).unwrap();

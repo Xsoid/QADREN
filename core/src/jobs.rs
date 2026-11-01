@@ -669,7 +669,9 @@ impl JobStore {
             Some((name, rev)) => (Some(name), Some(rev as i64)),
             None => (None, None),
         };
-        let tx = self.db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let result = tx.execute(
             "INSERT OR IGNORE INTO jobs (id,state,scenario_id,scenario_revision)
              VALUES (?1,'queued',?2,?3)",
@@ -805,7 +807,9 @@ impl JobStore {
                 return Err(JobStoreError::MissingEvidence);
             }
         }
-        let tx = self.db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         // A Job must never be declared complete while an operation attempt
         // is active or has an unresolved outcome.
         if matches!(next, JobState::Completed | JobState::Cancelled) {
@@ -844,7 +848,9 @@ impl JobStore {
     /// external effect; reconciliation must classify it instead.
     pub fn cancel(&mut self, id: &str) -> Result<()> {
         self.check_storage_identity()?;
-        let tx = self.db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let state: Option<String> = tx
             .query_row("SELECT state FROM jobs WHERE id=?1", [id], |row| row.get(0))
             .optional()?;
@@ -886,7 +892,9 @@ impl JobStore {
     /// this guard must not pretend that an active transfer was paused.
     pub fn pause(&mut self, id: &str) -> Result<()> {
         self.check_storage_identity()?;
-        let tx = self.db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let state: Option<String> = tx
             .query_row("SELECT state FROM jobs WHERE id=?1", [id], |row| row.get(0))
             .optional()?;
@@ -951,7 +959,9 @@ impl JobStore {
         {
             return Err(JobStoreError::InvalidId);
         }
-        let tx = self.db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let state: Option<String> = tx
             .query_row("SELECT state FROM jobs WHERE id=?1", [job_id], |row| {
                 row.get(0)
@@ -1014,7 +1024,9 @@ impl JobStore {
         {
             return Err(JobStoreError::InvalidId);
         }
-        let tx = self.db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let stored: Option<(String, String, String, String, i64, String, i64)> = tx
             .query_row(
                 "SELECT operation_kind,connection_id,relative_path,decision,expires_at,job_id,consumed
@@ -1163,7 +1175,9 @@ impl JobStore {
         {
             return Err(JobStoreError::InvalidId);
         }
-        let tx = self.db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let state: Option<String> = tx
             .query_row("SELECT state FROM jobs WHERE id=?1", [job_id], |row| {
                 row.get(0)
@@ -1246,7 +1260,9 @@ impl JobStore {
         if operation_kind.is_empty() || target_connection_id.is_empty() || target_path.is_empty() {
             return Err(JobStoreError::InvalidId);
         }
-        let tx = self.db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let state: Option<String> = tx
             .query_row("SELECT state FROM jobs WHERE id=?1", [job_id], |row| {
                 row.get(0)
@@ -1300,7 +1316,9 @@ impl JobStore {
         {
             return Err(JobStoreError::InvalidId);
         }
-        let tx = self.db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let eligible: i64 = tx.query_row(
             "SELECT count(*) FROM job_attempts
              WHERE job_id=?1 AND attempt_id=?2 AND status='active'
@@ -1578,7 +1596,9 @@ impl JobStore {
         if !evidence.meets(crate::confirmation::EvidenceLevel::MetadataVerified) {
             return Err(JobStoreError::MissingEvidence);
         }
-        let tx = self.db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let updated = tx.execute(
             "UPDATE job_attempts SET status='resolved'
              WHERE job_id=?1 AND attempt_id=?2 AND status IN ('active','unknown')",
@@ -1661,7 +1681,9 @@ impl JobStore {
         if !evidence.meets(crate::confirmation::EvidenceLevel::MetadataVerified) {
             return Err(JobStoreError::MissingEvidence);
         }
-        let tx = self.db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let state: Option<String> = tx
             .query_row("SELECT state FROM jobs WHERE id=?1", [job_id], |row| {
                 row.get(0)
@@ -1813,7 +1835,9 @@ impl JobStore {
     /// fabricated, and any I/O result that could be ambiguous stays UNKNOWN.
     pub fn fail_attempt_before_effect(&mut self, job_id: &str, attempt_id: &str) -> Result<()> {
         self.check_storage_identity()?;
-        let tx = self.db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let state: Option<String> = tx
             .query_row("SELECT state FROM jobs WHERE id=?1", [job_id], |row| {
                 row.get(0)

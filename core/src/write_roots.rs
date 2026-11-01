@@ -22,15 +22,26 @@ pub struct ScenarioRoot {
 
 /// The roots of a Scenario. A one-way Scenario writes only to its
 /// destination; a two-way Scenario writes to both roots.
-pub fn scenario_roots(scenario: &Scenario, adapter: impl Fn(&str) -> Option<String>) -> Vec<ScenarioRoot> {
+pub fn scenario_roots(
+    scenario: &Scenario,
+    adapter: impl Fn(&str) -> Option<String>,
+) -> Vec<ScenarioRoot> {
     let (left_writes, right_writes) = match scenario.direction.as_str() {
         "left_to_right" => (false, true),
         "right_to_left" => (true, false),
         _ => (true, true),
     };
     [
-        (&scenario.left_connection_id, &scenario.left_root, left_writes),
-        (&scenario.right_connection_id, &scenario.right_root, right_writes),
+        (
+            &scenario.left_connection_id,
+            &scenario.left_root,
+            left_writes,
+        ),
+        (
+            &scenario.right_connection_id,
+            &scenario.right_root,
+            right_writes,
+        ),
     ]
     .into_iter()
     .map(|(connection, root, write)| {
@@ -65,7 +76,10 @@ fn canonical(path: &Path) -> PathBuf {
     let mut current = path;
     loop {
         if let Ok(found) = std::fs::canonicalize(current) {
-            return missing.iter().rev().fold(found, |path, part| path.join(part));
+            return missing
+                .iter()
+                .rev()
+                .fold(found, |path, part| path.join(part));
         }
         match (current.parent(), current.file_name()) {
             (Some(parent), Some(name)) => {
@@ -85,8 +99,10 @@ fn nested(a: &ScenarioRoot, b: &ScenarioRoot) -> bool {
 /// True when the runs of two Scenarios must not execute at the same time:
 /// a write root of one is equal to, inside, or around any root of the other.
 pub fn conflict(a: &[ScenarioRoot], b: &[ScenarioRoot]) -> bool {
-    a.iter()
-        .any(|left| b.iter().any(|right| (left.write || right.write) && nested(left, right)))
+    a.iter().any(|left| {
+        b.iter()
+            .any(|right| (left.write || right.write) && nested(left, right))
+    })
 }
 
 #[cfg(test)]
@@ -97,7 +113,12 @@ mod tests {
         Scenario {
             id: "s".into(),
             name: "S".into(),
-            left_connection_id: if left.starts_with("disk:") { "yandex" } else { "mac" }.into(),
+            left_connection_id: if left.starts_with("disk:") {
+                "yandex"
+            } else {
+                "mac"
+            }
+            .into(),
             left_root: left.into(),
             right_connection_id: "mac".into(),
             right_root: right.into(),
@@ -109,7 +130,14 @@ mod tests {
 
     fn roots(left: &str, right: &str, direction: &str) -> Vec<ScenarioRoot> {
         scenario_roots(&scenario(left, right, direction), |id| {
-            Some(if id == "yandex" { YANDEX_DISK } else { "local_filesystem" }.to_owned())
+            Some(
+                if id == "yandex" {
+                    YANDEX_DISK
+                } else {
+                    "local_filesystem"
+                }
+                .to_owned(),
+            )
         })
     }
 
@@ -119,20 +147,44 @@ mod tests {
         let path = |name: &str| base.join(name).to_string_lossy().into_owned();
         let backup = roots(&path("photos"), &path("backup"), "left_to_right");
         // The same destination.
-        assert!(conflict(&backup, &roots(&path("music"), &path("backup"), "left_to_right")));
+        assert!(conflict(
+            &backup,
+            &roots(&path("music"), &path("backup"), "left_to_right")
+        ));
         // A destination inside or around the other destination.
-        assert!(conflict(&backup, &roots(&path("music"), &path("backup/music"), "left_to_right")));
-        assert!(conflict(&backup, &roots(&path("music"), &base.to_string_lossy(), "left_to_right")));
+        assert!(conflict(
+            &backup,
+            &roots(&path("music"), &path("backup/music"), "left_to_right")
+        ));
+        assert!(conflict(
+            &backup,
+            &roots(&path("music"), &base.to_string_lossy(), "left_to_right")
+        ));
         // The other run reads what this run writes.
-        assert!(conflict(&backup, &roots(&path("backup"), &path("copy"), "left_to_right")));
+        assert!(conflict(
+            &backup,
+            &roots(&path("backup"), &path("copy"), "left_to_right")
+        ));
         // Letter case does not make a different folder.
-        assert!(conflict(&backup, &roots(&path("music"), &path("BACKUP"), "left_to_right")));
+        assert!(conflict(
+            &backup,
+            &roots(&path("music"), &path("BACKUP"), "left_to_right")
+        ));
         // Two runs that only read the same source do not conflict.
-        assert!(!conflict(&backup, &roots(&path("photos"), &path("other"), "left_to_right")));
+        assert!(!conflict(
+            &backup,
+            &roots(&path("photos"), &path("other"), "left_to_right")
+        ));
         // A sibling with a common name prefix is another folder.
-        assert!(!conflict(&backup, &roots(&path("music"), &path("backup-2"), "left_to_right")));
+        assert!(!conflict(
+            &backup,
+            &roots(&path("music"), &path("backup-2"), "left_to_right")
+        ));
         // A two-way Scenario writes to both roots.
-        assert!(conflict(&backup, &roots(&path("photos"), &path("elsewhere"), "bidirectional")));
+        assert!(conflict(
+            &backup,
+            &roots(&path("photos"), &path("elsewhere"), "bidirectional")
+        ));
     }
 
     #[test]
@@ -140,11 +192,18 @@ mod tests {
         let base = std::env::temp_dir().join("qadren-write-roots");
         let mac = base.join("yad").to_string_lossy().into_owned();
         let first = roots("disk:/Photos", &mac, "left_to_right");
-        let second = roots("disk:/Photos/2026", &base.join("other").to_string_lossy(), "left_to_right");
+        let second = roots(
+            "disk:/Photos/2026",
+            &base.join("other").to_string_lossy(),
+            "left_to_right",
+        );
         // Both only read the Yandex Disk: no conflict.
         assert!(!conflict(&first, &second));
         // A Mac path "/Photos" is not the Yandex Disk path "disk:/Photos".
-        assert!(!conflict(&first, &roots("/Photos", "/Users/x/out", "left_to_right")));
+        assert!(!conflict(
+            &first,
+            &roots("/Photos", "/Users/x/out", "left_to_right")
+        ));
     }
 
     #[test]

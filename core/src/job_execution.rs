@@ -2013,7 +2013,9 @@ pub fn reconcile_local_file_copy(
         return Ok(LocalFileCopyReconciliationStatus::StillUnknown);
     };
     let binding = root_binding(
-        store.attempt_root_identity(job_id, &attempt.attempt_id)?.as_deref(),
+        store
+            .attempt_root_identity(job_id, &attempt.attempt_id)?
+            .as_deref(),
         identity,
         destination.root_on_smb_share(),
     );
@@ -2029,7 +2031,12 @@ pub fn reconcile_local_file_copy(
         return Ok(LocalFileCopyReconciliationStatus::StillUnknown);
     }
     if binding == RootBinding::SmbRemount
-        && !content_matches(&destination, target, expected.expected_size, &expected.expected_md5)
+        && !content_matches(
+            &destination,
+            target,
+            expected.expected_size,
+            &expected.expected_md5,
+        )
     {
         return Ok(LocalFileCopyReconciliationStatus::StillUnknown);
     }
@@ -2111,7 +2118,9 @@ pub fn remove_interrupted_staging(
             && attempt.target_connection_id.as_deref() == Some(destination_connection_id)
     }) {
         if root_binding(
-            store.attempt_root_identity(job_id, &attempt.attempt_id)?.as_deref(),
+            store
+                .attempt_root_identity(job_id, &attempt.attempt_id)?
+                .as_deref(),
             identity,
             smb,
         ) == RootBinding::Different

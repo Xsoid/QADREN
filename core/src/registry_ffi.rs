@@ -1325,9 +1325,11 @@ pub unsafe extern "C" fn qadren_registry_remove_scenario_after_job_gate(
     };
     // The Worker owns the JobStore; this gate only reads it. No JobStore
     // yet means no Job of this Scenario.
-    match JobStore::open_read_only(Path::new(&jobs_path))
-        .and_then(|jobs| jobs.map_or(Ok(false), |jobs| jobs.scenario_has_unresolved_jobs(&scenario_id)))
-    {
+    match JobStore::open_read_only(Path::new(&jobs_path)).and_then(|jobs| {
+        jobs.map_or(Ok(false), |jobs| {
+            jobs.scenario_has_unresolved_jobs(&scenario_id)
+        })
+    }) {
         Ok(true) => return output(json!({"ok":false,"error":"scenario_has_unresolved_jobs"})),
         Ok(false) => {}
         Err(_) => return output(json!({"ok":false,"error":"job_store_unavailable"})),
