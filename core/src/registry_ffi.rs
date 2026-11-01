@@ -192,6 +192,7 @@ fn registry_error_code(error: &RegistryError) -> &'static str {
         RegistryError::UnsupportedYandexScope => "yandex_source_only",
         RegistryError::InvalidPanelUrl => "invalid_panel_url",
         RegistryError::UnsupportedScenarioEndpoint => "unsupported_scenario_endpoint",
+        RegistryError::BackupRunUnavailable => "backup_run_unavailable",
         _ => "registry_error",
     }
 }
@@ -226,7 +227,10 @@ pub extern "C" fn qadren_scenarios_list(path: *const c_char) -> *mut c_char {
         for item in db.list_scenarios()? {
             let scope = db.get_scenario_revision_scope(&item.id, item.revision)?;
             let retry_until_success = db.scenario_retry_until_success(&item.id)?;
+            let mode = db.scenario_mode(&item.id)?;
+            let resources = db.backup_resources(&item.id, item.revision)?;
             entries.push(json!({
+                "mode": mode, "resources": resources,
                 "id": item.id, "name": item.name, "left_connection_id": item.left_connection_id,
                 "left_root": item.left_root, "right_connection_id": item.right_connection_id,
                 "right_root": item.right_root, "direction": item.direction, "enabled": item.enabled,
@@ -236,6 +240,61 @@ pub extern "C" fn qadren_scenarios_list(path: *const c_char) -> *mut c_char {
             }));
         }
         Ok(json!(entries))
+    })
+}
+
+/// Create (empty `id`) or change a Backup/export Scenario (D-027 section 5).
+/// `resources` is a JSON array of `{category, provider_id, kind}`.
+#[no_mangle]
+pub extern "C" fn qadren_scenarios_save_backup(
+    path: *const c_char,
+    id: *const c_char,
+    name: *const c_char,
+    source_id: *const c_char,
+    destination_id: *const c_char,
+    destination_root: *const c_char,
+    resources: *const c_char,
+    deletion_mode: *const c_char,
+) -> *mut c_char {
+    let (
+        Some(id),
+        Some(name),
+        Some(source_id),
+        Some(destination_id),
+        Some(root),
+        Some(resources),
+        Some(deletion_mode),
+    ) = (
+        input(id),
+        input(name),
+        input(source_id),
+        input(destination_id),
+        input(destination_root),
+        input(resources),
+        input(deletion_mode).and_then(|mode| crate::model::DeletionMode::parse(&mode)),
+    )
+    else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    let Ok(resources) = serde_json::from_str::<Vec<crate::registry::BackupResource>>(&resources)
+    else {
+        return output(json!({"ok":false,"error":"invalid_selection"}));
+    };
+    with_registry(path, |db| {
+        let draft = crate::registry::BackupScenarioDraft {
+            name: &name,
+            source_connection_id: &source_id,
+            destination_connection_id: &destination_id,
+            destination_root: &root,
+            resources: &resources,
+            deletion_mode,
+        };
+        if id.is_empty() {
+            Ok(json!({"id": db.create_backup_scenario(draft)?}))
+        } else {
+            db.update_backup_scenario(&id, draft)?;
+            Ok(json!({"id": id}))
+        }
     })
 }
 

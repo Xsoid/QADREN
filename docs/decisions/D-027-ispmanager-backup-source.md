@@ -1,6 +1,6 @@
 # D-027 — ISPmanager 6 Read-Only Backup Source
 
-**Date:** 2026-11-01. **Status:** proposed. The owner must approve this decision before Gate 1 code starts. **Revises (after approval):** the "runtime BackupSet is deferred" rule in the [synchronization model](../architecture/backup-model.md) and the [roadmap](../roadmap.md), only for the backup run namespace in section 5. **Work:** GitHub epic Xsoid/QADREN#36.
+**Date:** 2026-11-01. **Status:** proposed. The owner must approve this decision before Gate 1 code starts. **Revises (after approval):** nothing in the synchronization model: the Backup/export mode is a one-way update of one current copy (section 5) and adds no BackupSet. **Work:** GitHub epic Xsoid/QADREN#36.
 
 ## Context
 
@@ -50,12 +50,28 @@ Only `verified_export` permits a content export. `verified_metadata_only` permit
 
 ### 5. Backup/export Scenario mode
 
-1. An ISPmanager Scenario has the named mode **Backup/export**. It is not a synchronization mode. It has no conflict rule, no deletion mode, and no replacement.
-2. Each run writes into a new run folder below the destination root: `<root>/<run start, UTC, ISO 8601 basic>-<run ID>/`. The executor creates this folder with no-overwrite. A run never writes outside its own run folder.
-3. A run never deletes, replaces, or prunes an earlier run folder. There is no retention, no deduplication, and no restore in this stage.
-4. The run writes `manifest.json` last, through a staging name and no-overwrite publish. The manifest records for each selected resource: the category, the stable provider ID, the hierarchy, the artifact type (file, database dump, mailbox content, configuration metadata), the export format, the start and end time, the byte count and checksum, the result, and every omitted subpart with its reason.
-5. The run result is `complete` only when each selected resource has a verified result. Otherwise it is `partial` or `failed`. A partial run is never shown as a successful backup.
-6. A run folder with its manifest is the only new backup concept. This decision does not add a runtime BackupSet entity, content version history, or retention to the Registry.
+The owner decided on 2026-11-02: the destination is **one current copy** that each run updates. A run does not make a new copy folder, and QADREN keeps no generations of old data.
+
+1. An ISPmanager Scenario has the named mode **Backup/export**. It is a one-way update from the panel to the destination. The source always wins, as in a one-way Scenario (D-025 section 3). The user confirms this rule one time.
+2. Each data type has its own subfolder in the destination root. The executor creates a subfolder only for a type that the Scenario exports:
+
+   ```text
+   <root>/
+     manifest.json                     state of the last run
+     files/<absolute server path>      selected files and folders; the server path is kept
+     databases/<database>.sql          one current dump for each selected database
+     mailboxes/<mailbox>/              mailbox content and settings
+     mail-domains/  cron/  dns/  ssl/  ftp/  accounts/  web-server/  php/
+     mail-service/  network/  docker/  panel-settings/  logs/
+   ```
+
+   The subfolder names are the stable category keys of the [adapter contract](../architecture/ispmanager-adapter.md), in kebab case. They do not change with the interface language. `files/` keeps the absolute server path, so that objects from different branches cannot have the same destination name.
+3. **Update.** A new object is created with no-overwrite. A changed file, a new database dump, or changed metadata replaces the destination object through the approved replacement protocol (D-025 section 6). The replaced version goes into the Trash of the destination when it has a `trash` capability; an SMB share usually has none, so the loss is permanent.
+4. **Deletion.** An object that QADREN confirmed in an earlier run and that is now absent inside a selected folder is deleted under the deletion mode of the revision: Simple synchronization (the default, owner decision 2026-11-02) or Paranoid, where each deletion waits for a decision (D-019, D-025 section 5). The user confirms Simple synchronization together with the source-wins rule one time, when the Scenario is created.
+5. **Guard.** A selected resource that is missing, renamed, or not accessible, a listing error, a permission error, or an incomplete snapshot is an error for that resource. It never gives a deletion or a replacement in the destination (D-025 section 5.3).
+6. **Manifest.** The run writes `manifest.json` last, through a staging name, and replaces the previous one. It records for each selected resource: the category, the stable provider ID, the artifact type (file, database dump, mailbox content, configuration metadata), the export format, the time, the byte count and checksum where available, the result, and every omitted subpart with its reason.
+7. The run result is `complete` only when each selected resource has a verified result. Otherwise it is `partial` or `failed`. A partial run keeps the earlier content of the failed resources and is never shown as a successful backup.
+8. This mode adds no runtime BackupSet, no content version history, and no retention.
 
 ### 6. Selection
 
@@ -95,7 +111,7 @@ SSL private keys and other secrets that a panel can export are `unsupported` in 
 
 ## Owner questions
 
-1. Approve the run folder name format in section 5.2.
+1. Approve the destination layout and the update rules in section 5.
 2. Approve the exclusion of native backups (section 8) and of exported secrets (section 9) in this stage.
 3. Approve the SSH client library for section 7a (D-014).
 4. Give a test panel and test accounts (a user and an administrator) for Gate 0. The live checks run on the owner Mac with the read-only probe. Real names, paths, and counts stay outside the repository and the work tracker.

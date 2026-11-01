@@ -60,6 +60,9 @@ pub enum RegistryError {
     /// The connection cannot be a Scenario endpoint yet. An ISPmanager
     /// connection is a source of a Backup/export Scenario only (D-027).
     UnsupportedScenarioEndpoint,
+    /// A Backup/export Scenario cannot run yet: its export handlers are
+    /// Gate 3 of D-027.
+    BackupRunUnavailable,
     /// Another run of the Scenario is active (D-025 section 2).
     ScenarioRunActive,
     /// A batch item of the Scenario has an unknown result. Its record must
@@ -390,7 +393,7 @@ impl Registry {
         }
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 29 {
+        if version > 30 {
             return Err(RegistryError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -877,6 +880,30 @@ impl Registry {
                  ALTER TABLE ispmanager_settings ADD COLUMN last_check_json TEXT;
                  ALTER TABLE ispmanager_settings ADD COLUMN last_check_at INTEGER;
                  PRAGMA user_version = 29;
+                 COMMIT;",
+            )?;
+        }
+        if version <= 29 {
+            // D-027 sections 5 and 6: the Backup/export Scenario mode and its
+            // typed selection. A resource is a provider object, not a path
+            // relative to a root. An empty selection means nothing.
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE scenarios ADD COLUMN mode TEXT NOT NULL DEFAULT 'sync'
+                   CHECK(mode IN ('sync','backup_export'));
+                 ALTER TABLE scenario_revisions ADD COLUMN mode TEXT NOT NULL DEFAULT 'sync'
+                   CHECK(mode IN ('sync','backup_export'));
+                 CREATE TABLE scenario_revision_resources (
+                    scenario_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL CHECK(revision > 0),
+                    category TEXT NOT NULL,
+                    provider_id TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK(kind IN ('file','dir','symlink','object')),
+                    PRIMARY KEY(scenario_id,revision,category,provider_id),
+                    FOREIGN KEY(scenario_id,revision)
+                      REFERENCES scenario_revisions(scenario_id,revision) ON DELETE RESTRICT
+                 );
+                 PRAGMA user_version = 30;
                  COMMIT;",
             )?;
         }
@@ -2482,6 +2509,7 @@ impl Registry {
         let reference = self
             .schedule_job_reference(schedule_job_id)?
             .ok_or(RegistryError::NotFound)?;
+        self.require_sync_scenario(&reference.scenario_id)?;
         let transaction = rusqlite::Transaction::new_unchecked(
             &self.db,
             rusqlite::TransactionBehavior::Immediate,
@@ -2602,6 +2630,7 @@ impl Registry {
     /// action of the monitoring Scenario widget (D-025 section 2). The batch
     /// step still requires the confirmed source-wins rule.
     pub fn begin_manual_planning_run(&self, scenario: &ScenarioReference) -> Result<String> {
+        self.require_sync_scenario(&scenario.scenario_id)?;
         let id: String = self
             .db
             .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
@@ -2654,6 +2683,7 @@ impl Registry {
         batch_id: &str,
         deferred_items: u64,
     ) -> Result<String> {
+        self.require_sync_scenario(&scenario.scenario_id)?;
         let id: String = self
             .db
             .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
@@ -3120,6 +3150,7 @@ impl Registry {
             "DELETE FROM scenario_conflict_tasks WHERE scenario_id=?1",
             "DELETE FROM file_sync_states WHERE scenario_id=?1",
             "DELETE FROM scenario_revision_selection WHERE scenario_id=?1",
+            "DELETE FROM scenario_revision_resources WHERE scenario_id=?1",
             "DELETE FROM scenario_source_wins_consents WHERE scenario_id=?1",
             "DELETE FROM scenario_automation WHERE scenario_id=?1",
             "DELETE FROM scenario_revisions WHERE scenario_id=?1",
@@ -3917,6 +3948,206 @@ pub fn scenario_roots_overlap(left: &str, right: &str) -> bool {
 
 /// Store a normalized selection for one revision. An empty selection stores
 /// no rows and means the complete root.
+/// One selected resource of a Backup/export Scenario revision (D-027
+/// section 6). For the Files category, `provider_id` is an absolute server
+/// path; `kind` is `file`, `dir` (recursive, new descendants included),
+/// `symlink`, or `object` for a logical provider object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct BackupResource {
+    pub category: String,
+    pub provider_id: String,
+    pub kind: String,
+}
+
+impl BackupResource {
+    fn valid(&self) -> bool {
+        let text_ok = |text: &str| {
+            !text.is_empty() && text.len() <= 4096 && !text.chars().any(char::is_control)
+        };
+        if !text_ok(&self.category) || !text_ok(&self.provider_id) {
+            return false;
+        }
+        match self.category.as_str() {
+            "files" => {
+                matches!(self.kind.as_str(), "file" | "dir" | "symlink")
+                    && self.provider_id.starts_with('/')
+                    && !self
+                        .provider_id
+                        .split('/')
+                        .any(|part| part == "." || part == "..")
+            }
+            _ => self.kind == "object",
+        }
+    }
+}
+
+/// The fields of a Backup/export Scenario revision.
+#[derive(Debug, Clone, Copy)]
+pub struct BackupScenarioDraft<'a> {
+    pub name: &'a str,
+    pub source_connection_id: &'a str,
+    pub destination_connection_id: &'a str,
+    pub destination_root: &'a str,
+    pub resources: &'a [BackupResource],
+    /// Deletions inside selected folders (D-027 section 5.4).
+    pub deletion_mode: DeletionMode,
+}
+
+impl Registry {
+    /// Create a Backup/export Scenario (D-027 section 5). The source is an
+    /// ISPmanager connection; the destination is This Mac or an SMB share.
+    pub fn create_backup_scenario(&self, draft: BackupScenarioDraft<'_>) -> Result<String> {
+        self.validate_backup_draft(&draft)?;
+        let id: String = self
+            .db
+            .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        transaction.execute(
+            "INSERT INTO scenarios(id,name,left_connection_id,left_root,right_connection_id,
+                                   right_root,direction,mode,deletion_mode)
+             VALUES(?1,?2,?3,'/',?4,?5,'left_to_right','backup_export',?6)",
+            params![
+                id,
+                draft.name.trim(),
+                draft.source_connection_id,
+                draft.destination_connection_id,
+                draft.destination_root,
+                draft.deletion_mode.as_str()
+            ],
+        )?;
+        insert_backup_revision(&transaction, &id, 1, draft.resources)?;
+        transaction.commit()?;
+        Ok(id)
+    }
+
+    /// Store a new revision of a Backup/export Scenario. Older revisions keep
+    /// their own selection. The source connection does not change.
+    pub fn update_backup_scenario(&self, id: &str, draft: BackupScenarioDraft<'_>) -> Result<()> {
+        self.validate_backup_draft(&draft)?;
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let changed = transaction.execute(
+            "UPDATE scenarios SET name=?1,right_connection_id=?2,right_root=?3,deletion_mode=?6,
+                                  revision=revision+1
+             WHERE id=?4 AND mode='backup_export' AND left_connection_id=?5",
+            params![
+                draft.name.trim(),
+                draft.destination_connection_id,
+                draft.destination_root,
+                id,
+                draft.source_connection_id,
+                draft.deletion_mode.as_str()
+            ],
+        )?;
+        if changed == 0 {
+            return Err(RegistryError::NotFound);
+        }
+        let revision: i64 =
+            transaction.query_row("SELECT revision FROM scenarios WHERE id=?1", [id], |row| {
+                row.get(0)
+            })?;
+        insert_backup_revision(&transaction, id, revision as u64, draft.resources)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// `sync` or `backup_export`.
+    pub fn scenario_mode(&self, id: &str) -> Result<String> {
+        self.db
+            .query_row("SELECT mode FROM scenarios WHERE id=?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()?
+            .ok_or(RegistryError::NotFound)
+    }
+
+    /// The typed selection of one Backup/export Scenario revision.
+    pub fn backup_resources(&self, id: &str, revision: u64) -> Result<Vec<BackupResource>> {
+        let mut statement = self.db.prepare(
+            "SELECT category,provider_id,kind FROM scenario_revision_resources
+             WHERE scenario_id=?1 AND revision=?2 ORDER BY category,provider_id",
+        )?;
+        let rows = statement.query_map(params![id, revision as i64], |row| {
+            Ok(BackupResource {
+                category: row.get(0)?,
+                provider_id: row.get(1)?,
+                kind: row.get(2)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    fn validate_backup_draft(&self, draft: &BackupScenarioDraft<'_>) -> Result<()> {
+        if !valid_name(draft.name) || !draft.destination_root.starts_with('/') {
+            return Err(RegistryError::InvalidName);
+        }
+        if draft.resources.is_empty() || !draft.resources.iter().all(BackupResource::valid) {
+            return Err(RegistryError::InvalidSelection);
+        }
+        let adapter = |id: &str| -> Result<String> {
+            Ok(self.get(id)?.ok_or(RegistryError::NotFound)?.adapter)
+        };
+        let source = adapter(draft.source_connection_id)?;
+        let destination = adapter(draft.destination_connection_id)?;
+        if source != crate::storage_access::ISPMANAGER
+            || !matches!(
+                destination.as_str(),
+                crate::storage_access::LOCAL_FILESYSTEM | crate::storage_access::SMB_SHARE
+            )
+        {
+            return Err(RegistryError::UnsupportedScenarioEndpoint);
+        }
+        Ok(())
+    }
+
+    /// Runs of a Backup/export Scenario wait for its export handlers.
+    fn require_sync_scenario(&self, id: &str) -> Result<()> {
+        match self.scenario_mode(id)?.as_str() {
+            "sync" => Ok(()),
+            _ => Err(RegistryError::BackupRunUnavailable),
+        }
+    }
+}
+
+fn insert_backup_revision(
+    transaction: &rusqlite::Transaction<'_>,
+    id: &str,
+    revision: u64,
+    resources: &[BackupResource],
+) -> Result<()> {
+    transaction.execute(
+        "INSERT INTO scenario_revisions(
+            scenario_id,revision,name,left_connection_id,left_root,
+            right_connection_id,right_root,direction,deletion_mode,mode
+         )
+         SELECT id,?2,name,left_connection_id,left_root,
+                right_connection_id,right_root,direction,deletion_mode,mode
+         FROM scenarios WHERE id=?1",
+        params![id, revision as i64],
+    )?;
+    for resource in resources {
+        transaction.execute(
+            "INSERT OR IGNORE INTO scenario_revision_resources(
+                scenario_id,revision,category,provider_id,kind
+             ) VALUES(?1,?2,?3,?4,?5)",
+            params![
+                id,
+                revision as i64,
+                resource.category,
+                resource.provider_id,
+                resource.kind
+            ],
+        )?;
+    }
+    Ok(())
+}
+
 fn insert_revision_selection(
     transaction: &rusqlite::Transaction<'_>,
     id: &str,

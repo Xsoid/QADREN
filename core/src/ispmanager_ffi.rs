@@ -1,6 +1,6 @@
 //! C ABI for the ISPmanager connection check (D-027). Call off the Swift
 //! main thread: the check makes network requests.
-use crate::ispmanager;
+use crate::{ispmanager, ispmanager_sftp};
 use serde_json::json;
 use std::ffi::{c_char, CStr, CString};
 
@@ -32,6 +32,48 @@ pub extern "C" fn qadren_ispmanager_check(
                 host_key_sha256: host_key.as_deref(),
             };
             json!({"ok": true, "data": ispmanager::check(&url, &login, &password, sftp)})
+        }
+        _ => json!({"ok": false, "error": "invalid_input"}),
+    };
+    CString::new(value.to_string())
+        .expect("JSON cannot contain NUL")
+        .into_raw()
+}
+
+/// Lists one folder through SFTP (D-027 section 7a). `path` is absolute, or
+/// empty for the home folder. `host_key` must be the confirmed fingerprint.
+/// A failure returns the SFTP reason in the same form as the check report.
+#[no_mangle]
+pub extern "C" fn qadren_ispmanager_sftp_list(
+    url: *const c_char,
+    login: *const c_char,
+    password: *const c_char,
+    ssh_port: u16,
+    host_key: *const c_char,
+    path: *const c_char,
+) -> *mut c_char {
+    let value = match (
+        input(url).and_then(|url| ispmanager::PanelUrl::parse(url.trim()).ok()),
+        input(login),
+        input(password),
+        input(host_key).filter(|key| !key.is_empty()),
+        input(path),
+    ) {
+        (Some(url), Some(login), Some(password), Some(host_key), Some(path)) if ssh_port > 0 => {
+            let path = (!path.is_empty()).then_some(path.as_str());
+            match ispmanager_sftp::list_dir(
+                url.host(),
+                ssh_port,
+                &login,
+                &password,
+                &host_key,
+                path,
+            ) {
+                Ok(listing) => json!({"ok": true, "data": listing}),
+                Err(error) => {
+                    json!({"ok": false, "error": "sftp", "transport": ispmanager::FileTransport::from(error)})
+                }
+            }
         }
         _ => json!({"ok": false, "error": "invalid_input"}),
     };

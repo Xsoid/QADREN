@@ -11,6 +11,12 @@ private func ispmanagerCheck(
 @_silgen_name("qadren_ispmanager_free_string")
 private func ispmanagerFree(_ pointer: UnsafeMutablePointer<CChar>?)
 
+@_silgen_name("qadren_ispmanager_sftp_list")
+private func ispmanagerSFTPList(
+    _ url: UnsafePointer<CChar>?, _ login: UnsafePointer<CChar>?, _ password: UnsafePointer<CChar>?,
+    _ sshPort: UInt16, _ hostKey: UnsafePointer<CChar>?, _ path: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
+
 let ISPmanagerKeychain = LoginKeychain(service: "dev.qadren.ispmanager.credentials")
 
 /// The panel URL form that Core stores: `https://host[:port][/path]`. Core
@@ -178,7 +184,7 @@ enum ISPmanagerCategory {
         case "permission_denied":
             (.needsAction, "Нет прав у этого аккаунта")
         case "unsupported":
-            (.offline, "Нет на этой панели")
+            (.unsupported, "Нет на этой панели")
         default:
             if !report.functions.isEmpty {
                 (.unknown, "Не проверено")
@@ -189,5 +195,68 @@ enum ISPmanagerCategory {
                 (.unknown, "В API нет функции; только через файлы конфигурации")
             }
         }
+    }
+}
+
+/// One entry of an SFTP folder listing. A link is not followed.
+struct ISPmanagerDirEntry: Decodable, Identifiable, Equatable {
+    var id: String { name }
+    let name: String
+    /// `dir`, `file`, `symlink`, or `other`.
+    let kind: String
+    let size: UInt64?
+    let modified: UInt32?
+    let mode: UInt32?
+}
+
+struct ISPmanagerDirListing: Decodable, Equatable {
+    let path: String
+    let parent: String?
+    let home: String
+    let entries: [ISPmanagerDirEntry]
+    let truncated: Bool
+}
+
+private struct ISPmanagerListResult: Decodable {
+    let ok: Bool
+    let data: ISPmanagerDirListing?
+    let error: String?
+    let transport: ISPmanagerFileTransport?
+}
+
+enum ISPmanagerSFTP {
+    enum Failure: Error, Equatable {
+        case transport(ISPmanagerFileTransport)
+        case message(String)
+    }
+
+    /// Lists one folder off the main thread. `path` nil is the home folder.
+    static func list(
+        url: String, credentials: LoginCredentials, settings: ISPmanagerSettings, path: String?
+    ) async -> Result<ISPmanagerDirListing, Failure> {
+        guard let hostKey = settings.host_key_sha256 else {
+            return .failure(.message("Ключ SSH-сервера не подтверждён. Подтвердите его на карточке подключения в разделе «Подключения»."))
+        }
+        return await Task.detached(priority: .userInitiated) {
+            let pointer = url.withCString { url in
+                credentials.login.withCString { login in
+                    credentials.password.withCString { password in
+                        hostKey.withCString { key in
+                            (path ?? "").withCString { path in
+                                ispmanagerSFTPList(url, login, password, settings.ssh_port, key, path)
+                            }
+                        }
+                    }
+                }
+            }
+            guard let pointer else { return .failure(.message("Нет ответа от Core.")) }
+            defer { ispmanagerFree(pointer) }
+            guard let result = try? JSONDecoder().decode(
+                ISPmanagerListResult.self, from: Data(String(cString: pointer).utf8)
+            ) else { return .failure(.message("Неверный ответ Core.")) }
+            if let listing = result.data, result.ok { return .success(listing) }
+            if let transport = result.transport { return .failure(.transport(transport)) }
+            return .failure(.message(result.error ?? "Не удалось прочитать папку."))
+        }.value
     }
 }

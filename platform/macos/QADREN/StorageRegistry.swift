@@ -171,6 +171,13 @@ private func registrySetISPmanagerSSHPort(_ path: UnsafePointer<CChar>?, _ id: U
 private func registryRecordISPmanagerCheck(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ report: UnsafePointer<CChar>?, _ at: Int64) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_confirm_ispmanager_host_key")
 private func registryConfirmISPmanagerHostKey(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ fingerprint: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_scenarios_save_backup")
+private func scenarioSaveBackup(
+    _ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ name: UnsafePointer<CChar>?,
+    _ sourceID: UnsafePointer<CChar>?, _ destinationID: UnsafePointer<CChar>?,
+    _ destinationRoot: UnsafePointer<CChar>?, _ resources: UnsafePointer<CChar>?,
+    _ deletionMode: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_ensure_local_computer")
 private func registryEnsureLocalComputer(_ path: UnsafePointer<CChar>?, _ name: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_rename")
@@ -227,6 +234,21 @@ struct ScenarioEntry: Decodable, Identifiable {
     /// D-024: retry a temporarily unavailable file every 24 h after the
     /// retry schedule. A Scenario parameter outside the revision.
     var retry_until_success: Bool = true
+    /// `sync` or `backup_export` (D-027 section 5).
+    var mode: String = "sync"
+    /// The typed selection of a Backup/export Scenario revision.
+    var resources: [BackupResource] = []
+
+    var isBackup: Bool { mode == "backup_export" }
+}
+
+/// One selected resource of a Backup/export Scenario (D-027 section 6). For
+/// files, `provider_id` is an absolute server path and `kind` is `file`,
+/// `dir` (with all its content, also new), or `symlink`.
+struct BackupResource: Codable, Hashable {
+    let category: String
+    let provider_id: String
+    let kind: String
 }
 
 /// How a Scenario revision treats a deletion after a confirmed synchronization.
@@ -509,6 +531,8 @@ enum QADRENUserMessage {
             "Яндекс Диск вернул неполные метаданные. Обход продолжится автоматически."
         case "invalid_panel_url":
             "Адрес панели должен иметь вид https://сервер:порт/путь, например https://panel.example.com:1500/ispmgr. Логин и пароль в адрес не вписывайте."
+        case "backup_run_unavailable":
+            "Запуск резервных копий с ISPmanager появится на следующем этапе. Сценарий и выбор сохранены."
         case "unsupported_scenario_endpoint":
             "Панель ISPmanager пока нельзя выбрать в сценарии. Сценарии резервного копирования с неё появятся на следующем этапе."
         case "yandex_source_only":
@@ -648,6 +672,38 @@ enum StorageRegistryBridge {
     static func listScenarios() throws -> [ScenarioEntry] {
         let database = try path
         return try database.withCString { try unwrap(scenarioList($0), as: [ScenarioEntry].self) }
+    }
+
+    /// Creates (nil `id`) or changes a Backup/export Scenario. Core checks the
+    /// connections and the selection; an empty selection is refused.
+    @discardableResult
+    static func saveBackupScenario(
+        id: String?, name: String, sourceID: String, destinationID: String,
+        destinationRoot: String, resources: [BackupResource], deletionMode: ScenarioDeletionMode
+    ) throws -> String {
+        let database = try path
+        let json = String(decoding: try JSONEncoder().encode(resources), as: UTF8.self)
+        let result: NewConnection = try database.withCString { db in
+            try (id ?? "").withCString { id in
+                try name.withCString { name in
+                    try sourceID.withCString { source in
+                        try destinationID.withCString { destination in
+                            try destinationRoot.withCString { root in
+                                try json.withCString { resources in
+                                    try deletionMode.rawValue.withCString { mode in
+                                        try unwrap(
+                                            scenarioSaveBackup(db, id, name, source, destination, root, resources, mode),
+                                            as: NewConnection.self
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return result.id
     }
 
     static func createScenario(
