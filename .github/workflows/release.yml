@@ -36,6 +36,18 @@ jobs:
           fi
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
+      - name: Take the release description from CHANGELOG.md
+        run: |
+          awk -v heading="## [$VERSION]" '
+            index($0, heading) == 1 { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/notes.md"; then
+            echo "Add a \"## [$VERSION]\" section to CHANGELOG.md." >&2
+            exit 1
+          fi
+
       - name: Rust formatting, lint and tests
         run: bash scripts/test-core.sh
 
@@ -63,10 +75,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cat > "$RUNNER_TEMP/notes.md" <<'EOF'
-          Ad-hoc signed build for Apple silicon Macs with macOS 13 or later. It is not Developer ID signed and not notarized.
+          cat >> "$RUNNER_TEMP/notes.md" <<'EOF'
 
-          **Install**
+          ### Install
 
           1. Download and open the `.zip` file. Move `QADREN.app` to the Applications folder.
           2. Open QADREN. macOS blocks the first start.
@@ -80,5 +91,4 @@ jobs:
             --verify-tag \
             --prerelease \
             --title "QADREN $VERSION" \
-            --notes-file "$RUNNER_TEMP/notes.md" \
-            --generate-notes
+            --notes-file "$RUNNER_TEMP/notes.md"

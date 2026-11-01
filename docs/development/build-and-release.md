@@ -28,7 +28,7 @@ The developer machine needs Rust and Xcode. The user distribution must include i
 
 [D-026](../decisions/D-026-github-releases.md) defines the distribution channel. To publish a release:
 
-1. Set the same version in `CFBundleShortVersionString` of `platform/macos/Info.plist` and in `version` of `core/Cargo.toml`. Run `cargo update --workspace --manifest-path core/Cargo.toml` to update `Cargo.lock`. Commit and push to `main`.
+1. Set the same version in `CFBundleShortVersionString` of `platform/macos/Info.plist` and in `version` of `core/Cargo.toml`. Run `cargo update --workspace --manifest-path core/Cargo.toml` to update `Cargo.lock`. Add a `## [X.Y.Z] - YYYY-MM-DD` section to `CHANGELOG.md`. It becomes the release description. Commit and push to `main`.
 2. Make sure that the repository variable `YANDEX_CLIENT_ID` has the public Yandex OAuth client ID.
 3. Push a tag with the same version:
 
@@ -37,7 +37,7 @@ The developer machine needs Rust and Xcode. The user distribution must include i
    git push origin v0.2.0
    ```
 
-4. The `Release` workflow (`.github/workflows/release.yml`) checks the versions, runs `scripts/test-core.sh`, builds the bundle, and publishes a pre-release with `QADREN-<version>-macos-arm64.zip` and its SHA-256 file.
+4. The `Release` workflow (`.github/workflows/release.yml`) checks the versions and the `CHANGELOG.md` section, runs `scripts/test-core.sh`, builds the bundle, and publishes a pre-release with `QADREN-<version>-macos-arm64.zip` and its SHA-256 file.
 
 A release build has an ad-hoc signature. It is not Developer ID signed and not notarized. A Developer ID signature and notarization need a new owner decision. iCloud entitlements are not a Release 1 requirement. A release bundle must not introduce a second JobStore, Worker, or synchronization engine.
 
