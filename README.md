@@ -76,3 +76,7 @@ See [build and release](docs/development/build-and-release.md) and [testing and 
 GitHub Issues contain active work, audits, test results for a specific SHA, and closure criteria. Git history contains change history.
 
 The repository and the issue tracker are public. Do not put real file or folder names, paths, counts, sizes, quota, account data, or screenshots of user content in issues, commits, or files.
+
+## License
+
+QADREN is available under the [MIT License](LICENSE). Third-party fonts, design sources, and agent skills keep their own licenses. See [third-party notices](THIRD_PARTY_NOTICES.md).

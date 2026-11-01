@@ -1,6 +1,6 @@
 # Third-party notices
 
-This file lists the third-party software, fonts, design sources, and agent skills that QADREN uses, with their licenses and sources. QADREN's own license is not in this file.
+This file lists the third-party software, fonts, design sources, and agent skills that QADREN uses, with their licenses and sources. QADREN's own license is in [LICENSE](LICENSE) (MIT).
 
 When you add, update, or remove a third-party dependency, font, asset, design source, or agent skill, update this file in the same change. Keep the license files that come with the third-party content.
 
