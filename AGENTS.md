@@ -15,7 +15,7 @@
 - Use one Rust JobStore. A `Scenario` defines synchronization rules. A `Job` is one execution or one manual file operation.
 - Keep each `StorageConnection` independent. Bind OAuth and Keychain state to `connection_id`.
 - Do not save secrets in SQLite, Git, logs, or HTTP URLs.
-- Do not put information about user content or accounts (real file and folder names, paths, counts, sizes, quota, screenshots) in the repository, commit messages, or the work tracker. Evidence from real storage states only the storage type and the result ([data safety](docs/policies/data-safety.md)).
+- Treat the repository and the work tracker as public. Do not put information about user content or accounts (real file and folder names, paths, counts, sizes, quota, screenshots) in the repository, commit messages, or the work tracker. Evidence from real storage states only the storage type and the result. Keep real data only in local temporary files outside the repository ([data safety](docs/policies/data-safety.md)).
 - Remove and Disconnect change only local state. They must not delete provider objects.
 - If an operation cannot stay within selected files, disclose its real scope and limitation. Never claim narrow effects when broader files may change.
 - Read needed content silently for an enabled/requested operation, including macOS File Provider materialization. Do not add a separate `read_content` consent prompt or unrelated prefetch.

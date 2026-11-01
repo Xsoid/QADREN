@@ -45,13 +45,13 @@ For scheduled or unattended work, carry out ordinary reads, safe configured oper
 
 ## User Content in Project Records
 
-Project records are the repository (documentation, code, comments, test fixtures, scripts, commit messages) and the work tracker (issues, pull requests, comments, attachments). Project records must not contain information about the content or the accounts of a user, the owner included:
+Treat the repository and the work tracker as public. Project records are the repository (documentation, code, comments, test fixtures, scripts, commit messages) and the work tracker (issues, pull requests, comments, attachments). Project records must not contain information about the content or the accounts of a user, the owner included:
 
 - Names and paths of real files and folders, share names, server and host names, account names, and e-mail addresses of storage accounts.
 - Counts, sizes, dates, durations, quota values, and other properties of real user files, folders, or storage.
 - File content, screenshots that show user content, and log or database excerpts with real user paths.
 
-Evidence from a real storage states only the storage type and the result, for example: "Checked on a real Yandex Disk folder: the walk continued after `kill -9`." Use generated data for each measurement with numbers. Use neutral sample names in code, tests, and examples (`disk:/Photos`, `smb://nas/share`). Before a commit or a tracker post, remove such information. Do not copy it from logs, the Registry, the JobStore, or screenshots.
+Evidence from a real storage states only the storage type and the result, for example: "Checked on a real Yandex Disk folder: the walk continued after `kill -9`." Use generated data for each measurement with numbers. Use neutral sample names in code, tests, and examples (`disk:/Photos`, `smb://nas/share`). Before a commit or a tracker post, remove such information. Do not copy it from logs, the Registry, the JobStore, or screenshots. Keep real data for a check only in local temporary files outside the repository (for example in the system temporary folder). Never add these files to the repository, and never attach them to the work tracker.
 
 ## Main MacBook Limitations
 
