@@ -25,6 +25,10 @@ The SMB share connector (`smb_share`, [D-021](../decisions/D-021-smb-network-dri
 
 Yandex Disk is a one-way Scenario source to a Local Filesystem root ([D-023](../decisions/D-023-yandex-disk-to-mac.md), [Yandex Disk adapter](yandex-adapter.md)). Yandex Disk as a destination needs stage 2 of D-023. iCloud is post-release ([D-017](../decisions/D-017-defer-icloud.md)). File Provider materialization caused by a required Local Filesystem read does not create an iCloud adapter and does not allow unrelated prefetch.
 
+## Proposed adapters
+
+ISPmanager 6 is a proposed read-only backup source ([D-027](../decisions/D-027-ispmanager-backup-source.md), [ISPmanager adapter](ispmanager-adapter.md)). It has no `trash` capability, because it is never a destination. It is not active until the owner approves D-027.
+
 ## New adapters
 
 A new adapter design includes the Trash examination above.

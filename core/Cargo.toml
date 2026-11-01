@@ -13,6 +13,11 @@ crate-type = ["staticlib", "rlib"]
 name = "qadren-worker"
 path = "src/bin/qadren_worker.rs"
 
+# Gate 0 read-only ISPmanager probe (D-027, proposed). The app does not ship it.
+[[bin]]
+name = "qadren-ispmanager-probe"
+path = "src/bin/qadren_ispmanager_probe.rs"
+
 [features]
 # Builds narrow test fixtures for native macOS acceptance. The production app
 # never enables this feature.

@@ -4,6 +4,7 @@
 pub mod automation;
 pub mod capabilities;
 pub mod confirmation;
+pub mod ispmanager;
 pub mod job_execution;
 pub mod jobs;
 pub mod jobs_ffi;
