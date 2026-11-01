@@ -324,13 +324,16 @@ impl Session {
 pub enum CapabilityState {
     VerifiedMetadataOnly,
     PermissionDenied,
+    /// The panel has none of the functions (panel error `missed`).
+    Unsupported,
     Unverified,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FunctionReport {
     pub function: &'static str,
-    /// `items`, `empty`, `denied` (panel error `access`), or `error`.
+    /// `items`, `empty`, `denied` (panel error `access`), `missing` (panel
+    /// error `missed`: the panel has no such function), or `error`.
     pub result: &'static str,
     pub error: Option<String>,
 }
@@ -404,6 +407,8 @@ fn category_state(functions: &[FunctionReport]) -> CapabilityState {
         CapabilityState::VerifiedMetadataOnly
     } else if !functions.is_empty() && functions.iter().all(|report| report.result == "denied") {
         CapabilityState::PermissionDenied
+    } else if !functions.is_empty() && functions.iter().all(|report| report.result == "missing") {
+        CapabilityState::Unsupported
     } else {
         CapabilityState::Unverified
     }
@@ -464,6 +469,7 @@ pub fn check(url: &str, login: &str, password: &str, sftp: SftpTarget<'_>) -> Ch
                         function,
                         result: match &error {
                             IspError::Panel(kind) if kind == "access" => "denied",
+                            IspError::Panel(kind) if kind == "missed" => "missing",
                             _ => "error",
                         },
                         error: Some(error.to_string()),

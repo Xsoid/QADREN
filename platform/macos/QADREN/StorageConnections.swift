@@ -143,8 +143,10 @@ final class StorageConnections: ObservableObject {
         publishChange()
     }
 
+    /// Records the status and keeps the report, so that it survives a restart.
     func recordISPmanagerCheck(id: String, outcome: ISPmanagerCheckReport) {
         do {
+            try StorageRegistryBridge.recordISPmanagerCheck(id: id, report: outcome)
             try StorageRegistryBridge.setStatus(id: id, status: outcome.status)
             refresh()
             publishChange()
@@ -167,6 +169,9 @@ final class StorageConnections: ObservableObject {
         }
         try StorageRegistryBridge.setCredential(id: id)
         try StorageRegistryBridge.setStatus(id: id, status: outcome?.status ?? "disconnected")
+        if let outcome {
+            try StorageRegistryBridge.recordISPmanagerCheck(id: id, report: outcome)
+        }
     }
 
     @discardableResult

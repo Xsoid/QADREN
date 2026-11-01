@@ -26,17 +26,18 @@ enum ISPmanagerAddress {
     }
 }
 
-struct ISPmanagerFunctionReport: Decodable, Equatable {
+struct ISPmanagerFunctionReport: Codable, Equatable {
     let function: String
-    /// `items`, `empty`, `denied`, or `error`.
+    /// `items`, `empty`, `denied`, `missing`, or `error`.
     let result: String
     let error: String?
 }
 
-struct ISPmanagerCategoryReport: Decodable, Equatable, Identifiable {
+struct ISPmanagerCategoryReport: Codable, Equatable, Identifiable {
     var id: String { category }
     let category: String
-    /// `verified_metadata_only`, `permission_denied`, or `unverified`.
+    /// `verified_metadata_only`, `permission_denied`, `unsupported`, or
+    /// `unverified`.
     let state: String
     let functions: [ISPmanagerFunctionReport]
 }
@@ -46,13 +47,16 @@ struct ISPmanagerCategoryReport: Decodable, Equatable, Identifiable {
 struct ISPmanagerSettings: Decodable, Equatable {
     var ssh_port: UInt16
     var host_key_sha256: String?
+    /// The report of the last connection check, kept by the Registry.
+    var last_check: ISPmanagerCheckReport?
+    var last_check_at: Int64?
 
     static let defaults = ISPmanagerSettings(ssh_port: 22, host_key_sha256: nil)
 }
 
 /// The file transport that a check confirmed: `sftp`, or `panel_api` with
 /// the reason why SFTP is not used.
-struct ISPmanagerFileTransport: Decodable, Equatable {
+struct ISPmanagerFileTransport: Codable, Equatable {
     let kind: String
     let reason: String
     let fingerprint: String?
@@ -84,7 +88,7 @@ struct ISPmanagerFileTransport: Decodable, Equatable {
 
 /// The result of one sign-in and capability check. `status` is a Registry
 /// status. The report holds no values from the panel, only result classes.
-struct ISPmanagerCheckReport: Decodable, Equatable {
+struct ISPmanagerCheckReport: Codable, Equatable {
     let status: String
     let error: String?
     let categories: [ISPmanagerCategoryReport]
@@ -173,6 +177,8 @@ enum ISPmanagerCategory {
             (.ready, "Список доступен; экспорт ещё не проверен")
         case "permission_denied":
             (.needsAction, "Нет прав у этого аккаунта")
+        case "unsupported":
+            (.offline, "Нет на этой панели")
         default:
             if !report.functions.isEmpty {
                 (.unknown, "Не проверено")

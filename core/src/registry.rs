@@ -21,6 +21,9 @@ use std::str::FromStr;
 pub struct IspmanagerSettings {
     pub ssh_port: u16,
     pub host_key_sha256: Option<String>,
+    /// The report of the last connection check, as Core produced it.
+    pub last_check: Option<serde_json::Value>,
+    pub last_check_at: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -387,7 +390,7 @@ impl Registry {
         }
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 28 {
+        if version > 29 {
             return Err(RegistryError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -866,6 +869,17 @@ impl Registry {
                  COMMIT;",
             )?;
         }
+        if version <= 28 {
+            // D-027: the last connection check survives a restart. The report
+            // has result classes only, never a password or a session ID.
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE ispmanager_settings ADD COLUMN last_check_json TEXT;
+                 ALTER TABLE ispmanager_settings ADD COLUMN last_check_at INTEGER;
+                 PRAGMA user_version = 29;
+                 COMMIT;",
+            )?;
+        }
         Ok(Self { db })
     }
 
@@ -1040,19 +1054,31 @@ impl Registry {
         let row = self
             .db
             .query_row(
-                "SELECT ssh_port,host_key_sha256 FROM ispmanager_settings WHERE connection_id=?1",
+                "SELECT ssh_port,host_key_sha256,last_check_json,last_check_at
+                 FROM ispmanager_settings WHERE connection_id=?1",
                 [id],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                    ))
+                },
             )
             .optional()?;
         Ok(match row {
-            Some((port, host_key_sha256)) => IspmanagerSettings {
+            Some((port, host_key_sha256, last_check, last_check_at)) => IspmanagerSettings {
                 ssh_port: u16::try_from(port).unwrap_or(crate::ispmanager_sftp::DEFAULT_PORT),
                 host_key_sha256,
+                last_check: last_check.and_then(|text| serde_json::from_str(&text).ok()),
+                last_check_at,
             },
             None => IspmanagerSettings {
                 ssh_port: crate::ispmanager_sftp::DEFAULT_PORT,
                 host_key_sha256: None,
+                last_check: None,
+                last_check_at: None,
             },
         })
     }
@@ -1087,6 +1113,25 @@ impl Registry {
             "INSERT INTO ispmanager_settings(connection_id,host_key_sha256) VALUES (?1,?2)
              ON CONFLICT(connection_id) DO UPDATE SET host_key_sha256=excluded.host_key_sha256",
             params![id, fingerprint],
+        )?;
+        Ok(())
+    }
+
+    /// Stores the report of the last connection check. The report must be a
+    /// JSON object from `ispmanager::check`.
+    pub fn record_ispmanager_check(&self, id: &str, report: &str, at: i64) -> Result<()> {
+        let parsed: serde_json::Value =
+            serde_json::from_str(report).map_err(|_| RegistryError::InvalidEndpoint)?;
+        if !parsed.is_object() || report.len() > 256 * 1024 {
+            return Err(RegistryError::InvalidEndpoint);
+        }
+        self.require_ispmanager(id)?;
+        self.db.execute(
+            "INSERT INTO ispmanager_settings(connection_id,last_check_json,last_check_at)
+             VALUES (?1,?2,?3)
+             ON CONFLICT(connection_id) DO UPDATE SET
+                 last_check_json=excluded.last_check_json,last_check_at=excluded.last_check_at",
+            params![id, report, at],
         )?;
         Ok(())
     }

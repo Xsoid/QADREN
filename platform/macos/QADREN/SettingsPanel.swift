@@ -1363,6 +1363,8 @@ private struct ISPmanagerConnectionDetails: View {
         do {
             credentials = try ISPmanagerKeychain.read(entry.id)
             settings = try StorageRegistryBridge.ispmanagerSettings(id: entry.id)
+            // The last check stays visible after a restart.
+            if report == nil { report = settings.last_check }
             problem = nil
         } catch {
             credentials = nil

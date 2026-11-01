@@ -167,6 +167,8 @@ private func registrySetISPmanagerEndpoint(_ path: UnsafePointer<CChar>?, _ id: 
 private func registryISPmanagerSettings(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_set_ispmanager_ssh_port")
 private func registrySetISPmanagerSSHPort(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ port: UInt16) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_registry_record_ispmanager_check")
+private func registryRecordISPmanagerCheck(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ report: UnsafePointer<CChar>?, _ at: Int64) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_confirm_ispmanager_host_key")
 private func registryConfirmISPmanagerHostKey(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ fingerprint: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_ensure_local_computer")
@@ -1370,6 +1372,19 @@ enum StorageRegistryBridge {
         let _: Bool = try database.withCString { db in
             try id.withCString { value in
                 try unwrap(registrySetISPmanagerSSHPort(db, value, port), as: Bool.self)
+            }
+        }
+    }
+
+    static func recordISPmanagerCheck(id: String, report: ISPmanagerCheckReport) throws {
+        let database = try path
+        let json = String(decoding: try JSONEncoder().encode(report), as: UTF8.self)
+        let now = Int64(Date().timeIntervalSince1970)
+        let _: Bool = try database.withCString { db in
+            try id.withCString { value in
+                try json.withCString { text in
+                    try unwrap(registryRecordISPmanagerCheck(db, value, text, now), as: Bool.self)
+                }
             }
         }
     }

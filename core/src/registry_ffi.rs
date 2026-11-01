@@ -1291,6 +1291,22 @@ pub extern "C" fn qadren_registry_set_ispmanager_ssh_port(
 }
 
 #[no_mangle]
+pub extern "C" fn qadren_registry_record_ispmanager_check(
+    path: *const c_char,
+    id: *const c_char,
+    report: *const c_char,
+    at: i64,
+) -> *mut c_char {
+    let (Some(id), Some(report)) = (input(id), input(report)) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    with_registry(path, |db| {
+        db.record_ispmanager_check(&id, &report, at)?;
+        Ok(json!(true))
+    })
+}
+
+#[no_mangle]
 pub extern "C" fn qadren_registry_confirm_ispmanager_host_key(
     path: *const c_char,
     id: *const c_char,
