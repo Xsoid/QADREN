@@ -7,7 +7,7 @@
 - The repository is public and has the MIT License.
 - `scripts/build-macos.sh` builds `dist/QADREN.app`. It signs with an "Apple Development" identity when one is available. Without one, it uses an ad-hoc signature.
 - QADREN has no Developer ID certificate and no notarization.
-- The `v1.0.0-internal` tag marks an internal ad-hoc build. It is not a public release.
+- An earlier `v1.0.0-internal` tag marked an internal ad-hoc build. The owner removed it on 2026-11-01.
 - `Info.plist` and `core/Cargo.toml` have version `0.1.0`.
 
 ## Decision
