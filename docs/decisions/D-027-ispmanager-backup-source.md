@@ -77,7 +77,7 @@ The owner decided on 2026-11-02: the destination is **one current copy** that ea
 
 1. The selection is a typed list of resources: category, stable provider ID, display hierarchy, and a recursive flag for a folder. It is not a list of file paths. A database or a mailbox is never written as a fake path.
 2. An empty selection means nothing. "Select all accessible resources" is a separate, explicit flag. The D-019 rule "an empty selection means the complete root" does not apply to this mode.
-3. A selected folder includes new descendants. It excludes siblings.
+3. A selected folder includes new descendants. It excludes siblings. Inside a selected folder, the user can clear a check box: this stores an **exclude** rule for that folder or file with all its content (owner decision 2026-11-04). The most specific rule wins, so a selected object inside an excluded folder is in the Scenario again. The walk does not read an excluded object. An excluded object is not copied, and its earlier copy in the destination is not deleted.
 4. A selected resource that is missing, renamed, or not accessible at run time fails as one item with a reason. It never becomes a deletion.
 5. A resource that appears under more than one group, for example a database under a site, has one canonical ID. A run exports it one time.
 
@@ -94,7 +94,7 @@ The owner decided on 2026-11-01: file content uses the transport with the best s
 
 1. **Scope.** The file transport serves the Files category and every category whose data exists only as files: SSH keys (`~/.ssh`), and service configuration files when the account can read them. Other categories use the panel API.
 2. **Same account.** SFTP signs in with the login of the connection. By default it uses the same password and port 22. The connection form can set another port. QADREN never uses root, `su`, `sudo`, or another account.
-3. **SFTP only.** The client opens only the `sftp` subsystem. It never opens a shell or an `exec` channel and never runs a command on the server.
+3. **SFTP and one hash command.** The client opens the `sftp` subsystem for all reads. It never opens a shell. The owner allowed on 2026-11-04 one fixed command for a file hash: `md5sum -- '<path>'` on an `exec` channel, with the path in single quotes and every `'` escaped. The path has no control characters. QADREN runs no other command. When the command fails, the account has no shell, or the answer is not one MD5 for that path, QADREN reads the file one time through SFTP for its MD5. The download always checks the byte count and the MD5 before the publish, so a wrong answer publishes nothing.
 4. **Read-only operations.** The client uses only open for read, read, readdir, stat, lstat, readlink, and close. It never writes, creates, removes, renames, or changes attributes.
 5. **Host key.** The first connection shows the host key fingerprint. The user confirms it one time. The Registry stores the confirmed fingerprint for that `connection_id`; it is not a secret. A different key later stops all SFTP work for that connection with an error. QADREN never accepts a changed key silently.
 6. **Choice per connection.** The connection check tries SFTP sign-in. The capability report states the file transport: `sftp`, or `panel_api` with the reason (no SSH access, sign-in refused, host key not confirmed). A run uses the transport that the last check confirmed and rechecks it before the effect.

@@ -278,6 +278,7 @@ pub fn build_plan(store_path: &std::path::Path, registry: &Registry, id: &str) -
         selected_paths: ScenarioScope::normalized_selection(&scope.selected_paths)
             .map_err(|_| SnapshotError::Blocked("invalid_selection".into()))?,
         deletion_mode: scope.deletion_mode,
+        excluded_paths: scope.excluded_paths,
     };
     let tx = db.unchecked_transaction()?;
     tx.execute("UPDATE plans SET state='building' WHERE id=?1", [id])?;

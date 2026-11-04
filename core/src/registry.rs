@@ -60,9 +60,6 @@ pub enum RegistryError {
     /// The connection cannot be a Scenario endpoint yet. An ISPmanager
     /// connection is a source of a Backup/export Scenario only (D-027).
     UnsupportedScenarioEndpoint,
-    /// A Backup/export Scenario cannot run yet: its export handlers are
-    /// Gate 3 of D-027.
-    BackupRunUnavailable,
     /// Another run of the Scenario is active (D-025 section 2).
     ScenarioRunActive,
     /// A batch item of the Scenario has an unknown result. Its record must
@@ -393,7 +390,7 @@ impl Registry {
         }
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 30 {
+        if version > 31 {
             return Err(RegistryError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -904,6 +901,17 @@ impl Registry {
                       REFERENCES scenario_revisions(scenario_id,revision) ON DELETE RESTRICT
                  );
                  PRAGMA user_version = 30;
+                 COMMIT;",
+            )?;
+        }
+        if version <= 30 {
+            // D-027 section 6: a rule can leave out a folder or a file inside
+            // a selected folder.
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE scenario_revision_resources ADD COLUMN rule TEXT NOT NULL
+                   DEFAULT 'include' CHECK(rule IN ('include','exclude'));
+                 PRAGMA user_version = 31;
                  COMMIT;",
             )?;
         }
@@ -2509,7 +2517,6 @@ impl Registry {
         let reference = self
             .schedule_job_reference(schedule_job_id)?
             .ok_or(RegistryError::NotFound)?;
-        self.require_sync_scenario(&reference.scenario_id)?;
         let transaction = rusqlite::Transaction::new_unchecked(
             &self.db,
             rusqlite::TransactionBehavior::Immediate,
@@ -2630,7 +2637,6 @@ impl Registry {
     /// action of the monitoring Scenario widget (D-025 section 2). The batch
     /// step still requires the confirmed source-wins rule.
     pub fn begin_manual_planning_run(&self, scenario: &ScenarioReference) -> Result<String> {
-        self.require_sync_scenario(&scenario.scenario_id)?;
         let id: String = self
             .db
             .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
@@ -2683,7 +2689,6 @@ impl Registry {
         batch_id: &str,
         deferred_items: u64,
     ) -> Result<String> {
-        self.require_sync_scenario(&scenario.scenario_id)?;
         let id: String = self
             .db
             .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
@@ -3434,16 +3439,34 @@ impl Registry {
             .optional()?;
         let deletion_mode = DeletionMode::parse(&mode.ok_or(RegistryError::NotFound)?)
             .ok_or(RegistryError::IntegrityFailed)?;
+        // A Backup/export revision selects server paths (D-027 section 6). The
+        // source root is `/`, so a path is the server path without its first
+        // slash; the destination keeps it below `files/`.
         let mut statement = self.db.prepare(
             "SELECT relative_path FROM scenario_revision_selection
-             WHERE scenario_id=?1 AND revision=?2 ORDER BY relative_path",
+             WHERE scenario_id=?1 AND revision=?2
+             UNION
+             SELECT substr(provider_id,2) FROM scenario_revision_resources
+             WHERE scenario_id=?1 AND revision=?2 AND category='files' AND rule='include'
+               AND length(provider_id)>1
+             ORDER BY 1",
         )?;
         let selected_paths = statement
+            .query_map(params![id, revision as i64], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<String>, _>>()?;
+        let mut statement = self.db.prepare(
+            "SELECT substr(provider_id,2) FROM scenario_revision_resources
+             WHERE scenario_id=?1 AND revision=?2 AND category='files' AND rule='exclude'
+               AND length(provider_id)>1
+             ORDER BY 1",
+        )?;
+        let excluded_paths = statement
             .query_map(params![id, revision as i64], |row| row.get(0))?
             .collect::<std::result::Result<Vec<String>, _>>()?;
         Ok(ScenarioScope {
             selected_paths,
             deletion_mode,
+            excluded_paths,
         })
     }
 
@@ -3957,10 +3980,21 @@ pub struct BackupResource {
     pub category: String,
     pub provider_id: String,
     pub kind: String,
+    /// `include`, or `exclude` for an object inside a selected folder that
+    /// the Scenario leaves out with all its content.
+    #[serde(default = "BackupResource::include")]
+    pub rule: String,
 }
 
 impl BackupResource {
+    fn include() -> String {
+        "include".to_owned()
+    }
+
     fn valid(&self) -> bool {
+        if !matches!(self.rule.as_str(), "include" | "exclude") {
+            return false;
+        }
         let text_ok = |text: &str| {
             !text.is_empty() && text.len() <= 4096 && !text.chars().any(char::is_control)
         };
@@ -3998,6 +4032,7 @@ impl Registry {
     /// ISPmanager connection; the destination is This Mac or an SMB share.
     pub fn create_backup_scenario(&self, draft: BackupScenarioDraft<'_>) -> Result<String> {
         self.validate_backup_draft(&draft)?;
+        let files_root = backup_files_root(draft.destination_root);
         let id: String = self
             .db
             .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
@@ -4014,7 +4049,7 @@ impl Registry {
                 draft.name.trim(),
                 draft.source_connection_id,
                 draft.destination_connection_id,
-                draft.destination_root,
+                files_root,
                 draft.deletion_mode.as_str()
             ],
         )?;
@@ -4023,10 +4058,12 @@ impl Registry {
         Ok(id)
     }
 
-    /// Store a new revision of a Backup/export Scenario. Older revisions keep
-    /// their own selection. The source connection does not change.
-    pub fn update_backup_scenario(&self, id: &str, draft: BackupScenarioDraft<'_>) -> Result<()> {
+    /// Store a new revision of a Backup/export Scenario and return it. Older
+    /// revisions keep their own selection. The source connection does not
+    /// change.
+    pub fn update_backup_scenario(&self, id: &str, draft: BackupScenarioDraft<'_>) -> Result<u64> {
         self.validate_backup_draft(&draft)?;
+        let files_root = backup_files_root(draft.destination_root);
         let transaction = rusqlite::Transaction::new_unchecked(
             &self.db,
             rusqlite::TransactionBehavior::Immediate,
@@ -4038,7 +4075,7 @@ impl Registry {
             params![
                 draft.name.trim(),
                 draft.destination_connection_id,
-                draft.destination_root,
+                files_root,
                 id,
                 draft.source_connection_id,
                 draft.deletion_mode.as_str()
@@ -4053,7 +4090,7 @@ impl Registry {
             })?;
         insert_backup_revision(&transaction, id, revision as u64, draft.resources)?;
         transaction.commit()?;
-        Ok(())
+        Ok(revision as u64)
     }
 
     /// `sync` or `backup_export`.
@@ -4069,7 +4106,7 @@ impl Registry {
     /// The typed selection of one Backup/export Scenario revision.
     pub fn backup_resources(&self, id: &str, revision: u64) -> Result<Vec<BackupResource>> {
         let mut statement = self.db.prepare(
-            "SELECT category,provider_id,kind FROM scenario_revision_resources
+            "SELECT category,provider_id,kind,rule FROM scenario_revision_resources
              WHERE scenario_id=?1 AND revision=?2 ORDER BY category,provider_id",
         )?;
         let rows = statement.query_map(params![id, revision as i64], |row| {
@@ -4077,6 +4114,7 @@ impl Registry {
                 category: row.get(0)?,
                 provider_id: row.get(1)?,
                 kind: row.get(2)?,
+                rule: row.get(3)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -4087,7 +4125,25 @@ impl Registry {
         if !valid_name(draft.name) || !draft.destination_root.starts_with('/') {
             return Err(RegistryError::InvalidName);
         }
-        if draft.resources.is_empty() || !draft.resources.iter().all(BackupResource::valid) {
+        if !draft.resources.iter().all(BackupResource::valid) {
+            return Err(RegistryError::InvalidSelection);
+        }
+        // An empty selection means nothing; an exclusion needs a selected
+        // folder above it.
+        let includes: Vec<&BackupResource> = draft
+            .resources
+            .iter()
+            .filter(|r| r.rule == "include")
+            .collect();
+        let excluded_alone = draft.resources.iter().any(|r| {
+            r.rule == "exclude"
+                && !includes.iter().any(|include| {
+                    include.kind == "dir"
+                        && r.provider_id
+                            .starts_with(&format!("{}/", include.provider_id))
+                })
+        });
+        if includes.is_empty() || excluded_alone {
             return Err(RegistryError::InvalidSelection);
         }
         let adapter = |id: &str| -> Result<String> {
@@ -4105,13 +4161,17 @@ impl Registry {
         }
         Ok(())
     }
+}
 
-    /// Runs of a Backup/export Scenario wait for its export handlers.
-    fn require_sync_scenario(&self, id: &str) -> Result<()> {
-        match self.scenario_mode(id)?.as_str() {
-            "sync" => Ok(()),
-            _ => Err(RegistryError::BackupRunUnavailable),
-        }
+/// The destination root of the Files category: `<destination>/files`
+/// (D-027 section 5.2). The Scenario stores this root; the other data types
+/// use sibling folders of it.
+pub fn backup_files_root(destination_root: &str) -> String {
+    let base = destination_root.trim_end_matches('/');
+    if base.ends_with("/files") {
+        base.to_owned()
+    } else {
+        format!("{base}/files")
     }
 }
 
@@ -4134,14 +4194,15 @@ fn insert_backup_revision(
     for resource in resources {
         transaction.execute(
             "INSERT OR IGNORE INTO scenario_revision_resources(
-                scenario_id,revision,category,provider_id,kind
-             ) VALUES(?1,?2,?3,?4,?5)",
+                scenario_id,revision,category,provider_id,kind,rule
+             ) VALUES(?1,?2,?3,?4,?5,?6)",
             params![
                 id,
                 revision as i64,
                 resource.category,
                 resource.provider_id,
-                resource.kind
+                resource.kind,
+                resource.rule
             ],
         )?;
     }
@@ -4941,6 +5002,7 @@ mod tests {
         let scope = ScenarioScope {
             selected_paths: vec!["Docs/a.txt".into(), "Docs".into(), "Photos".into()],
             deletion_mode: DeletionMode::Simple,
+            excluded_paths: Vec::new(),
         };
         let id = db
             .create_scenario_with_scope(
@@ -4958,6 +5020,7 @@ mod tests {
             ScenarioScope {
                 selected_paths: vec!["Docs".into(), "Photos".into()],
                 deletion_mode: DeletionMode::Simple,
+                excluded_paths: Vec::new(),
             }
         );
 
@@ -4999,6 +5062,7 @@ mod tests {
             let scope = ScenarioScope {
                 selected_paths: vec![path.into()],
                 deletion_mode: DeletionMode::Paranoid,
+                excluded_paths: Vec::new(),
             };
             assert!(matches!(
                 db.create_scenario_with_scope(

@@ -249,6 +249,9 @@ struct BackupResource: Codable, Hashable {
     let category: String
     let provider_id: String
     let kind: String
+    /// `include`, or `exclude` for an object inside a selected folder that
+    /// the Scenario leaves out with all its content.
+    var rule = "include"
 }
 
 /// How a Scenario revision treats a deletion after a confirmed synchronization.
@@ -531,8 +534,6 @@ enum QADRENUserMessage {
             "Яндекс Диск вернул неполные метаданные. Обход продолжится автоматически."
         case "invalid_panel_url":
             "Адрес панели должен иметь вид https://сервер:порт/путь, например https://panel.example.com:1500/ispmgr. Логин и пароль в адрес не вписывайте."
-        case "backup_run_unavailable":
-            "Запуск резервных копий с ISPmanager появится на следующем этапе. Сценарий и выбор сохранены."
         case "unsupported_scenario_endpoint":
             "Панель ISPmanager пока нельзя выбрать в сценарии. Сценарии резервного копирования с неё появятся на следующем этапе."
         case "yandex_source_only":

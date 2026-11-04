@@ -192,7 +192,6 @@ fn registry_error_code(error: &RegistryError) -> &'static str {
         RegistryError::UnsupportedYandexScope => "yandex_source_only",
         RegistryError::InvalidPanelUrl => "invalid_panel_url",
         RegistryError::UnsupportedScenarioEndpoint => "unsupported_scenario_endpoint",
-        RegistryError::BackupRunUnavailable => "backup_run_unavailable",
         _ => "registry_error",
     }
 }
@@ -289,10 +288,15 @@ pub extern "C" fn qadren_scenarios_save_backup(
             resources: &resources,
             deletion_mode,
         };
+        // The editor showed "the source always wins" before this save, and
+        // the user confirmed it (D-027 section 5.1).
         if id.is_empty() {
-            Ok(json!({"id": db.create_backup_scenario(draft)?}))
+            let id = db.create_backup_scenario(draft)?;
+            db.confirm_scenario_source_wins(&id, 1)?;
+            Ok(json!({"id": id}))
         } else {
-            db.update_backup_scenario(&id, draft)?;
+            let revision = db.update_backup_scenario(&id, draft)?;
+            db.confirm_scenario_source_wins(&id, revision)?;
             Ok(json!({"id": id}))
         }
     })
@@ -351,6 +355,7 @@ fn scope_input(value: &str) -> Option<ScenarioScope> {
     Some(ScenarioScope {
         selected_paths: input.selected_paths,
         deletion_mode: DeletionMode::parse(&input.deletion_mode)?,
+        excluded_paths: Vec::new(),
     })
 }
 

@@ -319,6 +319,7 @@ pub fn plan_scoped(
     let scope = ScenarioScope {
         selected_paths,
         deletion_mode: scope.deletion_mode,
+        excluded_paths: scope.excluded_paths.clone(),
     };
     let skipped = skipped_left
         .iter()
@@ -911,6 +912,7 @@ mod tests {
                 .map(|path| (*path).to_owned())
                 .collect(),
             deletion_mode: DeletionMode::Simple,
+            excluded_paths: Vec::new(),
         }
     }
 
@@ -919,6 +921,7 @@ mod tests {
         let scope = ScenarioScope {
             selected_paths: vec!["Docs".into(), "notes.txt".into()],
             deletion_mode: DeletionMode::Paranoid,
+            excluded_paths: Vec::new(),
         };
         let left = [
             file("Docs/a.txt", "a", None),

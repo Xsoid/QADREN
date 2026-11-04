@@ -75,8 +75,8 @@ enum LoginHandoff {
     }
 }
 
-/// Gives the Worker the credentials of every enabled Yandex Disk and SMB
-/// connection from the Keychain. The Worker keeps them in memory only.
+/// Gives the Worker the credentials of every enabled Yandex Disk, SMB, and
+/// ISPmanager connection from the Keychain. The Worker keeps them in memory only.
 enum WorkerCredentials {
     /// Returns false when a Keychain item is missing or locked, or when the
     /// Worker did not take a credential.
@@ -98,6 +98,16 @@ enum WorkerCredentials {
                     continue
                 }
                 if (try? WorkerIPC.provideSMBCredentials(
+                    connectionID: entry.id, login: credentials.login, password: credentials.password
+                )) == nil {
+                    complete = false
+                }
+            case "ispmanager" where entry.credential_ref != nil:
+                guard let credentials = try? ISPmanagerKeychain.read(entry.id) else {
+                    complete = false
+                    continue
+                }
+                if (try? WorkerIPC.provideISPmanagerCredentials(
                     connectionID: entry.id, login: credentials.login, password: credentials.password
                 )) == nil {
                     complete = false

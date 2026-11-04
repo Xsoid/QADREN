@@ -5,6 +5,12 @@
 //! network or remote-Worker protocol.
 
 use qadren_core::confirmation::{Confirmation, EvidenceLevel};
+use qadren_core::ispmanager_execution::{
+    run_ispmanager_scenario_delete, run_ispmanager_scenario_file_download,
+    run_ispmanager_scenario_update,
+};
+use qadren_core::ispmanager_sftp::SftpConnection;
+use qadren_core::job_execution::SftpFailure;
 use qadren_core::job_execution::{
     local_directory_reconciliation_candidates, local_file_copy_reconciliation_candidates,
     reconcile_local_directory_create, reconcile_local_file_copy, reconcile_local_rule_delete,
@@ -26,9 +32,9 @@ use qadren_core::registry::{
 use qadren_core::scenario_planner::{ObservedFile, PlanAction};
 use qadren_core::schedule_dispatch::dispatch_pending_schedule_jobs;
 use qadren_core::snapshot::{
-    walk_local_step, walk_yandex_step, SnapshotError, SnapshotKey, SnapshotStore,
+    walk_local_step, walk_sftp_step, walk_yandex_step, SnapshotError, SnapshotKey, SnapshotStore,
 };
-use qadren_core::storage_access::{SMB_SHARE, YANDEX_DISK};
+use qadren_core::storage_access::{ISPMANAGER, SMB_SHARE, YANDEX_DISK};
 use qadren_core::yandex::{YandexError, YandexMetadataClient};
 use qadren_core::yandex_execution::{
     run_yandex_scenario_delete, run_yandex_scenario_file_download, run_yandex_scenario_update,
@@ -223,6 +229,59 @@ fn yandex_source_connection(
     };
     matches!(registry.get(&source), Ok(Some(connection)) if connection.adapter == YANDEX_DISK)
         .then_some(source)
+}
+
+/// The ISPmanager source connection of a Backup/export revision (D-027).
+fn ispmanager_source_connection(
+    registry: &Registry,
+    scenario_id: &str,
+    revision: u64,
+) -> Option<String> {
+    let scenario = registry
+        .get_scenario_revision(scenario_id, revision)
+        .ok()??;
+    (scenario.direction == "left_to_right"
+        && matches!(registry.get(&scenario.left_connection_id), Ok(Some(connection)) if connection.adapter == ISPMANAGER))
+        .then_some(scenario.left_connection_id)
+}
+
+/// Open the SFTP session of an ISPmanager connection with the login that the
+/// app gave in memory and the host key that the user confirmed.
+fn open_sftp(paths: &WorkerPaths, connection_id: &str) -> Result<SftpConnection, &'static str> {
+    let (login, password) = runner()
+        .ispmanager_login(connection_id)
+        .ok_or("ispmanager_login_required")?;
+    let registry = Registry::open(&paths.registry).map_err(|_| "registry_unavailable")?;
+    let connection = registry
+        .get(connection_id)
+        .ok()
+        .flatten()
+        .filter(|connection| connection.enabled && connection.adapter == ISPMANAGER)
+        .ok_or("ispmanager_connection_unavailable")?;
+    let url = connection
+        .endpoint_url
+        .as_deref()
+        .and_then(|url| qadren_core::ispmanager::PanelUrl::parse(url).ok())
+        .ok_or("ispmanager_connection_unavailable")?;
+    let settings = registry
+        .ispmanager_settings(connection_id)
+        .map_err(|_| "registry_unavailable")?;
+    let host_key = settings
+        .host_key_sha256
+        .ok_or("ispmanager_host_key_unconfirmed")?;
+    drop(registry);
+    SftpConnection::open(url.host(), settings.ssh_port, &login, &password, &host_key).map_err(
+        |error| {
+            use qadren_core::ispmanager_sftp::SftpCheck;
+            match error {
+                SftpCheck::HostKeyChanged { .. } | SftpCheck::HostKeyUnconfirmed { .. } => {
+                    "ispmanager_host_key_changed"
+                }
+                SftpCheck::AuthRefused => "ispmanager_sign_in_refused",
+                _ => "ispmanager_network_error",
+            }
+        },
+    )
 }
 
 /// Run one Yandex Disk to Mac download. `None` replacement is a Create.
@@ -818,10 +877,17 @@ fn advance_scenario_run(paths: &WorkerPaths, run: &ScenarioRun) -> Result<(), St
         }
         Err(_) => return Err("registry_unavailable".to_string()),
     }
-    // A Yandex Disk run without a token from the app waits (D-024 stage A).
+    // A Yandex Disk run without a token from the app waits (D-024 stage A),
+    // and a Backup/export run without its ISPmanager login (D-027).
     let needs_sign_in =
         yandex_source_connection(&registry, &run.scenario.scenario_id, run.scenario.revision)
-            .is_some_and(|connection| runner().token(&connection).is_none());
+            .is_some_and(|connection| runner().token(&connection).is_none())
+            || ispmanager_source_connection(
+                &registry,
+                &run.scenario.scenario_id,
+                run.scenario.revision,
+            )
+            .is_some_and(|connection| runner().ispmanager_login(&connection).is_none());
     let finished = match run.state.as_str() {
         "planning" => advance_planning_run(paths, &registry, run, needs_sign_in)?,
         "executing" => advance_executing_run(&registry, run, needs_sign_in)?,
@@ -829,9 +895,113 @@ fn advance_scenario_run(paths: &WorkerPaths, run: &ScenarioRun) -> Result<(), St
     };
     drop(registry);
     if finished {
+        write_backup_manifest(paths, &run.id);
         finish_run_job(paths, &run.id)?;
     }
     Ok(())
+}
+
+/// Write `manifest.json` into the root of a Backup/export copy after a run
+/// (D-027 section 5.6). It replaces the previous manifest atomically and
+/// does not go into the Trash: it describes the last run only. A failure
+/// leaves the previous manifest and does not change the run result.
+fn write_backup_manifest(paths: &WorkerPaths, run_id: &str) {
+    let Ok(registry) = Registry::open(&paths.registry) else {
+        return;
+    };
+    let Ok(Some(run)) = registry.scenario_run(run_id) else {
+        return;
+    };
+    let (id, revision) = (&run.scenario.scenario_id, run.scenario.revision);
+    if registry.scenario_mode(id).ok().as_deref() != Some("backup_export") {
+        return;
+    }
+    let Ok(Some(scenario)) = registry.get_scenario_revision(id, revision) else {
+        return;
+    };
+    if !qadren_core::storage_access::connection_id_ready(
+        &registry,
+        &paths.registry,
+        &scenario.right_connection_id,
+    ) {
+        return;
+    }
+    let Some(root) = Path::new(&scenario.right_root).parent() else {
+        return;
+    };
+    let resources = registry.backup_resources(id, revision).unwrap_or_default();
+    let summary = run
+        .batch_id
+        .as_deref()
+        .and_then(|batch| {
+            registry
+                .scenario_create_batch_summary(batch, unix_now())
+                .ok()
+        })
+        .flatten();
+    let result = match (run.state.as_str(), &summary) {
+        ("completed", Some(summary)) if summary.failed + summary.unknown == 0 => "complete",
+        ("completed", None) => "complete",
+        ("cancelled", _) => "cancelled",
+        (_, Some(summary)) if summary.completed > 0 => "partial",
+        _ => "failed",
+    };
+    let finished_at = chrono::DateTime::<chrono::Utc>::from_timestamp(
+        run.finished_at.unwrap_or_else(unix_now),
+        0,
+    )
+    .map(|time| time.to_rfc3339());
+    let manifest = serde_json::json!({
+        "format": "qadren-ispmanager-backup/1",
+        "scenario_id": id,
+        "scenario_revision": revision,
+        "run_id": run.id,
+        "trigger": run.trigger,
+        "result": result,
+        "error": run.error,
+        "finished_at": finished_at,
+        "categories": {
+            "files": {
+                "folder": "files",
+                "artifact": "file",
+                "transport": "sftp",
+                "integrity": "byte count and MD5 checked before publish",
+                "selected": resources
+                    .iter()
+                    .filter(|resource| resource.category == "files")
+                    .collect::<Vec<_>>(),
+                "items": summary.as_ref().map(|summary| serde_json::json!({
+                    "total": summary.total,
+                    "completed": summary.completed,
+                    "failed": summary.failed,
+                    "unknown": summary.unknown,
+                    "cancelled": summary.cancelled,
+                    "not_executed": run.deferred_items,
+                })),
+                "omissions": "symbolic links and special files are not copied",
+            },
+        },
+    });
+    let Ok(text) = serde_json::to_vec_pretty(&manifest) else {
+        return;
+    };
+    let staging = root.join(format!(".qadren-manifest-{}.tmp", std::process::id()));
+    let written = (|| -> std::io::Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging)?;
+        file.write_all(&text)?;
+        file.sync_all()?;
+        fs::rename(&staging, root.join("manifest.json"))
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&staging);
+        eprintln!(
+            "qadren-worker: {} manifest of run {run_id} not written",
+            log_time()
+        );
+    }
 }
 
 /// Request the plan of a planning run, or start the batch of its complete
@@ -1106,21 +1276,22 @@ fn snapshot_keys(
     let scenario = registry
         .get_scenario_revision(scenario_id, revision)
         .ok()??;
-    let selection = registry
+    let scope = registry
         .get_scenario_revision_scope(scenario_id, revision)
-        .ok()?
-        .selected_paths;
+        .ok()?;
+    let (selection, exclusions) = (scope.selected_paths, scope.excluded_paths);
     let key = |connection_id: &str, root: &str| {
         let adapter = registry.get(connection_id).ok()??.adapter;
         Some(SnapshotKey {
             connection_id: connection_id.to_owned(),
-            kind: if adapter == YANDEX_DISK {
-                YANDEX_DISK.to_owned()
+            kind: if adapter == YANDEX_DISK || adapter == ISPMANAGER {
+                adapter
             } else {
                 "local".to_owned()
             },
             root: root.to_owned(),
             selection: selection.clone(),
+            exclusions: exclusions.clone(),
         })
     };
     Some((
@@ -1133,7 +1304,14 @@ fn snapshot_keys(
 /// exits (D-024 stage 3).
 fn run_snapshots_forever(paths: WorkerPaths) {
     loop {
-        let worked = run_snapshot_pass(&paths);
+        // A panic in one pass must not stop every later walk (found on
+        // 2026-11-04: one SFTP panic stopped all snapshots).
+        let worked =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_snapshot_pass(&paths)))
+                .unwrap_or_else(|_| {
+                    eprintln!("qadren-worker: {} snapshot pass panicked", log_time());
+                    false
+                });
         thread::sleep(if worked {
             Duration::from_millis(5)
         } else {
@@ -1153,7 +1331,27 @@ fn run_snapshot_pass(paths: &WorkerPaths) -> bool {
     let client = YandexMetadataClient::new().ok();
     let mut worked = false;
     for snapshot in walking {
-        let result = if snapshot.key.kind == YANDEX_DISK {
+        let result = if snapshot.key.kind == ISPMANAGER {
+            // Without a login from the app the walk waits.
+            if runner()
+                .ispmanager_login(&snapshot.key.connection_id)
+                .is_none()
+            {
+                continue;
+            }
+            match runner().checkout_sftp(paths, &snapshot.key.connection_id) {
+                Ok(connection) => {
+                    let result = walk_sftp_step(&store, &connection, &snapshot.key, &snapshot.id);
+                    let healthy = !matches!(result, Err(SnapshotError::Transient(_)));
+                    runner().checkin_sftp(&snapshot.key.connection_id, connection, healthy);
+                    result
+                }
+                Err(code @ ("ispmanager_host_key_unconfirmed" | "ispmanager_host_key_changed")) => {
+                    Err(SnapshotError::Blocked(code.into()))
+                }
+                Err(code) => Err(SnapshotError::Transient(code.into())),
+            }
+        } else if snapshot.key.kind == YANDEX_DISK {
             // Without a token from the app the walk waits.
             let (Some(token), Some(client)) =
                 (runner().token(&snapshot.key.connection_id), client.as_ref())
@@ -1560,6 +1758,18 @@ fn start_snapshots(paths: &WorkerPaths, request: &Request) -> serde_json::Value 
     let Some((left, right)) = snapshot_keys(&registry, scenario_id, revision) else {
         return serde_json::json!({"ok": false, "status": "scenario_unavailable"});
     };
+    // The `files/` folder of a Backup/export destination (D-027 section 5.2)
+    // must exist before the destination walk: a missing root is an error.
+    if left.kind == ISPMANAGER {
+        let files_root = Path::new(&right.root);
+        if let (Some(parent), Some(name)) = (files_root.parent(), files_root.file_name()) {
+            let created = LocalFilesystem::open(parent)
+                .and_then(|destination| destination.create_directory_tree(Path::new(name)));
+            if created.is_err() && !files_root.is_dir() {
+                return serde_json::json!({"ok": false, "status": "local_root_unavailable"});
+            }
+        }
+    }
     if let (Some(connection), Some(AccessToken(token))) = (
         yandex_source_connection(&registry, scenario_id, revision),
         request.access_token.as_ref(),
@@ -1607,12 +1817,30 @@ const DUE_PAGE: usize = 256;
 /// Parallel downloads for each Yandex Disk connection (D-024).
 const YANDEX_PARALLEL_DOWNLOADS: usize = 2;
 
+/// Idle SFTP sessions for each ISPmanager connection: one for the walk and
+/// the parallel downloads (`YANDEX_PARALLEL_DOWNLOADS`).
+const SFTP_POOL_SIZE: usize = 3;
+/// A session idle longer than this closes: the SSH inactivity timeout of
+/// the client is 60 s.
+const SFTP_IDLE_LIMIT: Duration = Duration::from_secs(30);
+
+struct PooledSftp {
+    connection: SftpConnection,
+    returned: std::time::Instant,
+}
+
 /// State of the run thread that the IPC thread can read (D-024).
 struct Runner {
     /// Yandex Disk access tokens by connection ID, from the app. Memory only.
     tokens: Mutex<HashMap<String, String>>,
     /// SMB logins and passwords by connection ID, from the app. Memory only.
     smb_logins: Mutex<HashMap<String, (String, String)>>,
+    /// ISPmanager logins and passwords by connection ID (D-027). Memory only.
+    ispmanager_logins: Mutex<HashMap<String, (String, String)>>,
+    /// Open SFTP sessions by connection ID that wait for the next file or
+    /// walk step. One SSH sign-in for each file was too slow and fills the
+    /// server log (2026-11-04).
+    sftp_pool: Mutex<HashMap<String, Vec<PooledSftp>>>,
     /// The login that the server refused, by connection ID. The app sends
     /// the same login again every minute; it is not used again.
     smb_refused: Mutex<HashMap<String, (String, String)>>,
@@ -1633,6 +1861,61 @@ impl Runner {
     /// True while a restart waits: running effects finish, new ones wait.
     fn draining(&self) -> bool {
         unix_now() < self.drain_until.load(Ordering::SeqCst)
+    }
+
+    fn remember_ispmanager_login(&self, connection_id: &str, login: &str, password: &str) {
+        let credentials = (login.to_owned(), password.to_owned());
+        let changed = self.ispmanager_logins.lock().is_ok_and(|mut logins| {
+            logins.insert(connection_id.to_owned(), credentials.clone()) != Some(credentials)
+        });
+        // Sessions of an earlier login are not used again.
+        if changed {
+            if let Ok(mut pool) = self.sftp_pool.lock() {
+                pool.remove(connection_id);
+            }
+        }
+    }
+
+    /// An idle session from the pool, or a new one.
+    fn checkout_sftp(
+        &self,
+        paths: &WorkerPaths,
+        connection_id: &str,
+    ) -> Result<SftpConnection, &'static str> {
+        let pooled = self.sftp_pool.lock().ok().and_then(|mut pool| {
+            let sessions = pool.get_mut(connection_id)?;
+            sessions.retain(|session| session.returned.elapsed() < SFTP_IDLE_LIMIT);
+            sessions.pop()
+        });
+        match pooled {
+            Some(session) => Ok(session.connection),
+            None => open_sftp(paths, connection_id),
+        }
+    }
+
+    /// Return a session after use. A session after a network or session
+    /// error closes instead.
+    fn checkin_sftp(&self, connection_id: &str, connection: SftpConnection, healthy: bool) {
+        if !healthy {
+            return;
+        }
+        if let Ok(mut pool) = self.sftp_pool.lock() {
+            let sessions = pool.entry(connection_id.to_owned()).or_default();
+            if sessions.len() < SFTP_POOL_SIZE {
+                sessions.push(PooledSftp {
+                    connection,
+                    returned: std::time::Instant::now(),
+                });
+            }
+        }
+    }
+
+    fn ispmanager_login(&self, connection_id: &str) -> Option<(String, String)> {
+        self.ispmanager_logins
+            .lock()
+            .ok()?
+            .get(connection_id)
+            .cloned()
     }
 
     fn remember_token(&self, connection_id: &str, token: &str) {
@@ -1677,6 +1960,8 @@ fn runner() -> &'static Runner {
     RUNNER.get_or_init(|| Runner {
         tokens: Mutex::new(HashMap::new()),
         smb_logins: Mutex::new(HashMap::new()),
+        ispmanager_logins: Mutex::new(HashMap::new()),
+        sftp_pool: Mutex::new(HashMap::new()),
         smb_refused: Mutex::new(HashMap::new()),
         smb_retry: Mutex::new(HashMap::new()),
         active: AtomicUsize::new(0),
@@ -1692,7 +1977,14 @@ fn unix_now() -> i64 {
 /// The run thread: start due batch children until the Worker exits.
 fn run_batches_forever(paths: WorkerPaths) {
     loop {
-        run_due_batch_children(&paths);
+        // A panic in one pass must not stop every later effect.
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_due_batch_children(&paths)
+        }))
+        .is_err()
+        {
+            eprintln!("qadren-worker: {} batch pass panicked", log_time());
+        }
         thread::sleep(Duration::from_secs(1));
     }
 }
@@ -1745,6 +2037,18 @@ fn run_due_batch_children(paths: &WorkerPaths) {
         };
         let destination = if child.source_is_left { right } else { left };
         let mut slots = vec![format!("write:{destination}")];
+        let ispmanager = ispmanager_source_connection(
+            &registry,
+            &child.scenario.scenario_id,
+            child.scenario.revision,
+        );
+        if let Some(connection) = &ispmanager {
+            // A Backup/export batch waits for its login from the app.
+            if runner().ispmanager_login(connection).is_none() {
+                continue;
+            }
+            slots.push(format!("sftp:{connection}"));
+        }
         if let Some(connection) = &source {
             // A Yandex batch waits for its token; its children stay pending.
             if runner().token(connection).is_none() {
@@ -1755,6 +2059,7 @@ fn run_due_batch_children(paths: &WorkerPaths) {
         queue.push_back(PoolItem {
             child,
             yandex: source,
+            ispmanager,
             slots,
         });
     }
@@ -1770,13 +2075,15 @@ const DESTINATION_PARALLEL_EFFECTS: usize = 2;
 struct PoolItem {
     child: DueBatchChild,
     yandex: Option<String>,
+    /// The ISPmanager source of a Backup/export child (D-027).
+    ispmanager: Option<String>,
     /// Limited resources that this child uses: its destination connection
     /// and, for a Yandex Disk source, the download slots of that connection.
     slots: Vec<String>,
 }
 
 fn slot_limit(slot: &str) -> usize {
-    if slot.starts_with("yandex:") {
+    if slot.starts_with("yandex:") || slot.starts_with("sftp:") {
         YANDEX_PARALLEL_DOWNLOADS
     } else {
         DESTINATION_PARALLEL_EFFECTS
@@ -1840,6 +2147,12 @@ fn run_pool(paths: &WorkerPaths, queue: std::collections::VecDeque<PoolItem>) {
 }
 
 fn run_pool_item(paths: &WorkerPaths, item: &PoolItem) {
+    if let Some(connection) = &item.ispmanager {
+        if still_due(paths, &item.child) {
+            run_ispmanager_batch_child(paths, &item.child, connection);
+        }
+        return;
+    }
     match &item.yandex {
         Some(connection) => {
             // A 401 removes the token; the batch then waits.
@@ -1886,6 +2199,67 @@ fn job_state(paths: &WorkerPaths, job_id: &str) -> Option<JobState> {
         .get(job_id)
         .ok()?
         .map(|job| job.state)
+}
+
+/// Run one child of a Backup/export batch on its own SFTP session and
+/// record its outcome (D-027 section 7a).
+fn run_ispmanager_batch_child(paths: &WorkerPaths, child: &DueBatchChild, connection_id: &str) {
+    runner().active.fetch_add(1, Ordering::SeqCst);
+    let result = (|| {
+        if let Some(state) = job_state(paths, &child.job_id) {
+            return Ok(LocalFileCopyStatus::Existing(state));
+        }
+        let connection = runner()
+            .checkout_sftp(paths, connection_id)
+            .map_err(|_| LocalFileCopyError::Sftp(SftpFailure::SessionUnavailable))?;
+        let (scenario_id, revision) = (&child.scenario.scenario_id, child.scenario.revision);
+        let result = match child.kind {
+            BatchChildKind::Create => run_ispmanager_scenario_file_download(
+                &paths.jobs,
+                &paths.registry,
+                scenario_id,
+                revision,
+                &child.relative_path,
+                &child.job_id,
+                &connection,
+                None,
+            ),
+            BatchChildKind::Update => run_ispmanager_scenario_update(
+                &paths.jobs,
+                &paths.registry,
+                scenario_id,
+                revision,
+                &child.relative_path,
+                &child.job_id,
+                &connection,
+            ),
+            BatchChildKind::Delete => run_ispmanager_scenario_delete(
+                &paths.jobs,
+                &paths.registry,
+                scenario_id,
+                revision,
+                &child.relative_path,
+                &child.job_id,
+                &connection,
+            )
+            .map(|status| match status {
+                LocalRuleDeleteStatus::MovedToTrash | LocalRuleDeleteStatus::DeletedPermanently => {
+                    LocalFileCopyStatus::Completed
+                }
+                LocalRuleDeleteStatus::Existing(state) => LocalFileCopyStatus::Existing(state),
+            }),
+        };
+        let healthy = !matches!(
+            result,
+            Err(LocalFileCopyError::Sftp(
+                SftpFailure::Network | SftpFailure::SessionUnavailable
+            ))
+        );
+        runner().checkin_sftp(connection_id, connection, healthy);
+        result
+    })();
+    record_batch_child_outcome(paths, child, None, result);
+    runner().active.fetch_sub(1, Ordering::SeqCst);
 }
 
 /// Run one batch child and record its outcome, or schedule its retry.
@@ -2043,6 +2417,17 @@ fn classify(error: &LocalFileCopyError) -> (Failure, String) {
             };
             (failure, code)
         }
+        E::Sftp(failure) => match failure {
+            SftpFailure::NotFound => (Failure::Permanent, "ispmanager_not_found".into()),
+            SftpFailure::PermissionDenied => {
+                (Failure::Permanent, "ispmanager_permission_denied".into())
+            }
+            SftpFailure::SessionUnavailable => {
+                (Failure::Transient, "ispmanager_session_unavailable".into())
+            }
+            SftpFailure::Network => (Failure::Transient, "ispmanager_network_error".into()),
+            SftpFailure::Changed => (Failure::Transient, "ispmanager_source_changed".into()),
+        },
         E::OutcomeUnknown(_) => (Failure::Unproven, "outcome_unknown".into()),
         E::VerificationFailed => (Failure::Unproven, "verification_failed".into()),
         E::ConnectionUnavailable => (Failure::Transient, "local_connection_unavailable".into()),
@@ -2836,6 +3221,30 @@ fn handle_client(mut stream: UnixStream, paths: &WorkerPaths, stop: &mut bool) {
                 },
             );
         }
+        "provide_ispmanager_credentials" => {
+            let ok = match (
+                request.connection_id.as_deref(),
+                request.login.as_deref(),
+                request.password.as_ref(),
+            ) {
+                (Some(connection), Some(login), Some(AccessToken(password)))
+                    if !connection.is_empty() && !login.is_empty() =>
+                {
+                    runner().remember_ispmanager_login(connection, login, password);
+                    true
+                }
+                _ => false,
+            };
+            respond(
+                &mut stream,
+                &Response {
+                    ok,
+                    status: if ok { "updated" } else { "invalid_request" },
+                    staged: None,
+                    dispatched: None,
+                },
+            );
+        }
         "provide_smb_credentials" => {
             let ok = match (
                 request.connection_id.as_deref(),
@@ -3315,6 +3724,8 @@ mod tests {
         let runner = Runner {
             tokens: Mutex::new(HashMap::new()),
             smb_logins: Mutex::new(HashMap::new()),
+            ispmanager_logins: Mutex::new(HashMap::new()),
+            sftp_pool: Mutex::new(HashMap::new()),
             smb_refused: Mutex::new(HashMap::new()),
             smb_retry: Mutex::new(HashMap::new()),
             active: AtomicUsize::new(0),

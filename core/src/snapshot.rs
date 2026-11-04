@@ -49,20 +49,37 @@ pub type Result<T> = std::result::Result<T, SnapshotError>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotKey {
     pub connection_id: String,
-    /// `yandex_disk`, or `local` for This Mac and an SMB mount.
+    /// `yandex_disk`, `ispmanager` (SFTP, root `/`), or `local` for This Mac
+    /// and an SMB mount.
     pub kind: String,
     /// `disk:/…` for Yandex Disk, an absolute path for a local root.
     pub root: String,
     /// Relative selected paths; empty means the full root.
     pub selection: Vec<String>,
+    /// Relative paths inside the selection that the walk leaves out
+    /// (D-027 section 6).
+    pub exclusions: Vec<String>,
 }
 
 impl SnapshotKey {
     fn fingerprint(&self) -> String {
         let mut selection = self.selection.clone();
         selection.sort();
-        let text =
-            serde_json::json!([self.connection_id, self.kind, self.root, selection]).to_string();
+        // A key without exclusions keeps its earlier fingerprint.
+        let text = if self.exclusions.is_empty() {
+            serde_json::json!([self.connection_id, self.kind, self.root, selection]).to_string()
+        } else {
+            let mut exclusions = self.exclusions.clone();
+            exclusions.sort();
+            serde_json::json!([
+                self.connection_id,
+                self.kind,
+                self.root,
+                selection,
+                exclusions
+            ])
+            .to_string()
+        };
         format!("{:x}", md5::compute(text.as_bytes()))
     }
 }
@@ -208,6 +225,16 @@ impl SnapshotStore {
              ) WITHOUT ROWID;
              CREATE INDEX IF NOT EXISTS snapshot_files_by_key ON snapshot_files(snapshot_id, name_key);",
         )?;
+        let has_exclusions: bool = db.query_row(
+            "SELECT count(*) FROM pragma_table_info('snapshots') WHERE name='exclusions'",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_exclusions {
+            db.execute_batch(
+                "ALTER TABLE snapshots ADD COLUMN exclusions TEXT NOT NULL DEFAULT '[]';",
+            )?;
+        }
         db.pragma_update(None, "foreign_keys", "ON")?;
         Ok(Self { db })
     }
@@ -236,7 +263,12 @@ impl SnapshotStore {
         if key.connection_id.is_empty() || key.root.is_empty() {
             return Err(SnapshotError::InvalidRequest);
         }
-        if key.selection.iter().any(|path| !valid_relative(path)) {
+        if key
+            .selection
+            .iter()
+            .chain(&key.exclusions)
+            .any(|path| !valid_relative(path))
+        {
             return Err(SnapshotError::InvalidRequest);
         }
         let fingerprint = key.fingerprint();
@@ -254,8 +286,9 @@ impl SnapshotStore {
         let tx = self.db.unchecked_transaction()?;
         let id: String = tx.query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
         tx.execute(
-            "INSERT INTO snapshots(id,fingerprint,connection_id,kind,root,selection,state,started_at)
-             VALUES(?1,?2,?3,?4,?5,?6,'walking',?7)",
+            "INSERT INTO snapshots(id,fingerprint,connection_id,kind,root,selection,state,started_at,
+                                   exclusions)
+             VALUES(?1,?2,?3,?4,?5,?6,'walking',?7,?8)",
             params![
                 id,
                 fingerprint,
@@ -263,7 +296,8 @@ impl SnapshotStore {
                 key.kind,
                 key.root,
                 serde_json::to_string(&key.selection).unwrap_or_else(|_| "[]".into()),
-                unix_now()
+                unix_now(),
+                serde_json::to_string(&key.exclusions).unwrap_or_else(|_| "[]".into())
             ],
         )?;
         if key.selection.is_empty() {
@@ -361,12 +395,13 @@ impl SnapshotStore {
     /// Walks that continue now: not waiting for a retry time.
     pub fn walking(&self, now: i64) -> Result<Vec<WalkingSnapshot>> {
         let mut statement = self.db.prepare(
-            "SELECT id,connection_id,kind,root,selection,retry_at FROM snapshots
+            "SELECT id,connection_id,kind,root,selection,retry_at,exclusions FROM snapshots
              WHERE state='walking' AND (retry_at IS NULL OR retry_at<=?1) ORDER BY started_at",
         )?;
         let rows = statement
             .query_map([now], |row| {
                 let selection: String = row.get(4)?;
+                let exclusions: String = row.get(6)?;
                 Ok(WalkingSnapshot {
                     id: row.get(0)?,
                     key: SnapshotKey {
@@ -374,6 +409,7 @@ impl SnapshotStore {
                         kind: row.get(2)?,
                         root: row.get(3)?,
                         selection: serde_json::from_str(&selection).unwrap_or_default(),
+                        exclusions: serde_json::from_str(&exclusions).unwrap_or_default(),
                     },
                     retry_at: row.get(5)?,
                 })
@@ -840,6 +876,121 @@ pub fn walk_local_step(store: &SnapshotStore, id: &str, root: &Path) -> Result<S
     })
 }
 
+/// Folders that one SFTP step lists on one session.
+const SFTP_FOLDERS_PER_STEP: usize = 64;
+
+/// The server path of a snapshot path: the root of an ISPmanager source is
+/// `/`, and a relative path is the server path without its first slash.
+fn server_path(relative: &str) -> String {
+    format!("/{relative}")
+}
+
+fn sftp_file(relative_path: String, meta: &crate::ispmanager_sftp::ObjectMeta) -> SnapshotFile {
+    SnapshotFile {
+        relative_path,
+        size: meta.size,
+        revision: Some(meta.revision()),
+        md5: None,
+        special: false,
+    }
+}
+
+fn sftp_failure(error: crate::ispmanager_sftp::SftpReadError) -> SnapshotError {
+    use crate::ispmanager_sftp::SftpReadError;
+    match error {
+        // A folder that QADREN cannot read must not look empty: its confirmed
+        // files would become deletions (D-027 section 5.5).
+        SftpReadError::PermissionDenied => {
+            SnapshotError::Blocked("ispmanager_permission_denied".into())
+        }
+        SftpReadError::NotFound => SnapshotError::Blocked("ispmanager_selected_missing".into()),
+        SftpReadError::Failed(_) => SnapshotError::Transient("ispmanager_network_error".into()),
+    }
+}
+
+/// List up to 64 pending folders of an ISPmanager source on one SFTP
+/// session (D-027 section 7a). A selected object that is missing stops the
+/// snapshot: it is never a deletion. A link and a special file are skipped
+/// objects that the plan discloses.
+pub fn walk_sftp_step(
+    store: &SnapshotStore,
+    connection: &crate::ispmanager_sftp::SftpConnection,
+    key: &SnapshotKey,
+    id: &str,
+) -> Result<StepOutcome> {
+    // An excluded object is not read at all. A selected path inside it is its
+    // own walk root, so it is still walked.
+    let scope = crate::model::ScenarioScope {
+        selected_paths: key.selection.clone(),
+        excluded_paths: key.exclusions.clone(),
+        ..Default::default()
+    };
+    let folders = store.pending_folders(id, SFTP_FOLDERS_PER_STEP)?;
+    let mut pages = 0;
+    for folder in folders {
+        let path = server_path(&folder.path);
+        if folder.probe {
+            match connection.lstat(&path) {
+                Ok(Some(meta)) if meta.kind == "file" => {
+                    let file = sftp_file(folder.path.clone(), &meta);
+                    store.record_page(id, &folder.path, &[file], &[], None)?;
+                    pages += 1;
+                    continue;
+                }
+                Ok(Some(meta)) if meta.kind != "dir" => {
+                    store.record_page(
+                        id,
+                        &folder.path,
+                        &[skipped(folder.path.clone())],
+                        &[],
+                        None,
+                    )?;
+                    pages += 1;
+                    continue;
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    return Err(SnapshotError::Blocked("ispmanager_selected_missing".into()))
+                }
+                Err(error) => return Err(sftp_failure(error)),
+            }
+        }
+        let entries = match connection.read_dir(&path) {
+            Ok(entries) => entries,
+            // A subfolder removed during the walk has no files now.
+            Err(crate::ispmanager_sftp::SftpReadError::NotFound) if !folder.probe => {
+                store.record_page(id, &folder.path, &[], &[], None)?;
+                pages += 1;
+                continue;
+            }
+            Err(error) => return Err(sftp_failure(error)),
+        };
+        let mut files = Vec::new();
+        let mut subfolders = Vec::new();
+        for (name, meta) in entries {
+            let child = join(&folder.path, &name);
+            if scope.excluded(&child, str::to_owned) {
+                continue;
+            }
+            if unusable_name(&name) {
+                files.push(skipped(child));
+                continue;
+            }
+            match meta.kind {
+                "dir" => subfolders.push(child),
+                "file" => files.push(sftp_file(child, &meta)),
+                _ => files.push(skipped(child)),
+            }
+        }
+        store.record_page(id, &folder.path, &files, &subfolders, None)?;
+        pages += 1;
+    }
+    Ok(StepOutcome {
+        pages,
+        complete: store.finish_if_done(id)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -858,6 +1009,7 @@ mod tests {
             kind: "local".into(),
             root: root.to_string_lossy().into_owned(),
             selection: vec![],
+            exclusions: vec![],
         };
         let id = store.start(&key).unwrap();
         assert_eq!(store.start(&key).unwrap(), id, "a walking key resumes");

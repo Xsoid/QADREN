@@ -131,6 +131,22 @@ pub enum LocalFileCopyError {
     Store(JobStoreError),
     /// A Yandex Disk request failed before any local publish (D-023).
     Remote(crate::yandex::YandexError),
+    /// An ISPmanager SFTP read failed before any local publish (D-027).
+    Sftp(SftpFailure),
+}
+
+/// Why an ISPmanager SFTP source read failed. It never holds a path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SftpFailure {
+    /// The source object is absent or is not a regular file now.
+    NotFound,
+    PermissionDenied,
+    /// The SFTP session could not start: host key, sign-in, or network.
+    SessionUnavailable,
+    /// A network or server error during a read. It can pass later.
+    Network,
+    /// The file changed between the two reads.
+    Changed,
 }
 
 /// Refuse a new interactive Job for a superseded Scenario revision. Staged
@@ -3632,6 +3648,7 @@ mod tests {
         let scope = crate::model::ScenarioScope {
             selected_paths: vec!["report.txt".into()],
             deletion_mode: DeletionMode::Simple,
+            excluded_paths: Vec::new(),
         };
         let (database, registry_path, right_root, scenario_id, trash) =
             rule_delete_fixture("rule-delete", &scope);
@@ -3691,6 +3708,7 @@ mod tests {
         let elsewhere = crate::model::ScenarioScope {
             selected_paths: vec!["Docs".into()],
             deletion_mode: DeletionMode::Simple,
+            excluded_paths: Vec::new(),
         };
         let (database, registry_path, right_root, scenario_id, _) =
             rule_delete_fixture("rule-delete-outside", &elsewhere);
@@ -3722,6 +3740,7 @@ mod tests {
         let scope = crate::model::ScenarioScope {
             selected_paths: Vec::new(),
             deletion_mode: DeletionMode::Simple,
+            excluded_paths: Vec::new(),
         };
         let (database, registry_path, right_root, scenario_id, _) =
             rule_delete_fixture("rule-delete-changed", &scope);

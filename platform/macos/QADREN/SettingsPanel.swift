@@ -1739,14 +1739,14 @@ private struct ScenariosSettingsView: View {
                                       ? "Изменить сценарий"
                                       : "Сценарий использует подключение, которое QADREN не поддерживает")
                             Button("Расписания") { editSchedules(scenario) }
-                                .disabled(!isSupportedScenario(scenario) || scenario.isBackup)
+                                .disabled(!isSupportedScenario(scenario))
                                 .help(!isSupportedScenario(scenario)
                                       ? "Сценарий использует подключение, которое QADREN не поддерживает"
                                       : isLocalScenario(scenario)
                                       ? "Настроить расписания сценария"
                                       : "Настроить расписания. Вход в Яндекс фоновая служба получает от QADREN: после перезапуска Mac запуск ждёт, пока вы откроете QADREN")
                             Button("Проверить план") { previewScenario(scenario) }
-                                .disabled(!isSupportedScenario(scenario) || scenario.isBackup)
+                                .disabled(!isSupportedScenario(scenario))
                                 .help(isSupportedScenario(scenario)
                                       ? "Прочитать только метаданные обеих сторон и показать план без передачи файлов"
                                       : "Сценарий использует подключение, которое QADREN не поддерживает")
@@ -1754,7 +1754,7 @@ private struct ScenariosSettingsView: View {
                         EndpointLine(
                             title: "Источник",
                             connection: connectionName(scenario.left_connection_id),
-                            root: scenario.isBackup ? "выбрано объектов: \(scenario.resources.count)" : scenario.left_root
+                            root: scenario.isBackup ? "выбрано объектов: \(scenario.resources.filter { $0.rule == "include" }.count)" : scenario.left_root
                         )
                         EndpointLine(
                             title: "Назначение",
@@ -1825,7 +1825,7 @@ private struct ScenariosSettingsView: View {
             return "Сценарий использует подключение, которое QADREN не поддерживает. Его запуск, изменение и расписания недоступны; запись сохранена локально."
         }
         if scenario.isBackup {
-            return "Выбор и назначение сохранены. Запуск и расписания резервной копии появятся на следующем этапе."
+            return "Панель ISPmanager → копия: файлы читаются по SFTP, копия обновляется по серверу. Запуск — из этого окна, с панели мониторинга или по расписанию."
         }
         if !isLocalScenario(scenario) {
             return "Яндекс Диск → Mac: план и перенос запускаются из этого окна или по расписанию. После перезапуска Mac запуск по расписанию ждёт, пока вы откроете QADREN. Удаления на Mac пока недоступны."
@@ -2843,7 +2843,7 @@ private struct ScenarioSchedulesView: View {
     private var needsLoginHandoff: Bool {
         let entries = (try? StorageRegistryBridge.list()) ?? []
         return [scenario.left_connection_id, scenario.right_connection_id].contains { id in
-            ["yandex_disk", "smb_share"].contains(entries.first { $0.id == id }?.adapter ?? "")
+            ["yandex_disk", "smb_share", "ispmanager"].contains(entries.first { $0.id == id }?.adapter ?? "")
         }
     }
 
@@ -3406,11 +3406,9 @@ private struct BackupScenarioEditorView: View {
                     }
                     Spacer()
                     Button(scenario == nil ? "Создать сценарий" : "Сохранить изменения") {
-                        // The source-wins rule and automatic deletions are
-                        // confirmed once, at creation or when Simple is chosen.
-                        let switchesToSimple = deletionMode == .simple
-                            && scenario?.deletion_mode != ScenarioDeletionMode.simple.rawValue
-                        if scenario == nil || switchesToSimple { confirmRule = true } else { commit() }
+                        // Each save makes a revision whose "source always wins"
+                        // rule Core records as confirmed (D-027 section 5.1).
+                        confirmRule = true
                     }
                     .keyboardShortcut(.defaultAction)
                     .disabled(!canSave)
@@ -3453,7 +3451,7 @@ private struct BackupScenarioEditorView: View {
                 Label("В папке назначения хранится одна актуальная копия: подпапки по типам данных (files, databases, mailboxes, cron…) и файл manifest.json. Каждый запуск обновляет их. Пустой выбор — ничего не копируется.", systemImage: "square.stack.3d.down.right")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                Label("Запуск резервной копии появится на следующем этапе. Сейчас сохраняются выбор и назначение.", systemImage: "info.circle")
+                Label("Сейчас копируются файлы и папки. Базы данных, почта, Cron и другие типы появятся следующими шагами.", systemImage: "info.circle")
                     .font(.caption).foregroundStyle(.secondary)
                 if let error {
                     SettingsNotice(text: error, symbol: "exclamationmark.triangle")
@@ -3482,7 +3480,9 @@ private struct BackupScenarioEditorView: View {
                 name = scenario.name
                 sourceID = scenario.left_connection_id
                 destinationID = scenario.right_connection_id
-                destinationRoot = scenario.right_root
+                // Core stores `<destination>/files` (D-027 section 5.2).
+                destinationRoot = scenario.right_root.hasSuffix("/files")
+                    ? String(scenario.right_root.dropLast("/files".count)) : scenario.right_root
                 selection = Set(scenario.resources)
                 deletionMode = ScenarioDeletionMode(rawValue: scenario.deletion_mode) ?? .simple
             } else {
@@ -3495,7 +3495,7 @@ private struct BackupScenarioEditorView: View {
     private var canSave: Bool {
         !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !sourceID.isEmpty && !destinationID.isEmpty && !destinationRoot.isEmpty
-            && !selection.isEmpty
+            && selection.contains { $0.rule == "include" }
     }
 
     private var ruleText: String {
@@ -3652,17 +3652,21 @@ private struct ISPmanagerFilePanel: View {
 
     private func row(_ entry: ISPmanagerDirEntry, in folder: String) -> some View {
         let path = folder == "/" ? "/" + entry.name : folder + "/" + entry.name
-        let covered = coveringFolder(of: path) != nil
+        let rule = nearestRule(for: path)
+        let checked = rule?.rule == "include"
+        let inherited = rule != nil && rule?.provider_id != path
         let selectable = entry.kind != "other"
         return HStack(spacing: 8) {
             Toggle("", isOn: Binding(
-                get: { covered || selection.contains { $0.provider_id == path } },
+                get: { checked },
                 set: { toggle(entry, path: path, on: $0) }
             ))
             .toggleStyle(.checkbox)
             .labelsHidden()
-            .disabled(covered || !selectable)
-            .help(covered ? "Входит в выбранную папку" : selectable ? "Выбрать" : "Устройство, сокет или канал не копируется")
+            .disabled(!selectable)
+            .help(!selectable ? "Устройство, сокет или канал не копируется"
+                : checked && inherited ? "Входит в выбранную папку. Снимите галочку, чтобы исключить"
+                : checked ? "Выбрано" : rule?.rule == "exclude" ? "Исключено" : "Выбрать")
             Image(systemName: symbol(entry.kind))
                 .foregroundStyle(entry.kind == "dir" ? StorageConnector.ispmanager.tint : .secondary)
                 .frame(width: 18)
@@ -3674,9 +3678,12 @@ private struct ISPmanagerFilePanel: View {
             } else {
                 Text(entry.name).lineLimit(1).truncationMode(.middle)
             }
-            if hasSelection(inside: path) && !covered {
-                Image(systemName: "checkmark.circle").font(.caption).foregroundStyle(.secondary)
-                    .help("Внутри выбраны объекты")
+            if rule?.rule == "exclude" && rule?.provider_id == path {
+                Text("исключено").font(.caption).foregroundStyle(.orange)
+            }
+            if hasRules(inside: path) {
+                Image(systemName: "minus.circle").font(.caption).foregroundStyle(.secondary)
+                    .help("Внутри есть отдельно выбранные или исключённые объекты")
             }
             Spacer(minLength: 8)
             Text(detail(entry)).font(.caption.monospaced()).foregroundStyle(.secondary)
@@ -3688,25 +3695,39 @@ private struct ISPmanagerFilePanel: View {
 
     @ViewBuilder
     private var summary: some View {
-        let files = selection.filter { $0.category == "files" }.sorted { $0.provider_id < $1.provider_id }
+        let rules = selection.filter { $0.category == "files" }.sorted { $0.provider_id < $1.provider_id }
+        let included = rules.filter { $0.rule == "include" }.count
+        let excluded = rules.count - included
         VStack(alignment: .leading, spacing: 4) {
-            Text(files.isEmpty ? "Ничего не выбрано" : "Выбрано объектов: \(files.count)")
+            Text(rules.isEmpty ? "Ничего не выбрано"
+                : "Выбрано объектов: \(included)" + (excluded > 0 ? " · исключено: \(excluded)" : ""))
                 .font(.caption.weight(.semibold))
-            ForEach(files, id: \.self) { resource in
+            ForEach(rules, id: \.self) { resource in
                 HStack(spacing: 6) {
-                    Image(systemName: symbol(resource.kind)).font(.caption).foregroundStyle(.secondary)
-                    Text(resource.provider_id + (resource.kind == "dir" ? "/ — вся папка" : ""))
+                    Image(systemName: resource.rule == "exclude" ? "nosign" : symbol(resource.kind))
+                        .font(.caption)
+                        .foregroundStyle(resource.rule == "exclude" ? Color.orange : Color.secondary)
+                    Text(resource.provider_id + ruleSuffix(resource))
                         .font(.caption.monospaced())
                         .lineLimit(1).truncationMode(.middle)
                         .textSelection(.enabled)
                     Spacer(minLength: 4)
-                    Button("Убрать", systemImage: "xmark.circle") { selection.remove(resource) }
+                    Button("Убрать", systemImage: "xmark.circle") { remove(resource) }
                         .labelStyle(.iconOnly).buttonStyle(.borderless)
                 }
             }
-            Text("Папка копируется целиком, также новые файлы в ней. Соседние объекты не входят. Ссылка сохраняется как ссылка.")
+            Text("Папка копируется целиком, также новые файлы в ней. Снимите галочку внутри выбранной папки, чтобы исключить объект со всем содержимым. Исключённое не копируется и не удаляется из копии.")
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func ruleSuffix(_ resource: BackupResource) -> String {
+        switch (resource.rule, resource.kind) {
+        case ("exclude", "dir"): "/ — исключить папку"
+        case ("exclude", _): " — исключить"
+        case (_, "dir"): "/ — вся папка"
+        default: ""
         }
     }
 
@@ -3728,25 +3749,45 @@ private struct ISPmanagerFilePanel: View {
         }
     }
 
-    private func coveringFolder(of path: String) -> BackupResource? {
-        selection.first { $0.kind == "dir" && path.hasPrefix($0.provider_id == "/" ? "/" : $0.provider_id + "/") }
+    private static func isInside(_ path: String, _ rule: String) -> Bool {
+        path == rule || path.hasPrefix(rule == "/" ? "/" : rule + "/")
     }
 
-    private func hasSelection(inside path: String) -> Bool {
+    /// The most specific rule at or above `path` (D-027 section 6). A file
+    /// rule covers only that file.
+    private func nearestRule(for path: String, excludingExact: Bool = false) -> BackupResource? {
+        selection
+            .filter { rule in
+                rule.category == "files"
+                    && (rule.provider_id == path ? !excludingExact
+                        : rule.kind == "dir" && Self.isInside(path, rule.provider_id))
+            }
+            .max { $0.provider_id.count < $1.provider_id.count }
+    }
+
+    private func hasRules(inside path: String) -> Bool {
         selection.contains { $0.provider_id.hasPrefix(path + "/") }
     }
 
+    /// A new choice for `path` replaces every rule in its subtree. A rule is
+    /// stored only when the choice differs from the rule above.
     private func toggle(_ entry: ISPmanagerDirEntry, path: String, on: Bool) {
-        if !on {
-            selection = selection.filter { $0.provider_id != path }
-            return
-        }
         let kind = entry.kind == "dir" ? "dir" : entry.kind == "symlink" ? "symlink" : "file"
-        if kind == "dir" {
-            // The folder covers its content: selected descendants are merged.
-            selection = selection.filter { !$0.provider_id.hasPrefix(path + "/") }
+        selection = selection.filter { $0.provider_id != path && !$0.provider_id.hasPrefix(path + "/") }
+        let inheritedOn = nearestRule(for: path)?.rule == "include"
+        if on != inheritedOn {
+            selection.insert(BackupResource(
+                category: "files", provider_id: path, kind: kind, rule: on ? "include" : "exclude"
+            ))
         }
-        selection.insert(BackupResource(category: "files", provider_id: path, kind: kind))
+    }
+
+    /// Removing a selected folder also removes the rules inside it.
+    private func remove(_ resource: BackupResource) {
+        selection = selection.filter {
+            $0 != resource && !(resource.rule == "include" && resource.kind == "dir"
+                && $0.provider_id.hasPrefix(resource.provider_id + "/"))
+        }
     }
 
     private func openDraft() {
