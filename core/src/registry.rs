@@ -353,25 +353,49 @@ pub struct Registry {
     db: Connection,
 }
 
+/// Registry paths that passed `quick_check` in this process.
+static VERIFIED_REGISTRIES: std::sync::Mutex<std::collections::BTreeSet<std::path::PathBuf>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+fn check_integrity(db: &Connection) -> Result<()> {
+    let integrity: String = db.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+    if integrity != "ok" {
+        return Err(RegistryError::IntegrityFailed);
+    }
+    Ok(())
+}
+
 impl Registry {
     pub fn open(path: &Path) -> Result<Self> {
         let db = Connection::open(path)?;
         // The app, the Worker IPC thread, and the Worker run thread write the
         // Registry at the same time (D-024). Wait for a short write.
         db.busy_timeout(std::time::Duration::from_secs(10))?;
+        // Callers open the Registry for each file of a run. `quick_check`
+        // reads every page, so it runs once for each path in a process
+        // (D-028). SQLite still reports corruption that it finds later.
+        let mut verified = VERIFIED_REGISTRIES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !verified.contains(path) {
+            check_integrity(&db)?;
+            // Readers never block the writer, and the Worker run threads
+            // do not wait for one another for each read (D-028).
+            db.pragma_update(None, "journal_mode", "WAL")?;
+            verified.insert(path.to_path_buf());
+        }
+        drop(verified);
         Self::initialize(db)
     }
 
     pub fn in_memory() -> Result<Self> {
-        Self::initialize(Connection::open_in_memory()?)
+        let db = Connection::open_in_memory()?;
+        check_integrity(&db)?;
+        Self::initialize(db)
     }
 
     fn initialize(db: Connection) -> Result<Self> {
         db.pragma_update(None, "foreign_keys", "ON")?;
-        let integrity: String = db.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
-        if integrity != "ok" {
-            return Err(RegistryError::IntegrityFailed);
-        }
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if version > 27 {
