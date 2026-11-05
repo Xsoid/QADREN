@@ -175,8 +175,8 @@ private func registryConfirmISPmanagerHostKey(_ path: UnsafePointer<CChar>?, _ i
 private func scenarioSaveBackup(
     _ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ name: UnsafePointer<CChar>?,
     _ sourceID: UnsafePointer<CChar>?, _ destinationID: UnsafePointer<CChar>?,
-    _ destinationRoot: UnsafePointer<CChar>?, _ resources: UnsafePointer<CChar>?,
-    _ deletionMode: UnsafePointer<CChar>?
+    _ destinationRoot: UnsafePointer<CChar>?, _ sourceRoot: UnsafePointer<CChar>?,
+    _ resources: UnsafePointer<CChar>?, _ deletionMode: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_ensure_local_computer")
 private func registryEnsureLocalComputer(_ path: UnsafePointer<CChar>?, _ name: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
@@ -314,6 +314,8 @@ struct ScenarioRunState: Decodable, Equatable {
         let waiting_for_scenario: String?
         /// The file batch of an executing run.
         var batch_id: String? = nil
+        /// The Scenario revision that the run executes.
+        var revision: UInt64? = nil
     }
     /// The newest finished run, for the monitoring Scenario widget.
     struct LastRun: Decodable, Equatable {
@@ -358,6 +360,8 @@ struct ScenarioPlanAction: Decodable {
     let from_left: Bool?
     let on_left: Bool?
     let reason: String?
+    /// The file count of a whole-folder deletion (D-027 section 5.6b).
+    var files: Int? = nil
 }
 struct ScenarioPlanItem: Decodable, Identifiable {
     let relative_path: String
@@ -497,7 +501,7 @@ enum QADRENUserMessage {
         case "local_scenario_connection_unavailable":
             "Подключение сценария выключено или недоступно. Включите его в разделе «Подключения»."
         case "local_metadata_unavailable":
-            "Не удалось прочитать папку. QADREN не открывает папки, в которых есть символические ссылки или специальные файлы, и не следует по ссылкам. Проверьте папку или выберите другую."
+            "Не удалось прочитать папку. Возможно, диск ещё подключается или временно недоступен, нет прав на папку, или в ней есть символическая ссылка (по ссылкам QADREN не переходит). Нажмите «Повторить»; если ошибка останется, выберите другую папку."
         case "a symbolic link or special file has this name; QADREN does not synchronize it":
             "Под этим именем находится символическая ссылка или специальный файл. QADREN такие объекты не синхронизирует, поэтому действий с этим путём нет."
         case "conflict_stale":
@@ -536,6 +540,26 @@ enum QADRENUserMessage {
             "Адрес панели должен иметь вид https://сервер:порт/путь, например https://panel.example.com:1500/ispmgr. Логин и пароль в адрес не вписывайте."
         case "unsupported_scenario_endpoint":
             "Панель ISPmanager пока нельзя выбрать в сценарии. Сценарии резервного копирования с неё появятся на следующем этапе."
+        case "ispmanager_source_root_outdated":
+            "Сценарий сохранён до того, как домашняя папка аккаунта стала корнем источника, поэтому копия повторяла бы полный путь на сервере. Откройте сценарий через «Изменить» и сохраните его, затем запустите снова."
+        case "databases_failed":
+            "Дамп одной или нескольких баз не снят. Файлы скопированы; прежние дампы этих баз в копии не изменены."
+        case "backup_without_files":
+            "В сценарии выбраны только базы данных: план файлов не нужен. Нажмите «Запустить»."
+        case "ispmanager_database_refused":
+            "MySQL не принял логин или пароль базы из панели. Дамп не снят."
+        case "ispmanager_database_dump_failed":
+            "mysqldump не закончил дамп базы. Дамп не сохранён; прежний файл в копии не изменён."
+        case "ispmanager_database_missing":
+            "Выбранной базы больше нет на панели. Уберите её из сценария."
+        case "ispmanager_database_access_unavailable":
+            "Панель не отдала пользователя или пароль базы. Дамп не снят."
+        case "ispmanager_database_unsupported":
+            "Эта база не MySQL. QADREN пока снимает дампы только MySQL."
+        case "ispmanager_selected_missing":
+            "Выбранная папка или файл на сервере не найдены. Удалений нет. Откройте сценарий через «Изменить» и выберите объекты заново."
+        case "ispmanager_permission_denied":
+            "У аккаунта нет прав на чтение одной из выбранных папок на сервере. Удалений нет. Исключите эту папку или выдайте права."
         case "yandex_source_only":
             "Яндекс Диск пока может быть только источником сценария «В одну сторону», а назначением — этот Mac или сетевой диск."
         case "yandex_deletions_unsupported":
@@ -680,7 +704,8 @@ enum StorageRegistryBridge {
     @discardableResult
     static func saveBackupScenario(
         id: String?, name: String, sourceID: String, destinationID: String,
-        destinationRoot: String, resources: [BackupResource], deletionMode: ScenarioDeletionMode
+        destinationRoot: String, sourceRoot: String, resources: [BackupResource],
+        deletionMode: ScenarioDeletionMode
     ) throws -> String {
         let database = try path
         let json = String(decoding: try JSONEncoder().encode(resources), as: UTF8.self)
@@ -690,12 +715,14 @@ enum StorageRegistryBridge {
                     try sourceID.withCString { source in
                         try destinationID.withCString { destination in
                             try destinationRoot.withCString { root in
-                                try json.withCString { resources in
-                                    try deletionMode.rawValue.withCString { mode in
-                                        try unwrap(
-                                            scenarioSaveBackup(db, id, name, source, destination, root, resources, mode),
-                                            as: NewConnection.self
-                                        )
+                                try sourceRoot.withCString { home in
+                                    try json.withCString { resources in
+                                        try deletionMode.rawValue.withCString { mode in
+                                            try unwrap(
+                                                scenarioSaveBackup(db, id, name, source, destination, root, home, resources, mode),
+                                                as: NewConnection.self
+                                            )
+                                        }
                                     }
                                 }
                             }

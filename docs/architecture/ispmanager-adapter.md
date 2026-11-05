@@ -69,4 +69,4 @@ The probe output contains no user data by design. Check it before you post it to
 
 ## Destination effect
 
-The Local Filesystem executor owns the destination effect (D-027 section 7). The destination is one current copy that each run updates. Each data type has its own subfolder in the destination root: `files/`, `databases/`, `mailboxes/`, `cron/`, and the other category keys (D-027 section 5).
+The Local Filesystem executor owns the destination effect (D-027 section 7). The destination is one current copy that each run updates. Each data type has its own subfolder in the destination root: `files/`, `databases/`, `mailboxes/`, `cron/`, and the other category keys (D-027 section 5). `files/` keeps the path below the home folder of the account, which is the source root of the Scenario.

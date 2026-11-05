@@ -52,10 +52,39 @@ struct ScenarioWidgetSnapshot: Equatable {
     var batchPaused = false
     var batchStopping = false
     var currentPath: String?
+    /// A plan that is being made now: by "Проверить план" or by a run in
+    /// planning. Shows how far the snapshots are.
+    var planCheck: PlanCheck?
     var nextRunAt: Date?
     var hasSchedule = false
     var schedulePaused = false
     var error: String?
+
+    /// The progress of a plan that is not complete yet.
+    struct PlanCheck: Equatable {
+        /// Only what is read so far: the total is unknown until the walk
+        /// ends, and an estimate misleads (owner decision 2026-11-04).
+        struct Side: Equatable {
+            let files: Int
+            let foldersDone: Int
+            let complete: Bool
+        }
+        let source: Side?
+        let destination: Side?
+
+        var detail: String {
+            // One short line for each side: a long line was cut in the
+            // middle and read as "0 files" (found on 2026-11-04).
+            func line(_ title: String, _ side: Side?) -> String {
+                guard let side else { return "\(title): ждёт" }
+                let files = side.files.formatted()
+                if side.complete { return "\(title): готово, файлов \(files)" }
+                return "\(title): файлов \(files), папок \(side.foldersDone.formatted())"
+            }
+            if source?.complete == true, destination?.complete == true { return "Снимки готовы, строю план." }
+            return line("Источник", source) + "\n" + line("Назначение", destination)
+        }
+    }
 
     static func capture(scenarioID: String?) -> (ScenarioWidgetSnapshot, ScenarioEntry?) {
         var snapshot = ScenarioWidgetSnapshot()
@@ -100,6 +129,25 @@ struct ScenarioWidgetSnapshot: Equatable {
                 snapshot.batchPaused = summary.paused
                 snapshot.batchStopping = summary.cancellation_requested
                 snapshot.currentPath = summary.current_path
+            }
+            // A plan in progress, with or without a run (the run waits for the
+            // same plan, so both show the same progress).
+            if run.active == nil || run.active?.state == "planning",
+               // A run follows its own revision, also after a newer save.
+               let status = try? WorkerIPC.planStatus(
+                   scenarioID: scenarioID, revision: run.active?.revision ?? entry.revision
+               ),
+               let plan = status.plan, plan.state == "waiting" || plan.state == "building" {
+                func side(_ info: WorkerSnapshotInfo?) -> PlanCheck.Side? {
+                    info.map {
+                        PlanCheck.Side(files: $0.files, foldersDone: $0.folders_done, complete: $0.state == "complete")
+                    }
+                }
+                let left = side(status.left)
+                let right = side(status.right)
+                snapshot.planCheck = reversed
+                    ? PlanCheck(source: right, destination: left)
+                    : PlanCheck(source: left, destination: right)
             }
             let schedules = try StorageRegistryBridge.listScenarioSchedules(scenarioID: scenarioID).filter(\.enabled)
             snapshot.hasSchedule = !schedules.isEmpty
@@ -181,7 +229,8 @@ struct ScenarioStage: Equatable {
             }
             let trigger = active.trigger == "schedule" ? "по расписанию" : "вручную"
             if active.state == "planning" {
-                return ScenarioStage(frame: .active, tone: .active, headline: "Планирование", detail: "Снимки и план, запуск \(trigger).", active: true, moving: true)
+                let detail = snapshot.planCheck?.detail ?? "Снимки и план, запуск \(trigger)."
+                return ScenarioStage(frame: .active, tone: .active, headline: "Планирование", detail: detail, active: true, moving: true)
             }
             if snapshot.batchStopping {
                 return ScenarioStage(frame: .waiting, tone: .waiting, headline: "Остановка", detail: "Текущий файл завершается, новые не начинаются.", active: true, moving: true)
@@ -190,6 +239,11 @@ struct ScenarioStage: Equatable {
                 return ScenarioStage(frame: .paused, tone: .paused, headline: "Пауза", detail: "Новые файлы не начинаются.", active: true)
             }
             return ScenarioStage(frame: .active, tone: .active, headline: "Копирование", detail: snapshot.currentPath ?? "Запуск \(trigger).", active: true, moving: true)
+        }
+        // "Проверить план" without a run. "Запустить" stays available: a run
+        // takes this same plan.
+        if let check = snapshot.planCheck {
+            return ScenarioStage(frame: .active, tone: .active, headline: "Проверка плана", detail: check.detail, active: false, moving: true)
         }
         if !snapshot.enabled {
             return ScenarioStage(frame: .offline, tone: .offline, headline: "Выключен", detail: "Сценарий выключен в настройках.", active: false)
@@ -278,8 +332,10 @@ struct ScenarioWidget<Actions: View>: View {
                     Text(stage.detail)
                         .font(QDCyber.heading(13, weight: .medium))
                         .foregroundStyle(QDCyber.color(.secondaryText, for: colorScheme))
-                        .lineLimit(compact ? 2 : 3)
+                        // Plan progress has two lines, and each can wrap.
+                        .lineLimit(compact ? 3 : 4)
                         .truncationMode(.middle)
+                        .fixedSize(horizontal: false, vertical: true)
                     if stage.moving {
                         QDCyberActivityBar(stalled: feed.stalledMinutes != nil)
                             .padding(.top, 4)

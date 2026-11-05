@@ -41,6 +41,7 @@ Electron, Chromium bundle, Node.js/Python runtime in production, JVM, Docker, mi
 - Installed macOS package: desired target up to **20 MB**.
 - RAM at rest: desired target up to **40 MB**.
 - CPU without tasks: close to zero, without active polling.
+- CPU during a run: spent on transfer, not on bookkeeping ([D-028](../decisions/D-028-energy-efficiency.md)).
 - No permanent local mirror on the main MacBook.
 - No unrelated content prefetch or mirroring to the main MacBook.
 

@@ -26,6 +26,11 @@ struct ConnectionsWidget<Actions: View>: View {
                         rows.padding(.top, 10)
                     }
                 }
+                if density == .compact, connections.error == nil, problem(aggregate) {
+                    Button("Решить проблему") { openConnections() }
+                        .buttonStyle(QDCyberLinkStyle())
+                        .padding(.top, 12)
+                }
                 if density != .compact || connections.entries.isEmpty || connections.error != nil {
                     Button {
                         openWindow(id: "scenario-settings")
@@ -165,10 +170,26 @@ struct ConnectionsWidget<Actions: View>: View {
                     .foregroundStyle(attention ? kind.cyberColor(for: colorScheme) : QDCyber.color(.mutedText, for: colorScheme))
                     .lineLimit(1)
             }
+            // A problem that needs the user has a way to its fix. "Нет связи"
+            // can pass by itself and has no button.
+            if problem(presentation) {
+                Button("Решить") { openConnections() }
+                    .buttonStyle(QDCyberLinkStyle())
+                    .help("Открыть подключение «\(entry.name)» в настройках")
+            }
         }
         .padding(.vertical, 7)
-        .accessibilityElement(children: .ignore)
+        .accessibilityElement(children: .contain)
         .accessibilityLabel("\(entry.name), \(adapterTitle(entry.adapter)), \(presentation.title)")
+    }
+
+    private func problem(_ presentation: ConnectionPresentationStatus) -> Bool {
+        presentation == .needsAction || presentation == .failed
+    }
+
+    private func openConnections() {
+        openWindow(id: "scenario-settings")
+        NotificationCenter.default.post(name: .qadrenShowConnectionSettings, object: nil)
     }
 
     private func caption(_ text: String) -> some View {

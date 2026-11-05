@@ -38,42 +38,11 @@ struct MonitoringHeader: View {
             .accessibilityLabel("Q.A.D.R.E.N. Контрольная панель")
             .accessibilityAddTraits(.isHeader)
             Spacer(minLength: 12)
-            if isEditing {
-                Menu {
-                    ForEach(MonitoringWidgetKind.allCases) { kind in
-                        Button {
-                            onAdd(kind)
-                        } label: {
-                            Label(kind.title, systemImage: kind.symbol)
-                        }
-                        .help(kind.summary)
-                    }
-                } label: {
-                    Label("Виджет", systemImage: "plus")
-                }
-                .menuStyle(.button)
-                .menuIndicator(.hidden)
-                .buttonStyle(QDCyberOutlineButtonStyle())
-                .fixedSize()
-                .help("Добавить виджет на панель")
-            }
-            if isEditing {
-                Button {
-                    isEditing = false
-                } label: {
-                    Label("Готово", systemImage: "checkmark")
-                }
-                .buttonStyle(QDCyberButtonStyle(tint: QDCyber.color(.accent, for: colorScheme), label: QDCyber.color(.onAccent, for: colorScheme)))
-                .keyboardShortcut(.defaultAction)
-                .help("Завершить компоновку")
-            } else {
-                Button {
-                    isEditing = true
-                } label: {
-                    Label("Компоновка", systemImage: "square.grid.2x2")
-                }
-                .buttonStyle(QDCyberOutlineButtonStyle())
-                .help("Изменить компоновку панели")
+            // In a window the empty title bar toolbar lies over this bar and
+            // takes its clicks, so the controls are a toolbar item there
+            // (found on 2026-11-04). Full screen has no toolbar.
+            if fullScreen {
+                controls
             }
         }
         .padding(.leading, leading)
@@ -82,7 +51,15 @@ struct MonitoringHeader: View {
         .frame(maxWidth: .infinity)
         .background(QDCyber.color(.card, for: colorScheme))
         .overlay(alignment: .bottom) { bottomEdge }
-        .background(WindowFullScreenReader(fullScreen: $fullScreen).frame(width: 0, height: 0))
+        .background(WindowFullScreenReader(fullScreen: $fullScreen, controls: controls).frame(width: 0, height: 0))
+    }
+
+    private var controls: MonitoringLayoutControls {
+        MonitoringLayoutControls(
+            isEditing: isEditing,
+            setEditing: { isEditing = $0 },
+            onAdd: onAdd
+        )
     }
 
     private var leading: CGFloat { fullScreen ? 18 : Self.trafficLights }
@@ -126,6 +103,72 @@ struct MonitoringHeader: View {
     }
 }
 
+/// "+ Виджет", "Готово", and "Компоновка" of the monitoring top bar.
+struct MonitoringLayoutControls: View {
+    let isEditing: Bool
+    let setEditing: (Bool) -> Void
+    let onAdd: (MonitoringWidgetKind) -> Void
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        // Both states take the same room, so the toolbar item keeps one width
+        // and does not move when the mode changes (found on 2026-11-04).
+        ZStack(alignment: .trailing) {
+            editingControls
+                .opacity(isEditing ? 1 : 0)
+                .allowsHitTesting(isEditing)
+                .accessibilityHidden(!isEditing)
+            layoutButton
+                .opacity(isEditing ? 0 : 1)
+                .allowsHitTesting(!isEditing)
+                .accessibilityHidden(isEditing)
+        }
+        // A toolbar shows only the icon of a Label; the bar shows both.
+        .labelStyle(.titleAndIcon)
+        .fixedSize()
+    }
+
+    private var editingControls: some View {
+        HStack(spacing: 12) {
+            Menu {
+                ForEach(MonitoringWidgetKind.allCases) { kind in
+                    Button {
+                        onAdd(kind)
+                    } label: {
+                        Label(kind.title, systemImage: kind.symbol)
+                    }
+                    .help(kind.summary)
+                }
+            } label: {
+                Label("Виджет", systemImage: "plus")
+            }
+            .menuStyle(.button)
+            .menuIndicator(.hidden)
+            .buttonStyle(QDCyberOutlineButtonStyle())
+            .fixedSize()
+            .help("Добавить виджет на панель")
+            Button {
+                setEditing(false)
+            } label: {
+                Label("Готово", systemImage: "checkmark")
+            }
+            .buttonStyle(QDCyberButtonStyle(tint: QDCyber.color(.accent, for: colorScheme), label: QDCyber.color(.onAccent, for: colorScheme)))
+            .keyboardShortcut(isEditing ? .defaultAction : nil)
+            .help("Завершить компоновку")
+        }
+    }
+
+    private var layoutButton: some View {
+        Button {
+            setEditing(true)
+        } label: {
+            Label("Компоновка", systemImage: "square.grid.2x2")
+        }
+        .buttonStyle(QDCyberOutlineButtonStyle())
+        .help("Изменить компоновку панели")
+    }
+}
+
 /// The border of the monitoring window: a thin edge and bright corner marks,
 /// so that the panel reads as one instrument surface.
 struct MonitoringScreenFrame: View {
@@ -162,26 +205,59 @@ struct MonitoringScreenFrame: View {
 /// its title bar for `MonitoringHeader`.
 private struct WindowFullScreenReader: NSViewRepresentable {
     @Binding var fullScreen: Bool
+    let controls: MonitoringLayoutControls
 
     func makeCoordinator() -> Coordinator { Coordinator(fullScreen: $fullScreen) }
 
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
+        context.coordinator.controls.rootView = AnyView(Self.inToolbar(controls))
         DispatchQueue.main.async { context.coordinator.attach(to: view.window) }
         return view
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.controls.rootView = AnyView(Self.inToolbar(controls))
         DispatchQueue.main.async { context.coordinator.attach(to: nsView.window) }
     }
 
+    /// The toolbar puts its last item close to the window edge; the header
+    /// keeps 18 pt there in full screen, so the item adds the difference.
+    private static func inToolbar(_ controls: MonitoringLayoutControls) -> some View {
+        controls.padding(.trailing, 10)
+    }
+
     @MainActor
-    final class Coordinator {
+    final class Coordinator: NSObject, NSToolbarDelegate {
         private var fullScreen: Binding<Bool>
         private weak var window: NSWindow?
         private var observers: [NSObjectProtocol] = []
+        /// The layout controls as the one toolbar item, so that a click
+        /// reaches them in a window.
+        let controls = NSHostingView(rootView: AnyView(EmptyView()))
+        private static let controlsItem = NSToolbarItem.Identifier("qadren.monitoring.layout")
 
         init(fullScreen: Binding<Bool>) { self.fullScreen = fullScreen }
+
+        func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+            [.flexibleSpace, Self.controlsItem]
+        }
+
+        func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+            toolbarDefaultItemIdentifiers(toolbar)
+        }
+
+        func toolbar(
+            _ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
+            willBeInsertedIntoToolbar flag: Bool
+        ) -> NSToolbarItem? {
+            guard itemIdentifier == Self.controlsItem else { return nil }
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.view = controls
+            item.isBordered = false
+            item.label = "Компоновка"
+            return item
+        }
 
         func attach(to window: NSWindow?) {
             guard let window, window !== self.window else { return }
@@ -192,14 +268,14 @@ private struct WindowFullScreenReader: NSViewRepresentable {
                     guard let self, let window else { return }
                     let full = window.styleMask.contains(.fullScreen)
                     self.fullScreen.wrappedValue = full
-                    Self.setTitlebarToolbar(window, present: !full)
+                    self.setTitlebarToolbar(window, present: !full)
                 }
             }
             // Full screen shows a toolbar as a separate bar over the content,
             // so it goes before the transition and comes back after it.
-            let leaving: @Sendable (Notification) -> Void = { [weak window] _ in
+            let leaving: @Sendable (Notification) -> Void = { [weak self, weak window] _ in
                 MainActor.assumeIsolated {
-                    if let window { Self.setTitlebarToolbar(window, present: false) }
+                    if let self, let window { self.setTitlebarToolbar(window, present: false) }
                 }
             }
             observers = [NSWindow.didEnterFullScreenNotification, NSWindow.didExitFullScreenNotification].map {
@@ -210,16 +286,19 @@ private struct WindowFullScreenReader: NSViewRepresentable {
             window.titleVisibility = .hidden
             window.titlebarAppearsTransparent = true
             window.titlebarSeparatorStyle = .none
-            Self.setTitlebarToolbar(window, present: !full)
+            setTitlebarToolbar(window, present: !full)
         }
 
-        /// An empty unified toolbar makes the title bar as tall as the
-        /// header, so macOS centers the traffic lights in it. It has no
-        /// items, so it draws no item separators.
-        @MainActor
-        private static func setTitlebarToolbar(_ window: NSWindow, present: Bool) {
+        /// A unified toolbar makes the title bar as tall as the header, so
+        /// macOS centers the traffic lights in it. Its only item is the
+        /// layout controls; the rest stays empty.
+        private func setTitlebarToolbar(_ window: NSWindow, present: Bool) {
             if present, window.toolbar == nil {
-                window.toolbar = NSToolbar(identifier: "qadren.monitoring.titlebar")
+                let toolbar = NSToolbar(identifier: "qadren.monitoring.titlebar")
+                toolbar.delegate = self
+                toolbar.allowsUserCustomization = false
+                toolbar.displayMode = .iconOnly
+                window.toolbar = toolbar
                 window.toolbarStyle = .unified
             } else if !present, window.toolbar != nil {
                 window.toolbar = nil

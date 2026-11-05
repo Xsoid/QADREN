@@ -269,6 +269,9 @@ pub enum BatchChildKind {
     Create,
     Update,
     Delete,
+    /// A whole destination folder of a Backup/export mirror (D-027
+    /// section 5.6b).
+    DeleteFolder,
 }
 
 impl BatchChildKind {
@@ -277,6 +280,7 @@ impl BatchChildKind {
             Self::Create => "create",
             Self::Update => "update",
             Self::Delete => "delete",
+            Self::DeleteFolder => "delete_folder",
         }
     }
 
@@ -285,6 +289,7 @@ impl BatchChildKind {
             "create" => Some(Self::Create),
             "update" => Some(Self::Update),
             "delete" => Some(Self::Delete),
+            "delete_folder" => Some(Self::DeleteFolder),
             _ => None,
         }
     }
@@ -369,28 +374,52 @@ pub struct Registry {
     db: Connection,
 }
 
+/// Registry paths that passed `quick_check` in this process.
+static VERIFIED_REGISTRIES: std::sync::Mutex<std::collections::BTreeSet<std::path::PathBuf>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+fn check_integrity(db: &Connection) -> Result<()> {
+    let integrity: String = db.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+    if integrity != "ok" {
+        return Err(RegistryError::IntegrityFailed);
+    }
+    Ok(())
+}
+
 impl Registry {
     pub fn open(path: &Path) -> Result<Self> {
         let db = Connection::open(path)?;
         // The app, the Worker IPC thread, and the Worker run thread write the
         // Registry at the same time (D-024). Wait for a short write.
         db.busy_timeout(std::time::Duration::from_secs(10))?;
+        // Callers open the Registry for each file of a run. `quick_check`
+        // reads every page, so it runs once for each path in a process
+        // (D-028). SQLite still reports corruption that it finds later.
+        let mut verified = VERIFIED_REGISTRIES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !verified.contains(path) {
+            check_integrity(&db)?;
+            // Readers never block the writer, and the Worker run threads
+            // do not wait for one another for each read (D-028).
+            db.pragma_update(None, "journal_mode", "WAL")?;
+            verified.insert(path.to_path_buf());
+        }
+        drop(verified);
         Self::initialize(db)
     }
 
     pub fn in_memory() -> Result<Self> {
-        Self::initialize(Connection::open_in_memory()?)
+        let db = Connection::open_in_memory()?;
+        check_integrity(&db)?;
+        Self::initialize(db)
     }
 
     fn initialize(db: Connection) -> Result<Self> {
         db.pragma_update(None, "foreign_keys", "ON")?;
-        let integrity: String = db.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
-        if integrity != "ok" {
-            return Err(RegistryError::IntegrityFailed);
-        }
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 31 {
+        if version > 33 {
             return Err(RegistryError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -912,6 +941,63 @@ impl Registry {
                  ALTER TABLE scenario_revision_resources ADD COLUMN rule TEXT NOT NULL
                    DEFAULT 'include' CHECK(rule IN ('include','exclude'));
                  PRAGMA user_version = 31;
+                 COMMIT;",
+            )?;
+        }
+        if version <= 31 {
+            // D-027 section 7b: the result of each selected database in one
+            // Backup/export run. It holds no access facts.
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE backup_database_results (
+                    run_id TEXT NOT NULL,
+                    provider_id TEXT NOT NULL,
+                    result TEXT NOT NULL
+                      CHECK(result IN ('created','updated','unchanged','failed','cancelled')),
+                    error TEXT,
+                    bytes INTEGER,
+                    md5 TEXT,
+                    finished_at INTEGER NOT NULL,
+                    PRIMARY KEY(run_id, provider_id)
+                 );
+                 PRAGMA user_version = 32;
+                 COMMIT;",
+            )?;
+        }
+        if version <= 32 {
+            // D-027 section 5.6b: a Backup/export mirror deletes a whole
+            // destination folder as one batch child. SQLite cannot change a
+            // CHECK, so the table is copied once.
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE scenario_create_batch_children_v33 (
+                    batch_id TEXT NOT NULL REFERENCES scenario_create_batches(id) ON DELETE RESTRICT,
+                    relative_path TEXT NOT NULL,
+                    source_is_left INTEGER NOT NULL CHECK(source_is_left IN (0,1)),
+                    job_id TEXT NOT NULL UNIQUE,
+                    state TEXT NOT NULL DEFAULT 'pending'
+                      CHECK(state IN ('pending','completed','failed','cancelled','unknown')),
+                    retries INTEGER NOT NULL DEFAULT 0 CHECK(retries >= 0),
+                    next_retry_at INTEGER,
+                    last_error TEXT,
+                    kind TEXT NOT NULL DEFAULT 'create'
+                      CHECK(kind IN ('create','update','delete','delete_folder')),
+                    PRIMARY KEY(batch_id,relative_path)
+                 );
+                 INSERT INTO scenario_create_batch_children_v33(
+                    batch_id,relative_path,source_is_left,job_id,state,
+                    retries,next_retry_at,last_error,kind)
+                 SELECT batch_id,relative_path,source_is_left,job_id,state,
+                    retries,next_retry_at,last_error,kind
+                 FROM scenario_create_batch_children;
+                 DROP TABLE scenario_create_batch_children;
+                 ALTER TABLE scenario_create_batch_children_v33
+                   RENAME TO scenario_create_batch_children;
+                 CREATE INDEX batch_children_due
+                   ON scenario_create_batch_children(state, next_retry_at);
+                 CREATE INDEX batch_children_by_batch
+                   ON scenario_create_batch_children(batch_id, state);
+                 PRAGMA user_version = 33;
                  COMMIT;",
             )?;
         }
@@ -2290,34 +2376,32 @@ impl Registry {
     /// `pending`, without a retry time in the future, in a batch that is not
     /// paused. A cancelled batch is included, so that the Worker records
     /// `cancelled`.
-    pub fn due_scenario_create_batch_children(
+    /// Batches with a child that is due now, in creation order.
+    pub fn due_scenario_batches(&self, now: i64) -> Result<Vec<String>> {
+        let mut statement = self.db.prepare(
+            "SELECT b.id FROM scenario_create_batches b
+             WHERE b.paused=0 AND EXISTS (
+               SELECT 1 FROM scenario_create_batch_children c
+               WHERE c.batch_id=b.id AND c.state='pending'
+                 AND (c.next_retry_at IS NULL OR c.next_retry_at<=?1
+                      OR b.cancellation_requested=1))
+             ORDER BY b.rowid",
+        )?;
+        let rows = statement
+            .query_map([now], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// A bounded page of the due children of one batch, in row order. It
+    /// reads through the `batch_children_by_batch` index.
+    pub fn due_children_of_batch(
         &self,
+        batch_id: &str,
         now: i64,
         limit: usize,
     ) -> Result<Vec<DueBatchChild>> {
-        // D-025 section 11: a bounded page from each batch in turn, so that
-        // one large run does not stop the others. Each query reads through
-        // the `batch_children_by_batch` index in row order.
-        let batches = {
-            let mut statement = self.db.prepare(
-                "SELECT b.id FROM scenario_create_batches b
-                 WHERE b.paused=0 AND EXISTS (
-                   SELECT 1 FROM scenario_create_batch_children c
-                   WHERE c.batch_id=b.id AND c.state='pending'
-                     AND (c.next_retry_at IS NULL OR c.next_retry_at<=?1
-                          OR b.cancellation_requested=1))
-                 ORDER BY b.rowid",
-            )?;
-            let rows = statement
-                .query_map([now], |row| row.get::<_, String>(0))?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            rows
-        };
-        if batches.is_empty() || limit == 0 {
-            return Ok(Vec::new());
-        }
-        let share = (limit / batches.len()).max(1);
-        let mut statement = self.db.prepare(
+        let mut statement = self.db.prepare_cached(
             "SELECT c.batch_id,b.scenario_id,b.scenario_revision,c.relative_path,c.source_is_left,
                     c.job_id,c.retries,b.cancellation_requested,c.kind
              FROM scenario_create_batch_children c
@@ -2327,27 +2411,42 @@ impl Registry {
              ORDER BY c.rowid
              LIMIT ?3",
         )?;
+        let rows = statement
+            .query_map(params![batch_id, now, limit as i64], |row| {
+                Ok(DueBatchChild {
+                    batch_id: row.get(0)?,
+                    scenario: ScenarioReference {
+                        scenario_id: row.get(1)?,
+                        revision: row.get::<_, i64>(2)? as u64,
+                    },
+                    relative_path: row.get(3)?,
+                    source_is_left: row.get(4)?,
+                    job_id: row.get(5)?,
+                    retries: row.get(6)?,
+                    cancellation_requested: row.get(7)?,
+                    kind: BatchChildKind::parse(&row.get::<_, String>(8)?)
+                        .unwrap_or(BatchChildKind::Create),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn due_scenario_create_batch_children(
+        &self,
+        now: i64,
+        limit: usize,
+    ) -> Result<Vec<DueBatchChild>> {
+        // D-025 section 11: a bounded page from each batch in turn, so that
+        // one large run does not stop the others.
+        let batches = self.due_scenario_batches(now)?;
+        if batches.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let share = (limit / batches.len()).max(1);
         let mut pages = Vec::with_capacity(batches.len());
         for batch in batches.iter().take(limit) {
-            let page = statement
-                .query_map(params![batch, now, share as i64], |row| {
-                    Ok(DueBatchChild {
-                        batch_id: row.get(0)?,
-                        scenario: ScenarioReference {
-                            scenario_id: row.get(1)?,
-                            revision: row.get::<_, i64>(2)? as u64,
-                        },
-                        relative_path: row.get(3)?,
-                        source_is_left: row.get(4)?,
-                        job_id: row.get(5)?,
-                        retries: row.get(6)?,
-                        cancellation_requested: row.get(7)?,
-                        kind: BatchChildKind::parse(&row.get::<_, String>(8)?)
-                            .unwrap_or(BatchChildKind::Create),
-                    })
-                })?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            pages.push(page.into_iter());
+            pages.push(self.due_children_of_batch(batch, now, share)?.into_iter());
         }
         // Interleave the pages: one child of each batch in turn.
         let mut due = Vec::new();
@@ -3051,6 +3150,63 @@ impl Registry {
         }
     }
 
+    /// Cancel every pending child of a batch whose stop the user requested, in
+    /// one statement. A pending child has no Job yet, so nothing else changes.
+    /// One update for each child took minutes for a large run (2026-11-04).
+    pub fn backup_database_results(&self, run_id: &str) -> Result<Vec<BackupDatabaseResult>> {
+        let mut statement = self.db.prepare(
+            "SELECT provider_id, result, error, bytes, md5, finished_at
+             FROM backup_database_results WHERE run_id=?1 ORDER BY provider_id",
+        )?;
+        let rows = statement
+            .query_map([run_id], |row| {
+                Ok(BackupDatabaseResult {
+                    provider_id: row.get(0)?,
+                    result: row.get(1)?,
+                    error: row.get(2)?,
+                    bytes: row.get::<_, Option<i64>>(3)?.map(|bytes| bytes as u64),
+                    md5: row.get(4)?,
+                    finished_at: row.get(5)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Record the result of one database. A second record keeps the first.
+    pub fn record_backup_database_result(
+        &self,
+        run_id: &str,
+        result: &BackupDatabaseResult,
+    ) -> Result<()> {
+        self.db.execute(
+            "INSERT OR IGNORE INTO backup_database_results
+             (run_id, provider_id, result, error, bytes, md5, finished_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                run_id,
+                result.provider_id,
+                result.result,
+                result.error,
+                result.bytes.map(|bytes| bytes as i64),
+                result.md5,
+                result.finished_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn cancel_pending_batch_children(&self, batch_id: &str) -> Result<usize> {
+        Ok(self.db.execute(
+            "UPDATE scenario_create_batch_children
+             SET state='cancelled', next_retry_at=NULL
+             WHERE batch_id=?1 AND state='pending'
+               AND EXISTS (SELECT 1 FROM scenario_create_batches b
+                           WHERE b.id=?1 AND b.cancellation_requested=1)",
+            [batch_id],
+        )?)
+    }
+
     /// Enable or disable one schedule without changing its already claimed
     /// occurrences. Re-enabling must never replay an older local slot.
     pub fn set_scenario_schedule_enabled(
@@ -3440,24 +3596,32 @@ impl Registry {
         let deletion_mode = DeletionMode::parse(&mode.ok_or(RegistryError::NotFound)?)
             .ok_or(RegistryError::IntegrityFailed)?;
         // A Backup/export revision selects server paths (D-027 section 6). The
-        // source root is `/`, so a path is the server path without its first
-        // slash; the destination keeps it below `files/`.
+        // source root is the home folder of the account, so a path is the
+        // server path relative to it; the destination keeps it below `files/`.
+        // The home folder itself selects the whole root.
         let mut statement = self.db.prepare(
             "SELECT relative_path FROM scenario_revision_selection
              WHERE scenario_id=?1 AND revision=?2
              UNION
-             SELECT substr(provider_id,2) FROM scenario_revision_resources
-             WHERE scenario_id=?1 AND revision=?2 AND category='files' AND rule='include'
-               AND length(provider_id)>1
+             SELECT CASE WHEN r.provider_id=v.left_root THEN ''
+                         ELSE substr(r.provider_id, length(rtrim(v.left_root,'/'))+2) END
+             FROM scenario_revision_resources r
+             JOIN scenario_revisions v ON v.scenario_id=r.scenario_id AND v.revision=r.revision
+             WHERE r.scenario_id=?1 AND r.revision=?2 AND r.category='files' AND r.rule='include'
              ORDER BY 1",
         )?;
-        let selected_paths = statement
+        let mut selected_paths = statement
             .query_map(params![id, revision as i64], |row| row.get(0))?
             .collect::<std::result::Result<Vec<String>, _>>()?;
+        if selected_paths.iter().any(String::is_empty) {
+            selected_paths.clear();
+        }
         let mut statement = self.db.prepare(
-            "SELECT substr(provider_id,2) FROM scenario_revision_resources
-             WHERE scenario_id=?1 AND revision=?2 AND category='files' AND rule='exclude'
-               AND length(provider_id)>1
+            "SELECT CASE WHEN r.provider_id=v.left_root THEN ''
+                         ELSE substr(r.provider_id, length(rtrim(v.left_root,'/'))+2) END
+             FROM scenario_revision_resources r
+             JOIN scenario_revisions v ON v.scenario_id=r.scenario_id AND v.revision=r.revision
+             WHERE r.scenario_id=?1 AND r.revision=?2 AND r.category='files' AND r.rule='exclude'
              ORDER BY 1",
         )?;
         let excluded_paths = statement
@@ -3485,6 +3649,28 @@ impl Registry {
                 reference.scenario_id,
                 reference.revision as i64,
                 relative_path
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Remove the confirmed baselines of every path under one folder after a
+    /// verified folder deletion (D-027 section 5.6b). The range uses the
+    /// primary key: `0` is the next character after `/`.
+    pub fn forget_confirmed_file_states_under(
+        &self,
+        reference: &ScenarioReference,
+        folder: &str,
+    ) -> Result<()> {
+        self.db.execute(
+            "DELETE FROM file_sync_states
+             WHERE scenario_id=?1 AND scenario_revision=?2
+               AND relative_path>=?3 AND relative_path<?4",
+            params![
+                reference.scenario_id,
+                reference.revision as i64,
+                format!("{folder}/"),
+                format!("{folder}0")
             ],
         )?;
         Ok(())
@@ -3584,6 +3770,38 @@ impl Registry {
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into);
         states
+    }
+
+    /// The confirmed state of one path, or `None` (D-028: one indexed row,
+    /// not the whole baseline).
+    pub fn confirmed_file_state(
+        &self,
+        reference: &ScenarioReference,
+        relative_path: &str,
+    ) -> Result<Option<FileSyncState>> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT relative_path,
+                    left_object_revision,left_size,left_checksum_md5,
+                    right_object_revision,right_size,right_checksum_md5
+                 FROM file_sync_states
+                 WHERE scenario_id=?1 AND scenario_revision=?2 AND relative_path=?3",
+                params![
+                    reference.scenario_id,
+                    reference.revision as i64,
+                    relative_path
+                ],
+                |row| {
+                    Ok(FileSyncState {
+                        scenario: reference.clone(),
+                        relative_path: row.get(0)?,
+                        left: decode_confirmed_version(row, 1, 2, 3)?,
+                        right: decode_confirmed_version(row, 4, 5, 6)?,
+                    })
+                },
+            )
+            .optional()?)
     }
 
     /// One page of confirmed file states after `after_path`, in path order
@@ -3975,6 +4193,19 @@ pub fn scenario_roots_overlap(left: &str, right: &str) -> bool {
 /// section 6). For the Files category, `provider_id` is an absolute server
 /// path; `kind` is `file`, `dir` (recursive, new descendants included),
 /// `symlink`, or `object` for a logical provider object.
+/// The result of one selected database in one Backup/export run (D-027
+/// section 7b).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BackupDatabaseResult {
+    pub provider_id: String,
+    /// `created`, `updated`, `unchanged`, `failed`, or `cancelled`.
+    pub result: String,
+    pub error: Option<String>,
+    pub bytes: Option<u64>,
+    pub md5: Option<String>,
+    pub finished_at: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct BackupResource {
     pub category: String,
@@ -4010,6 +4241,16 @@ impl BackupResource {
                         .split('/')
                         .any(|part| part == "." || part == "..")
             }
+            // A MySQL database name, which is also its dump file name.
+            "databases" => {
+                self.kind == "object"
+                    && self.rule == "include"
+                    && self.provider_id.len() <= 64
+                    && !self.provider_id.starts_with(['.', '-'])
+                    && self.provider_id.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'$')
+                    })
+            }
             _ => self.kind == "object",
         }
     }
@@ -4022,6 +4263,8 @@ pub struct BackupScenarioDraft<'a> {
     pub source_connection_id: &'a str,
     pub destination_connection_id: &'a str,
     pub destination_root: &'a str,
+    /// The home folder of the account: the source root (D-027 section 6).
+    pub source_root: &'a str,
     pub resources: &'a [BackupResource],
     /// Deletions inside selected folders (D-027 section 5.4).
     pub deletion_mode: DeletionMode,
@@ -4043,14 +4286,15 @@ impl Registry {
         transaction.execute(
             "INSERT INTO scenarios(id,name,left_connection_id,left_root,right_connection_id,
                                    right_root,direction,mode,deletion_mode)
-             VALUES(?1,?2,?3,'/',?4,?5,'left_to_right','backup_export',?6)",
+             VALUES(?1,?2,?3,?7,?4,?5,'left_to_right','backup_export',?6)",
             params![
                 id,
                 draft.name.trim(),
                 draft.source_connection_id,
                 draft.destination_connection_id,
                 files_root,
-                draft.deletion_mode.as_str()
+                draft.deletion_mode.as_str(),
+                draft.source_root
             ],
         )?;
         insert_backup_revision(&transaction, &id, 1, draft.resources)?;
@@ -4070,7 +4314,7 @@ impl Registry {
         )?;
         let changed = transaction.execute(
             "UPDATE scenarios SET name=?1,right_connection_id=?2,right_root=?3,deletion_mode=?6,
-                                  revision=revision+1
+                                  left_root=?7,revision=revision+1
              WHERE id=?4 AND mode='backup_export' AND left_connection_id=?5",
             params![
                 draft.name.trim(),
@@ -4078,7 +4322,8 @@ impl Registry {
                 files_root,
                 id,
                 draft.source_connection_id,
-                draft.deletion_mode.as_str()
+                draft.deletion_mode.as_str(),
+                draft.source_root
             ],
         )?;
         if changed == 0 {
@@ -4122,8 +4367,25 @@ impl Registry {
     }
 
     fn validate_backup_draft(&self, draft: &BackupScenarioDraft<'_>) -> Result<()> {
-        if !valid_name(draft.name) || !draft.destination_root.starts_with('/') {
+        let root = draft.source_root;
+        let root_valid = root.starts_with('/')
+            && !root.chars().any(char::is_control)
+            && !root.split('/').any(|part| part == "." || part == "..");
+        if !valid_name(draft.name) || !draft.destination_root.starts_with('/') || !root_valid {
             return Err(RegistryError::InvalidName);
+        }
+        // Every file rule is the home folder or inside it.
+        let inside = |path: &str| {
+            path == root
+                || root == "/"
+                || path.starts_with(&format!("{}/", root.trim_end_matches('/')))
+        };
+        if draft
+            .resources
+            .iter()
+            .any(|r| r.category == "files" && !inside(&r.provider_id))
+        {
+            return Err(RegistryError::InvalidSelection);
         }
         if !draft.resources.iter().all(BackupResource::valid) {
             return Err(RegistryError::InvalidSelection);

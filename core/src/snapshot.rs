@@ -62,7 +62,8 @@ pub struct SnapshotKey {
 }
 
 impl SnapshotKey {
-    fn fingerprint(&self) -> String {
+    /// The stable identity of what the key walks.
+    pub fn fingerprint(&self) -> String {
         let mut selection = self.selection.clone();
         selection.sort();
         // A key without exclusions keeps its earlier fingerprint.
@@ -444,6 +445,41 @@ impl SnapshotStore {
     pub fn prune(&self) -> Result<usize> {
         let removed = self.prune_rows()?;
         release_free_pages(&self.db)?;
+        Ok(removed)
+    }
+
+    /// Delete the snapshots of keys that no current Scenario revision uses,
+    /// also walks in progress, unless a plan needs them. `current` holds the
+    /// fingerprints of the current keys. The caller removes old plans first.
+    pub fn prune_unused_keys(&self, current: &std::collections::HashSet<String>) -> Result<usize> {
+        let has_plans: bool = self.db.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='plans'",
+            [],
+            |row| row.get::<_, i64>(0).map(|count| count > 0),
+        )?;
+        let referenced = if has_plans {
+            "SELECT left_snapshot FROM plans UNION SELECT right_snapshot FROM plans"
+        } else {
+            "SELECT NULL WHERE 0"
+        };
+        let unused: Vec<(String, String)> = self
+            .db
+            .prepare(&format!(
+                "SELECT id,fingerprint FROM snapshots WHERE id NOT IN ({referenced})"
+            ))?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut removed = 0;
+        for (id, fingerprint) in unused {
+            if !current.contains(&fingerprint) {
+                removed += self
+                    .db
+                    .execute("DELETE FROM snapshots WHERE id=?1", [&id])?;
+            }
+        }
+        if removed > 0 {
+            release_free_pages(&self.db)?;
+        }
         Ok(removed)
     }
 
@@ -879,10 +915,22 @@ pub fn walk_local_step(store: &SnapshotStore, id: &str, root: &Path) -> Result<S
 /// Folders that one SFTP step lists on one session.
 const SFTP_FOLDERS_PER_STEP: usize = 64;
 
-/// The server path of a snapshot path: the root of an ISPmanager source is
-/// `/`, and a relative path is the server path without its first slash.
-fn server_path(relative: &str) -> String {
-    format!("/{relative}")
+/// The server path of a snapshot path below the source root, the home folder
+/// of the account. An empty path is the root itself.
+fn server_path(root: &str, relative: &str) -> String {
+    let root = root.trim_end_matches('/');
+    match (root.is_empty(), relative.is_empty()) {
+        (true, true) => "/".to_owned(),
+        (_, true) => root.to_owned(),
+        _ => format!("{root}/{relative}"),
+    }
+}
+
+/// True when `root` is strictly above `home`.
+fn source_root_outdated(root: &str, home: &str) -> bool {
+    let root = root.trim_end_matches('/');
+    let home = home.trim_end_matches('/');
+    home != root && home.starts_with(&format!("{root}/"))
 }
 
 fn sftp_file(relative_path: String, meta: &crate::ispmanager_sftp::ObjectMeta) -> SnapshotFile {
@@ -926,9 +974,20 @@ pub fn walk_sftp_step(
         ..Default::default()
     };
     let folders = store.pending_folders(id, SFTP_FOLDERS_PER_STEP)?;
+    // The selected roots are probed first. A revision saved before the home
+    // folder became the source root has a root above the home folder. Its
+    // copy would keep the full server path, so it is not walked.
+    if folders.iter().any(|folder| folder.probe) {
+        let home = connection.home().map_err(sftp_failure)?;
+        if source_root_outdated(&key.root, &home) {
+            return Err(SnapshotError::Blocked(
+                "ispmanager_source_root_outdated".into(),
+            ));
+        }
+    }
     let mut pages = 0;
     for folder in folders {
-        let path = server_path(&folder.path);
+        let path = server_path(&key.root, &folder.path);
         if folder.probe {
             match connection.lstat(&path) {
                 Ok(Some(meta)) if meta.kind == "file" => {

@@ -252,6 +252,7 @@ pub extern "C" fn qadren_scenarios_save_backup(
     source_id: *const c_char,
     destination_id: *const c_char,
     destination_root: *const c_char,
+    source_root: *const c_char,
     resources: *const c_char,
     deletion_mode: *const c_char,
 ) -> *mut c_char {
@@ -261,6 +262,7 @@ pub extern "C" fn qadren_scenarios_save_backup(
         Some(source_id),
         Some(destination_id),
         Some(root),
+        Some(source_root),
         Some(resources),
         Some(deletion_mode),
     ) = (
@@ -269,6 +271,7 @@ pub extern "C" fn qadren_scenarios_save_backup(
         input(source_id),
         input(destination_id),
         input(destination_root),
+        input(source_root),
         input(resources),
         input(deletion_mode).and_then(|mode| crate::model::DeletionMode::parse(&mode)),
     )
@@ -285,6 +288,7 @@ pub extern "C" fn qadren_scenarios_save_backup(
             source_connection_id: &source_id,
             destination_connection_id: &destination_id,
             destination_root: &root,
+            source_root: &source_root,
             resources: &resources,
             deletion_mode,
         };
@@ -922,7 +926,8 @@ pub extern "C" fn qadren_scenario_run_state(
                 Some(json!({
                     "id": run.id, "trigger": run.trigger, "state": run.state,
                     "waiting_reason": run.waiting_reason, "created_at": run.created_at,
-                    "waiting_for_scenario": waiting_for, "batch_id": run.batch_id
+                    "waiting_for_scenario": waiting_for, "batch_id": run.batch_id,
+                    "revision": run.scenario.revision
                 }))
             }
             None => None,

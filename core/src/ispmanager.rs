@@ -105,13 +105,25 @@ impl Category {
     }
 }
 
+/// Reads of one parent object (D-027 section 7b): a nested list with `elid`
+/// and an edit form opened without `sok`. Without `sok` the panel only
+/// returns the form; it saves nothing.
+const OBJECT_READS: [&str; 2] = ["db.users", "db.users.edit"];
+
 /// The only functions that the client sends. `auth` opens a session; every
-/// other entry is a documented list function.
+/// other entry is a documented list function or an object read.
 fn is_allowed(func: &str) -> bool {
     func == "auth"
+        || OBJECT_READS.contains(&func)
         || Category::ALL
             .iter()
             .any(|category| category.list_functions().contains(&func))
+}
+
+/// The only parameters that the client sends. `sok` (save a form) is never
+/// one of them.
+fn is_allowed_param(name: &str) -> bool {
+    matches!(name, "auth" | "username" | "password" | "elid" | "plid")
 }
 
 #[derive(Debug)]
@@ -260,7 +272,7 @@ impl Session {
     }
 
     fn post(&self, func: &str, params: &[(&str, &str)]) -> Result<serde_json::Map<String, Value>> {
-        if !is_allowed(func) {
+        if !is_allowed(func) || params.iter().any(|(name, _)| !is_allowed_param(name)) {
             return Err(IspError::NotAllowed(func.to_owned()));
         }
         let mut form = vec![("func", func), ("out", "json")];
@@ -310,10 +322,74 @@ impl Session {
     }
 
     fn list_once(&self, func: &str) -> Result<ListOutcome> {
-        let session_id = self.session_id.as_deref().unwrap_or_default();
-        let doc = self.post(func, &[("auth", session_id)])?;
-        Ok(classify_list(&doc))
+        Ok(classify_list(&self.read_once(func, &[])?))
     }
+
+    /// Calls an allowed function with `elid` or `plid` and returns the
+    /// `doc` object. It re-authenticates one time, as `list` does.
+    pub fn read(
+        &mut self,
+        func: &str,
+        params: &[(&str, &str)],
+    ) -> Result<serde_json::Map<String, Value>> {
+        if self.session_id.is_none() {
+            self.authenticate()?;
+        }
+        match self.read_once(func, params) {
+            Err(IspError::Panel(kind)) if kind == "auth" => {
+                self.authenticate()?;
+                self.read_once(func, params)
+            }
+            other => other,
+        }
+    }
+
+    fn read_once(
+        &self,
+        func: &str,
+        params: &[(&str, &str)],
+    ) -> Result<serde_json::Map<String, Value>> {
+        let session_id = self.session_id.as_deref().unwrap_or_default();
+        let mut form = vec![("auth", session_id)];
+        form.extend_from_slice(params);
+        self.post(func, &form)
+    }
+}
+
+/// The elements of a list `doc`.
+fn elements(doc: &serde_json::Map<String, Value>) -> Vec<&serde_json::Map<String, Value>> {
+    match doc.get("elem") {
+        Some(Value::Array(items)) => items.iter().filter_map(Value::as_object).collect(),
+        Some(Value::Object(item)) => vec![item],
+        _ => Vec::new(),
+    }
+}
+
+/// The text of a field. In `out=json` a value is a string or `{"$": ..}`.
+fn text(object: &serde_json::Map<String, Value>, field: &str) -> Option<String> {
+    let value = object.get(field)?;
+    value
+        .as_str()
+        .or_else(|| value.get("$").and_then(Value::as_str))
+        .map(str::to_owned)
+}
+
+fn sorted_fields(object: &serde_json::Map<String, Value>) -> Vec<String> {
+    let mut fields: Vec<String> = object.keys().cloned().collect();
+    fields.sort();
+    fields
+}
+
+/// The first field of `candidates` that has a non-empty value.
+fn key_field(
+    object: &serde_json::Map<String, Value>,
+    candidates: &[&'static str],
+) -> Option<(&'static str, String)> {
+    candidates.iter().find_map(|field| {
+        text(object, field)
+            .filter(|value| !value.is_empty())
+            .map(|value| (*field, value))
+    })
 }
 
 /// A capability state of D-027 section 4 that a connection check can set.
@@ -390,6 +466,233 @@ impl From<SftpCheck> for FileTransport {
     }
 }
 
+/// What the panel and the SSH server tell about databases (D-027 section
+/// 7b). It holds field names, the server type and version fields, tool
+/// versions, and whether a password is readable. It never holds a password,
+/// a database name, or a user name.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct DatabaseProbe {
+    /// Field names of the first `db` element.
+    pub db_fields: Vec<String>,
+    /// The `db` field used as `elid`.
+    pub db_key_field: Option<&'static str>,
+    /// Values of the type, version, and host fields of the first database.
+    pub server_info: Vec<ServerField>,
+    /// `items`, `empty`, `denied`, `missing`, or `error`.
+    pub users_result: Option<&'static str>,
+    pub user_fields: Vec<String>,
+    pub user_key_field: Option<&'static str>,
+    /// The result of the user edit form, read without `sok`.
+    pub user_form_result: Option<&'static str>,
+    pub user_form_fields: Vec<String>,
+    /// True when the form returns a non-empty password field.
+    pub password_readable: Option<bool>,
+    /// True when the password field holds one repeated mask character.
+    pub password_masked: Option<bool>,
+    /// MySQL sign-in with the panel facts through `mysqldump --no-data`.
+    pub mysql_login: Option<crate::ispmanager_sftp::MysqlLoginCheck>,
+    /// `--version` of each dump tool through SSH; `None` when it is absent.
+    pub tools: Vec<ToolVersion>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ServerField {
+    pub field: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ToolVersion {
+    pub tool: crate::ispmanager_sftp::DumpTool,
+    pub version: Option<String>,
+}
+
+fn result_class(error: &IspError) -> &'static str {
+    match error {
+        IspError::Panel(kind) if kind == "access" => "denied",
+        IspError::Panel(kind) if kind == "missed" => "missing",
+        _ => "error",
+    }
+}
+
+/// Reads the first database, its first user, and that user's edit form.
+/// The access facts for a MySQL sign-in stay in memory.
+fn probe_databases(session: &mut Session) -> (DatabaseProbe, Option<ispmanager_sftp::MysqlAccess>) {
+    let mut probe = DatabaseProbe::default();
+    let access = probe_databases_into(session, &mut probe);
+    (probe, access)
+}
+
+fn probe_databases_into(
+    session: &mut Session,
+    probe: &mut DatabaseProbe,
+) -> Option<ispmanager_sftp::MysqlAccess> {
+    let doc = match session.read("db", &[]) {
+        Ok(doc) => doc,
+        Err(error) => {
+            probe.error = Some(error.to_string());
+            return None;
+        }
+    };
+    let Some(db) = elements(&doc).first().copied().cloned() else {
+        return None;
+    };
+    probe.db_fields = sorted_fields(&db);
+    probe.server_info = db
+        .keys()
+        .filter(|field| {
+            ["type", "version", "host", "server"]
+                .iter()
+                .any(|part| field.contains(part))
+        })
+        .filter_map(|field| {
+            let value = text(&db, field)?;
+            (value.len() <= 64).then(|| ServerField {
+                field: field.clone(),
+                value,
+            })
+        })
+        .collect();
+    let Some((db_field, db_key)) = key_field(&db, &["pair", "key", "id", "name"]) else {
+        return None;
+    };
+    probe.db_key_field = Some(db_field);
+    let users = match session.read("db.users", &[("elid", &db_key)]) {
+        Ok(users) => users,
+        Err(error) => {
+            probe.users_result = Some(result_class(&error));
+            probe.error = Some(error.to_string());
+            return None;
+        }
+    };
+    let Some(user) = elements(&users).first().copied().cloned() else {
+        probe.users_result = Some("empty");
+        return None;
+    };
+    probe.users_result = Some("items");
+    probe.user_fields = sorted_fields(&user);
+    let Some((user_field, user_key)) = key_field(&user, &["key", "id", "name"]) else {
+        return None;
+    };
+    probe.user_key_field = Some(user_field);
+    match session.read("db.users.edit", &[("elid", &user_key), ("plid", &db_key)]) {
+        Ok(form) => {
+            probe.user_form_result = Some("items");
+            probe.user_form_fields = sorted_fields(&form)
+                .into_iter()
+                .filter(|field| !field.starts_with('$') && !field.starts_with("tparams"))
+                .collect();
+            let password = text(&form, "password").filter(|value| !value.is_empty());
+            probe.password_readable = Some(password.is_some());
+            probe.password_masked = password.as_ref().map(|value| {
+                let mut chars = value.chars();
+                let first = chars.next();
+                first.is_some_and(|first| "*•●x".contains(first))
+                    && chars.all(|ch| Some(ch) == first)
+            });
+            let is_mysql = text(&db, "server")
+                .is_some_and(|server| server.to_ascii_lowercase().contains("mysql"));
+            let port = text(&db, "server_hostandport").and_then(|value| {
+                value
+                    .rsplit_once(':')
+                    .and_then(|(_, port)| port.parse().ok())
+            });
+            match (password, text(&form, "username"), text(&db, "name")) {
+                (Some(password), Some(user), Some(database))
+                    if is_mysql && probe.password_masked == Some(false) =>
+                {
+                    return Some(ispmanager_sftp::MysqlAccess {
+                        database,
+                        user,
+                        password,
+                        host: text(&db, "server_host").unwrap_or_else(|| "localhost".to_owned()),
+                        port,
+                    });
+                }
+                _ => {}
+            }
+        }
+        Err(error) => {
+            probe.user_form_result = Some(result_class(&error));
+            probe.error = Some(error.to_string());
+        }
+    }
+    None
+}
+
+/// The MySQL access facts of one selected database, read from the panel at
+/// the start of each export (D-027 section 7b). QADREN never stores them.
+/// The user is the first user of the database with the read right.
+pub fn mysql_access(
+    session: &mut Session,
+    database: &str,
+) -> std::result::Result<ispmanager_sftp::MysqlAccess, &'static str> {
+    let doc = session
+        .read("db", &[])
+        .map_err(|_| "ispmanager_database_list_failed")?;
+    let db = elements(&doc)
+        .into_iter()
+        .find(|db| text(db, "name").as_deref() == Some(database))
+        .cloned()
+        .ok_or("ispmanager_database_missing")?;
+    if !text(&db, "server").is_some_and(|server| server.to_ascii_lowercase().contains("mysql")) {
+        return Err("ispmanager_database_unsupported");
+    }
+    let (_, db_key) = key_field(&db, &["pair", "key", "id", "name"])
+        .ok_or("ispmanager_database_access_unavailable")?;
+    let users = session
+        .read("db.users", &[("elid", &db_key)])
+        .map_err(|_| "ispmanager_database_access_unavailable")?;
+    let users = elements(&users);
+    let readable = |user: &&&serde_json::Map<String, Value>| {
+        text(user, "read")
+            .is_some_and(|value| matches!(value.as_str(), "on" | "yes" | "1" | "true"))
+    };
+    let user = users
+        .iter()
+        .find(readable)
+        .or_else(|| users.first())
+        .ok_or("ispmanager_database_access_unavailable")?;
+    let (_, user_key) =
+        key_field(user, &["key", "id", "name"]).ok_or("ispmanager_database_access_unavailable")?;
+    let form = session
+        .read("db.users.edit", &[("elid", &user_key), ("plid", &db_key)])
+        .map_err(|_| "ispmanager_database_access_unavailable")?;
+    let password = text(&form, "password")
+        .filter(|value| !value.is_empty())
+        .ok_or("ispmanager_database_access_unavailable")?;
+    let user = text(&form, "username")
+        .filter(|value| !value.is_empty())
+        .ok_or("ispmanager_database_access_unavailable")?;
+    let port = text(&db, "server_hostandport").and_then(|value| {
+        value
+            .rsplit_once(':')
+            .and_then(|(_, port)| port.parse().ok())
+    });
+    Ok(ispmanager_sftp::MysqlAccess {
+        database: database.to_owned(),
+        user,
+        password,
+        host: text(&db, "server_host").unwrap_or_else(|| "localhost".to_owned()),
+        port,
+    })
+}
+
+/// The names of the MySQL databases of the account, for the Scenario editor.
+pub fn database_names(session: &mut Session) -> Result<Vec<String>> {
+    let doc = session.read("db", &[])?;
+    let mut names: Vec<String> = elements(&doc)
+        .into_iter()
+        .filter(|db| {
+            text(db, "server").is_some_and(|server| server.to_ascii_lowercase().contains("mysql"))
+        })
+        .filter_map(|db| text(db, "name"))
+        .collect();
+    names.sort();
+    Ok(names)
+}
+
 /// The result of one connection check. `status` is a Registry status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CheckReport {
@@ -397,6 +700,7 @@ pub struct CheckReport {
     pub error: Option<String>,
     pub categories: Vec<CategoryReport>,
     pub file_transport: Option<FileTransport>,
+    pub databases: Option<DatabaseProbe>,
 }
 
 fn category_state(functions: &[FunctionReport]) -> CapabilityState {
@@ -430,6 +734,7 @@ pub fn check(url: &str, login: &str, password: &str, sftp: SftpTarget<'_>) -> Ch
         error: Some(error.to_string()),
         categories: Vec::new(),
         file_transport: None,
+        databases: None,
     };
     let url = match PanelUrl::parse(url.trim()) {
         Ok(url) => url,
@@ -485,10 +790,31 @@ pub fn check(url: &str, login: &str, password: &str, sftp: SftpTarget<'_>) -> Ch
         .collect();
     let file_transport =
         ispmanager_sftp::check(&host, sftp.port, login, password, sftp.host_key_sha256);
+    let (mut databases, access) = probe_databases(&mut session);
+    if let (SftpCheck::Ready, Some(key)) = (&file_transport, sftp.host_key_sha256) {
+        if let Ok(connection) =
+            ispmanager_sftp::SftpConnection::open(&host, sftp.port, login, password, key)
+        {
+            databases.tools = ispmanager_sftp::DumpTool::ALL
+                .iter()
+                .map(|tool| ToolVersion {
+                    tool: *tool,
+                    version: connection.tool_version(*tool),
+                })
+                .collect();
+            let has_mysqldump = databases.tools.iter().any(|tool| {
+                tool.tool == ispmanager_sftp::DumpTool::Mysqldump && tool.version.is_some()
+            });
+            if let (true, Some(access)) = (has_mysqldump, &access) {
+                databases.mysql_login = Some(connection.mysql_login_check(access));
+            }
+        }
+    }
     CheckReport {
         status: "connected",
         error: None,
         categories,
         file_transport: Some(file_transport.into()),
+        databases: Some(databases),
     }
 }

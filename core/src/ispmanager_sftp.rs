@@ -1,6 +1,7 @@
 //! SFTP file transport of an ISPmanager connection (D-027 section 7a). The
 //! client opens the `sftp` subsystem and uses only read operations. It never
-//! opens a shell; its only command is `md5sum` for one file (section 7a.3).
+//! opens a shell. Its commands are `md5sum` for one file (section 7a.3),
+//! `--version` of the database dump tools, and `mysqldump` (section 7b).
 use russh::client;
 use russh::keys::HashAlg;
 use russh::keys::PublicKeyOrCertificate;
@@ -15,6 +16,96 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
 /// `md5sum` reads the whole file on the server; a large file needs time.
 const HASH_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// A large database needs time; a stalled dump ends after this.
+const DUMP_TIMEOUT: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// A database dump tool whose version the connection check reads
+/// (D-027 section 7b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DumpTool {
+    Mysqldump,
+    MariadbDump,
+    PgDump,
+}
+
+impl DumpTool {
+    pub const ALL: [DumpTool; 3] = [DumpTool::Mysqldump, DumpTool::MariadbDump, DumpTool::PgDump];
+
+    fn command(self) -> &'static str {
+        match self {
+            DumpTool::Mysqldump => "mysqldump",
+            DumpTool::MariadbDump => "mariadb-dump",
+            DumpTool::PgDump => "pg_dump",
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct ExecOutput {
+    status: Option<u32>,
+    stdout_bytes: u64,
+    stderr: Vec<u8>,
+}
+
+fn shell_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+/// The MySQL access facts of one database from the panel. They stay in
+/// memory; `Debug` shows none of them.
+pub struct MysqlAccess {
+    pub database: String,
+    pub user: String,
+    pub password: String,
+    pub host: String,
+    pub port: Option<u16>,
+}
+
+impl std::fmt::Debug for MysqlAccess {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MysqlAccess(..)")
+    }
+}
+
+impl MysqlAccess {
+    /// A `[client]` option file. Values are double-quoted with `\` and `"`
+    /// escaped, so that `#` and spaces stay part of the value.
+    fn option_file(&self) -> Vec<u8> {
+        let quote =
+            |value: &str| format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""));
+        let mut text = format!(
+            "[client]\nuser={}\npassword={}\nhost={}\n",
+            quote(&self.user),
+            quote(&self.password),
+            quote(&self.host)
+        );
+        if let Some(port) = self.port {
+            text.push_str(&format!("port={port}\n"));
+        }
+        text.into_bytes()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MysqlDumpError {
+    /// MySQL refused the user or the password from the panel.
+    Refused,
+    /// The caller stopped the dump.
+    Stopped,
+    /// No channel, a non-zero exit, a timeout, or an incomplete dump.
+    Failed,
+}
+
+/// The result of a MySQL sign-in through `mysqldump --no-data`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MysqlLoginCheck {
+    Ok,
+    /// MySQL refused the user or the password.
+    Refused,
+    Error,
+}
 
 /// The result of one SFTP check. Only `Ready` permits SFTP work.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -281,7 +372,14 @@ async fn open(
     })
     .await;
     match opened {
-        Ok(Ok(sftp)) => Ok((session, sftp)),
+        Ok(Ok(sftp)) => {
+            // russh-sftp stops each request after 10 s by default. Read-ahead
+            // queues several reads, so on a busy link one answer can wait
+            // longer while bytes still flow (found on 2026-11-05). Use the
+            // same limit as every other SFTP operation.
+            sftp.set_timeout(OPERATION_TIMEOUT.as_secs());
+            Ok((session, sftp))
+        }
         Ok(Err(error)) => Err(SftpCheck::SftpUnavailable(error)),
         Err(_) => Err(SftpCheck::SftpUnavailable(
             "sftp start timed out".to_owned(),
@@ -398,6 +496,21 @@ impl SftpConnection {
             .ok_or_else(|| SftpReadError::Failed("session closed".to_owned()))
     }
 
+    /// The home folder of the account: the source root of a Backup/export
+    /// Scenario (D-027 section 6).
+    pub fn home(&self) -> std::result::Result<String, SftpReadError> {
+        // A tokio timer needs the runtime context when it is made.
+        let _context = self.runtime.enter();
+        match self.runtime.block_on(tokio::time::timeout(
+            OPERATION_TIMEOUT,
+            self.sftp()?.canonicalize("."),
+        )) {
+            Ok(Ok(home)) => Ok(home),
+            Ok(Err(error)) => Err(read_error(error)),
+            Err(_) => Err(SftpReadError::Failed("home lookup timed out".to_owned())),
+        }
+    }
+
     /// `None` when the object does not exist.
     pub fn lstat(&self, path: &str) -> std::result::Result<Option<ObjectMeta>, SftpReadError> {
         // A tokio timer needs the runtime context when it is made.
@@ -473,37 +586,11 @@ impl SftpConnection {
     /// command fails, or the answer is not one MD5 for this path. The caller
     /// then reads the file through SFTP.
     pub fn remote_md5(&self, path: &str) -> Option<String> {
-        // A tokio timer needs the runtime context when it is made.
-        let _context = self.runtime.enter();
         if !path.starts_with('/') || path.contains(|ch: char| ch.is_control()) {
             return None;
         }
-        let quoted = format!("'{}'", path.replace('\'', "'\\''"));
-        let command = format!("md5sum -- {quoted}");
-        let session = self.session.as_ref()?;
-        let output = self
-            .runtime
-            .block_on(tokio::time::timeout(HASH_TIMEOUT, async {
-                let mut channel = session.channel_open_session().await.ok()?;
-                channel.exec(true, command).await.ok()?;
-                let mut stdout = Vec::new();
-                let mut status = None;
-                while let Some(message) = channel.wait().await {
-                    match message {
-                        russh::ChannelMsg::Data { data } => {
-                            stdout.extend_from_slice(&data);
-                            if stdout.len() > 64 * 1024 {
-                                return None;
-                            }
-                        }
-                        russh::ChannelMsg::ExitStatus { exit_status } => status = Some(exit_status),
-                        russh::ChannelMsg::Close => break,
-                        _ => {}
-                    }
-                }
-                (status == Some(0)).then_some(stdout)
-            }));
-        let text = String::from_utf8(output.ok()??).ok()?;
+        let stdout = self.exec(format!("md5sum -- {}", shell_quote(path)), HASH_TIMEOUT)?;
+        let text = String::from_utf8(stdout).ok()?;
         let line = text.strip_suffix('\n')?;
         if line.contains('\n') {
             return None;
@@ -511,6 +598,163 @@ impl SftpConnection {
         let (md5, rest) = line.split_once("  ")?;
         let valid = md5.len() == 32 && md5.bytes().all(|byte| byte.is_ascii_hexdigit());
         (valid && rest == path).then(|| md5.to_ascii_lowercase())
+    }
+
+    /// The first line of `<tool> --version`, or `None` when the tool is
+    /// absent or the account has no shell (D-027 section 7b). The command
+    /// takes no argument from the user.
+    pub fn tool_version(&self, tool: DumpTool) -> Option<String> {
+        let stdout = self.exec(format!("{} --version", tool.command()), OPERATION_TIMEOUT)?;
+        let line = String::from_utf8(stdout)
+            .ok()?
+            .lines()
+            .next()?
+            .trim()
+            .to_owned();
+        let printable = !line.is_empty() && line.chars().all(|ch| !ch.is_control());
+        printable.then(|| line.chars().take(200).collect())
+    }
+
+    /// Runs one command of the compiled list on an exec channel. `None`
+    /// when the channel or the command fails, or stdout exceeds 64 KiB.
+    fn exec(&self, command: String, timeout: Duration) -> Option<Vec<u8>> {
+        let mut stdout = Vec::new();
+        let mut overflow = false;
+        let output = self.exec_streaming(command, &[], timeout, |data| {
+            stdout.extend_from_slice(data);
+            overflow |= stdout.len() > 64 * 1024;
+            !overflow
+        })?;
+        (output.status == Some(0) && !overflow).then_some(stdout)
+    }
+
+    /// Runs one command, writes `stdin` and closes it, and gives stdout to
+    /// `sink` in chunks. `sink` returns false to stop. Stderr keeps its
+    /// first 4 KiB. `None` when the channel cannot open or time runs out.
+    fn exec_streaming(
+        &self,
+        command: String,
+        stdin: &[u8],
+        timeout: Duration,
+        mut sink: impl FnMut(&[u8]) -> bool,
+    ) -> Option<ExecOutput> {
+        // A tokio timer needs the runtime context when it is made.
+        let _context = self.runtime.enter();
+        let session = self.session.as_ref()?;
+        let output = self.runtime.block_on(tokio::time::timeout(timeout, async {
+            let mut channel = session.channel_open_session().await.ok()?;
+            channel.exec(true, command).await.ok()?;
+            if !stdin.is_empty() {
+                channel.data(stdin).await.ok()?;
+            }
+            channel.eof().await.ok()?;
+            let mut output = ExecOutput::default();
+            while let Some(message) = channel.wait().await {
+                match message {
+                    russh::ChannelMsg::Data { data } => {
+                        output.stdout_bytes += data.len() as u64;
+                        if !sink(&data) {
+                            let _ = channel.close().await;
+                            return Some(output);
+                        }
+                    }
+                    russh::ChannelMsg::ExtendedData { data, .. } => {
+                        let room = 4096_usize.saturating_sub(output.stderr.len());
+                        output
+                            .stderr
+                            .extend_from_slice(&data[..data.len().min(room)]);
+                    }
+                    russh::ChannelMsg::ExitStatus { exit_status } => {
+                        output.status = Some(exit_status)
+                    }
+                    russh::ChannelMsg::Close => break,
+                    _ => {}
+                }
+            }
+            Some(output)
+        }));
+        output.ok()?
+    }
+
+    /// Signs in to MySQL with `mysqldump --no-data` for one database
+    /// (D-027 section 7b). It reads the table structure only, takes no
+    /// lock, and discards the output. The access facts travel on stdin as
+    /// an option file, never in the command line.
+    pub fn mysql_login_check(&self, access: &MysqlAccess) -> MysqlLoginCheck {
+        let command = format!(
+            "mysqldump --defaults-extra-file=/dev/stdin --no-data --single-transaction \
+             --skip-lock-tables --no-tablespaces --set-gtid-purged=OFF {}",
+            shell_quote(&access.database)
+        );
+        // A name that starts with `-` would be read as an option.
+        if access.database.is_empty()
+            || access.database.starts_with('-')
+            || access.database.contains(|ch: char| ch.is_control())
+        {
+            return MysqlLoginCheck::Error;
+        }
+        let Some(output) =
+            self.exec_streaming(command, &access.option_file(), OPERATION_TIMEOUT, |_| true)
+        else {
+            return MysqlLoginCheck::Error;
+        };
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        match output.status {
+            Some(0) if output.stdout_bytes > 0 => MysqlLoginCheck::Ok,
+            _ if stderr.contains("Access denied") => MysqlLoginCheck::Refused,
+            _ => MysqlLoginCheck::Error,
+        }
+    }
+
+    /// Dumps one MySQL database through `mysqldump` (D-027 section 7b) and
+    /// gives the SQL text to `sink` in chunks. `sink` returns false to stop.
+    /// The dump is consistent for InnoDB tables, takes no table lock, and
+    /// has no dump date, so the same data gives the same bytes. It is
+    /// complete only when `mysqldump` exits with 0 and the text ends with
+    /// its `-- Dump completed` line.
+    pub fn mysql_dump(
+        &self,
+        access: &MysqlAccess,
+        mut sink: impl FnMut(&[u8]) -> bool,
+    ) -> std::result::Result<u64, MysqlDumpError> {
+        if access.database.is_empty()
+            || access.database.starts_with('-')
+            || access.database.contains(|ch: char| ch.is_control())
+        {
+            return Err(MysqlDumpError::Failed);
+        }
+        let command = format!(
+            "mysqldump --defaults-extra-file=/dev/stdin --single-transaction --quick \
+             --skip-lock-tables --no-tablespaces --set-gtid-purged=OFF --routines --triggers \
+             --events --hex-blob --default-character-set=utf8mb4 --skip-dump-date {}",
+            shell_quote(&access.database)
+        );
+        let mut tail: Vec<u8> = Vec::new();
+        let mut stopped = false;
+        let output = self
+            .exec_streaming(command, &access.option_file(), DUMP_TIMEOUT, |data| {
+                tail.extend_from_slice(data);
+                if tail.len() > 256 {
+                    tail.drain(..tail.len() - 256);
+                }
+                stopped = !sink(data);
+                !stopped
+            })
+            .ok_or(MysqlDumpError::Failed)?;
+        if stopped {
+            return Err(MysqlDumpError::Stopped);
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("Access denied") {
+            return Err(MysqlDumpError::Refused);
+        }
+        let completed = String::from_utf8_lossy(&tail)
+            .trim_end()
+            .ends_with("-- Dump completed");
+        match output.status {
+            Some(0) if completed => Ok(output.stdout_bytes),
+            _ => Err(MysqlDumpError::Failed),
+        }
     }
 
     /// Reads a file one time and returns its byte count and MD5.

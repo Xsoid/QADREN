@@ -31,6 +31,7 @@ Baseline date: **2026-10-08**. Records list agreements. They do not prove the fe
 | D-025 | Accepted (2026-10-28) | [Autonomous scheduled Scenarios: one run path, one active run for each Scenario, automatic Update and Delete, one-way source wins, Worker SMB mount, Yandex schedules, launch at login, daily and every-N-hours schedules, parallel runs with a write-root lock; revises D-019, D-022, D-023, D-024](D-025-autonomous-scheduled-scenarios.md) |
 | D-026 | Accepted (2026-11-01) | [GitHub Releases: a `vX.Y.Z` tag starts a macOS workflow that builds an ad-hoc signed Apple silicon pre-release; Semantic Versioning from `v0.2.0`; Yandex client ID from a repository variable](D-026-github-releases.md) |
 | D-027 | Proposed (2026-11-01) | [ISPmanager 6 read-only backup source: `ispmanager` connector, POST transport, read-only allowlist, five capability states, Backup/export Scenario mode: one current copy with a subfolder per data type, updated by each run, typed selection](D-027-ispmanager-backup-source.md) |
+| D-028 | Accepted (2026-11-04) | [Energy efficiency is a system-wide priority: per-item cost does not grow with database size, full checks run once per process, stores and sessions open once per run, WAL for shared databases, close to zero CPU at rest, measured with a CPU profile; safety invariants stay first](D-028-energy-efficiency.md) |
 
 ## Revision 2026-10-09 — specification v0.2
 

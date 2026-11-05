@@ -12,15 +12,16 @@ use crate::confirmation::Confirmation;
 use crate::ispmanager_sftp::{SftpConnection, SftpReadError, SftpReader};
 use crate::job_execution::{
     enabled_local_connection, local_root_identity_key, matches_conflict_snapshot,
-    require_selected_path, run_scenario_rule_delete_after_remote_check,
+    require_selected_path, run_backup_mirror_delete, run_backup_mirror_delete_folder,
     scenario_update_destination, valid_job_id, LocalDirectoryCreateError, LocalFileCopyError,
     LocalFileCopyStatus, LocalRuleDeleteStatus, SftpFailure,
 };
 use crate::jobs::{JobStore, ScenarioCopyBaselineOutboxEntry};
 use crate::local_fs::{LocalError, LocalFilesystem};
-use crate::model::{ConfirmedFileVersion, JobState, ScenarioReference};
+use crate::model::{ConfirmedFileVersion, JobState, ScenarioReference, ScopeMatch};
 use crate::registry::{Registry, Scenario};
 use crate::scenario_copy_dispatch::dispatch_pending_scenario_copy_baselines;
+use crate::scenario_planner::name_key;
 use crate::storage_access::ISPMANAGER;
 use crate::verification::VerifiedReceipt;
 use std::io::{self, Read};
@@ -32,6 +33,12 @@ fn plain_relative(path: &str) -> bool {
         && Path::new(path)
             .components()
             .all(|part| matches!(part, Component::Normal(_)))
+}
+
+/// The server path of a Scenario path: the source root is the home folder
+/// of the account (D-027 section 6).
+fn server_path(root: &str, relative: &str) -> String {
+    format!("{}/{relative}", root.trim_end_matches('/'))
 }
 
 fn read_failure(error: SftpReadError) -> LocalFileCopyError {
@@ -55,7 +62,9 @@ fn backup_scenario(
     let mode = registry
         .scenario_mode(scenario_id)
         .map_err(|_| LocalFileCopyError::ScenarioUnavailable)?;
-    if mode != "backup_export" || scenario.direction != "left_to_right" || scenario.left_root != "/"
+    if mode != "backup_export"
+        || scenario.direction != "left_to_right"
+        || !scenario.left_root.starts_with('/')
     {
         return Err(LocalFileCopyError::ScenarioScopeMismatch);
     }
@@ -140,7 +149,7 @@ pub fn run_ispmanager_scenario_file_download(
     drop(registry);
 
     // Read the source metadata again. The plan can be old.
-    let server_path = format!("/{relative_path}");
+    let server_path = server_path(&scenario.left_root, relative_path);
     let meta = connection
         .lstat(&server_path)
         .map_err(read_failure)?
@@ -338,7 +347,7 @@ pub fn run_ispmanager_scenario_update(
         Registry::open(registry_path).map_err(|_| LocalFileCopyError::ScenarioUnavailable)?;
     let scenario = backup_scenario(&registry, scenario_id, scenario_revision)?;
     let meta = connection
-        .lstat(&format!("/{relative_path}"))
+        .lstat(&server_path(&scenario.left_root, relative_path))
         .map_err(read_failure)?
         .filter(|meta| meta.kind == "file")
         .ok_or(LocalFileCopyError::Sftp(SftpFailure::NotFound))?;
@@ -371,9 +380,10 @@ pub fn run_ispmanager_scenario_update(
     )
 }
 
-/// One Delete of a Backup/export run (D-027 section 5.4). The server must
-/// answer that the source object is absent; any other answer stops the
-/// deletion. The effect acts only on the Mac or SMB side.
+/// One Delete of a Backup/export run, of a file or of a whole folder (D-027
+/// sections 5.4, 5.6a, and 5.6b). For a path in the scope, the server must answer that the source object is
+/// absent; any other answer stops the deletion. The effect acts only on the
+/// Mac or SMB side.
 #[allow(clippy::too_many_arguments)]
 pub fn run_ispmanager_scenario_delete(
     database_path: &Path,
@@ -383,26 +393,325 @@ pub fn run_ispmanager_scenario_delete(
     relative_path: &str,
     job_id: &str,
     connection: &SftpConnection,
+    folder: bool,
 ) -> Result<LocalRuleDeleteStatus, LocalFileCopyError> {
     if !plain_relative(relative_path) {
         return Err(LocalFileCopyError::InvalidRequest);
     }
     let registry =
         Registry::open(registry_path).map_err(|_| LocalFileCopyError::ScenarioUnavailable)?;
-    backup_scenario(&registry, scenario_id, scenario_revision)?;
+    let scenario = backup_scenario(&registry, scenario_id, scenario_revision)?;
+    let scope = registry
+        .get_scenario_revision_scope(scenario_id, scenario_revision)
+        .map_err(|_| LocalFileCopyError::ScenarioUnavailable)?;
     drop(registry);
-    match connection.lstat(&format!("/{relative_path}")) {
-        Ok(None) => {}
-        Ok(Some(_)) => return Err(LocalFileCopyError::ConflictStale),
-        Err(error) => return Err(read_failure(error)),
+    // `files/` is a mirror of the source scope (D-027 section 5.6a). A path
+    // outside the selection or inside an exclusion is not in the scope, so
+    // its copy goes without a server check. A path in the scope goes only
+    // when the server answers that the object is absent.
+    match scope.classify(relative_path, name_key) {
+        ScopeMatch::Outside => {}
+        ScopeMatch::NameVariant => return Err(LocalFileCopyError::ScenarioScopeMismatch),
+        ScopeMatch::Inside => {
+            match connection.lstat(&server_path(&scenario.left_root, relative_path)) {
+                Ok(None) => {}
+                Ok(Some(_)) => return Err(LocalFileCopyError::ConflictStale),
+                Err(error) => return Err(read_failure(error)),
+            }
+        }
     }
-    run_scenario_rule_delete_after_remote_check(
-        database_path,
-        registry_path,
-        scenario_id,
-        scenario_revision,
-        relative_path,
-        false,
-        job_id,
-    )
+    if folder {
+        run_backup_mirror_delete_folder(
+            database_path,
+            registry_path,
+            scenario_id,
+            scenario_revision,
+            relative_path,
+            job_id,
+        )
+    } else {
+        run_backup_mirror_delete(
+            database_path,
+            registry_path,
+            scenario_id,
+            scenario_revision,
+            relative_path,
+            job_id,
+        )
+    }
+}
+
+/// The result of one database export (D-027 section 7b).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DatabaseExportStatus {
+    Created {
+        bytes: u64,
+        md5: String,
+    },
+    Updated {
+        bytes: u64,
+        md5: String,
+    },
+    /// The new dump has the same bytes as the destination file: no effect.
+    Unchanged {
+        bytes: u64,
+        md5: String,
+    },
+    /// The Job of this run and database exists already.
+    Existing(JobState),
+}
+
+/// A writer that keeps the byte count and the MD5 of what it writes.
+struct HashingWriter<W> {
+    inner: W,
+    context: md5::Context,
+    total: u64,
+}
+
+impl<W: io::Write> io::Write for HashingWriter<W> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        let count = self.inner.write(buffer)?;
+        self.context.consume(&buffer[..count]);
+        self.total += count as u64;
+        Ok(count)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// A database name that is also a safe file name.
+fn plain_database_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('.')
+        && !name.starts_with('-')
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'$'))
+}
+
+/// The Job of one database export in one run.
+pub fn database_export_job_id(run_id: &str, database: &str) -> String {
+    let digest = format!("{:x}", md5::compute(database.as_bytes()));
+    format!("ispdb-{run_id}-{}", &digest[..16])
+}
+
+/// Dump one selected MySQL database into `databases/<name>.sql.gz` of the
+/// Backup/export copy (D-027 section 7b). The dump goes into a private
+/// staging file first. Only a complete dump is published: as a new file
+/// with no-overwrite, or through the approved replacement protocol with a
+/// durable attempt. A dump with the same bytes as the destination file
+/// gives no effect. `keep_going` is read during the dump; false stops it
+/// before the publish.
+#[allow(clippy::too_many_arguments)]
+pub fn run_ispmanager_database_export(
+    database_path: &Path,
+    registry_path: &Path,
+    scenario_id: &str,
+    scenario_revision: u64,
+    run_id: &str,
+    connection: &SftpConnection,
+    access: &crate::ispmanager_sftp::MysqlAccess,
+    staging_dir: &Path,
+    keep_going: &dyn Fn() -> bool,
+) -> Result<DatabaseExportStatus, &'static str> {
+    use crate::ispmanager_sftp::MysqlDumpError;
+    use std::io::Write;
+    let database = access.database.as_str();
+    let job_id = database_export_job_id(run_id, database);
+    if !valid_job_id(&job_id) || !plain_database_name(database) {
+        return Err("invalid_request");
+    }
+    let registry = Registry::open(registry_path).map_err(|_| "registry_unavailable")?;
+    let scenario = backup_scenario(&registry, scenario_id, scenario_revision)
+        .map_err(|_| "scenario_unavailable")?;
+    let selected = registry
+        .backup_resources(scenario_id, scenario_revision)
+        .map_err(|_| "registry_unavailable")?
+        .iter()
+        .any(|r| r.category == "databases" && r.rule == "include" && r.provider_id == database);
+    if !selected {
+        return Err("invalid_selection");
+    }
+    let destination_connection = scenario.right_connection_id.clone();
+    if !enabled_local_connection(registry_path, &destination_connection) {
+        return Err("local_scenario_connection_unavailable");
+    }
+    drop(registry);
+    // `files/` is the right root; `databases/` is next to it.
+    let root = Path::new(&scenario.right_root)
+        .parent()
+        .ok_or("local_root_unavailable")?;
+    let destination = LocalFilesystem::open(root).map_err(|_| "local_root_unavailable")?;
+    if !destination.capabilities().operations.write_content {
+        return Err("local_root_unavailable");
+    }
+    let mut store = JobStore::open(database_path).map_err(|_| "job_store_unavailable")?;
+    if let Some(existing) = store.get(&job_id).map_err(|_| "job_store_unavailable")? {
+        return Ok(DatabaseExportStatus::Existing(existing.state));
+    }
+
+    // 1. The dump, read-only on the server, into a private staging file.
+    std::fs::create_dir_all(staging_dir).map_err(|_| "local_root_unavailable")?;
+    let staging = staging_dir.join(format!("{job_id}.sql.gz"));
+    let _ = std::fs::remove_file(&staging);
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staging)
+        .map_err(|_| "local_root_unavailable")?;
+    let remove_staging = || {
+        let _ = std::fs::remove_file(&staging);
+    };
+    let mut encoder = flate2::write::GzEncoder::new(
+        HashingWriter {
+            inner: io::BufWriter::new(file),
+            context: md5::Context::new(),
+            total: 0,
+        },
+        flate2::Compression::default(),
+    );
+    let mut write_failed = false;
+    let dumped = connection.mysql_dump(access, |data| {
+        write_failed = encoder.write_all(data).is_err();
+        !write_failed && keep_going()
+    });
+    if let Err(error) = dumped {
+        remove_staging();
+        return Err(match error {
+            _ if write_failed => "local_root_unavailable",
+            MysqlDumpError::Refused => "ispmanager_database_refused",
+            MysqlDumpError::Stopped => "stopped_by_user",
+            MysqlDumpError::Failed => "ispmanager_database_dump_failed",
+        });
+    }
+    let written = encoder.finish().and_then(|mut hashing| {
+        hashing.inner.flush()?;
+        let file = hashing
+            .inner
+            .into_inner()
+            .map_err(|error| error.into_error())?;
+        file.sync_all()?;
+        Ok((hashing.total, format!("{:x}", hashing.context.compute())))
+    });
+    let Ok((size, md5)) = written else {
+        remove_staging();
+        return Err("local_root_unavailable");
+    };
+
+    // 2. The same bytes as the destination file give no effect.
+    let target = Path::new("databases").join(format!("{database}.sql.gz"));
+    let target_text = target.to_string_lossy().into_owned();
+    let replace = match destination.stat(&target) {
+        Ok(entry) if entry.is_directory => {
+            remove_staging();
+            return Err("target_exists");
+        }
+        Ok(entry) => {
+            if entry.size == size {
+                let mut hashing = HashingWriter {
+                    inner: io::sink(),
+                    context: md5::Context::new(),
+                    total: 0,
+                };
+                if destination.read_to_writer(&target, &mut hashing).is_ok()
+                    && format!("{:x}", hashing.context.compute()) == md5
+                {
+                    remove_staging();
+                    return Ok(DatabaseExportStatus::Unchanged { bytes: size, md5 });
+                }
+            }
+            true
+        }
+        Err(LocalError::Io(error)) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(_) => {
+            remove_staging();
+            return Err("local_metadata_unavailable");
+        }
+    };
+
+    // 3. The publish: a durable attempt, then no-overwrite or replacement.
+    let root_identity = local_root_identity_key(&destination).map_err(|_| {
+        remove_staging();
+        "local_root_unavailable"
+    })?;
+    let store_error = |_| "job_store_unavailable";
+    store
+        .enqueue(&job_id, Some((scenario_id, scenario_revision)))
+        .map_err(store_error)?;
+    store
+        .advance(
+            &job_id,
+            JobState::Queued,
+            JobState::Running,
+            Confirmation::Unknown,
+        )
+        .map_err(store_error)?;
+    let attempt_id = format!("{job_id}-attempt-1");
+    let operation_kind = if replace {
+        "local_copy_replace"
+    } else {
+        "local_copy_new"
+    };
+    store
+        .prepare_bound_attempt_with_root_identity(
+            &job_id,
+            &attempt_id,
+            operation_kind,
+            &destination_connection,
+            &target_text,
+            size,
+            &md5,
+            &root_identity,
+        )
+        .map_err(store_error)?;
+    let fail_before_effect = |store: &mut JobStore, code: &'static str| {
+        let _ = store.fail_attempt_before_effect(&job_id, &attempt_id);
+        let _ = std::fs::remove_file(&staging);
+        Err(code)
+    };
+    if !enabled_local_connection(registry_path, &destination_connection) {
+        return fail_before_effect(&mut store, "local_scenario_connection_unavailable");
+    }
+    match destination.create_directory_tree(Path::new("databases")) {
+        Ok(_) => {}
+        Err(LocalError::OutcomeUnknown(_)) => return Err("outcome_unknown"),
+        Err(_) => return fail_before_effect(&mut store, "local_root_unavailable"),
+    }
+    let Ok(mut input) = std::fs::File::open(&staging) else {
+        return fail_before_effect(&mut store, "local_root_unavailable");
+    };
+    let published = if replace {
+        destination.create_from_reader_to_replace(&target, &mut input)
+    } else {
+        destination.create_from_reader(&target, &mut input)
+    };
+    match published {
+        Ok(bytes) if bytes == size => {}
+        Ok(_) => return Err("outcome_unknown"),
+        Err(LocalError::OutcomeUnknown(_)) => return Err("outcome_unknown"),
+        Err(LocalError::AlreadyExists) => return fail_before_effect(&mut store, "target_exists"),
+        Err(_) => return fail_before_effect(&mut store, "local_root_unavailable"),
+    }
+    remove_staging();
+    match destination.stat(&target) {
+        Ok(entry) if !entry.is_directory && entry.size == size => {}
+        _ => return Err("outcome_unknown"),
+    }
+    let receipt = VerifiedReceipt::metadata_verified(
+        &attempt_id,
+        operation_kind,
+        &destination_connection,
+        &target_text,
+    );
+    store
+        .complete_attempt_with_scenario_copy_baseline(&job_id, &attempt_id, &receipt, None)
+        .map_err(store_error)?;
+    Ok(if replace {
+        DatabaseExportStatus::Updated { bytes: size, md5 }
+    } else {
+        DatabaseExportStatus::Created { bytes: size, md5 }
+    })
 }

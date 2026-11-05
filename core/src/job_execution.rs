@@ -1418,7 +1418,7 @@ pub fn run_local_scenario_rule_delete(
         relative_path,
         on_left,
         job_id,
-        false,
+        SourceCheck::Local,
     )
 }
 
@@ -1443,8 +1443,45 @@ pub fn run_scenario_rule_delete_after_remote_check(
         relative_path,
         on_left,
         job_id,
-        true,
+        SourceCheck::Remote,
     )
+}
+
+/// A mirror deletion in the `files/` destination of a Backup/export
+/// Scenario (D-027 section 5.6a). The object needs no confirmed state and
+/// can be outside the selection or inside an exclusion. For a path inside
+/// the scope, the caller has just checked with the server that the source
+/// object is absent.
+pub fn run_backup_mirror_delete(
+    database_path: &Path,
+    registry_path: &Path,
+    scenario_id: &str,
+    scenario_revision: u64,
+    relative_path: &str,
+    job_id: &str,
+) -> Result<LocalRuleDeleteStatus, LocalFileCopyError> {
+    run_local_scenario_rule_delete_checked(
+        database_path,
+        registry_path,
+        scenario_id,
+        scenario_revision,
+        relative_path,
+        false,
+        job_id,
+        SourceCheck::Mirror,
+    )
+}
+
+/// How a rule deletion knows that the source does not have the object.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SourceCheck {
+    /// The executor checks the Local source root.
+    Local,
+    /// The caller checked the provider.
+    Remote,
+    /// A Backup/export mirror: the caller checked the server for a path in
+    /// the scope; a path outside the scope is not in the source by rule.
+    Mirror,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1456,8 +1493,10 @@ fn run_local_scenario_rule_delete_checked(
     relative_path: &str,
     on_left: bool,
     job_id: &str,
-    source_absence_checked_remotely: bool,
+    source_check: SourceCheck,
 ) -> Result<LocalRuleDeleteStatus, LocalFileCopyError> {
+    let source_absence_checked_remotely = source_check != SourceCheck::Local;
+    let mirror = source_check == SourceCheck::Mirror;
     if !valid_job_id(job_id) {
         return Err(LocalFileCopyError::InvalidRequest);
     }
@@ -1471,11 +1510,27 @@ fn run_local_scenario_rule_delete_checked(
         return Err(LocalFileCopyError::ConsentRequired);
     }
     let path = Path::new(relative_path);
-    require_selected_path(&registry, scenario_id, scenario_revision, path)?;
     let scenario = registry
         .get_scenario_revision(scenario_id, scenario_revision)
         .map_err(|_| LocalFileCopyError::ScenarioUnavailable)?
         .ok_or(LocalFileCopyError::ScenarioUnavailable)?;
+    if mirror {
+        // Only the `files/` destination of a Backup/export Scenario is a
+        // mirror. Core sets that root (D-027 section 5.2).
+        if on_left
+            || !scenario.right_root.ends_with("/files")
+            || registry.scenario_mode(scenario_id).ok().as_deref() != Some("backup_export")
+            || relative_path.is_empty()
+            || crate::scenario_planner::executor_own_file(relative_path)
+            || !path
+                .components()
+                .all(|part| matches!(part, std::path::Component::Normal(_)))
+        {
+            return Err(LocalFileCopyError::ScenarioScopeMismatch);
+        }
+    } else {
+        require_selected_path(&registry, scenario_id, scenario_revision, path)?;
+    }
     let reference = ScenarioReference {
         scenario_id: scenario_id.to_owned(),
         revision: scenario_revision,
@@ -1508,24 +1563,20 @@ fn run_local_scenario_rule_delete_checked(
         return Err(LocalFileCopyError::ConnectionUnavailable);
     }
     let baseline = registry
-        .list_confirmed_file_states(&reference)
-        .map_err(|_| LocalFileCopyError::ScenarioUnavailable)?
-        .into_iter()
-        .find(|state| state.relative_path == relative_path)
-        .ok_or(LocalFileCopyError::ConflictStale)?;
-    let (Some(confirmed_target), Some(_)) = (
+        .confirmed_file_state(&reference, relative_path)
+        .map_err(|_| LocalFileCopyError::ScenarioUnavailable)?;
+    // A mirror deletes any destination object; the others delete only an
+    // object with a confirmed state on both sides (D-019 rule 4).
+    let confirmed_target = match baseline.as_ref().map(|state| {
         if on_left {
-            &baseline.left
+            (&state.left, &state.right)
         } else {
-            &baseline.right
-        },
-        if on_left {
-            &baseline.right
-        } else {
-            &baseline.left
-        },
-    ) else {
-        return Err(LocalFileCopyError::ConflictStale);
+            (&state.right, &state.left)
+        }
+    }) {
+        Some((Some(target), Some(_))) => Some(target),
+        _ if mirror => None,
+        _ => return Err(LocalFileCopyError::ConflictStale),
     };
     if !source_absence_checked_remotely {
         let other =
@@ -1549,7 +1600,10 @@ fn run_local_scenario_rule_delete_checked(
     let current = match target.stat(path) {
         Ok(entry)
             if !entry.is_directory
-                && (source_wins || matches_conflict_snapshot(&entry, confirmed_target)) =>
+                && (mirror
+                    || source_wins
+                    || confirmed_target
+                        .is_some_and(|confirmed| matches_conflict_snapshot(&entry, confirmed))) =>
         {
             entry
         }
@@ -1560,11 +1614,50 @@ fn run_local_scenario_rule_delete_checked(
         && target
             .trash_available(path)
             .map_err(LocalFileCopyError::Local)?;
+    if let Some(state) = execute_rule_delete(
+        database_path,
+        (scenario_id, scenario_revision),
+        job_id,
+        &target,
+        target_connection,
+        relative_path,
+        current.size,
+        to_trash,
+        false,
+    )? {
+        return Ok(LocalRuleDeleteStatus::Existing(state));
+    }
+    registry
+        .forget_confirmed_file_state(&reference, relative_path)
+        .map_err(|_| LocalFileCopyError::ScenarioUnavailable)?;
+    Ok(if to_trash {
+        LocalRuleDeleteStatus::MovedToTrash
+    } else {
+        LocalRuleDeleteStatus::DeletedPermanently
+    })
+}
+
+/// The durable part of one rule deletion: the Job, the exact-scope use of
+/// the simple deletion rule, a bound attempt, the effect, and the check
+/// that the path is gone. Returns the state of a Job that already exists.
+#[allow(clippy::too_many_arguments)]
+fn execute_rule_delete(
+    database_path: &Path,
+    (scenario_id, scenario_revision): (&str, u64),
+    job_id: &str,
+    target: &LocalFilesystem,
+    target_connection: &str,
+    relative_path: &str,
+    size: u64,
+    to_trash: bool,
+    folder: bool,
+) -> Result<Option<JobState>, LocalFileCopyError> {
+    let path = Path::new(relative_path);
     let root_identity =
-        local_root_identity_key(&target).map_err(|_| LocalFileCopyError::InvalidRequest)?;
+        local_root_identity_key(target).map_err(|_| LocalFileCopyError::InvalidRequest)?;
     let mut store = JobStore::open(database_path)?;
     if let Some(existing) = store.get(job_id)? {
-        return Ok(LocalRuleDeleteStatus::Existing(existing.state));
+        return Ok(Some(existing.state));
     }
     store.enqueue(job_id, Some((scenario_id, scenario_revision)))?;
     store.advance(
@@ -1601,10 +1694,11 @@ fn run_local_scenario_rule_delete_checked(
         Confirmation::Confirmed(EvidenceLevel::Requested),
     )?;
     let attempt_id = format!("{job_id}-attempt-1");
-    let operation_kind = if to_trash {
-        "local_rule_trash"
-    } else {
-        "local_rule_delete"
+    let operation_kind = match (folder, to_trash) {
+        (false, true) => "local_rule_trash",
+        (false, false) => "local_rule_delete",
+        (true, true) => "local_rule_trash_folder",
+        (true, false) => "local_rule_delete_folder",
     };
     store.prepare_bound_attempt_with_root_identity(
         job_id,
@@ -1612,19 +1706,21 @@ fn run_local_scenario_rule_delete_checked(
         operation_kind,
         target_connection,
         relative_path,
-        current.size,
+        size,
         "00000000000000000000000000000000",
         &root_identity,
     )?;
-    let effect = if to_trash {
-        match target.trash_file(path) {
-            Ok(true) => Ok(()),
-            // The Trash disappeared after the check. Nothing changed.
-            Ok(false) => Err(LocalError::UnsafeEntry),
-            Err(error) => Err(error),
-        }
-    } else {
-        target.delete_file(path)
+    let trashed = |moved: crate::local_fs::Result<bool>| match moved {
+        Ok(true) => Ok(()),
+        // The Trash disappeared after the check. Nothing changed.
+        Ok(false) => Err(LocalError::UnsafeEntry),
+        Err(error) => Err(error),
+    };
+    let effect = match (folder, to_trash) {
+        (false, true) => trashed(target.trash_file(path)),
+        (false, false) => target.delete_file(path),
+        (true, true) => trashed(target.trash_directory_tree(path)),
+        (true, false) => target.delete_directory_tree(path),
     };
     match effect {
         Ok(()) => {}
@@ -1647,8 +1743,128 @@ fn run_local_scenario_rule_delete_checked(
         relative_path,
     );
     store.complete_attempt(job_id, &attempt_id, &receipt)?;
+    Ok(None)
+}
+
+/// A whole-folder deletion in the `files/` destination of a Backup/export
+/// Scenario (D-027 section 5.6b). The folder goes as one entry into the
+/// Trash of its volume, or without a Trash it is removed with all its
+/// content. The caller has checked the folder against the source: outside
+/// the scope, or absent on the server. Before the attempt, this reads the
+/// folder again: a symbolic link, a special file, a `.qadren-` file, an
+/// unresolved attempt under it, or a selected object inside it stops the
+/// deletion, and the next plan decides file by file.
+pub fn run_backup_mirror_delete_folder(
+    database_path: &Path,
+    registry_path: &Path,
+    scenario_id: &str,
+    scenario_revision: u64,
+    relative_path: &str,
+    job_id: &str,
+) -> Result<LocalRuleDeleteStatus, LocalFileCopyError> {
+    if !valid_job_id(job_id) {
+        return Err(LocalFileCopyError::InvalidRequest);
+    }
+    require_current_scenario_revision(registry_path, scenario_id, scenario_revision)?;
+    let registry =
+        Registry::open(registry_path).map_err(|_| LocalFileCopyError::ScenarioUnavailable)?;
+    let scope = registry
+        .get_scenario_revision_scope(scenario_id, scenario_revision)
+        .map_err(|_| LocalFileCopyError::ScenarioUnavailable)?;
+    if scope.deletion_mode != DeletionMode::Simple {
+        return Err(LocalFileCopyError::ConsentRequired);
+    }
+    let scenario = registry
+        .get_scenario_revision(scenario_id, scenario_revision)
+        .map_err(|_| LocalFileCopyError::ScenarioUnavailable)?
+        .ok_or(LocalFileCopyError::ScenarioUnavailable)?;
+    let path = Path::new(relative_path);
+    let inside = |selected: &String| {
+        selected
+            .strip_prefix(relative_path)
+            .is_some_and(|rest| rest.starts_with('/'))
+    };
+    if !scenario.right_root.ends_with("/files")
+        || registry.scenario_mode(scenario_id).ok().as_deref() != Some("backup_export")
+        || relative_path.is_empty()
+        || !path
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
+        || crate::scenario_planner::executor_own_file(relative_path)
+        || scope.selected_paths.iter().any(inside)
+    {
+        return Err(LocalFileCopyError::ScenarioScopeMismatch);
+    }
+    let target_connection = &scenario.right_connection_id;
+    if !enabled_local_connection(registry_path, target_connection) {
+        return Err(LocalFileCopyError::ConnectionUnavailable);
+    }
+    let target = LocalFilesystem::open(Path::new(&scenario.right_root))
+        .map_err(LocalFileCopyError::Local)?;
+    if !target.capabilities().operations.delete {
+        return Err(LocalFileCopyError::CapabilityUnavailable);
+    }
+    match target.stat(path) {
+        Ok(entry) if entry.is_directory => {}
+        Ok(_) | Err(LocalError::Io(_)) => return Err(LocalFileCopyError::ConflictStale),
+        Err(error) => return Err(LocalFileCopyError::Local(error)),
+    }
+    // The real content now, for the checks and the attempt size.
+    let (entries, skipped) = target
+        .list_tree_with_skipped(path, usize::MAX)
+        .map_err(LocalFileCopyError::Local)?;
+    let own = entries.iter().any(|(entry_path, _)| {
+        entry_path
+            .to_str()
+            .is_none_or(crate::scenario_planner::executor_own_file)
+    });
+    if !skipped.is_empty() || own {
+        return Err(LocalFileCopyError::ConflictStale);
+    }
+    let bytes = entries
+        .iter()
+        .filter(|(_, entry)| !entry.is_directory)
+        .map(|(_, entry)| entry.size)
+        .sum();
+    let prefix = format!("{relative_path}/");
+    let pending = JobStore::open(database_path)?
+        .unresolved_attempts()?
+        .into_iter()
+        .any(|attempt| {
+            attempt.target_connection_id.as_deref() == Some(target_connection.as_str())
+                && attempt
+                    .target_path
+                    .as_deref()
+                    .is_some_and(|target| target == relative_path || target.starts_with(&prefix))
+        });
+    if pending {
+        return Err(LocalFileCopyError::ConflictStale);
+    }
+    let to_trash = target.capabilities().operations.trash
+        && target
+            .trash_available(path)
+            .map_err(LocalFileCopyError::Local)?;
+    if let Some(state) = execute_rule_delete(
+        database_path,
+        (scenario_id, scenario_revision),
+        job_id,
+        &target,
+        target_connection,
+        relative_path,
+        bytes,
+        to_trash,
+        true,
+    )? {
+        return Ok(LocalRuleDeleteStatus::Existing(state));
+    }
     registry
-        .forget_confirmed_file_state(&reference, relative_path)
+        .forget_confirmed_file_states_under(
+            &ScenarioReference {
+                scenario_id: scenario_id.to_owned(),
+                revision: scenario_revision,
+            },
+            relative_path,
+        )
         .map_err(|_| LocalFileCopyError::ScenarioUnavailable)?;
     Ok(if to_trash {
         LocalRuleDeleteStatus::MovedToTrash
@@ -1687,7 +1903,12 @@ pub fn reconcile_local_rule_delete(
         attempt.job_id == job_id
             && matches!(
                 attempt.operation_kind.as_deref(),
-                Some("local_rule_trash" | "local_rule_delete")
+                Some(
+                    "local_rule_trash"
+                        | "local_rule_delete"
+                        | "local_rule_trash_folder"
+                        | "local_rule_delete_folder"
+                )
             )
     }) else {
         return still_unknown;
@@ -1726,15 +1947,16 @@ pub fn reconcile_local_rule_delete(
             &relative_path,
         );
         store.complete_attempt(job_id, &attempt.attempt_id, &receipt)?;
-        registry
-            .forget_confirmed_file_state(
-                &ScenarioReference {
-                    scenario_id,
-                    revision,
-                },
-                &relative_path,
-            )
-            .map_err(|_| LocalFileCopyError::ScenarioUnavailable)?;
+        let reference = ScenarioReference {
+            scenario_id,
+            revision,
+        };
+        if kind.ends_with("_folder") {
+            registry.forget_confirmed_file_states_under(&reference, &relative_path)
+        } else {
+            registry.forget_confirmed_file_state(&reference, &relative_path)
+        }
+        .map_err(|_| LocalFileCopyError::ScenarioUnavailable)?;
         return Ok(LocalRuleDeleteReconciliationStatus::Completed);
     }
     still_unknown

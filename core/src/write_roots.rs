@@ -45,10 +45,14 @@ pub fn scenario_roots(
     ]
     .into_iter()
     .map(|(connection, root, write)| {
-        let yandex = adapter(connection).as_deref() == Some(YANDEX_DISK);
-        let (storage, path) = if yandex {
+        let adapter = adapter(connection);
+        let (storage, path) = if adapter.as_deref() == Some(YANDEX_DISK) {
             let path = root.strip_prefix("disk:").unwrap_or(root);
             (format!("yandex:{connection}"), PathBuf::from(path))
+        } else if adapter.as_deref() == Some(crate::storage_access::ISPMANAGER) {
+            // Server paths of an ISPmanager source are not paths on this Mac:
+            // the root `/` overlapped every local root (found on 2026-11-04).
+            (format!("ispmanager:{connection}"), PathBuf::from(root))
         } else {
             ("fs".to_owned(), canonical(Path::new(root)))
         };

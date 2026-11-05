@@ -11,6 +11,11 @@ private func ispmanagerCheck(
 @_silgen_name("qadren_ispmanager_free_string")
 private func ispmanagerFree(_ pointer: UnsafeMutablePointer<CChar>?)
 
+@_silgen_name("qadren_ispmanager_databases")
+private func ispmanagerDatabases(
+    _ url: UnsafePointer<CChar>?, _ login: UnsafePointer<CChar>?, _ password: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
+
 @_silgen_name("qadren_ispmanager_sftp_list")
 private func ispmanagerSFTPList(
     _ url: UnsafePointer<CChar>?, _ login: UnsafePointer<CChar>?, _ password: UnsafePointer<CChar>?,
@@ -75,7 +80,7 @@ struct ISPmanagerFileTransport: Codable, Equatable {
         let detail = detail.map { " (\($0))" } ?? ""
         switch reason {
         case "ready":
-            return "Файлы: SFTP, порт \(port). Ключ сервера подтверждён, вход по SSH выполнен, команды на сервере не запускаются."
+            return "Файлы: SFTP, порт \(port). Ключ сервера подтверждён, вход по SSH выполнен. На сервере запускаются только команды чтения: md5sum и проверка версий утилит дампа."
         case "host_key_unconfirmed":
             return "SSH-сервер на порту \(port) показал ключ \(fingerprint ?? "?"). Сверьте отпечаток с ключом сервера и подтвердите его. До подтверждения QADREN не отправляет логин и пароль по SSH." + fallback
         case "host_key_changed":
@@ -92,6 +97,75 @@ struct ISPmanagerFileTransport: Codable, Equatable {
     }
 }
 
+/// What the panel and the SSH server tell about databases (D-027 section
+/// 7b): field names, server type and version, tool versions, and whether
+/// the panel returns a password. It holds no password and no names.
+struct ISPmanagerDatabaseProbe: Codable, Equatable {
+    struct ServerField: Codable, Equatable {
+        let field: String
+        let value: String
+    }
+    struct ToolVersion: Codable, Equatable {
+        let tool: String
+        let version: String?
+    }
+    let db_fields: [String]
+    let db_key_field: String?
+    let server_info: [ServerField]
+    let users_result: String?
+    let user_fields: [String]
+    let user_key_field: String?
+    let user_form_result: String?
+    let user_form_fields: [String]
+    let password_readable: Bool?
+    let password_masked: Bool?
+    let mysql_login: String?
+    let tools: [ToolVersion]
+    let error: String?
+
+    var lines: [String] {
+        if db_fields.isEmpty {
+            return [error.map { "Список баз не прочитан (\($0))." } ?? "Баз данных у аккаунта нет."]
+        }
+        var result: [String] = []
+        let server = server_info.map { "\($0.field): \($0.value)" }.joined(separator: ", ")
+        result.append("Базы: поля списка — \(db_fields.joined(separator: ", "))." + (server.isEmpty ? "" : " Сервер: \(server)."))
+        switch users_result {
+        case "items": result.append("Пользователи базы читаются: \(user_fields.joined(separator: ", ")).")
+        case "empty": result.append("У первой базы нет пользователей.")
+        case .some(let other): result.append("Пользователи базы не читаются: \(Self.label(other)).")
+        case nil: break
+        }
+        switch (user_form_result, password_readable) {
+        case ("items", true?) where password_masked == true:
+            result.append("Форма пользователя базы отдаёт только маску вместо пароля.")
+        case ("items", true?): result.append("Панель отдаёт пароль пользователя базы.")
+        case ("items", _): result.append("Форма пользователя базы читается, но поле пароля пустое: панель пароль не отдаёт. Поля: \(user_form_fields.joined(separator: ", ")).")
+        case (.some(let other), _): result.append("Форма пользователя базы не читается: \(Self.label(other)).")
+        default: break
+        }
+        if !tools.isEmpty {
+            let found = tools.compactMap { tool in tool.version.map { "\(tool.tool): \($0)" } }
+            result.append(found.isEmpty ? "Утилит дампа по SSH не найдено." : "По SSH: " + found.joined(separator: "; ") + ".")
+        }
+        switch mysql_login {
+        case "ok": result.append("Вход в MySQL с данными из панели работает: mysqldump прочитал структуру первой базы. Данные не читались, база не изменялась.")
+        case "refused": result.append("MySQL не принял пользователя или пароль из панели.")
+        case "error": result.append("Проверочный вход в MySQL по SSH не удался.")
+        default: break
+        }
+        return result
+    }
+
+    private static func label(_ result: String) -> String {
+        switch result {
+        case "denied": "нет прав"
+        case "missing": "функции нет на панели"
+        default: "ошибка"
+        }
+    }
+}
+
 /// The result of one sign-in and capability check. `status` is a Registry
 /// status. The report holds no values from the panel, only result classes.
 struct ISPmanagerCheckReport: Codable, Equatable {
@@ -99,6 +173,15 @@ struct ISPmanagerCheckReport: Codable, Equatable {
     let error: String?
     let categories: [ISPmanagerCategoryReport]
     let file_transport: ISPmanagerFileTransport?
+    var databases: ISPmanagerDatabaseProbe? = nil
+
+    /// The Registry status. Backups read files through SFTP with the
+    /// confirmed host key, so an unconfirmed or changed key needs the user
+    /// even when the panel sign-in works.
+    var effectiveStatus: String {
+        let keyProblem = ["host_key_unconfirmed", "host_key_changed"].contains(file_transport?.reason ?? "")
+        return status == "connected" && keyProblem ? "requires_auth" : status
+    }
 
     var message: String {
         switch status {
@@ -257,6 +340,35 @@ enum ISPmanagerSFTP {
             if let listing = result.data, result.ok { return .success(listing) }
             if let transport = result.transport { return .failure(.transport(transport)) }
             return .failure(.message(result.error ?? "Не удалось прочитать папку."))
+        }.value
+    }
+}
+
+/// The MySQL databases of the account for the Scenario editor (D-027
+/// section 7b). Core reads only the `db` list of the panel.
+enum ISPmanagerDatabases {
+    private struct Result: Decodable {
+        let ok: Bool
+        let data: [String]?
+        let error: String?
+    }
+
+    static func list(url: String, credentials: LoginCredentials) async -> Swift.Result<[String], ISPmanagerSFTP.Failure> {
+        await Task.detached(priority: .userInitiated) {
+            let pointer = url.withCString { url in
+                credentials.login.withCString { login in
+                    credentials.password.withCString { password in
+                        ispmanagerDatabases(url, login, password)
+                    }
+                }
+            }
+            guard let pointer else { return .failure(.message("Нет ответа от Core.")) }
+            defer { ispmanagerFree(pointer) }
+            guard let result = try? JSONDecoder().decode(
+                Result.self, from: Data(String(cString: pointer).utf8)
+            ) else { return .failure(.message("Неверный ответ Core.")) }
+            if let names = result.data, result.ok { return .success(names) }
+            return .failure(.message("Не удалось прочитать список баз панели (\(result.error ?? "ошибка"))."))
         }.value
     }
 }

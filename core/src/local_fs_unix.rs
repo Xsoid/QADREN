@@ -635,6 +635,35 @@ fn trash_name(leaf: &CStr, attempt: usize) -> Result<CString> {
 pub fn trash_file_into(root: &File, target: &Path, trash: &File) -> Result<()> {
     let (directory, leaf) = parent(root, target)?;
     let source = file_identity(root, target)?;
+    let info = leaf_stat(&directory, &leaf)?;
+    reject_dataless_mutation(&info)?;
+    if info.st_mode & libc::S_IFMT != libc::S_IFREG
+        || info.st_dev as u64 != source.device
+        || info.st_ino != source.inode
+    {
+        return Err(LocalError::UnsafeEntry);
+    }
+    move_into_trash(&directory, &leaf, trash, source.device, source.inode)
+}
+
+/// Move one checked directory, with all its content, into `trash` as one
+/// entry (D-027 section 5.6b). The rules of `trash_file_into` apply.
+#[cfg(target_os = "macos")]
+pub fn trash_directory_into(root: &File, target: &Path, trash: &File) -> Result<()> {
+    let (directory, leaf) = parent(root, target)?;
+    let (device, inode) = directory_identity(root, target)?;
+    let info = leaf_stat(&directory, &leaf)?;
+    if info.st_mode & libc::S_IFMT != libc::S_IFDIR
+        || info.st_dev as u64 != device
+        || info.st_ino != inode
+    {
+        return Err(LocalError::UnsafeEntry);
+    }
+    move_into_trash(&directory, &leaf, trash, device, inode)
+}
+
+/// `fstatat` of one leaf without following a symbolic link.
+fn leaf_stat(directory: &File, leaf: &CStr) -> Result<libc::stat> {
     let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
     if unsafe {
         libc::fstatat(
@@ -647,17 +676,24 @@ pub fn trash_file_into(root: &File, target: &Path, trash: &File) -> Result<()> {
     {
         return Err(LocalError::Io(io::Error::last_os_error()));
     }
-    let info = unsafe { info.assume_init() };
-    reject_dataless_mutation(&info)?;
-    if info.st_mode & libc::S_IFMT != libc::S_IFREG
-        || info.st_dev as u64 != source.device
-        || info.st_ino != source.inode
-        || trash.metadata()?.dev() != source.device
-    {
+    Ok(unsafe { info.assume_init() })
+}
+
+/// Rename the checked inode `device`/`inode` at `leaf` into `trash` under a
+/// free name, then confirm the identity at the new name.
+#[cfg(target_os = "macos")]
+fn move_into_trash(
+    directory: &File,
+    leaf: &CStr,
+    trash: &File,
+    device: u64,
+    inode: u64,
+) -> Result<()> {
+    if trash.metadata()?.dev() != device {
         return Err(LocalError::UnsafeEntry);
     }
     for attempt in 0..100 {
-        let candidate = trash_name(&leaf, attempt)?;
+        let candidate = trash_name(leaf, attempt)?;
         let outcome = unsafe {
             libc::renameatx_np(
                 directory.as_raw_fd(),
@@ -673,32 +709,79 @@ pub fn trash_file_into(root: &File, target: &Path, trash: &File) -> Result<()> {
                 error => return Err(error),
             }
         }
-        let mut moved = std::mem::MaybeUninit::<libc::stat>::uninit();
-        let status = unsafe {
-            libc::fstatat(
-                trash.as_raw_fd(),
-                candidate.as_ptr(),
-                moved.as_mut_ptr(),
-                libc::AT_SYMLINK_NOFOLLOW,
-            )
-        };
         let unconfirmed = || {
             LocalError::OutcomeUnknown(io::Error::other(
                 "the Trash entry identity differs from preflight",
             ))
         };
-        if status != 0 {
+        let moved = leaf_stat(trash, &candidate).map_err(|_| unconfirmed())?;
+        if moved.st_dev as u64 != device || moved.st_ino != inode {
             return Err(unconfirmed());
         }
-        let moved = unsafe { moved.assume_init() };
-        if moved.st_dev as u64 != source.device || moved.st_ino != source.inode {
-            return Err(unconfirmed());
-        }
-        sync(&directory).map_err(LocalError::OutcomeUnknown)?;
+        sync(directory).map_err(LocalError::OutcomeUnknown)?;
         sync(trash).map_err(LocalError::OutcomeUnknown)?;
         return Ok(());
     }
     Err(LocalError::AlreadyExists)
+}
+
+/// Remove one checked directory and all its content relative to the pinned
+/// root (D-027 section 5.6b). Every directory is opened with O_NOFOLLOW; a
+/// symbolic link inside is removed as a link and never followed. A device,
+/// socket, or pipe stops the removal. The caller must persist an attempt
+/// first. An error after the first removal is UNKNOWN.
+pub fn delete_directory_tree(root: &File, target: &Path) -> Result<()> {
+    let (directory, leaf) = parent(root, target)?;
+    if leaf_stat(&directory, &leaf)?.st_mode & libc::S_IFMT != libc::S_IFDIR {
+        return Err(LocalError::UnsafeEntry);
+    }
+    let mut removed = false;
+    match remove_tree_at(&directory, &leaf, &mut removed) {
+        Ok(()) => sync(&directory).map_err(LocalError::OutcomeUnknown),
+        Err(LocalError::OutcomeUnknown(error)) => Err(LocalError::OutcomeUnknown(error)),
+        Err(error) if removed => Err(LocalError::OutcomeUnknown(io::Error::other(format!(
+            "the folder was removed in part: {error:?}"
+        )))),
+        Err(error) => Err(error),
+    }
+}
+
+fn remove_tree_at(parent: &File, leaf: &CStr, removed: &mut bool) -> Result<()> {
+    let directory = opened(unsafe {
+        openat(
+            parent.as_raw_fd(),
+            leaf.as_ptr(),
+            RDONLY | DIRECTORY | NOFOLLOW | CLOEXEC,
+        )
+    })?;
+    for name in entry_names(&directory)? {
+        let info = leaf_stat(&directory, &name)?;
+        match info.st_mode & libc::S_IFMT {
+            libc::S_IFDIR => remove_tree_at(&directory, &name, removed)?,
+            libc::S_IFREG | libc::S_IFLNK => {
+                #[cfg(target_os = "macos")]
+                reject_dataless_mutation(&info)?;
+                unlink_at(&directory, &name, 0)?;
+                *removed = true;
+            }
+            _ => return Err(LocalError::UnsafeEntry),
+        }
+    }
+    unlink_at(parent, leaf, libc::AT_REMOVEDIR)?;
+    *removed = true;
+    Ok(())
+}
+
+fn unlink_at(directory: &File, leaf: &CStr, flags: c_int) -> Result<()> {
+    if unsafe { unlinkat(directory.as_raw_fd(), leaf.as_ptr(), flags) } != 0 {
+        let error = io::Error::last_os_error();
+        return Err(if error.kind() == io::ErrorKind::Interrupted {
+            LocalError::OutcomeUnknown(error)
+        } else {
+            LocalError::Io(error)
+        });
+    }
+    Ok(())
 }
 
 /// Put a second name for one checked regular file into `trash`, which must
@@ -892,6 +975,40 @@ pub fn list(root: &File, relative: &Path) -> Result<Vec<LocalEntry>> {
 /// are returned separately, so callers can disclose them truthfully.
 pub fn list_with_skipped(root: &File, relative: &Path) -> Result<(Vec<LocalEntry>, Vec<String>)> {
     let dir = directory(root, relative)?;
+    let mut entries = Vec::new();
+    let mut skipped = Vec::new();
+    for leaf in entry_names(&dir)? {
+        let name = std::str::from_utf8(leaf.to_bytes())
+            .map_err(|_| LocalError::UnsafeEntry)?
+            .to_owned();
+        let (is_directory, size, object_revision) = match leaf_metadata(&dir, &leaf) {
+            Ok(metadata) => metadata,
+            // leaf_metadata reports UnsafeEntry only for an entry that is not a
+            // regular file or directory, such as a symbolic link.
+            Err(LocalError::UnsafeEntry) => {
+                skipped.push(name);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        entries.push(LocalEntry {
+            name,
+            is_directory,
+            size,
+            object_revision,
+        });
+    }
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    if entries.windows(2).any(|pair| pair[0].name == pair[1].name) {
+        // Distinct non-UTF8 names must not silently collapse after lossy conversion.
+        return Err(LocalError::UnsafeEntry);
+    }
+    skipped.sort();
+    Ok((entries, skipped))
+}
+
+/// The entry names of one open directory, without `.` and `..`.
+fn entry_names(dir: &File) -> Result<Vec<CString>> {
     let owned_fd = dir.try_clone()?.into_raw_fd();
     let stream = unsafe { libc::fdopendir(owned_fd) };
     if stream.is_null() {
@@ -905,8 +1022,7 @@ pub fn list_with_skipped(root: &File, relative: &Path) -> Result<(Vec<LocalEntry
         }
     }
     let stream = DirectoryStream(stream);
-    let mut entries = Vec::new();
-    let mut skipped = Vec::new();
+    let mut names = Vec::new();
     loop {
         #[cfg(target_os = "macos")]
         let errno = unsafe { libc::__error() };
@@ -919,39 +1035,13 @@ pub fn list_with_skipped(root: &File, relative: &Path) -> Result<(Vec<LocalEntry
             if code != 0 {
                 return Err(LocalError::Io(io::Error::from_raw_os_error(code)));
             }
-            break;
+            return Ok(names);
         }
-        let raw_name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
-        let bytes = raw_name.to_bytes();
-        if bytes == b"." || bytes == b".." {
-            continue;
+        let bytes = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+        if bytes != b"." && bytes != b".." {
+            names.push(CString::new(bytes).map_err(|_| LocalError::InvalidPath)?);
         }
-        let leaf = CString::new(bytes).map_err(|_| LocalError::InvalidPath)?;
-        let name = std::str::from_utf8(bytes).map_err(|_| LocalError::UnsafeEntry)?;
-        let (is_directory, size, object_revision) = match leaf_metadata(&dir, &leaf) {
-            Ok(metadata) => metadata,
-            // leaf_metadata reports UnsafeEntry only for an entry that is not a
-            // regular file or directory, such as a symbolic link.
-            Err(LocalError::UnsafeEntry) => {
-                skipped.push(name.to_owned());
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        entries.push(LocalEntry {
-            name: name.to_owned(),
-            is_directory,
-            size,
-            object_revision,
-        });
     }
-    entries.sort_by(|a, b| a.name.cmp(&b.name));
-    if entries.windows(2).any(|pair| pair[0].name == pair[1].name) {
-        // Distinct non-UTF8 names must not silently collapse after lossy conversion.
-        return Err(LocalError::UnsafeEntry);
-    }
-    skipped.sort();
-    Ok((entries, skipped))
 }
 
 /// Check sibling names without stat-ing unrelated entries. A directory may

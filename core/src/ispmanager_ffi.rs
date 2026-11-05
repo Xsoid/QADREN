@@ -82,6 +82,34 @@ pub extern "C" fn qadren_ispmanager_sftp_list(
         .into_raw()
 }
 
+/// The MySQL database names of the account, for the Scenario editor
+/// (D-027 section 7b). It reads the `db` list only.
+#[no_mangle]
+pub extern "C" fn qadren_ispmanager_databases(
+    url: *const c_char,
+    login: *const c_char,
+    password: *const c_char,
+) -> *mut c_char {
+    let value = match (
+        input(url).and_then(|url| ispmanager::PanelUrl::parse(url.trim()).ok()),
+        input(login),
+        input(password),
+    ) {
+        (Some(url), Some(login), Some(password)) => {
+            match ispmanager::Session::new(url, login, password)
+                .and_then(|mut session| ispmanager::database_names(&mut session))
+            {
+                Ok(names) => json!({"ok": true, "data": names}),
+                Err(error) => json!({"ok": false, "error": error.to_string()}),
+            }
+        }
+        _ => json!({"ok": false, "error": "invalid_input"}),
+    };
+    CString::new(value.to_string())
+        .expect("JSON cannot contain NUL")
+        .into_raw()
+}
+
 /// # Safety
 /// `pointer` must come from `qadren_ispmanager_check` and be freed one time.
 #[no_mangle]

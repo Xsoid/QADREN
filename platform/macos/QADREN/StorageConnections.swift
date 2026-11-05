@@ -3,6 +3,8 @@ import SwiftUI
 
 extension Notification.Name {
     static let qadrenStorageConnectionsDidChange = Notification.Name("qadren.storage-connections.did-change")
+    /// A widget asks the Settings window to show the Connections section.
+    static let qadrenShowConnectionSettings = Notification.Name("qadren.settings.show-connections")
 }
 
 @MainActor
@@ -147,7 +149,7 @@ final class StorageConnections: ObservableObject {
     func recordISPmanagerCheck(id: String, outcome: ISPmanagerCheckReport) {
         do {
             try StorageRegistryBridge.recordISPmanagerCheck(id: id, report: outcome)
-            try StorageRegistryBridge.setStatus(id: id, status: outcome.status)
+            try StorageRegistryBridge.setStatus(id: id, status: outcome.effectiveStatus)
             refresh()
             publishChange()
         } catch {
@@ -168,7 +170,7 @@ final class StorageConnections: ObservableObject {
             throw StorageError.operation("Keychain copy could not be verified")
         }
         try StorageRegistryBridge.setCredential(id: id)
-        try StorageRegistryBridge.setStatus(id: id, status: outcome?.status ?? "disconnected")
+        try StorageRegistryBridge.setStatus(id: id, status: outcome?.effectiveStatus ?? "disconnected")
         if let outcome {
             try StorageRegistryBridge.recordISPmanagerCheck(id: id, report: outcome)
         }
