@@ -501,6 +501,25 @@ fn execute_rule_deletions(
     }
 }
 
+/// The pauses between the checks of one UNKNOWN copy Job. An interrupted
+/// copy that never published its file stays UNKNOWN for good; before, each
+/// poll read its destination folder again (found on 2026-11-06). The first
+/// check after a Worker start is immediate.
+const RECONCILE_BACKOFF: [Duration; 5] = [
+    Duration::from_secs(60),
+    Duration::from_secs(5 * 60),
+    Duration::from_secs(30 * 60),
+    Duration::from_secs(2 * 60 * 60),
+    Duration::from_secs(6 * 60 * 60),
+];
+
+/// For each UNKNOWN copy Job: the time of its next check and its step.
+fn reconcile_backoff() -> &'static Mutex<HashMap<String, (std::time::Instant, usize)>> {
+    static BACKOFF: OnceLock<Mutex<HashMap<String, (std::time::Instant, usize)>>> =
+        OnceLock::new();
+    BACKOFF.get_or_init(Default::default)
+}
+
 /// Reconcile UNKNOWN Scenario Create and replacement Jobs with an exact
 /// persisted Scenario destination. This reads metadata and never retries an
 /// effect. Deletion stays UNKNOWN because missing metadata cannot prove that
@@ -542,9 +561,21 @@ fn reconcile_unknown_scenario_creates(
             })
             .collect::<Vec<_>>()
     };
+    let now = std::time::Instant::now();
+    let mut backoff = reconcile_backoff()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    backoff.retain(|job_id, _| candidates.iter().any(|candidate| &candidate.0 == job_id));
     for (job_id, scenario_id, revision, destination_connection_id) in candidates {
+        if backoff.get(&job_id).is_some_and(|(next, _)| now < *next) {
+            continue;
+        }
+        // A Job that stays UNKNOWN is checked less often (D-028).
+        let step = backoff.get(&job_id).map_or(0, |(_, step)| step + 1);
+        let delay = RECONCILE_BACKOFF[step.min(RECONCILE_BACKOFF.len() - 1)];
+        backoff.insert(job_id.clone(), (now + delay, step));
         // One unresolvable Job must not stop schedules or other checks. It
-        // stays UNKNOWN and is checked again on the next poll.
+        // stays UNKNOWN and is checked again after its pause.
         let Ok(Some(scenario)) = registry.get_scenario_revision(&scenario_id, revision) else {
             continue;
         };

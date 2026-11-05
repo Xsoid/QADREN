@@ -966,6 +966,18 @@ pub fn is_dataless(root: &File, target: &Path) -> Result<bool> {
 
 /// Enumerate via fdopendir/readdir. On macOS /dev/fd/N is not a
 /// directory pathname usable by read_dir, so enumeration must use the fd.
+/// The names in one folder that start with `prefix`. It reads only the
+/// folder entries and no metadata, so its cost on a network drive does not
+/// grow with a metadata call for each entry (D-028).
+pub fn names_with_prefix(root: &File, relative: &Path, prefix: &str) -> Result<Vec<String>> {
+    let dir = directory(root, relative)?;
+    Ok(entry_names(&dir)?
+        .into_iter()
+        .filter(|leaf| leaf.to_bytes().starts_with(prefix.as_bytes()))
+        .filter_map(|leaf| leaf.into_string().ok())
+        .collect())
+}
+
 pub fn list(root: &File, relative: &Path) -> Result<Vec<LocalEntry>> {
     list_with_skipped(root, relative).map(|(entries, _)| entries)
 }

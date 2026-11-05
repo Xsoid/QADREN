@@ -2372,16 +2372,20 @@ pub fn remove_interrupted_staging(
             .parent()
             .unwrap_or_else(|| Path::new(""))
             .to_path_buf();
-        let Ok(entries) = destination.list(&folder) else {
+        // Only the names: a metadata call for each entry of a large folder
+        // on a network drive took minutes (found on 2026-11-06).
+        let Ok(names) = destination.names_with_prefix(&folder, ".qadren-") else {
             continue;
         };
-        for entry in entries {
-            if entry.is_directory
-                || !staging_writer_pid(&entry.name).is_some_and(writer_process_is_gone)
-            {
+        for name in names {
+            if !staging_writer_pid(&name).is_some_and(writer_process_is_gone) {
                 continue;
             }
-            if destination.delete_file(&folder.join(&entry.name)).is_ok() {
+            let path = folder.join(&name);
+            if !matches!(destination.stat(&path), Ok(entry) if !entry.is_directory) {
+                continue;
+            }
+            if destination.delete_file(&path).is_ok() {
                 removed += 1;
             }
         }

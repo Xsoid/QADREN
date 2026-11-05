@@ -476,6 +476,27 @@ impl LocalFilesystem {
         }
     }
 
+    /// The names in one folder that start with `prefix`, without the
+    /// metadata of each entry.
+    pub fn names_with_prefix(&self, path: &Path, prefix: &str) -> Result<Vec<String>> {
+        if !path.as_os_str().is_empty() {
+            Self::relative(path)?;
+        }
+        #[cfg(unix)]
+        {
+            secure::names_with_prefix(&self.root_fd, path, prefix)
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(self
+                .list(path)?
+                .into_iter()
+                .map(|entry| entry.name)
+                .filter(|name| name.starts_with(prefix))
+                .collect())
+        }
+    }
+
     pub fn list(&self, path: &Path) -> Result<Vec<LocalEntry>> {
         if !path.as_os_str().is_empty() {
             Self::relative(path)?;
