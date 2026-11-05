@@ -423,7 +423,7 @@ impl Registry {
         db.pragma_update(None, "foreign_keys", "ON")?;
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 34 {
+        if version > 35 {
             return Err(RegistryError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -1031,6 +1031,33 @@ impl Registry {
                  ALTER TABLE scenario_revision_resources_v34
                    RENAME TO scenario_revision_resources;
                  PRAGMA user_version = 34;
+                 COMMIT;",
+            )?;
+        }
+        if version <= 34 {
+            // D-027 section 10: Cron, DNS, and mail settings have one result
+            // for each run and object, as databases do. The table gets a
+            // category; the database results keep `databases`.
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE backup_object_results (
+                    run_id TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    provider_id TEXT NOT NULL,
+                    result TEXT NOT NULL
+                      CHECK(result IN ('created','updated','unchanged','failed','cancelled')),
+                    error TEXT,
+                    bytes INTEGER,
+                    md5 TEXT,
+                    finished_at INTEGER NOT NULL,
+                    PRIMARY KEY(run_id, category, provider_id)
+                 );
+                 INSERT INTO backup_object_results(
+                    run_id,category,provider_id,result,error,bytes,md5,finished_at)
+                 SELECT run_id,'databases',provider_id,result,error,bytes,md5,finished_at
+                 FROM backup_database_results;
+                 DROP TABLE backup_database_results;
+                 PRAGMA user_version = 35;
                  COMMIT;",
             )?;
         }
@@ -3200,38 +3227,42 @@ impl Registry {
     /// Cancel every pending child of a batch whose stop the user requested, in
     /// one statement. A pending child has no Job yet, so nothing else changes.
     /// One update for each child took minutes for a large run (2026-11-04).
-    pub fn backup_database_results(&self, run_id: &str) -> Result<Vec<BackupDatabaseResult>> {
+    /// The results of the objects of one Backup/export run: databases, Cron,
+    /// DNS zones, and mail domains (D-027 sections 7b and 10).
+    pub fn backup_object_results(&self, run_id: &str) -> Result<Vec<BackupObjectResult>> {
         let mut statement = self.db.prepare(
-            "SELECT provider_id, result, error, bytes, md5, finished_at
-             FROM backup_database_results WHERE run_id=?1 ORDER BY provider_id",
+            "SELECT category, provider_id, result, error, bytes, md5, finished_at
+             FROM backup_object_results WHERE run_id=?1 ORDER BY category, provider_id",
         )?;
         let rows = statement
             .query_map([run_id], |row| {
-                Ok(BackupDatabaseResult {
-                    provider_id: row.get(0)?,
-                    result: row.get(1)?,
-                    error: row.get(2)?,
-                    bytes: row.get::<_, Option<i64>>(3)?.map(|bytes| bytes as u64),
-                    md5: row.get(4)?,
-                    finished_at: row.get(5)?,
+                Ok(BackupObjectResult {
+                    category: row.get(0)?,
+                    provider_id: row.get(1)?,
+                    result: row.get(2)?,
+                    error: row.get(3)?,
+                    bytes: row.get::<_, Option<i64>>(4)?.map(|bytes| bytes as u64),
+                    md5: row.get(5)?,
+                    finished_at: row.get(6)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
 
-    /// Record the result of one database. A second record keeps the first.
-    pub fn record_backup_database_result(
+    /// Record the result of one object. A second record keeps the first.
+    pub fn record_backup_object_result(
         &self,
         run_id: &str,
-        result: &BackupDatabaseResult,
+        result: &BackupObjectResult,
     ) -> Result<()> {
         self.db.execute(
-            "INSERT OR IGNORE INTO backup_database_results
-             (run_id, provider_id, result, error, bytes, md5, finished_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT OR IGNORE INTO backup_object_results
+             (run_id, category, provider_id, result, error, bytes, md5, finished_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 run_id,
+                result.category,
                 result.provider_id,
                 result.result,
                 result.error,
@@ -4243,7 +4274,9 @@ pub fn scenario_roots_overlap(left: &str, right: &str) -> bool {
 /// The result of one selected database in one Backup/export run (D-027
 /// section 7b).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct BackupDatabaseResult {
+pub struct BackupObjectResult {
+    /// `databases`, `cron`, `dns`, or `mail`.
+    pub category: String,
     pub provider_id: String,
     /// `created`, `updated`, `unchanged`, `failed`, or `cancelled`.
     pub result: String,
@@ -4314,9 +4347,27 @@ impl BackupResource {
                         _ => false,
                     }
             }
-            _ => self.kind == "object" && self.rule != "structure_only",
+            // All Cron jobs of the account (D-027 section 10).
+            "cron" => self.kind == "object" && self.rule == "include" && self.provider_id == "all",
+            // A DNS zone or a mail domain, which is also its file name.
+            "dns" | "mail" => {
+                self.kind == "object" && self.rule == "include" && domain_name(&self.provider_id)
+            }
+            _ => false,
         }
     }
+}
+
+/// A DNS zone or a mail domain name that can also be a file name: letters,
+/// digits, `-`, `_`, and `.` between labels.
+pub fn domain_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 253
+        && !name.starts_with(['.', '-'])
+        && !name.contains("..")
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 /// The fields of a Backup/export Scenario revision.

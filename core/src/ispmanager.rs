@@ -108,7 +108,7 @@ impl Category {
 /// Reads of one parent object (D-027 section 7b): a nested list with `elid`
 /// and an edit form opened without `sok`. Without `sok` the panel only
 /// returns the form; it saves nothing.
-const OBJECT_READS: [&str; 2] = ["db.users", "db.users.edit"];
+const OBJECT_READS: [&str; 3] = ["db.users", "db.users.edit", "domain.record"];
 
 /// The only functions that the client sends. `auth` opens a session; every
 /// other entry is a documented list function or an object read.
@@ -412,6 +412,39 @@ pub struct FunctionReport {
     /// error `missed`: the panel has no such function), or `error`.
     pub result: &'static str,
     pub error: Option<String>,
+    /// The field names of the first element: the API schema, no values.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fields: Option<Vec<String>>,
+}
+
+/// Live facts for the export design of mail, Cron, and DNS (D-027 section
+/// 10). It holds field names and yes/no facts only: no name, no value.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ExportProbe {
+    /// `domain.record` of the first DNS zone.
+    pub dns_records: Option<FunctionReport>,
+    /// The account home has an `email` folder (SFTP).
+    pub mail_folder: Option<bool>,
+    /// A mailbox folder below `email/<domain>/` has `cur`, `new`, and `tmp`.
+    pub maildir: Option<bool>,
+    /// The form of the `email` list: counts and field names, no value.
+    pub mailbox_names: Option<MailboxNameProbe>,
+}
+
+/// How the `email` list names a mailbox and ties it to its mail domain.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct MailboxNameProbe {
+    pub mailboxes: usize,
+    /// Mailboxes whose `name` has `@`.
+    pub names_with_at: usize,
+    /// Mailboxes whose `name` ends with `@<a mail domain>`.
+    pub names_with_domain: usize,
+    /// Fields whose value equals the name of a mail domain, in any mailbox.
+    pub domain_fields: Vec<String>,
+    /// Elements of `email` with `elid` = the first mail domain.
+    pub with_elid: Option<usize>,
+    /// Elements of `email` with `plid` = the first mail domain.
+    pub with_plid: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -693,6 +726,130 @@ pub fn database_names(session: &mut Session) -> Result<Vec<String>> {
     Ok(names)
 }
 
+/// The names of the DNS zones (`domain`) or mail domains (`emaildomain`)
+/// of the account, for the Scenario editor (D-027 section 10).
+pub fn object_names(session: &mut Session, category: &str) -> Result<Vec<String>> {
+    let func = match category {
+        "dns" => "domain",
+        "mail" => "emaildomain",
+        _ => return Err(IspError::NotAllowed(category.to_owned())),
+    };
+    let doc = session.read(func, &[])?;
+    let mut names: Vec<String> = elements(&doc)
+        .into_iter()
+        .filter_map(|item| text(item, "name"))
+        .filter(|name| crate::registry::domain_name(name))
+        .collect();
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
+/// The listed fields of one element as a JSON object of strings. A field
+/// that the element does not have is left out.
+fn pick(item: &serde_json::Map<String, Value>, fields: &[&str]) -> Value {
+    Value::Object(
+        fields
+            .iter()
+            .filter_map(|field| text(item, field).map(|value| ((*field).to_owned(), Value::String(value))))
+            .collect(),
+    )
+}
+
+/// Sorts objects by their JSON text, so that the same data gives the same
+/// bytes in each run.
+fn sorted(mut items: Vec<Value>) -> Vec<Value> {
+    items.sort_by_cached_key(Value::to_string);
+    items
+}
+
+/// The export of one Backup/export object from the panel (D-027 section
+/// 10): `cron` (`all`), `dns` (a zone), or `mail` (a mail domain). It reads
+/// list functions only and takes the listed fields, without internal keys.
+/// The result is pretty JSON with sorted keys and sorted lists.
+pub fn export_object(
+    session: &mut Session,
+    category: &str,
+    provider_id: &str,
+) -> std::result::Result<Vec<u8>, &'static str> {
+    let read = |session: &mut Session, func: &str, params: &[(&str, &str)]| {
+        session
+            .read(func, params)
+            .map_err(|error| match error {
+                IspError::Panel(kind) if kind == "access" => "ispmanager_permission_denied",
+                _ => "ispmanager_network_error",
+            })
+    };
+    let value = match category {
+        "cron" => {
+            let doc = read(session, "scheduler", &[])?;
+            let jobs = elements(&doc)
+                .into_iter()
+                .map(|job| pick(job, &["command", "interval", "schedule_type", "active", "description"]))
+                .collect();
+            serde_json::json!({
+                "format": "qadren-ispmanager-cron/1",
+                "source": "scheduler",
+                "jobs": sorted(jobs),
+            })
+        }
+        "dns" => {
+            let doc = read(session, "domain", &[])?;
+            let zone = elements(&doc)
+                .into_iter()
+                .find(|zone| text(zone, "name").as_deref() == Some(provider_id))
+                .ok_or("ispmanager_object_missing")?;
+            let zone = pick(zone, &["name", "dtype", "dnssecstatus"]);
+            let records = read(session, "domain.record", &[("elid", provider_id)])?;
+            let records = elements(&records)
+                .into_iter()
+                .map(|record| pick(record, &["name", "rtype", "ttl", "value"]))
+                .collect();
+            serde_json::json!({
+                "format": "qadren-ispmanager-dns/1",
+                "source": "domain, domain.record",
+                "zone": zone,
+                "records": sorted(records),
+            })
+        }
+        "mail" => {
+            let doc = read(session, "emaildomain", &[])?;
+            let domain = elements(&doc)
+                .into_iter()
+                .find(|domain| text(domain, "name").as_deref() == Some(provider_id))
+                .ok_or("ispmanager_object_missing")?;
+            let domain = pick(
+                domain,
+                &["name", "active", "dkim", "dmarc", "spamassassin", "defaction", "secure"],
+            );
+            let suffix = format!("@{provider_id}");
+            let boxes = read(session, "email", &[])?;
+            // `size_used` changes with each letter; it is not a setting.
+            let mailboxes = elements(&boxes)
+                .into_iter()
+                .filter(|mailbox| text(mailbox, "name").is_some_and(|name| name.ends_with(&suffix)))
+                .map(|mailbox| {
+                    pick(
+                        mailbox,
+                        &["name", "active", "aliases", "dontsave", "responder", "spamassassin", "size_total"],
+                    )
+                })
+                .collect();
+            serde_json::json!({
+                "format": "qadren-ispmanager-mail/1",
+                "source": "emaildomain, email",
+                "note": "Passwords and letters are not in this file.",
+                "domain": domain,
+                "mailboxes": sorted(mailboxes),
+            })
+        }
+        _ => return Err("invalid_selection"),
+    };
+    let mut bytes = serde_json::to_vec_pretty(&value).map_err(|_| "invalid_request")?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
 /// The result of one connection check. `status` is a Registry status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CheckReport {
@@ -701,6 +858,7 @@ pub struct CheckReport {
     pub categories: Vec<CategoryReport>,
     pub file_transport: Option<FileTransport>,
     pub databases: Option<DatabaseProbe>,
+    pub export_probe: Option<ExportProbe>,
 }
 
 fn category_state(functions: &[FunctionReport]) -> CapabilityState {
@@ -728,6 +886,119 @@ pub struct SftpTarget<'a> {
 /// Signs in, calls the list functions of every category, and checks the
 /// SFTP file transport. The check reads metadata only and changes nothing on
 /// the server.
+fn function_report(function: &'static str, outcome: Result<ListOutcome>) -> FunctionReport {
+    match outcome {
+        Ok(ListOutcome::Items { fields }) => FunctionReport {
+            function,
+            result: "items",
+            error: None,
+            fields: Some(fields),
+        },
+        Ok(ListOutcome::Empty) => FunctionReport {
+            function,
+            result: "empty",
+            error: None,
+            fields: None,
+        },
+        Err(error) => FunctionReport {
+            function,
+            result: match &error {
+                IspError::Panel(kind) if kind == "access" => "denied",
+                IspError::Panel(kind) if kind == "missed" => "missing",
+                _ => "error",
+            },
+            error: Some(error.to_string()),
+            fields: None,
+        },
+    }
+}
+
+/// The records of the first DNS zone, read with `elid` (D-027 section 10).
+fn probe_dns_records(session: &mut Session) -> Option<FunctionReport> {
+    let zones = session.read("domain", &[]).ok()?;
+    let zone = elements(&zones).into_iter().next().cloned()?;
+    let (_, key) = key_field(&zone, &["name", "key", "id"])?;
+    let outcome = session
+        .read("domain.record", &[("elid", &key)])
+        .map(|doc| classify_list(&doc));
+    Some(function_report("domain.record", outcome))
+}
+
+/// The form of mailbox names in the `email` list (D-027 section 7c).
+fn probe_mailbox_names(session: &mut Session) -> Option<MailboxNameProbe> {
+    let domains: Vec<String> = elements(&session.read("emaildomain", &[]).ok()?)
+        .into_iter()
+        .filter_map(|domain| text(domain, "name"))
+        .collect();
+    let boxes = session.read("email", &[]).ok()?;
+    let boxes = elements(&boxes);
+    let mut probe = MailboxNameProbe {
+        mailboxes: boxes.len(),
+        ..MailboxNameProbe::default()
+    };
+    for mailbox in &boxes {
+        let name = text(mailbox, "name").unwrap_or_default();
+        probe.names_with_at += usize::from(name.contains('@'));
+        probe.names_with_domain += usize::from(
+            domains.iter().any(|domain| name.ends_with(&format!("@{domain}"))),
+        );
+        for field in mailbox.keys() {
+            if text(mailbox, field).is_some_and(|value| domains.contains(&value))
+                && !probe.domain_fields.contains(field)
+            {
+                probe.domain_fields.push(field.clone());
+            }
+        }
+    }
+    probe.domain_fields.sort();
+    if let Some(first) = domains.first() {
+        for (param, slot) in [("elid", &mut probe.with_elid), ("plid", &mut probe.with_plid)] {
+            *slot = session
+                .read("email", &[(param, first.as_str())])
+                .ok()
+                .map(|doc| elements(&doc).len());
+        }
+    }
+    Some(probe)
+}
+
+/// Whether the account home has mail in Maildir form, through SFTP. It
+/// reads folder names only and keeps no name.
+fn probe_mail_storage(connection: &ispmanager_sftp::SftpConnection, probe: &mut ExportProbe) {
+    let Ok(home) = connection.home() else {
+        return;
+    };
+    let mail = format!("{}/email", home.trim_end_matches('/'));
+    let folders = |path: &str| -> Vec<String> {
+        connection
+            .read_dir(path)
+            .map(|entries| {
+                entries
+                    .into_iter()
+                    .filter(|(_, meta)| meta.kind == "dir")
+                    .map(|(name, _)| name)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    probe.mail_folder = Some(matches!(connection.lstat(&mail), Ok(Some(meta)) if meta.kind == "dir"));
+    if probe.mail_folder != Some(true) {
+        return;
+    }
+    let maildir = folders(&mail).into_iter().take(5).any(|domain| {
+        folders(&format!("{mail}/{domain}"))
+            .into_iter()
+            .take(5)
+            .any(|box_name| {
+                let inner = folders(&format!("{mail}/{domain}/{box_name}"));
+                ["cur", "new", "tmp"]
+                    .iter()
+                    .all(|part| inner.iter().any(|name| name == part))
+            })
+    });
+    probe.maildir = Some(maildir);
+}
+
 pub fn check(url: &str, login: &str, password: &str, sftp: SftpTarget<'_>) -> CheckReport {
     let failed = |status, error: IspError| CheckReport {
         status,
@@ -735,6 +1006,7 @@ pub fn check(url: &str, login: &str, password: &str, sftp: SftpTarget<'_>) -> Ch
         categories: Vec::new(),
         file_transport: None,
         databases: None,
+        export_probe: None,
     };
     let url = match PanelUrl::parse(url.trim()) {
         Ok(url) => url,
@@ -759,27 +1031,7 @@ pub fn check(url: &str, login: &str, password: &str, sftp: SftpTarget<'_>) -> Ch
             let functions: Vec<FunctionReport> = category
                 .list_functions()
                 .iter()
-                .map(|function| match session.list(function) {
-                    Ok(ListOutcome::Items { .. }) => FunctionReport {
-                        function,
-                        result: "items",
-                        error: None,
-                    },
-                    Ok(ListOutcome::Empty) => FunctionReport {
-                        function,
-                        result: "empty",
-                        error: None,
-                    },
-                    Err(error) => FunctionReport {
-                        function,
-                        result: match &error {
-                            IspError::Panel(kind) if kind == "access" => "denied",
-                            IspError::Panel(kind) if kind == "missed" => "missing",
-                            _ => "error",
-                        },
-                        error: Some(error.to_string()),
-                    },
-                })
+                .map(|function| function_report(function, session.list(function)))
                 .collect();
             CategoryReport {
                 category: category.key(),
@@ -791,6 +1043,11 @@ pub fn check(url: &str, login: &str, password: &str, sftp: SftpTarget<'_>) -> Ch
     let file_transport =
         ispmanager_sftp::check(&host, sftp.port, login, password, sftp.host_key_sha256);
     let (mut databases, access) = probe_databases(&mut session);
+    let mut export_probe = ExportProbe {
+        dns_records: probe_dns_records(&mut session),
+        mailbox_names: probe_mailbox_names(&mut session),
+        ..ExportProbe::default()
+    };
     if let (SftpCheck::Ready, Some(key)) = (&file_transport, sftp.host_key_sha256) {
         if let Ok(connection) =
             ispmanager_sftp::SftpConnection::open(&host, sftp.port, login, password, key)
@@ -808,6 +1065,7 @@ pub fn check(url: &str, login: &str, password: &str, sftp: SftpTarget<'_>) -> Ch
             if let (true, Some(access)) = (has_mysqldump, &access) {
                 databases.mysql_login = Some(connection.mysql_login_check(access));
             }
+            probe_mail_storage(&connection, &mut export_probe);
         }
     }
     CheckReport {
@@ -816,5 +1074,6 @@ pub fn check(url: &str, login: &str, password: &str, sftp: SftpTarget<'_>) -> Ch
         categories,
         file_transport: Some(file_transport.into()),
         databases: Some(databases),
+        export_probe: Some(export_probe),
     }
 }

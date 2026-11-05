@@ -912,6 +912,16 @@ pub extern "C" fn qadren_scenario_run_state(
         return output(json!({"ok":false,"error":"invalid_input"}));
     };
     with_registry(path, |db| {
+        // The objects of a Backup/export run (D-027 sections 7b and 7c).
+        let objects = |run_id: &str| -> Result<Vec<Value>, RegistryError> {
+            Ok(db
+                .backup_object_results(run_id)?
+                .into_iter()
+                .map(|result| {
+                    json!({"category": result.category, "result": result.result, "error": result.error})
+                })
+                .collect())
+        };
         let active = match db.active_scenario_run(&scenario_id)? {
             Some(run) => {
                 // The name of the Scenario whose run holds the write-root lock.
@@ -927,19 +937,21 @@ pub extern "C" fn qadren_scenario_run_state(
                     "id": run.id, "trigger": run.trigger, "state": run.state,
                     "waiting_reason": run.waiting_reason, "created_at": run.created_at,
                     "waiting_for_scenario": waiting_for, "batch_id": run.batch_id,
-                    "revision": run.scenario.revision
+                    "revision": run.scenario.revision, "objects": objects(&run.id)?
                 }))
             }
             None => None,
         };
         // The result of the newest finished run, for the monitoring widget.
-        let last = db.last_finished_scenario_run(&scenario_id)?.map(|run| {
-            json!({
+        let last = match db.last_finished_scenario_run(&scenario_id)? {
+            Some(run) => Some(json!({
                 "id": run.id, "trigger": run.trigger, "state": run.state,
                 "error": run.error, "batch_id": run.batch_id,
-                "created_at": run.created_at, "finished_at": run.finished_at
-            })
-        });
+                "created_at": run.created_at, "finished_at": run.finished_at,
+                "objects": objects(&run.id)?
+            })),
+            None => None,
+        };
         let skipped = db
             .skipped_schedule_slots(&scenario_id, 20)?
             .into_iter()

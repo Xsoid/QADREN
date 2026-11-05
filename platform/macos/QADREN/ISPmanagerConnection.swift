@@ -22,6 +22,12 @@ private func ispmanagerDatabaseTables(
     _ sshPort: UInt16, _ hostKey: UnsafePointer<CChar>?, _ database: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
 
+@_silgen_name("qadren_ispmanager_object_names")
+private func ispmanagerObjectNames(
+    _ url: UnsafePointer<CChar>?, _ login: UnsafePointer<CChar>?, _ password: UnsafePointer<CChar>?,
+    _ category: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
+
 @_silgen_name("qadren_ispmanager_sftp_list")
 private func ispmanagerSFTPList(
     _ url: UnsafePointer<CChar>?, _ login: UnsafePointer<CChar>?, _ password: UnsafePointer<CChar>?,
@@ -48,6 +54,27 @@ struct ISPmanagerFunctionReport: Codable, Equatable {
     /// `items`, `empty`, `denied`, `missing`, or `error`.
     let result: String
     let error: String?
+    /// Field names of the first element: the API schema, no values.
+    var fields: [String]? = nil
+}
+
+/// Live facts for the export design of mail, Cron, and DNS (D-027 section
+/// 10): field names and yes/no facts only.
+struct ISPmanagerExportProbe: Codable, Equatable {
+    var dns_records: ISPmanagerFunctionReport? = nil
+    var mail_folder: Bool? = nil
+    var maildir: Bool? = nil
+    var mailbox_names: ISPmanagerMailboxNameProbe? = nil
+}
+
+/// How the `email` list names a mailbox: counts and field names only.
+struct ISPmanagerMailboxNameProbe: Codable, Equatable {
+    let mailboxes: Int
+    let names_with_at: Int
+    let names_with_domain: Int
+    let domain_fields: [String]
+    var with_elid: Int? = nil
+    var with_plid: Int? = nil
 }
 
 struct ISPmanagerCategoryReport: Codable, Equatable, Identifiable {
@@ -180,6 +207,7 @@ struct ISPmanagerCheckReport: Codable, Equatable {
     let categories: [ISPmanagerCategoryReport]
     let file_transport: ISPmanagerFileTransport?
     var databases: ISPmanagerDatabaseProbe? = nil
+    var export_probe: ISPmanagerExportProbe? = nil
 
     /// The Registry status. Backups read files through SFTP with the
     /// confirmed host key, so an unconfirmed or changed key needs the user
@@ -377,6 +405,29 @@ enum ISPmanagerDatabases {
             return .failure(.message("Не удалось прочитать список баз панели (\(result.error ?? "ошибка"))."))
         }.value
     }
+    /// DNS zones (`dns`) or mail domains (`mail`) of the account (D-027
+    /// section 10). Core reads one panel list.
+    static func objectNames(url: String, credentials: LoginCredentials, category: String) async -> Swift.Result<[String], ISPmanagerSFTP.Failure> {
+        await Task.detached(priority: .userInitiated) {
+            let pointer = url.withCString { url in
+                credentials.login.withCString { login in
+                    credentials.password.withCString { password in
+                        category.withCString { category in
+                            ispmanagerObjectNames(url, login, password, category)
+                        }
+                    }
+                }
+            }
+            guard let pointer else { return .failure(.message("Нет ответа от Core.")) }
+            defer { ispmanagerFree(pointer) }
+            guard let result = try? JSONDecoder().decode(
+                Result.self, from: Data(String(cString: pointer).utf8)
+            ) else { return .failure(.message("Неверный ответ Core.")) }
+            if let names = result.data, result.ok { return .success(names) }
+            return .failure(.message("Не удалось прочитать список панели (\(result.error ?? "ошибка"))."))
+        }.value
+    }
+
     private struct TablesResult: Decodable {
         let ok: Bool
         let data: [ISPmanagerTable]?

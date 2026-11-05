@@ -71,6 +71,39 @@ struct ScenarioWidgetSnapshot: Equatable {
     var planCheck: PlanCheck?
     /// The database step of the active run (D-027 section 7b).
     var databaseProgress: WorkerDatabaseProgress?
+    /// The selected Backup/export objects outside `files/`, in run order:
+    /// category and count (D-027 sections 7b and 7c).
+    var subsystems: [Subsystem] = []
+
+    struct Subsystem: Equatable {
+        let category: String
+        let count: Int
+
+        var title: String {
+            switch category {
+            case "databases": "Базы"
+            case "cron": "Cron"
+            case "dns": "DNS"
+            case "mail": "Почта"
+            default: category
+            }
+        }
+    }
+
+    /// The object results of the active run, or of the last finished run.
+    var objectResults: [ScenarioRunState.ObjectResult] {
+        (run?.active != nil ? run?.active?.objects : run?.last?.objects) ?? []
+    }
+
+    /// Finished, failed, and total objects of the current or last run.
+    var objectCounts: (done: Int, failed: Int, total: Int) {
+        let results = objectResults
+        return (
+            results.filter { ["created", "updated", "unchanged"].contains($0.result) }.count,
+            results.filter { ["failed", "cancelled"].contains($0.result) }.count,
+            subsystems.reduce(0) { $0 + $1.count }
+        )
+    }
     var nextRunAt: Date?
     var hasSchedule = false
     var schedulePaused = false
@@ -135,6 +168,13 @@ struct ScenarioWidgetSnapshot: Equatable {
         let right = endpoint(entry.right_connection_id, entry.right_root, selected: reversed ? selected : 0)
         snapshot.twoWay = entry.direction == "bidirectional"
         snapshot.databasesOnly = entry.databasesOnly
+        if entry.isBackup {
+            let included = entry.resources.filter { $0.rule == "include" }
+            snapshot.subsystems = ["databases", "cron", "dns", "mail"].compactMap { category in
+                let count = included.filter { $0.category == category }.count
+                return count > 0 ? ScenarioWidgetSnapshot.Subsystem(category: category, count: count) : nil
+            }
+        }
         (snapshot.from, snapshot.to) = reversed ? (right, left) : (left, right)
         do {
             let run = try StorageRegistryBridge.scenarioRunState(scenarioID: scenarioID)
@@ -257,10 +297,23 @@ struct ScenarioStage: Equatable {
                     ? "Дамп: \(base), получено \(ByteCountFormatter.string(fromByteCount: Int64(clamping: progress.bytes), countStyle: .file))."
                     : "Дамп: \(base), подключение к серверу."
                 }
-                return ScenarioStage(frame: .active, tone: .active, headline: "Копия базы", detail: detail, active: true, moving: true)
+                let headline = switch progress.stage {
+                case "cleanup": "Очистка"
+                case "settings": "Настройки"
+                default: "Копия базы"
+                }
+                let position = progress.total > 1 ? " \(progress.index) из \(progress.total)" : ""
+                let settingsText = switch progress.category {
+                case "cron": "Cron: задания читаются с панели."
+                case "dns": "DNS: зона\(position) читается с панели."
+                case "mail": "Почта: домен\(position) читается с панели."
+                default: "Настройки читаются с панели."
+                }
+                let text = progress.stage == "settings" ? settingsText : detail
+                return ScenarioStage(frame: .active, tone: .active, headline: headline, detail: text, active: true, moving: true)
             }
             if active.state == "planning" && snapshot.databasesOnly {
-                return ScenarioStage(frame: .active, tone: .active, headline: "Дамп баз", detail: "Снимаются дампы баз данных, запуск \(trigger).", active: true, moving: true)
+                return ScenarioStage(frame: .active, tone: .active, headline: "Копия", detail: "Базы и настройки хостинга, запуск \(trigger).", active: true, moving: true)
             }
             if active.state == "planning" {
                 let detail = snapshot.planCheck?.detail ?? "Снимки и план, запуск \(trigger)."
@@ -343,7 +396,19 @@ struct ScenarioRunResult: Equatable {
         guard snapshot.run?.active == nil, snapshot.planCheck == nil, let last = snapshot.run?.last else { return nil }
         guard let files = snapshot.files else {
             guard last.state == "completed" else { return ScenarioRunResult(files: nil, short: nil, note: nil, noteTone: nil) }
-            let text = snapshot.databasesOnly ? "Дампы баз записаны." : "Изменений не было."
+            if !snapshot.subsystems.isEmpty {
+                let results = last.objects ?? []
+                if let failed = results.first(where: { $0.result == "failed" }) {
+                    let reason = failed.error.map(QADRENUserMessage.text(for:)) ?? "Объект не сохранён."
+                    return ScenarioRunResult(files: nil, short: "Есть ошибки", note: reason, noteTone: .failed)
+                }
+                let changed = results.filter { ["created", "updated"].contains($0.result) }.count
+                let text = changed == 0
+                    ? "Объекты сохранены, изменений не было."
+                    : "Объекты сохранены, изменилось: \(changed)."
+                return ScenarioRunResult(files: nil, short: text, note: snapshot.databasesOnly ? text : nil, noteTone: nil)
+            }
+            let text = "Изменений не было."
             return ScenarioRunResult(files: nil, short: text, note: text, noteTone: nil)
         }
         let parts = [
@@ -412,8 +477,15 @@ struct ScenarioWidget<Actions: View>: View {
                 // A completed run with nothing to change is a full ring.
                 let files = snapshot.run?.active?.state == "planning" ? nil : snapshot.files
                 let nothingToDo = result != nil && result?.files == nil && result?.short != nil
+                // A run without files counts its objects: databases, Cron,
+                // DNS zones, and mail domains.
+                let objects = snapshot.objectCounts
+                let objectRing = snapshot.databasesOnly && objects.total > 0
+                    && (snapshot.run?.active != nil || result != nil)
                 QDCyberRing(
-                    total: nothingToDo ? 0 : files?.total, done: files?.copied ?? 0, failed: files?.errors ?? 0,
+                    total: objectRing ? objects.total : nothingToDo ? 0 : files?.total,
+                    done: objectRing ? objects.done : files?.copied ?? 0,
+                    failed: objectRing ? objects.failed : files?.errors ?? 0,
                     size: compact ? 84 : 104, active: stage.moving, stalled: feed.stalledMinutes != nil
                 )
                 VStack(alignment: .leading, spacing: 4) {
@@ -469,13 +541,17 @@ struct ScenarioWidget<Actions: View>: View {
         let files = snapshot.run?.active?.state == "planning" ? nil : snapshot.files
         if let result {
             runResult(result)
-        } else {
+        } else if let files {
+            // The file counts appear only while a run copies files.
             HStack(spacing: 0) {
-                readout(files.map { "\($0.copied)" } ?? "—", "скопировано", .ready)
-                readout(files.map { "\($0.remaining)" } ?? "—", "осталось", nil)
-                readout(files.map { "\($0.errors)" } ?? "—", "ошибки", (files?.errors ?? 0) > 0 ? .failed : nil)
+                readout("\(files.copied)", "скопировано", .ready)
+                readout("\(files.remaining)", "осталось", nil)
+                readout("\(files.errors)", "ошибки", files.errors > 0 ? .failed : nil)
             }
             .padding(.top, 14)
+        }
+        if !snapshot.subsystems.isEmpty, snapshot.run?.active != nil || snapshot.run?.last != nil {
+            subsystemRow(snapshot)
         }
         if result == nil, let files, files.retrying > 0 {
             Text(retryText(files))
@@ -514,6 +590,26 @@ struct ScenarioWidget<Actions: View>: View {
                 }
                 .buttonStyle(QDCyberButtonStyle(tint: QDCyber.color(.accent, for: colorScheme), label: QDCyber.color(.onAccent, for: colorScheme)))
                 .disabled(busy || !snapshot.enabled)
+            }
+        }
+        .padding(.top, 14)
+    }
+
+    /// One column for each selected object category outside `files/`:
+    /// finished objects of the current or last run against the selection.
+    /// The category in work is active; a failed object makes it red.
+    private func subsystemRow(_ snapshot: ScenarioWidgetSnapshot) -> some View {
+        let results = snapshot.objectResults
+        let current = snapshot.databaseProgress?.category
+        return HStack(spacing: 0) {
+            ForEach(snapshot.subsystems, id: \.category) { subsystem in
+                let mine = results.filter { $0.category == subsystem.category }
+                let done = mine.filter { ["created", "updated", "unchanged"].contains($0.result) }.count
+                let failed = mine.contains { ["failed", "cancelled"].contains($0.result) }
+                let tone: QDStatusKind? = failed ? .failed
+                    : current == subsystem.category ? .active
+                    : done == subsystem.count ? .ready : nil
+                readout("\(done)/\(subsystem.count)", subsystem.title, tone)
             }
         }
         .padding(.top, 14)

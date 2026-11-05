@@ -322,6 +322,16 @@ struct ScenarioRunState: Decodable, Equatable {
         var batch_id: String? = nil
         /// The Scenario revision that the run executes.
         var revision: UInt64? = nil
+        /// Finished objects of a Backup/export run so far.
+        var objects: [ObjectResult]? = nil
+    }
+    /// The result of one database, Cron, DNS zone, or mail domain of a run.
+    struct ObjectResult: Decodable, Equatable {
+        /// `databases`, `cron`, `dns`, or `mail`.
+        let category: String
+        /// `created`, `updated`, `unchanged`, `failed`, or `cancelled`.
+        let result: String
+        let error: String?
     }
     /// The newest finished run, for the monitoring Scenario widget.
     struct LastRun: Decodable, Equatable {
@@ -333,6 +343,7 @@ struct ScenarioRunState: Decodable, Equatable {
         let batch_id: String?
         let created_at: Int64
         let finished_at: Int64?
+        var objects: [ObjectResult]? = nil
     }
     struct SkippedSlot: Decodable, Equatable {
         let schedule_id: String
@@ -554,9 +565,9 @@ enum QADRENUserMessage {
         case "files_cleanup_failed":
             "Файлы в сценарии не выбраны, но очистить папку files не удалось полностью. Дампы баз сняты. Подробности — в журнале фоновой службы."
         case "databases_failed":
-            "Дамп одной или нескольких баз не снят. Файлы скопированы; прежние дампы этих баз в копии не изменены."
+            "Не удалось сохранить одну или несколько баз или настроек хостинга (Cron, DNS, почта). Остальное скопировано; прежние копии этих объектов не изменены."
         case "backup_without_files":
-            "В сценарии выбраны только базы данных: план файлов не нужен. Нажмите «Запустить»."
+            "В сценарии не выбраны файлы: план файлов не нужен. Нажмите «Запустить»."
         case "ispmanager_database_refused":
             "MySQL не принял логин или пароль базы из панели. Дамп не снят."
         case "ispmanager_database_dump_failed":
@@ -565,6 +576,8 @@ enum QADRENUserMessage {
             "Выбранной базы больше нет на панели. Уберите её из сценария."
         case "ispmanager_database_access_unavailable":
             "Панель не отдала пользователя или пароль базы. Дамп не снят."
+        case "ispmanager_object_missing":
+            "Выбранной DNS-зоны или почтового домена больше нет на панели. Уберите их из сценария."
         case "ispmanager_database_tables_failed":
             "Не удалось прочитать список таблиц базы через mysql по SSH."
         case "ispmanager_unavailable":

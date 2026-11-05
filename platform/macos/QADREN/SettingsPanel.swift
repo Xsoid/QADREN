@@ -751,7 +751,7 @@ private struct ConnectionCard: View {
                 ISPmanagerConnectionDetails(entry: entry, connections: connections, onEdit: onEditAddress)
             }
             if connector == .ispmanager {
-                Text("Панель — только источник резервной копии. Сценарии резервного копирования с неё появятся на следующем этапе; сейчас доступны вход и список возможностей.")
+                Text("Панель — только источник резервной копии: QADREN читает данные и ничего не меняет на сервере. Сценарий резервной копии создаётся в разделе «Сценарии» кнопкой «Создать сценарий».")
                     .font(.caption).foregroundStyle(.secondary)
             } else if connector == .yandexDisk {
                 YandexConnectionDetails(entry: entry, connections: connections)
@@ -1793,7 +1793,7 @@ private struct ScenariosSettingsView: View {
                                 // compared with the copy after it, so there is no plan.
                                 Label("План не нужен", systemImage: "cylinder.split.1x2")
                                     .foregroundStyle(.secondary)
-                                    .help("В сценарии выбраны только базы данных. Каждый запуск снимает дамп заново и после дампа сравнивает его с копией: одинаковый дамп не перезаписывается. Запустите сценарий кнопкой «Запустить».")
+                                    .help("В сценарии не выбраны файлы, только базы и настройки хостинга. Каждый запуск читает их заново и сравнивает с копией: одинаковый файл не перезаписывается. Запустите сценарий кнопкой «Запустить».")
                             } else {
                                 Button("Проверить план") { previewScenario(scenario) }
                                     .disabled(!isSupportedScenario(scenario))
@@ -2004,7 +2004,7 @@ private struct ScenarioDryRunView: View {
             if scenario.databasesOnly {
                 SettingsEmptyState(
                     title: "Плана файлов нет",
-                    detail: "В сценарии выбраны только базы данных. Каждый запуск снимает их дампы заново, поэтому план не нужен: запустите сценарий кнопкой «Запустить».",
+                    detail: "В сценарии не выбраны файлы, только базы и настройки хостинга. Каждый запуск читает их заново, поэтому план не нужен: запустите сценарий кнопкой «Запустить».",
                     symbol: "cylinder.split.1x2"
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -3528,6 +3528,8 @@ private struct BackupScenarioEditorView: View {
                 if let source = sources.first(where: { $0.id == sourceID }) {
                     ISPmanagerDatabasePanel(connection: source, selection: $selection)
                         .id(source.id)
+                    ISPmanagerSettingsPanel(connection: source, selection: $selection, home: home)
+                        .id(source.id + "-settings")
                 }
                 ScenarioDeletionModeBox(
                     mode: deletionMode,
@@ -3547,7 +3549,7 @@ private struct BackupScenarioEditorView: View {
                         .font(.caption).foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                Label("Сейчас копируются файлы, папки и базы MySQL. Почта, Cron и другие типы появятся следующими шагами.", systemImage: "info.circle")
+                Label("Сейчас копируются файлы и папки, базы MySQL, задания Cron, DNS-зоны и настройки почты. Письма и другие типы появятся следующими шагами.", systemImage: "info.circle")
                     .font(.caption).foregroundStyle(.secondary)
                 if let error {
                     SettingsNotice(text: error, symbol: "exclamationmark.triangle")
@@ -4053,6 +4055,153 @@ private struct ISPmanagerDatabasePanel: View {
             failure = text
         case let .failure(.transport(transport)):
             failure = transport.message(port: 22)
+        }
+    }
+}
+
+/// Cron jobs, DNS zones, and mail domain settings of an ISPmanager source
+/// (D-027 section 10). Each becomes one JSON file of the copy: no password,
+/// no letter. The lists load from the panel.
+private struct ISPmanagerSettingsPanel: View {
+    let connection: StorageEntry
+    @Binding var selection: Set<BackupResource>
+    /// The account home folder from the file panel; empty until it loads.
+    let home: String
+    @State private var zones: [String] = []
+    @State private var domains: [String] = []
+    @State private var loading = false
+    @State private var failure: String?
+
+    var body: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Label("Настройки хостинга", systemImage: "gearshape.2").font(.headline)
+                    Spacer()
+                    if loading { ProgressView().controlSize(.small) }
+                }
+                if let failure {
+                    SettingsNotice(text: failure, symbol: "exclamationmark.triangle") {
+                        Button("Повторить") { Task { await load() } }
+                    }
+                }
+                Toggle("Задания Cron — все задания аккаунта", isOn: binding("cron", "all"))
+                    .toggleStyle(.checkbox)
+                list(title: "DNS-зоны", category: "dns", names: zones, empty: "У аккаунта нет DNS-зон.")
+                list(title: "Почтовые домены", category: "mail", names: domains, empty: "У аккаунта нет почтовых доменов.")
+                Text("Каждый объект — один файл JSON в копии: cron/jobs.json, dns/<зона>.json, mail/<домен>.json. QADREN только читает списки панели. Задания Cron не запускаются. Пароли ящиков и письма в эти файлы не попадают.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Письма хранятся на сервере как файлы, в папке email/<домен> домашней папки. «Письма» у домена добавляет эту папку в выбор файлов выше: письма копируются в files/email/<домен> вместе с файлами, по одному файлу на письмо, и при следующих запусках копируются только новые.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(6)
+        }
+        .task { await load() }
+    }
+
+    @ViewBuilder
+    private func list(title: String, category: String, names: [String], empty: String) -> some View {
+        Text(title).font(.subheadline.weight(.semibold)).padding(.top, 4)
+        if names.isEmpty && !loading && failure == nil {
+            Text(empty).foregroundStyle(.secondary)
+        }
+        ForEach(names, id: \.self) { name in
+            Toggle(name, isOn: binding(category, name)).toggleStyle(.checkbox)
+            if category == "mail" && !home.isEmpty {
+                lettersToggle(name).padding(.leading, 20)
+            }
+        }
+        // A selected object that the panel no longer lists stays visible.
+        ForEach(missing(category, names), id: \.self) { name in
+            Toggle(isOn: binding(category, name)) { Text("\(name) — нет на панели") }
+                .toggleStyle(.checkbox)
+        }
+    }
+
+    private func lettersPath(_ domain: String) -> String {
+        home.trimmingCharacters(in: CharacterSet(charactersIn: "/")).isEmpty
+            ? "/email/\(domain)" : home + "/email/" + domain
+    }
+
+    /// The most specific file rule at or above `path` (D-027 section 6).
+    private func nearestFileRule(_ path: String) -> BackupResource? {
+        selection
+            .filter { $0.category == "files" && ($0.provider_id == path || ($0.kind == "dir" && path.hasPrefix($0.provider_id == "/" ? "/" : $0.provider_id + "/"))) }
+            .max { $0.provider_id.count < $1.provider_id.count }
+    }
+
+    /// "Письма" of one mail domain: the file rule of `email/<domain>`.
+    @ViewBuilder
+    private func lettersToggle(_ domain: String) -> some View {
+        let path = lettersPath(domain)
+        let rule = nearestFileRule(path)
+        let covered = rule?.rule == "include" && rule?.provider_id != path
+        Toggle(isOn: Binding(
+            get: { rule?.rule == "include" },
+            set: { on in
+                selection = selection.filter { !($0.category == "files" && ($0.provider_id == path || $0.provider_id.hasPrefix(path + "/"))) }
+                if on {
+                    selection.insert(BackupResource(category: "files", provider_id: path, kind: "dir", rule: "include"))
+                }
+            }
+        )) {
+            Text(covered ? "письма — входят в выбранную папку \(rule?.provider_id ?? "")" : "письма — папка email/\(domain)")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+        .toggleStyle(.checkbox)
+        .disabled(covered)
+        .help("Добавляет папку \(path) в выбор файлов")
+    }
+
+    private func missing(_ category: String, _ names: [String]) -> [String] {
+        guard !loading else { return [] }
+        return selection
+            .filter { $0.category == category && !names.contains($0.provider_id) }
+            .map(\.provider_id)
+            .sorted()
+    }
+
+    private func binding(_ category: String, _ name: String) -> Binding<Bool> {
+        let resource = BackupResource(category: category, provider_id: name, kind: "object")
+        return Binding(
+            get: { selection.contains(resource) },
+            set: { checked in
+                if checked { selection.insert(resource) } else { selection.remove(resource) }
+            }
+        )
+    }
+
+    private func load() async {
+        guard let url = connection.endpoint_url else {
+            failure = "У подключения нет адреса панели."
+            return
+        }
+        let credentials: LoginCredentials
+        do {
+            guard let saved = try ISPmanagerKeychain.read(connection.id) else {
+                failure = "Логин и пароль не сохранены. Откройте подключение в разделе «Подключения»."
+                return
+            }
+            credentials = saved
+        } catch {
+            failure = "Не удалось прочитать вход подключения: " + error.localizedDescription
+            return
+        }
+        loading = true
+        async let zoneList = ISPmanagerDatabases.objectNames(url: url, credentials: credentials, category: "dns")
+        async let domainList = ISPmanagerDatabases.objectNames(url: url, credentials: credentials, category: "mail")
+        let (zoneResult, domainResult) = await (zoneList, domainList)
+        loading = false
+        failure = nil
+        for (result, apply) in [(zoneResult, { zones = $0 }), (domainResult, { domains = $0 })] as [(Swift.Result<[String], ISPmanagerSFTP.Failure>, ([String]) -> Void)] {
+            switch result {
+            case let .success(value): apply(value)
+            case let .failure(.message(text)): failure = text
+            case let .failure(.transport(transport)): failure = transport.message(port: 22)
+            }
         }
     }
 }

@@ -123,6 +123,22 @@ The owner decided on 2026-11-04: database servers differ in type, version, and c
     2. **No transfer of unchanged tables.** Before the dump, `CHECKSUM TABLE` gives a check sum for each table. One `--single-transaction` dump reads only the changed tables; the unchanged table files stay. After the dump, the check sums of the unchanged tables are read again; a table with a different check sum is dumped again. The result is a near-consistent copy, not a proven one: a table can change and change back between the checks. `CHECKSUM TABLE` reads each table on the server. The owner accepted this limitation for this stage; the user interface and `manifest.json` must disclose it.
     3. **Not in scope.** A dump into a temporary file on the server, with a resumable SFTP download, conflicts with section 7a.4 (no server writes) and uses server disk space. It needs a separate owner decision.
 
+### 7c. Cron, DNS, and mail settings
+
+The owner accepted on 2026-11-06: a Backup/export Scenario can copy the Cron jobs, DNS zones, and mail domain settings of the account. The live check on 2026-11-06 found these read functions and fields:
+
+| Category | Functions | Exported fields |
+|---|---|---|
+| Cron | `scheduler` | `command`, `interval`, `schedule_type`, `active`, `description` |
+| DNS | `domain`, `domain.record` (with `elid` of the zone) | zone `name`, `dtype`, `dnssecstatus`; record `name`, `rtype`, `ttl`, `value` |
+| Mail | `emaildomain`, `email` | domain `name`, `active`, `dkim`, `dmarc`, `spamassassin`, `defaction`, `secure`; mailbox `name`, `active`, `aliases`, `dontsave`, `responder`, `spamassassin`, `size_total` |
+
+1. **Selection.** `cron` with the provider ID `all` selects all jobs. `dns` and `mail` select one zone or one mail domain by name. The name is also the file name, so it has only letters, digits, `-`, `_`, and `.`.
+2. **Files.** `cron/jobs.json`, `dns/<zone>.json`, and `mail/<domain>.json` in the copy root. Each file is JSON with sorted keys and sorted lists, so the same settings give the same bytes. Only the listed fields go into a file; internal keys (`id`, `key`, `rkey`) and the mailbox `size_used` do not. A mail file has the mailboxes whose name ends with `@<domain>`.
+3. **Secrets and content.** The lists have no password. Mailbox passwords are never exported. Letters are not in these files. The owner decided on 2026-11-06: letters are copied as files. The panel stores them in `email/<domain>` of the home folder. Each mail domain in the Scenario editor has the option "письма": it adds the file rule of `<home>/email/<domain>`, so the letters go to `files/email/<domain>` with the files and their mirror rule. When a selected folder already covers this path, the option shows that and is not available. The live check found the `email` folder, but no `cur`, `new`, and `tmp` at the expected depth; a plan of the folder shows what the account can read.
+4. **Run.** These objects come before the databases, in the same step: after the file batch, or at once when the revision has no file rule. Each object has a durable result in the run (Registry `backup_object_results`, schema v35), and the publish is the same as for a dump (section 7b.7). A failed object makes the run `failed` with `databases_failed`; the other objects continue. Cron jobs are never run, suspended, or changed.
+5. **Not in scope yet.** A BIND zone file and the forwarding and autoresponder text of a mailbox (`email.edit` form).
+
 ### 8. Native ISPmanager backups
 
 This stage does not use native ISPmanager backups (`backups.*`, `backup.plan.*`, `backup2.*`). They create archives on the server, use server disk space, or bundle more data than the selection. A later owner decision can allow one of them after a live check of its exact content and side effects. The native backup does not include Docker.

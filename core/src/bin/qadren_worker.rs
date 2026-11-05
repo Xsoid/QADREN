@@ -26,7 +26,7 @@ use qadren_core::local_fs::LocalFilesystem;
 use qadren_core::model::{ConfirmedFileVersion, JobState, ScenarioReference};
 use qadren_core::plan_store;
 use qadren_core::registry::{
-    BackupDatabaseResult, BatchChildDue, BatchChildKind, DueBatchChild, Registry, RegistryError,
+    BackupObjectResult, BatchChildDue, BatchChildKind, DueBatchChild, Registry, RegistryError,
     RunWriteLock, ScenarioRun, ScheduleRunStart,
 };
 use qadren_core::scenario_planner::{ObservedFile, PlanAction};
@@ -1009,9 +1009,21 @@ fn write_backup_manifest(paths: &WorkerPaths, run_id: &str) {
         .iter()
         .filter(|resource| resource.category == "databases")
         .collect();
-    let database_results = registry
-        .backup_database_results(&run.id)
+    let object_results = registry
+        .backup_object_results(&run.id)
         .unwrap_or_default();
+    let results_of = |category: &str| -> Vec<_> {
+        object_results
+            .iter()
+            .filter(|result| result.category == category)
+            .collect()
+    };
+    let selected_of = |category: &str| -> Vec<_> {
+        resources
+            .iter()
+            .filter(|resource| resource.category == category)
+            .collect()
+    };
     let mut manifest = serde_json::json!({
         "format": "qadren-ispmanager-backup/1",
         "scenario_id": id,
@@ -1053,7 +1065,26 @@ fn write_backup_manifest(paths: &WorkerPaths, run_id: &str) {
             "consistency": "one transaction for InnoDB tables; no table lock",
             "integrity": "exit status 0 and the final dump line checked before publish; md5 of the .sql file",
             "selected": selected_databases,
-            "results": database_results,
+            "results": results_of("databases"),
+        });
+    }
+    // D-027 section 10: panel settings as JSON, without secrets.
+    for (category, folder, artifact, source) in [
+        ("cron", "cron", "jobs.json: all Cron jobs (command, schedule, state)", "scheduler"),
+        ("dns", "dns", "<zone>.json: zone and records (name, type, TTL, value)", "domain, domain.record"),
+        ("mail", "mail", "<domain>.json: mail domain and mailbox settings; no passwords, no letters", "emaildomain, email"),
+    ] {
+        let selected = selected_of(category);
+        if selected.is_empty() {
+            continue;
+        }
+        manifest["categories"][category] = serde_json::json!({
+            "folder": folder,
+            "artifact": artifact,
+            "source": source,
+            "integrity": "md5 of the file checked before publish",
+            "selected": selected,
+            "results": results_of(category),
         });
     }
     let Ok(text) = serde_json::to_vec_pretty(&manifest) else {
@@ -1284,8 +1315,11 @@ fn wait_for_run_wake(deadline: std::time::Instant) -> bool {
 struct DatabaseProgress {
     scenario_id: String,
     run_id: String,
-    /// `cleanup` of `files/`, `dump`, or `publish`.
+    /// `cleanup` of `files/`, `settings`, `dump`, or `publish`.
     stage: &'static str,
+    /// The category of the current object: `cron`, `dns`, `mail`, or
+    /// `databases`; empty during the cleanup.
+    category: String,
     /// The current database, from 1; 0 during the cleanup.
     index: usize,
     total: usize,
@@ -1299,6 +1333,17 @@ fn database_progress() -> &'static Mutex<HashMap<String, DatabaseProgress>> {
 }
 
 fn set_database_progress(run: &ScenarioRun, stage: &'static str, index: usize, total: usize, bytes: u64) {
+    set_object_progress(run, stage, "", index, total, bytes);
+}
+
+fn set_object_progress(
+    run: &ScenarioRun,
+    stage: &'static str,
+    category: &str,
+    index: usize,
+    total: usize,
+    bytes: u64,
+) {
     database_progress()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1308,6 +1353,7 @@ fn set_database_progress(run: &ScenarioRun, stage: &'static str, index: usize, t
                 scenario_id: run.scenario.scenario_id.clone(),
                 run_id: run.id.clone(),
                 stage,
+                category: category.to_owned(),
                 index,
                 total,
                 bytes,
@@ -1443,27 +1489,30 @@ fn advance_backup_databases(
     if registry.scenario_mode(id).ok().as_deref() != Some("backup_export") {
         return Ok(DatabaseStep::None);
     }
-    let databases: Vec<String> = registry
+    // The objects of the panel: Cron, DNS zones, mail domains, and
+    // databases, in this order (D-027 sections 7b and 10).
+    let order = |category: &str| ["cron", "dns", "mail", "databases"].iter().position(|c| *c == category);
+    let mut objects: Vec<(String, String)> = registry
         .backup_resources(id, revision)
         .map_err(|_| "registry_unavailable".to_string())?
         .into_iter()
-        .filter(|r| r.category == "databases" && r.rule == "include")
-        .map(|r| r.provider_id)
+        .filter(|r| r.rule == "include" && order(&r.category).is_some())
+        .map(|r| (r.category, r.provider_id))
         .collect();
-    if databases.is_empty() {
+    objects.sort_by_key(|(category, provider)| (order(category), provider.clone()));
+    if objects.is_empty() {
         return Ok(DatabaseStep::None);
     }
     let results = registry
-        .backup_database_results(&run.id)
+        .backup_object_results(&run.id)
         .map_err(|_| "registry_unavailable".to_string())?;
-    let missing: Vec<String> = databases
-        .iter()
-        .filter(|database| {
+    let missing: Vec<(String, String)> = objects
+        .into_iter()
+        .filter(|(category, provider)| {
             !results
                 .iter()
-                .any(|result| &result.provider_id == *database)
+                .any(|result| &result.category == category && &result.provider_id == provider)
         })
-        .cloned()
         .collect();
     if missing.is_empty() {
         return Ok(DatabaseStep::Done {
@@ -1543,16 +1592,17 @@ fn export_run_databases(
     paths: &WorkerPaths,
     run: &ScenarioRun,
     connection_id: &str,
-    databases: &[String],
+    objects: &[(String, String)],
 ) {
     let record =
-        |database: &str, result: &str, error: Option<&str>, done: Option<(u64, String)>| {
+        |category: &str, database: &str, result: &str, error: Option<&str>, done: Option<(u64, String)>| {
             if let Ok(registry) = Registry::open(&paths.registry) {
                 let (bytes, md5) =
                     done.map_or((None, None), |(bytes, md5)| (Some(bytes), Some(md5)));
-                let _ = registry.record_backup_database_result(
+                let _ = registry.record_backup_object_result(
                     &run.id,
-                    &BackupDatabaseResult {
+                    &BackupObjectResult {
+                        category: category.to_owned(),
                         provider_id: database.to_owned(),
                         result: result.to_owned(),
                         error: error.map(str::to_owned),
@@ -1563,17 +1613,23 @@ fn export_run_databases(
                 );
             }
             eprintln!(
-                "qadren-worker: {} run {} database export {result}{}",
+                "qadren-worker: {} run {} {} export {result}{}",
                 log_time(),
                 run.id,
+                if category == "databases" { "database" } else { category },
                 error.map_or(String::new(), |error| format!(": {error}"))
             );
         };
     let fail_all = |code: &str| {
-        for database in databases {
-            record(database, "failed", Some(code), None);
+        for (category, provider) in objects {
+            record(category, provider, "failed", Some(code), None);
         }
     };
+    let databases: Vec<String> = objects
+        .iter()
+        .filter(|(category, _)| category == "databases")
+        .map(|(_, provider)| provider.clone())
+        .collect();
     let Some((login, password)) = runner().ispmanager_login(connection_id) else {
         // The run waits for the login; the next advance starts again.
         return;
@@ -1589,6 +1645,66 @@ fn export_run_databases(
     let Ok(mut session) = qadren_core::ispmanager::Session::new(url, login, password) else {
         return fail_all("ispmanager_network_error");
     };
+    let staging = paths
+        .registry
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("database-staging");
+    // Cron, DNS, and mail settings come from panel lists (section 10).
+    let settings: Vec<_> = objects
+        .iter()
+        .filter(|(category, _)| category != "databases")
+        .collect();
+    for (category, provider) in settings.iter().copied() {
+        if !run_still_active(paths, run) {
+            record(category, provider, "cancelled", Some("stopped_by_user"), None);
+            continue;
+        }
+        // The position among the objects of the same category.
+        let same: Vec<_> = settings.iter().filter(|(other, _)| other == category).collect();
+        let index = same.iter().position(|(_, other)| other == provider).unwrap_or(0) + 1;
+        set_object_progress(run, "settings", category, index, same.len(), 0);
+        let status = qadren_core::ispmanager::export_object(&mut session, category, provider)
+            .and_then(|content| {
+                qadren_core::ispmanager_execution::run_ispmanager_object_export(
+                    &paths.jobs,
+                    &paths.registry,
+                    &run.scenario.scenario_id,
+                    run.scenario.revision,
+                    &run.id,
+                    category,
+                    provider,
+                    &content,
+                    &staging,
+                )
+            });
+        match status {
+            Ok(DatabaseExportStatus::Created { bytes, md5 }) => {
+                record(category, provider, "created", None, Some((bytes, md5)))
+            }
+            Ok(DatabaseExportStatus::Updated { bytes, md5 }) => {
+                record(category, provider, "updated", None, Some((bytes, md5)))
+            }
+            Ok(DatabaseExportStatus::Unchanged { bytes, md5 }) => {
+                record(category, provider, "unchanged", None, Some((bytes, md5)))
+            }
+            Ok(DatabaseExportStatus::Existing(JobState::Completed)) => {
+                record(category, provider, "updated", None, None)
+            }
+            Ok(DatabaseExportStatus::Existing(_)) => {
+                record(category, provider, "failed", Some("items_unknown"), None)
+            }
+            Err(code) => record(category, provider, "failed", Some(code), None),
+        }
+    }
+    if databases.is_empty() {
+        return;
+    }
+    let fail_all = |code: &str| {
+        for database in &databases {
+            record("databases", database, "failed", Some(code), None);
+        }
+    };
     let connected = std::time::Instant::now();
     let connection = match open_sftp(paths, connection_id) {
         Ok(connection) => connection,
@@ -1600,11 +1716,6 @@ fn export_run_databases(
         run.id,
         connected.elapsed().as_secs_f64()
     );
-    let staging = paths
-        .registry
-        .parent()
-        .unwrap_or(Path::new("."))
-        .join("database-staging");
     let checked = Mutex::new(std::time::Instant::now());
     let keep_going = || {
         let mut last = checked
@@ -1617,16 +1728,16 @@ fn export_run_databases(
         run_still_active(paths, run)
     };
     for (index, database) in databases.iter().enumerate() {
-        set_database_progress(run, "dump", index + 1, databases.len(), 0);
+        set_object_progress(run, "dump", "databases", index + 1, databases.len(), 0);
         if !run_still_active(paths, run) {
-            record(database, "cancelled", Some("stopped_by_user"), None);
+            record("databases", database, "cancelled", Some("stopped_by_user"), None);
             continue;
         }
         let asked = std::time::Instant::now();
         let access = match qadren_core::ispmanager::mysql_access(&mut session, database) {
             Ok(access) => access,
             Err(code) => {
-                record(database, "failed", Some(code), None);
+                record("databases", database, "failed", Some(code), None);
                 continue;
             }
         };
@@ -1654,7 +1765,7 @@ fn export_run_databases(
                     keep_going()
                 }
                 qadren_core::ispmanager_execution::ExportProgress::Publish => {
-                    set_database_progress(run, "publish", index + 1, databases.len(), 0);
+                    set_object_progress(run, "publish", "databases", index + 1, databases.len(), 0);
                     true
                 }
             },
@@ -1677,22 +1788,22 @@ fn export_run_databases(
         );
         match status {
             Ok(DatabaseExportStatus::Created { bytes, md5 }) => {
-                record(database, "created", None, Some((bytes, md5)))
+                record("databases", database, "created", None, Some((bytes, md5)))
             }
             Ok(DatabaseExportStatus::Updated { bytes, md5 }) => {
-                record(database, "updated", None, Some((bytes, md5)))
+                record("databases", database, "updated", None, Some((bytes, md5)))
             }
             Ok(DatabaseExportStatus::Unchanged { bytes, md5 }) => {
-                record(database, "unchanged", None, Some((bytes, md5)))
+                record("databases", database, "unchanged", None, Some((bytes, md5)))
             }
             Ok(DatabaseExportStatus::Existing(JobState::Completed)) => {
-                record(database, "updated", None, None)
+                record("databases", database, "updated", None, None)
             }
             Ok(DatabaseExportStatus::Existing(_)) => {
-                record(database, "failed", Some("items_unknown"), None)
+                record("databases", database, "failed", Some("items_unknown"), None)
             }
-            Err("stopped_by_user") => record(database, "cancelled", Some("stopped_by_user"), None),
-            Err(code) => record(database, "failed", Some(code), None),
+            Err("stopped_by_user") => record("databases", database, "cancelled", Some("stopped_by_user"), None),
+            Err(code) => record("databases", database, "failed", Some(code), None),
         }
     }
 }

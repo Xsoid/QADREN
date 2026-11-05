@@ -20,6 +20,9 @@ final class StorageConnections: ObservableObject {
         Task { await SMBMounts.mountAll(self) }
     }
 
+    /// True while a failed refresh waits for its retry.
+    private var retryScheduled = false
+
     func refresh() {
         do {
             // "This Mac" always exists (D-020). This creates it on first use
@@ -30,6 +33,17 @@ final class StorageConnections: ObservableObject {
             error = nil
         } catch {
             self.error = error.localizedDescription
+            // A Registry read can fail for a moment, for example while the
+            // app and the Worker migrate the schema at the same time. The
+            // panel refreshes only on a change, so the error stayed until a
+            // restart (found on 2026-11-06). Try again in a few seconds.
+            if !retryScheduled {
+                retryScheduled = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                    self?.retryScheduled = false
+                    self?.refresh()
+                }
+            }
         }
     }
 

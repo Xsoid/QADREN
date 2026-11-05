@@ -110,6 +110,37 @@ pub extern "C" fn qadren_ispmanager_databases(
         .into_raw()
 }
 
+/// The DNS zones (`category` `dns`) or mail domains (`mail`) of the
+/// account, for the Scenario editor (D-027 section 10). It reads one panel
+/// list only.
+#[no_mangle]
+pub extern "C" fn qadren_ispmanager_object_names(
+    url: *const c_char,
+    login: *const c_char,
+    password: *const c_char,
+    category: *const c_char,
+) -> *mut c_char {
+    let value = match (
+        input(url).and_then(|url| ispmanager::PanelUrl::parse(url.trim()).ok()),
+        input(login),
+        input(password),
+        input(category),
+    ) {
+        (Some(url), Some(login), Some(password), Some(category)) => {
+            match ispmanager::Session::new(url, login, password)
+                .and_then(|mut session| ispmanager::object_names(&mut session, &category))
+            {
+                Ok(names) => json!({"ok": true, "data": names}),
+                Err(error) => json!({"ok": false, "error": error.to_string()}),
+            }
+        }
+        _ => json!({"ok": false, "error": "invalid_input"}),
+    };
+    CString::new(value.to_string())
+        .expect("JSON cannot contain NUL")
+        .into_raw()
+}
+
 /// The base tables of one MySQL database with their estimated sizes, for
 /// the table rules of the Scenario editor (D-027 section 7b.10). The access
 /// facts come from the panel and stay in memory. The query reads

@@ -510,8 +510,10 @@ enum WorkerIPC {
 /// What the database step of a run does now.
 struct WorkerDatabaseProgress: Decodable, Equatable {
     let run_id: String
-    /// `cleanup`, `dump`, or `publish`.
+    /// `cleanup`, `settings`, `dump`, or `publish`.
     let stage: String
+    /// `cron`, `dns`, `mail`, or `databases`; empty during the cleanup.
+    var category: String? = nil
     /// The current database, from 1; 0 during the cleanup.
     let index: Int
     let total: Int

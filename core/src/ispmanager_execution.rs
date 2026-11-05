@@ -26,7 +26,7 @@ use crate::scenario_planner::name_key;
 use crate::storage_access::ISPMANAGER;
 use crate::verification::VerifiedReceipt;
 use std::io::{self, Read};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 fn plain_relative(path: &str) -> bool {
     !path.is_empty()
@@ -646,11 +646,140 @@ pub fn run_ispmanager_database_export(
 
     timing.dump = started.elapsed();
     let _ = progress(ExportProgress::Publish);
-    // 2. The same bytes as the destination file give no effect.
+    publish_backup_file(
+        registry_path,
+        &mut store,
+        &destination,
+        &destination_connection,
+        (scenario_id, scenario_revision),
+        &job_id,
+        &staging,
+        (size, md5),
+        &Path::new("databases").join(format!("{database}.sql")),
+        timing,
+    )
+}
+
+/// The Job of one Cron, DNS, or mail export in one run.
+pub fn object_export_job_id(run_id: &str, category: &str, provider_id: &str) -> String {
+    let digest = format!("{:x}", md5::compute(format!("{category}:{provider_id}").as_bytes()));
+    format!("ispobj-{run_id}-{}", &digest[..16])
+}
+
+/// The file of one exported object in the copy root (D-027 section 10).
+fn object_target(category: &str, provider_id: &str) -> Option<PathBuf> {
+    match category {
+        "cron" if provider_id == "all" => Some(PathBuf::from("cron/jobs.json")),
+        "dns" | "mail" if crate::registry::domain_name(provider_id) => {
+            Some(Path::new(category).join(format!("{provider_id}.json")))
+        }
+        _ => None,
+    }
+}
+
+/// Write the panel export of one selected Cron, DNS, or mail object into
+/// its file of the Backup/export copy (D-027 section 10). `content` comes
+/// from `ispmanager::export_object`. The same bytes as the copy give no
+/// effect; otherwise the file is published like a database dump.
+#[allow(clippy::too_many_arguments)]
+pub fn run_ispmanager_object_export(
+    database_path: &Path,
+    registry_path: &Path,
+    scenario_id: &str,
+    scenario_revision: u64,
+    run_id: &str,
+    category: &str,
+    provider_id: &str,
+    content: &[u8],
+    staging_dir: &Path,
+) -> Result<DatabaseExportStatus, &'static str> {
+    use std::io::Write;
+    let job_id = object_export_job_id(run_id, category, provider_id);
+    let target = object_target(category, provider_id).ok_or("invalid_request")?;
+    if !valid_job_id(&job_id) {
+        return Err("invalid_request");
+    }
+    let registry = Registry::open(registry_path).map_err(|_| "registry_unavailable")?;
+    let scenario = backup_scenario(&registry, scenario_id, scenario_revision)
+        .map_err(|_| "scenario_unavailable")?;
+    let selected = registry
+        .backup_resources(scenario_id, scenario_revision)
+        .map_err(|_| "registry_unavailable")?
+        .iter()
+        .any(|r| r.category == category && r.rule == "include" && r.provider_id == provider_id);
+    if !selected {
+        return Err("invalid_selection");
+    }
+    let destination_connection = scenario.right_connection_id.clone();
+    if !enabled_local_connection(registry_path, &destination_connection) {
+        return Err("local_scenario_connection_unavailable");
+    }
+    drop(registry);
+    let root = Path::new(&scenario.right_root)
+        .parent()
+        .ok_or("local_root_unavailable")?;
+    let destination = LocalFilesystem::open(root).map_err(|_| "local_root_unavailable")?;
+    if !destination.capabilities().operations.write_content {
+        return Err("local_root_unavailable");
+    }
+    let mut store = JobStore::open(database_path).map_err(|_| "job_store_unavailable")?;
+    if let Some(existing) = store.get(&job_id).map_err(|_| "job_store_unavailable")? {
+        return Ok(DatabaseExportStatus::Existing(existing.state));
+    }
+    std::fs::create_dir_all(staging_dir).map_err(|_| "local_root_unavailable")?;
+    let staging = staging_dir.join(format!("{job_id}.json"));
+    let _ = std::fs::remove_file(&staging);
+    let written = (|| -> io::Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging)?;
+        file.write_all(content)?;
+        file.sync_all()
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&staging);
+        return Err("local_root_unavailable");
+    }
+    publish_backup_file(
+        registry_path,
+        &mut store,
+        &destination,
+        &destination_connection,
+        (scenario_id, scenario_revision),
+        &job_id,
+        &staging,
+        (content.len() as u64, format!("{:x}", md5::compute(content))),
+        &target,
+        &mut DatabaseExportTiming::default(),
+    )
+}
+
+/// Publish one complete private staging file at `target` of the copy root
+/// (D-027 sections 7b.7 and 10). The same bytes as the destination file give
+/// no effect. Otherwise a durable attempt with the size and the MD5 comes
+/// first, then a no-overwrite create or the approved replacement protocol.
+/// A lost proof gives `outcome_unknown`; local reconciliation checks it.
+#[allow(clippy::too_many_arguments)]
+fn publish_backup_file(
+    registry_path: &Path,
+    store: &mut JobStore,
+    destination: &LocalFilesystem,
+    destination_connection: &str,
+    (scenario_id, scenario_revision): (&str, u64),
+    job_id: &str,
+    staging: &Path,
+    (size, md5): (u64, String),
+    target: &Path,
+    timing: &mut DatabaseExportTiming,
+) -> Result<DatabaseExportStatus, &'static str> {
+    // The same bytes as the destination file give no effect.
     let compared = Instant::now();
-    let target = Path::new("databases").join(format!("{database}.sql"));
+    let remove_staging = || {
+        let _ = std::fs::remove_file(staging);
+    };
     let target_text = target.to_string_lossy().into_owned();
-    let replace = match destination.stat(&target) {
+    let replace = match destination.stat(target) {
         Ok(entry) if entry.is_directory => {
             remove_staging();
             return Err("target_exists");
@@ -662,7 +791,7 @@ pub fn run_ispmanager_database_export(
                     context: md5::Context::new(),
                     total: 0,
                 };
-                if destination.read_to_writer(&target, &mut hashing).is_ok()
+                if destination.read_to_writer(target, &mut hashing).is_ok()
                     && format!("{:x}", hashing.context.compute()) == md5
                 {
                     remove_staging();
@@ -681,7 +810,7 @@ pub fn run_ispmanager_database_export(
 
     timing.compare = compared.elapsed();
     let publish_started = Instant::now();
-    // 3. The publish: a durable attempt, then no-overwrite or replacement.
+    // The publish: a durable attempt, then no-overwrite or replacement.
     let root_identity = local_root_identity_key(&destination).map_err(|_| {
         remove_staging();
         "local_root_unavailable"
@@ -709,7 +838,7 @@ pub fn run_ispmanager_database_export(
             &job_id,
             &attempt_id,
             operation_kind,
-            &destination_connection,
+            destination_connection,
             &target_text,
             size,
             &md5,
@@ -718,41 +847,41 @@ pub fn run_ispmanager_database_export(
         .map_err(store_error)?;
     let fail_before_effect = |store: &mut JobStore, code: &'static str| {
         let _ = store.fail_attempt_before_effect(&job_id, &attempt_id);
-        let _ = std::fs::remove_file(&staging);
+        let _ = std::fs::remove_file(staging);
         Err(code)
     };
-    if !enabled_local_connection(registry_path, &destination_connection) {
-        return fail_before_effect(&mut store, "local_scenario_connection_unavailable");
+    if !enabled_local_connection(registry_path, destination_connection) {
+        return fail_before_effect(store, "local_scenario_connection_unavailable");
     }
-    match destination.create_directory_tree(Path::new("databases")) {
+    match destination.create_directory_tree(target.parent().unwrap_or(Path::new(""))) {
         Ok(_) => {}
         Err(LocalError::OutcomeUnknown(_)) => return Err("outcome_unknown"),
-        Err(_) => return fail_before_effect(&mut store, "local_root_unavailable"),
+        Err(_) => return fail_before_effect(store, "local_root_unavailable"),
     }
-    let Ok(mut input) = std::fs::File::open(&staging) else {
-        return fail_before_effect(&mut store, "local_root_unavailable");
+    let Ok(mut input) = std::fs::File::open(staging) else {
+        return fail_before_effect(store, "local_root_unavailable");
     };
     let published = if replace {
-        destination.create_from_reader_to_replace(&target, &mut input)
+        destination.create_from_reader_to_replace(target, &mut input)
     } else {
-        destination.create_from_reader(&target, &mut input)
+        destination.create_from_reader(target, &mut input)
     };
     match published {
         Ok(bytes) if bytes == size => {}
         Ok(_) => return Err("outcome_unknown"),
         Err(LocalError::OutcomeUnknown(_)) => return Err("outcome_unknown"),
-        Err(LocalError::AlreadyExists) => return fail_before_effect(&mut store, "target_exists"),
-        Err(_) => return fail_before_effect(&mut store, "local_root_unavailable"),
+        Err(LocalError::AlreadyExists) => return fail_before_effect(store, "target_exists"),
+        Err(_) => return fail_before_effect(store, "local_root_unavailable"),
     }
     remove_staging();
-    match destination.stat(&target) {
+    match destination.stat(target) {
         Ok(entry) if !entry.is_directory && entry.size == size => {}
         _ => return Err("outcome_unknown"),
     }
     let receipt = VerifiedReceipt::metadata_verified(
         &attempt_id,
         operation_kind,
-        &destination_connection,
+        destination_connection,
         &target_text,
     );
     store
