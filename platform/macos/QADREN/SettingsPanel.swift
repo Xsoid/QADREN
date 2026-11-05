@@ -300,7 +300,6 @@ struct SettingsPanelView: View {
                             scenarios: scenarios,
                             connections: connections.entries,
                             createScenario: beginScenarioCreation,
-                            createBackup: beginBackupCreation,
                             editScenario: beginScenarioEditing,
                             editSchedules: { schedulesScenario = $0 },
                             previewScenario: { previewScenario = $0 }
@@ -341,14 +340,6 @@ struct SettingsPanelView: View {
         schedulesScenario = nil
         editedScenario = nil
         creatingBackup = false
-        isEditingScenario = true
-    }
-
-    private func beginBackupCreation() {
-        schedulesScenario = nil
-        editedScenario = nil
-        backupSourceID = nil
-        creatingBackup = true
         isEditingScenario = true
     }
 
@@ -1693,13 +1684,37 @@ private struct ScenariosSettingsView: View {
     @ObservedObject var scenarios: ScenarioSettings
     /// The Scenario whose run request is in progress.
     @State private var startingRun: String?
+    /// Scenarios with an active run, read while the list is visible.
+    @State private var activeRuns: Set<String> = []
     @State private var runNotice: (text: String, failed: Bool)?
     let connections: [StorageEntry]
     let createScenario: () -> Void
-    let createBackup: () -> Void
     let editScenario: (ScenarioEntry) -> Void
     let editSchedules: (ScenarioEntry) -> Void
     let previewScenario: (ScenarioEntry) -> Void
+
+    private func stopRun(_ scenario: ScenarioEntry) {
+        startingRun = scenario.id
+        runNotice = nil
+        Task {
+            do {
+                try await Task.detached { try WorkerIPC.stopRun(scenarioID: scenario.id) }.value
+                runNotice = ("Запуск «\(scenario.name)» останавливается: текущий файл завершится, новые не начнутся.", false)
+            } catch {
+                runNotice = ("Не удалось остановить «\(scenario.name)»: " + error.localizedDescription, true)
+            }
+            startingRun = nil
+            await refreshActiveRuns()
+        }
+    }
+
+    /// Read which Scenarios have an active run, off the main thread.
+    private func refreshActiveRuns() async {
+        let ids = scenarios.entries.map(\.id)
+        activeRuns = await Task.detached {
+            Set(ids.filter { (try? StorageRegistryBridge.scenarioRunState(scenarioID: $0))?.active != nil })
+        }.value
+    }
 
     private func startRun(_ scenario: ScenarioEntry) {
         startingRun = scenario.id
@@ -1713,6 +1728,7 @@ private struct ScenariosSettingsView: View {
                 runNotice = ("Не удалось запустить «\(scenario.name)»: " + error.localizedDescription, true)
             }
             startingRun = nil
+            await refreshActiveRuns()
         }
     }
 
@@ -1725,11 +1741,6 @@ private struct ScenariosSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                if connections.contains(where: { $0.adapter == StorageConnector.ispmanager.rawValue }) {
-                    Button("Резервная копия ISPmanager", systemImage: "globe", action: createBackup)
-                        .disabled(supportedConnections.isEmpty)
-                        .help("Сценарий резервной копии: панель ISPmanager → этот Mac или сетевой диск")
-                }
                 Button("Создать сценарий", action: createScenario)
                     .disabled(supportedConnections.isEmpty)
             }
@@ -1755,7 +1766,8 @@ private struct ScenariosSettingsView: View {
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(scenario.name).font(.headline)
-                                Text("Ревизия \(scenario.revision) · \(scenario.isBackup ? "резервная копия" : directionTitle(scenario.direction))")
+                                Text("Ревизия \(scenario.revision) · \(scenario.isBackup ? "резервная копия" : directionTitle(scenario.direction))"
+                                     + (activeRuns.contains(scenario.id) ? " · выполняется" : ""))
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                             Spacer()
@@ -1791,11 +1803,17 @@ private struct ScenariosSettingsView: View {
                             }
                             // The same manual run as "Запустить" of the Scenario widget, so
                             // that a run does not depend on a widget on the panel.
-                            Button("Запустить", systemImage: "play.fill") { startRun(scenario) }
-                                .disabled(!isSupportedScenario(scenario) || !scenario.enabled || startingRun != nil)
-                                .help(!scenario.enabled
-                                      ? "Сценарий выключен. Включите его переключателем слева"
-                                      : "Запустить сценарий сейчас: как запуск по расписанию. Ход запуска виден на виджете сценария")
+                            if activeRuns.contains(scenario.id) {
+                                Button("Остановить", systemImage: "stop.fill") { stopRun(scenario) }
+                                    .disabled(startingRun != nil)
+                                    .help("Остановить запуск: текущий файл завершится, новые не начнутся")
+                            } else {
+                                Button("Запустить", systemImage: "play.fill") { startRun(scenario) }
+                                    .disabled(!isSupportedScenario(scenario) || !scenario.enabled || startingRun != nil)
+                                    .help(!scenario.enabled
+                                          ? "Сценарий выключен. Включите его переключателем слева"
+                                          : "Запустить сценарий сейчас: как запуск по расписанию. Ход запуска виден на виджете сценария")
+                            }
                         }
                         EndpointLine(
                             title: "Источник",
@@ -1816,6 +1834,13 @@ private struct ScenariosSettingsView: View {
                     .padding(.vertical, 6)
                 }
                 .listStyle(.inset)
+            }
+        }
+        .task {
+            // A run can start or end in the Worker at any time.
+            while !Task.isCancelled {
+                await refreshActiveRuns()
+                try? await Task.sleep(for: .seconds(3))
             }
         }
         .padding(24)
@@ -4775,6 +4800,55 @@ struct LaunchAtLoginSection: View {
     }
 }
 
+/// The background Worker service (settings contract: Node and Service). A
+/// restart first lets the Worker finish its running files (D-024), so it
+/// does not leave an UNKNOWN copy.
+private struct WorkerServiceSection: View {
+    @State private var status = LocalWorkerController.statusText
+    @State private var registered = LocalWorkerController.isRegistered
+    @State private var restarting = LocalWorkerController.isRestarting
+    @State private var draining = LocalWorkerController.isDraining
+    @State private var confirmRestart = false
+
+    var body: some View {
+        Section("Фоновая служба") {
+            LabeledContent("Состояние", value: draining
+                ? "дожидается конца текущих файлов"
+                : restarting ? "перезапускается" : status)
+            HStack {
+                if registered {
+                    Button("Перезапустить", systemImage: "arrow.clockwise") { confirmRestart = true }
+                        .disabled(restarting)
+                    Button("Остановить…", systemImage: "stop.fill") { LocalWorkerController.confirmAndStop() }
+                        .disabled(restarting)
+                } else {
+                    Button("Запустить", systemImage: "play.fill") { LocalWorkerController.restart() }
+                        .disabled(restarting)
+                }
+            }
+            Text("Фоновая служба выполняет сценарии и расписания, даже когда окно QADREN закрыто. Перезапуск сначала дожидается конца файлов, которые копируются сейчас (до 10 минут), и не начинает новые; затем служба запускается заново и продолжает запуски.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .confirmationDialog("Перезапустить фоновую службу?", isPresented: $confirmRestart) {
+            Button("Перезапустить") { LocalWorkerController.restart() }
+        } message: {
+            Text("Служба доделает файлы, которые копируются сейчас, и запустится заново. Запуски сценариев продолжатся после перезапуска.")
+        }
+        .task {
+            // The controller state is not observable: read it while the
+            // section is visible.
+            while !Task.isCancelled {
+                status = LocalWorkerController.statusText
+                registered = LocalWorkerController.isRegistered
+                restarting = LocalWorkerController.isRestarting
+                draining = LocalWorkerController.isDraining
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+}
+
 struct ApplicationSettingsView: View {
     @AppStorage("qadren.theme") private var themeRaw = QDThemeMode.dark.rawValue
     @AppStorage(QDGlitchSetting.key) private var glitchEffects = false
@@ -4794,6 +4868,7 @@ struct ApplicationSettingsView: View {
                 Text("Короткие редкие помехи в заголовках виджетов, чтобы картинка панели не стояла неподвижно часами. Не работают, если в macOS включено «Уменьшение движения».")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            WorkerServiceSection()
             Section("Состояние приложения") {
                 LabeledContent("Настройки", value: "Отдельное окно")
                 LabeledContent("Выполнение сценариев", value: "Local Filesystem · Local Worker")
