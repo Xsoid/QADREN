@@ -398,6 +398,9 @@ struct ScenarioBatchSummary: Decodable {
     let paused: Bool
     let total: Int
     let completed: Int
+    /// The `completed` items that replaced or deleted a file.
+    var completed_updates: Int? = nil
+    var completed_deletes: Int? = nil
     let failed: Int
     let cancelled: Int
     let unknown: Int

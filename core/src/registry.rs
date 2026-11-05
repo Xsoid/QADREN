@@ -236,6 +236,10 @@ pub struct ScenarioBatchSummary {
     pub paused: bool,
     pub total: u64,
     pub completed: u64,
+    /// The `completed` children that replaced a destination file.
+    pub completed_updates: u64,
+    /// The `completed` children that deleted a file or a whole folder.
+    pub completed_deletes: u64,
     pub failed: u64,
     pub cancelled: u64,
     pub unknown: u64,
@@ -2567,6 +2571,8 @@ impl Registry {
             paused,
             total: 0,
             completed: 0,
+            completed_updates: 0,
+            completed_deletes: 0,
             failed: 0,
             cancelled: 0,
             unknown: 0,
@@ -2580,8 +2586,8 @@ impl Registry {
         let mut statement = self.db.prepare(
             "SELECT state,
                     CASE WHEN state='pending' AND next_retry_at>?2 THEN 1 ELSE 0 END,
-                    count(*), min(CASE WHEN state='pending' THEN next_retry_at END)
-             FROM scenario_create_batch_children WHERE batch_id=?1 GROUP BY 1,2",
+                    count(*), min(CASE WHEN state='pending' THEN next_retry_at END), kind
+             FROM scenario_create_batch_children WHERE batch_id=?1 GROUP BY 1,2,5",
         )?;
         let rows = statement.query_map(params![batch_id, now], |row| {
             Ok((
@@ -2589,19 +2595,31 @@ impl Registry {
                 row.get::<_, bool>(1)?,
                 row.get::<_, i64>(2)? as u64,
                 row.get::<_, Option<i64>>(3)?,
+                row.get::<_, String>(4)?,
             ))
         })?;
         for row in rows {
-            let (state, waiting, count, next) = row?;
+            let (state, waiting, count, next, kind) = row?;
             summary.total += count;
             match (state.as_str(), waiting) {
-                ("completed", _) => summary.completed += count,
+                ("completed", _) => {
+                    summary.completed += count;
+                    match kind.as_str() {
+                        "update" => summary.completed_updates += count,
+                        "delete" | "delete_folder" => summary.completed_deletes += count,
+                        _ => {}
+                    }
+                }
                 ("failed", _) => summary.failed += count,
                 ("cancelled", _) => summary.cancelled += count,
                 ("unknown", _) => summary.unknown += count,
                 ("pending", true) => {
                     summary.retry_waiting += count;
-                    summary.next_retry_at = next;
+                    // One row for each kind: keep the earliest retry.
+                    summary.next_retry_at = match (summary.next_retry_at, next) {
+                        (Some(a), Some(b)) => Some(a.min(b)),
+                        (a, b) => a.or(b),
+                    };
                 }
                 _ => summary.due += count,
             }

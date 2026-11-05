@@ -220,7 +220,8 @@ struct QDCyberRing: View {
 
     var body: some View {
         let line = size * 0.09
-        let doneEnd = fraction(done)
+        // A batch with nothing to do is complete.
+        let doneEnd = total == 0 ? 1 : fraction(done)
         let failedEnd = min(1, doneEnd + fraction(failed))
         ZStack {
             Circle()
@@ -266,7 +267,8 @@ struct QDCyberRing: View {
 
     /// Tenths below 10%, so that a long run does not read 0% for hours.
     private var percentText: String {
-        guard let total, total > 0 else { return "—" }
+        guard let total else { return "—" }
+        guard total > 0 else { return "100%" }
         let percent = Double(done) / Double(total) * 100
         if percent > 0, percent < 10 {
             return String(format: "%.1f%%", (percent * 10).rounded(.down) / 10)

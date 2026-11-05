@@ -11,11 +11,22 @@ struct ScenarioFileCounts: Equatable {
     /// Errors that the Worker retries later in this run.
     let retrying: Int
     let nextRetryAt: Date?
+    /// Copied items by kind; `created` is the rest of `copied`.
+    let updated: Int
+    let deleted: Int
+    /// The most frequent failure code, if any.
+    let topFailure: String?
+    var created: Int { max(0, copied - updated - deleted) }
     var remaining: Int { max(0, total - copied - errors) }
 
     init(_ summary: ScenarioBatchSummary) {
         total = summary.total
         copied = summary.completed
+        updated = summary.completed_updates ?? 0
+        deleted = summary.completed_deletes ?? 0
+        topFailure = summary.failure_reasons.first.flatMap { pair in
+            if case let .text(code)? = pair.first { code } else { nil }
+        }
         retrying = summary.retry_waiting
         errors = summary.failed + summary.unknown + summary.retry_waiting
         nextRetryAt = summary.next_retry_at.map { Date(timeIntervalSince1970: TimeInterval($0)) }
@@ -275,7 +286,10 @@ struct ScenarioStage: Equatable {
             return ScenarioStage(frame: .offline, tone: .offline, headline: "Не запускался", detail: "Запусков этого сценария ещё не было.", active: false)
         }
         let finished = Date(timeIntervalSince1970: TimeInterval(last.finished_at ?? last.created_at))
-        let when = "Завершён " + Self.shortDate(finished) + (last.trigger == "schedule" ? " · по расписанию" : " · вручную")
+        var when = "Завершён " + Self.shortDate(finished) + (last.trigger == "schedule" ? " · по расписанию" : " · вручную")
+        if let end = last.finished_at, let duration = Self.duration(seconds: end - last.created_at) {
+            when += " · " + duration
+        }
         let fileErrors = (snapshot.files?.errors ?? 0) > 0
         switch last.state {
         case "completed":
@@ -295,11 +309,60 @@ struct ScenarioStage: Equatable {
         }
     }
 
+    /// "3 мин 12 с"; nil for an unknown or negative time.
+    static func duration(seconds: Int64) -> String? {
+        guard seconds >= 0 else { return nil }
+        let formatter = DateComponentsFormatter()
+        formatter.unitsStyle = .abbreviated
+        formatter.allowedUnits = [.day, .hour, .minute, .second]
+        formatter.maximumUnitCount = 2
+        formatter.calendar?.locale = Locale(identifier: "ru_RU")
+        return seconds == 0 ? "меньше секунды" : formatter.string(from: TimeInterval(seconds))
+    }
+
     static func shortDate(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.dateFormat = Calendar.current.isDateInToday(date) ? "HH:mm" : "dd.MM HH:mm"
         return formatter.string(from: date)
     }
+}
+
+/// The result of the last finished run: the changed counts and at most one
+/// line about what needs attention. Replaces the progress counts when no run
+/// or plan check is active.
+struct ScenarioRunResult: Equatable {
+    /// The batch of the run; nil when the run had no file to change.
+    let files: ScenarioFileCounts?
+    /// One line for compact density.
+    let short: String?
+    /// One line under the counts: errors first, then a stopped run.
+    let note: String?
+    let noteTone: QDStatusKind?
+
+    static func evaluate(_ snapshot: ScenarioWidgetSnapshot) -> ScenarioRunResult? {
+        guard snapshot.run?.active == nil, snapshot.planCheck == nil, let last = snapshot.run?.last else { return nil }
+        guard let files = snapshot.files else {
+            guard last.state == "completed" else { return ScenarioRunResult(files: nil, short: nil, note: nil, noteTone: nil) }
+            let text = snapshot.databasesOnly ? "Дампы баз записаны." : "Изменений не было."
+            return ScenarioRunResult(files: nil, short: text, note: text, noteTone: nil)
+        }
+        let parts = [
+            (files.created, "новых"), (files.updated, "заменено"), (files.deleted, "удалено"), (files.errors, "ошибок"),
+        ].filter { $0.0 > 0 }.map { "\($0.1) \($0.0.formatted())" }
+        let short = parts.isEmpty ? "Изменений не было." : parts.joined(separator: " · ").capitalizedFirst
+        if files.errors > 0 {
+            let reason = files.topFailure.map(QADRENUserMessage.text(for:)) ?? "Следующий запуск повторит эти файлы."
+            return ScenarioRunResult(files: files, short: short, note: reason, noteTone: .failed)
+        }
+        if files.remaining > 0 {
+            return ScenarioRunResult(files: files, short: short, note: "Не выполнено: \(files.remaining.formatted())", noteTone: .paused)
+        }
+        return ScenarioRunResult(files: files, short: short, note: nil, noteTone: nil)
+    }
+}
+
+private extension String {
+    var capitalizedFirst: String { prefix(1).uppercased() + dropFirst() }
 }
 
 /// `scenario`: one selected Scenario. Compact shows the stage and the ring;
@@ -342,12 +405,15 @@ struct ScenarioWidget<Actions: View>: View {
     @ViewBuilder
     private func content(_ snapshot: ScenarioWidgetSnapshot, _ stage: ScenarioStage) -> some View {
         let compact = widget.density == .compact
+        let result = ScenarioRunResult.evaluate(snapshot)
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .center, spacing: 14) {
                 // Planning has no file total yet: the ring shows the track only.
+                // A completed run with nothing to change is a full ring.
                 let files = snapshot.run?.active?.state == "planning" ? nil : snapshot.files
+                let nothingToDo = result != nil && result?.files == nil && result?.short != nil
                 QDCyberRing(
-                    total: files?.total, done: files?.copied ?? 0, failed: files?.errors ?? 0,
+                    total: nothingToDo ? 0 : files?.total, done: files?.copied ?? 0, failed: files?.errors ?? 0,
                     size: compact ? 84 : 104, active: stage.moving, stalled: feed.stalledMinutes != nil
                 )
                 VStack(alignment: .leading, spacing: 4) {
@@ -359,6 +425,12 @@ struct ScenarioWidget<Actions: View>: View {
                         .lineLimit(compact ? 3 : 4)
                         .truncationMode(.middle)
                         .fixedSize(horizontal: false, vertical: true)
+                    if compact, let short = result?.short {
+                        Text(short)
+                            .font(QDCyber.heading(13, weight: .semibold))
+                            .foregroundStyle(QDCyber.color(.primaryText, for: colorScheme))
+                            .lineLimit(2)
+                    }
                     if stage.moving {
                         QDCyberActivityBar(stalled: feed.stalledMinutes != nil)
                             .padding(.top, 4)
@@ -372,7 +444,7 @@ struct ScenarioWidget<Actions: View>: View {
                 }
             }
             if !compact {
-                regularDetails(snapshot, stage)
+                regularDetails(snapshot, stage, result)
             }
             if widget.density == .expanded {
                 endpoints(snapshot)
@@ -393,15 +465,19 @@ struct ScenarioWidget<Actions: View>: View {
     }
 
     @ViewBuilder
-    private func regularDetails(_ snapshot: ScenarioWidgetSnapshot, _ stage: ScenarioStage) -> some View {
+    private func regularDetails(_ snapshot: ScenarioWidgetSnapshot, _ stage: ScenarioStage, _ result: ScenarioRunResult?) -> some View {
         let files = snapshot.run?.active?.state == "planning" ? nil : snapshot.files
-        HStack(spacing: 0) {
-            readout(files.map { "\($0.copied)" } ?? "—", "скопировано", .ready)
-            readout(files.map { "\($0.remaining)" } ?? "—", "осталось", nil)
-            readout(files.map { "\($0.errors)" } ?? "—", "ошибки", (files?.errors ?? 0) > 0 ? .failed : nil)
+        if let result {
+            runResult(result)
+        } else {
+            HStack(spacing: 0) {
+                readout(files.map { "\($0.copied)" } ?? "—", "скопировано", .ready)
+                readout(files.map { "\($0.remaining)" } ?? "—", "осталось", nil)
+                readout(files.map { "\($0.errors)" } ?? "—", "ошибки", (files?.errors ?? 0) > 0 ? .failed : nil)
+            }
+            .padding(.top, 14)
         }
-        .padding(.top, 14)
-        if let files, files.retrying > 0 {
+        if result == nil, let files, files.retrying > 0 {
             Text(retryText(files))
                 .font(QDCyber.heading(13, weight: .medium))
                 .foregroundStyle(QDCyber.color(.mutedText, for: colorScheme))
@@ -441,6 +517,29 @@ struct ScenarioWidget<Actions: View>: View {
             }
         }
         .padding(.top, 14)
+    }
+
+    /// The last finished run: what it changed, then one note.
+    @ViewBuilder
+    private func runResult(_ result: ScenarioRunResult) -> some View {
+        if let files = result.files {
+            HStack(spacing: 0) {
+                readout(files.created.formatted(), "новых", files.created > 0 ? .ready : nil)
+                readout(files.updated.formatted(), "заменено", nil)
+                readout(files.deleted.formatted(), "удалено", nil)
+                if files.errors > 0 {
+                    readout(files.errors.formatted(), "ошибки", .failed)
+                }
+            }
+            .padding(.top, 14)
+        }
+        if let note = result.note {
+            Text(note)
+                .font(QDCyber.heading(13, weight: .medium))
+                .foregroundStyle(result.noteTone?.cyberColor(for: colorScheme) ?? QDCyber.color(.secondaryText, for: colorScheme))
+                .lineLimit(2)
+                .padding(.top, result.files == nil ? 14 : 8)
+        }
     }
 
     @ViewBuilder
