@@ -240,6 +240,11 @@ struct ScenarioEntry: Decodable, Identifiable {
     var resources: [BackupResource] = []
 
     var isBackup: Bool { mode == "backup_export" }
+    /// A Backup/export revision with databases and no file rule: it has no
+    /// file plan, and a run dumps the databases only (D-027 section 7b).
+    var databasesOnly: Bool {
+        isBackup && !resources.contains { $0.category == "files" && $0.rule == "include" }
+    }
 }
 
 /// One selected resource of a Backup/export Scenario (D-027 section 6). For
@@ -249,8 +254,9 @@ struct BackupResource: Codable, Hashable {
     let category: String
     let provider_id: String
     let kind: String
-    /// `include`, or `exclude` for an object inside a selected folder that
-    /// the Scenario leaves out with all its content.
+    /// `include`; `exclude` for an object inside a selected folder that the
+    /// Scenario leaves out with all its content; or `structure_only` for a
+    /// table `<database>/<table>` whose dump has no data.
     var rule = "include"
 }
 
@@ -542,6 +548,8 @@ enum QADRENUserMessage {
             "Панель ISPmanager пока нельзя выбрать в сценарии. Сценарии резервного копирования с неё появятся на следующем этапе."
         case "ispmanager_source_root_outdated":
             "Сценарий сохранён до того, как домашняя папка аккаунта стала корнем источника, поэтому копия повторяла бы полный путь на сервере. Откройте сценарий через «Изменить» и сохраните его, затем запустите снова."
+        case "files_cleanup_failed":
+            "Файлы в сценарии не выбраны, но очистить папку files не удалось полностью. Дампы баз сняты. Подробности — в журнале фоновой службы."
         case "databases_failed":
             "Дамп одной или нескольких баз не снят. Файлы скопированы; прежние дампы этих баз в копии не изменены."
         case "backup_without_files":
@@ -554,6 +562,10 @@ enum QADRENUserMessage {
             "Выбранной базы больше нет на панели. Уберите её из сценария."
         case "ispmanager_database_access_unavailable":
             "Панель не отдала пользователя или пароль базы. Дамп не снят."
+        case "ispmanager_database_tables_failed":
+            "Не удалось прочитать список таблиц базы через mysql по SSH."
+        case "ispmanager_unavailable":
+            "Панель ISPmanager не ответила или не приняла вход."
         case "ispmanager_database_unsupported":
             "Эта база не MySQL. QADREN пока снимает дампы только MySQL."
         case "ispmanager_selected_missing":

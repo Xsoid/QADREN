@@ -16,6 +16,12 @@ private func ispmanagerDatabases(
     _ url: UnsafePointer<CChar>?, _ login: UnsafePointer<CChar>?, _ password: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
 
+@_silgen_name("qadren_ispmanager_database_tables")
+private func ispmanagerDatabaseTables(
+    _ url: UnsafePointer<CChar>?, _ login: UnsafePointer<CChar>?, _ password: UnsafePointer<CChar>?,
+    _ sshPort: UInt16, _ hostKey: UnsafePointer<CChar>?, _ database: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
+
 @_silgen_name("qadren_ispmanager_sftp_list")
 private func ispmanagerSFTPList(
     _ url: UnsafePointer<CChar>?, _ login: UnsafePointer<CChar>?, _ password: UnsafePointer<CChar>?,
@@ -371,4 +377,50 @@ enum ISPmanagerDatabases {
             return .failure(.message("Не удалось прочитать список баз панели (\(result.error ?? "ошибка"))."))
         }.value
     }
+    private struct TablesResult: Decodable {
+        let ok: Bool
+        let data: [ISPmanagerTable]?
+        let error: String?
+        let transport: ISPmanagerFileTransport?
+    }
+
+    /// The base tables of one database with their estimated sizes (D-027
+    /// section 7b.10). Core reads the access facts from the panel and runs
+    /// one read-only `information_schema` query over SSH.
+    static func tables(
+        url: String, credentials: LoginCredentials, settings: ISPmanagerSettings, database: String
+    ) async -> Swift.Result<[ISPmanagerTable], ISPmanagerSFTP.Failure> {
+        guard let hostKey = settings.host_key_sha256 else {
+            return .failure(.message("Ключ SSH-сервера не подтверждён. Подтвердите его на карточке подключения в разделе «Подключения»."))
+        }
+        return await Task.detached(priority: .userInitiated) {
+            let pointer = url.withCString { url in
+                credentials.login.withCString { login in
+                    credentials.password.withCString { password in
+                        hostKey.withCString { key in
+                            database.withCString { database in
+                                ispmanagerDatabaseTables(url, login, password, settings.ssh_port, key, database)
+                            }
+                        }
+                    }
+                }
+            }
+            guard let pointer else { return .failure(.message("Нет ответа от Core.")) }
+            defer { ispmanagerFree(pointer) }
+            guard let result = try? JSONDecoder().decode(
+                TablesResult.self, from: Data(String(cString: pointer).utf8)
+            ) else { return .failure(.message("Неверный ответ Core.")) }
+            if let tables = result.data, result.ok { return .success(tables) }
+            if let transport = result.transport { return .failure(.transport(transport)) }
+            return .failure(.message(QADRENUserMessage.text(for: result.error ?? "ispmanager_database_tables_failed")))
+        }.value
+    }
+}
+
+/// One base table of a MySQL database. `bytes` and `rows` are estimates.
+struct ISPmanagerTable: Decodable, Identifiable, Equatable {
+    var id: String { name }
+    let name: String
+    let bytes: UInt64
+    let rows: UInt64?
 }

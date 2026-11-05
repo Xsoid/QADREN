@@ -371,7 +371,8 @@ fn dispatch_due(paths: &WorkerPaths) -> Result<(usize, usize), String> {
         .map_err(|_| "schedule_dispatch_unavailable".to_string())?;
     drop(jobs);
     drop(registry);
-    advance_scenario_runs(paths)?;
+    // A dispatched schedule slot is a new run.
+    wake_runs();
     Ok((staged, dispatched))
 }
 
@@ -1015,10 +1016,11 @@ fn write_backup_manifest(paths: &WorkerPaths, run_id: &str) {
         manifest["categories"]["databases"] = serde_json::json!({
             "folder": "databases",
             "artifact": "database dump",
-            "format": "mysqldump SQL, gzip (<database>.sql.gz)",
-            "transport": "mysqldump over SSH; access facts from the panel",
+            "format": "mysqldump SQL, not compressed (<database>.sql)",
+            "transport": "mysqldump over SSH, through gzip -1 when the server has gzip; access facts from the panel",
+            "structure_only": "a selected table with rule structure_only has its structure and no data",
             "consistency": "one transaction for InnoDB tables; no table lock",
-            "integrity": "exit status 0 and the final dump line checked before publish; md5 of the .sql.gz file",
+            "integrity": "exit status 0 and the final dump line checked before publish; md5 of the .sql file",
             "selected": selected_databases,
             "results": database_results,
         });
@@ -1090,6 +1092,14 @@ fn advance_planning_run(
             DatabaseStep::Done {
                 cancelled: true, ..
             } => finish_run(registry, run, "cancelled", None),
+            DatabaseStep::Done { .. }
+                if cleanup_failures()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(&run.id) =>
+            {
+                finish_run(registry, run, "failed", Some("files_cleanup_failed"))
+            }
             DatabaseStep::Done { .. } => finish_run(registry, run, "completed", None),
         };
     }
@@ -1206,6 +1216,184 @@ enum DatabaseStep {
     Done { failed: bool, cancelled: bool },
 }
 
+fn run_wake() -> &'static (Mutex<bool>, std::sync::Condvar) {
+    static WAKE: OnceLock<(Mutex<bool>, std::sync::Condvar)> = OnceLock::new();
+    WAKE.get_or_init(Default::default)
+}
+
+/// Ask the run thread to advance the Scenario runs now, for example when a
+/// run starts or the database export of a run ends. Without it a run waited
+/// up to one poll pass (found on 2026-11-06).
+fn wake_runs() {
+    let (woken, signal) = run_wake();
+    *woken.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+    signal.notify_all();
+}
+
+/// Wait for `wake_runs` until `deadline`. True when it was called.
+fn wait_for_run_wake(deadline: std::time::Instant) -> bool {
+    let (woken, signal) = run_wake();
+    let mut flag = woken.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    while !*flag {
+        let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) else {
+            return false;
+        };
+        flag = signal
+            .wait_timeout(flag, left)
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .0;
+    }
+    *flag = false;
+    true
+}
+
+/// What the database step of an active run does now, for the Scenario
+/// widget. It lives in memory: after a Worker restart the step starts again.
+#[derive(Debug, Clone, Serialize)]
+struct DatabaseProgress {
+    scenario_id: String,
+    run_id: String,
+    /// `cleanup` of `files/`, `dump`, or `publish`.
+    stage: &'static str,
+    /// The current database, from 1; 0 during the cleanup.
+    index: usize,
+    total: usize,
+    /// SQL bytes of the current dump so far.
+    bytes: u64,
+}
+
+fn database_progress() -> &'static Mutex<HashMap<String, DatabaseProgress>> {
+    static PROGRESS: OnceLock<Mutex<HashMap<String, DatabaseProgress>>> = OnceLock::new();
+    PROGRESS.get_or_init(Default::default)
+}
+
+fn set_database_progress(run: &ScenarioRun, stage: &'static str, index: usize, total: usize, bytes: u64) {
+    database_progress()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(
+            run.id.clone(),
+            DatabaseProgress {
+                scenario_id: run.scenario.scenario_id.clone(),
+                run_id: run.id.clone(),
+                stage,
+                index,
+                total,
+                bytes,
+            },
+        );
+}
+
+/// The database step of the active run of one Scenario, if any.
+fn database_progress_status(request: &Request) -> serde_json::Value {
+    let Some(scenario_id) = request.scenario_id.as_deref() else {
+        return serde_json::json!({"ok": false, "status": "invalid_request"});
+    };
+    let progress = database_progress()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .values()
+        .find(|progress| progress.scenario_id == scenario_id)
+        .cloned();
+    serde_json::json!({"ok": true, "progress": progress})
+}
+
+/// Runs whose `files/` cleanup failed in this Worker process.
+fn cleanup_failures() -> &'static Mutex<std::collections::HashSet<String>> {
+    static RUNS: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    RUNS.get_or_init(Default::default)
+}
+
+/// The `files/` copy of a revision without a file rule is a mirror of an
+/// empty selection: every object in it is outside the source scope, so it
+/// is deleted (D-027 section 5.6a, owner decision 2026-11-06). Each top
+/// folder goes into the Trash as one entry, each top file as one file. No
+/// server check is needed for a path outside the scope. Executor files,
+/// links, and special files stay. Only the simple deletion rule deletes.
+/// Returns false when an effect failed or its outcome is unknown.
+fn clean_backup_files(paths: &WorkerPaths, run: &ScenarioRun) -> bool {
+    let (id, revision) = (&run.scenario.scenario_id, run.scenario.revision);
+    let Ok(registry) = Registry::open(&paths.registry) else {
+        return false;
+    };
+    let simple = registry
+        .get_scenario_revision_scope(id, revision)
+        .is_ok_and(|scope| scope.deletion_mode == qadren_core::model::DeletionMode::Simple);
+    let Ok(Some(scenario)) = registry.get_scenario_revision(id, revision) else {
+        return false;
+    };
+    drop(registry);
+    if !simple {
+        return true;
+    }
+    let root = Path::new(&scenario.right_root);
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        // No `files/` yet: nothing to delete.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return true,
+        Err(_) => return false,
+    };
+    let mut clean = true;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            clean = false;
+            continue;
+        };
+        let Some(name) = entry.file_name().to_str().map(ToOwned::to_owned) else {
+            clean = false;
+            continue;
+        };
+        if name.starts_with(".qadren-") {
+            continue;
+        }
+        let Ok(kind) = entry.file_type() else {
+            clean = false;
+            continue;
+        };
+        if !kind.is_dir() && !kind.is_file() {
+            continue;
+        }
+        let digest = format!("{:x}", md5::compute(name.as_bytes()));
+        let job_id = format!("ispclean-{}-{}", run.id, &digest[..16]);
+        let outcome = if kind.is_dir() {
+            qadren_core::job_execution::run_backup_mirror_delete_folder(
+                &paths.jobs,
+                &paths.registry,
+                id,
+                revision,
+                &name,
+                &job_id,
+            )
+        } else {
+            qadren_core::job_execution::run_backup_mirror_delete(
+                &paths.jobs,
+                &paths.registry,
+                id,
+                revision,
+                &name,
+                &job_id,
+            )
+        };
+        let ok = matches!(
+            outcome,
+            Ok(qadren_core::job_execution::LocalRuleDeleteStatus::MovedToTrash
+                | qadren_core::job_execution::LocalRuleDeleteStatus::DeletedPermanently
+                | qadren_core::job_execution::LocalRuleDeleteStatus::Existing(JobState::Completed))
+        );
+        if !ok {
+            eprintln!(
+                "qadren-worker: {} run {} files cleanup {}: {:?}",
+                log_time(),
+                run.id,
+                if kind.is_dir() { "folder" } else { "file" },
+                outcome.err()
+            );
+        }
+        clean &= ok;
+    }
+    clean
+}
+
 /// Runs of which the databases are being exported now. A run has at most
 /// one export thread.
 fn database_runs() -> &'static Mutex<std::collections::HashSet<String>> {
@@ -1264,8 +1452,18 @@ fn advance_backup_databases(
     }
     let paths = paths.clone();
     let run = run.clone();
+    let clean_files = backup_without_files(registry, &run);
     thread::spawn(move || {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if clean_files {
+                set_database_progress(&run, "cleanup", 0, missing.len(), 0);
+            }
+            if clean_files && !clean_backup_files(&paths, &run) {
+                cleanup_failures()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(run.id.clone());
+            }
             export_run_databases(&paths, &run, &connection_id, &missing)
         }));
         if outcome.is_err() {
@@ -1279,6 +1477,11 @@ fn advance_backup_databases(
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&run.id);
+        database_progress()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&run.id);
+        wake_runs();
     });
     Ok(DatabaseStep::Running)
 }
@@ -1355,10 +1558,17 @@ fn export_run_databases(
     let Ok(mut session) = qadren_core::ispmanager::Session::new(url, login, password) else {
         return fail_all("ispmanager_network_error");
     };
+    let connected = std::time::Instant::now();
     let connection = match open_sftp(paths, connection_id) {
         Ok(connection) => connection,
         Err(code) => return fail_all(code),
     };
+    eprintln!(
+        "qadren-worker: {} run {} database export ssh sign-in {:.1}s",
+        log_time(),
+        run.id,
+        connected.elapsed().as_secs_f64()
+    );
     let staging = paths
         .registry
         .parent()
@@ -1375,11 +1585,13 @@ fn export_run_databases(
         *last = std::time::Instant::now();
         run_still_active(paths, run)
     };
-    for database in databases {
+    for (index, database) in databases.iter().enumerate() {
+        set_database_progress(run, "dump", index + 1, databases.len(), 0);
         if !run_still_active(paths, run) {
             record(database, "cancelled", Some("stopped_by_user"), None);
             continue;
         }
+        let asked = std::time::Instant::now();
         let access = match qadren_core::ispmanager::mysql_access(&mut session, database) {
             Ok(access) => access,
             Err(code) => {
@@ -1387,6 +1599,8 @@ fn export_run_databases(
                 continue;
             }
         };
+        let access_time = asked.elapsed();
+        let mut timing = qadren_core::ispmanager_execution::DatabaseExportTiming::default();
         let status = run_ispmanager_database_export(
             &paths.jobs,
             &paths.registry,
@@ -1396,9 +1610,40 @@ fn export_run_databases(
             &connection,
             &access,
             &staging,
-            &keep_going,
+            &|step| match step {
+                qadren_core::ispmanager_execution::ExportProgress::Dump { bytes } => {
+                    // Each chunk only changes the byte count.
+                    if let Some(progress) = database_progress()
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .get_mut(&run.id)
+                    {
+                        progress.bytes = bytes;
+                    }
+                    keep_going()
+                }
+                qadren_core::ispmanager_execution::ExportProgress::Publish => {
+                    set_database_progress(run, "publish", index + 1, databases.len(), 0);
+                    true
+                }
+            },
+            &mut timing,
         );
         drop(access);
+        // The stages of one export, without the database name (D-028).
+        eprintln!(
+            "qadren-worker: {} run {} database export timing: panel access {:.1}s, dump {:.1}s, \
+             sql {} bytes, network {} bytes, gzip {}, compare {:.1}s, publish {:.1}s",
+            log_time(),
+            run.id,
+            access_time.as_secs_f64(),
+            timing.dump.as_secs_f64(),
+            timing.sql_bytes,
+            timing.network_bytes,
+            if timing.compressed { "on" } else { "off" },
+            timing.compare.as_secs_f64(),
+            timing.publish.as_secs_f64()
+        );
         match status {
             Ok(DatabaseExportStatus::Created { bytes, md5 }) => {
                 record(database, "created", None, Some((bytes, md5)))
@@ -3620,6 +3865,10 @@ fn handle_client(mut stream: UnixStream, paths: &WorkerPaths, stop: &mut bool) {
             let answer = plan_status(paths, &request);
             let _ = writeln!(stream, "{answer}");
         }
+        "database_progress" => {
+            let answer = database_progress_status(&request);
+            let _ = writeln!(stream, "{answer}");
+        }
         "plan_page" => {
             let answer = plan_page(paths, &request);
             let _ = writeln!(stream, "{answer}");
@@ -3630,10 +3879,12 @@ fn handle_client(mut stream: UnixStream, paths: &WorkerPaths, stop: &mut bool) {
         }
         "stop_run" => {
             let answer = stop_scenario_run(paths, &request);
+            wake_runs();
             let _ = writeln!(stream, "{answer}");
         }
         "run_now" => {
             let answer = run_scenario_now(paths, &request);
+            wake_runs();
             let _ = writeln!(stream, "{answer}");
         }
         "start_snapshot" => {
@@ -4013,6 +4264,7 @@ fn run(paths: WorkerPaths, once: bool) -> Result<(), String> {
     JobStore::claim_for_process(&paths.jobs).map_err(|_| "job_store_unavailable".to_string())?;
     if once {
         dispatch_due(&paths)?;
+        advance_scenario_runs(&paths)?;
         run_due_batch_children(&paths);
         return Ok(());
     }
@@ -4033,6 +4285,20 @@ fn run(paths: WorkerPaths, once: bool) -> Result<(), String> {
                 let _ = dispatch_due(&paths);
             }
             thread::sleep(POLL_INTERVAL);
+        });
+    }
+    // The runs advance on their own thread. Reconciliation of UNKNOWN Jobs
+    // can list large folders on a slow network drive for minutes; a manual
+    // run waited for it before it started (found on 2026-11-06). A new run
+    // or a finished step wakes this thread; otherwise it checks each poll
+    // interval (D-028).
+    {
+        let paths = paths.clone();
+        thread::spawn(move || loop {
+            if !runner().draining() {
+                let _ = advance_scenario_runs(&paths);
+            }
+            wait_for_run_wake(std::time::Instant::now() + POLL_INTERVAL);
         });
     }
     remove_stale_socket(&paths.socket)?;

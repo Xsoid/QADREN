@@ -1,7 +1,8 @@
 //! SFTP file transport of an ISPmanager connection (D-027 section 7a). The
 //! client opens the `sftp` subsystem and uses only read operations. It never
 //! opens a shell. Its commands are `md5sum` for one file (section 7a.3),
-//! `--version` of the database dump tools, and `mysqldump` (section 7b).
+//! `--version` of the database dump tools, `mysqldump` with an optional
+//! `gzip -1` pipe, and one `mysql` query of the table list (section 7b).
 use russh::client;
 use russh::keys::HashAlg;
 use russh::keys::PublicKeyOrCertificate;
@@ -46,6 +47,61 @@ struct ExecOutput {
     status: Option<u32>,
     stdout_bytes: u64,
     stderr: Vec<u8>,
+    /// The last 256 bytes of stderr.
+    stderr_tail: Vec<u8>,
+}
+
+/// One base table of a MySQL database for the Scenario editor
+/// (D-027 section 7b.10). The size and the row count are the estimates of
+/// `information_schema`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TableInfo {
+    pub name: String,
+    pub bytes: u64,
+    pub rows: Option<u64>,
+}
+
+/// A table name that QADREN can put in a rule and in a command line: not
+/// empty, at most 64 characters, no control character, no `/`, no `\`.
+pub fn plain_table_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().count() <= 64
+        && !name.contains(['/', '\\'])
+        && !name.chars().any(char::is_control)
+}
+
+fn plain_database(database: &str) -> bool {
+    !database.is_empty()
+        && !database.starts_with('-')
+        && !database.contains(|ch: char| ch.is_control())
+}
+
+/// Gives the SQL text of the dump parts to the dump sink and keeps the end
+/// of the current part for its completion check.
+struct SinkWriter<'a> {
+    sink: &'a mut dyn FnMut(&[u8]) -> bool,
+    tail: Vec<u8>,
+    bytes: u64,
+    stopped: bool,
+}
+
+impl SinkWriter<'_> {
+    fn accept(&mut self, data: &[u8]) -> bool {
+        self.tail.extend_from_slice(data);
+        if self.tail.len() > 256 {
+            self.tail.drain(..self.tail.len() - 256);
+        }
+        self.bytes += data.len() as u64;
+        self.stopped = !(self.sink)(data);
+        !self.stopped
+    }
+
+    /// True when the text ends with the `-- Dump completed` line.
+    fn completed(&self) -> bool {
+        String::from_utf8_lossy(&self.tail)
+            .trim_end()
+            .ends_with("-- Dump completed")
+    }
 }
 
 fn shell_quote(text: &str) -> String {
@@ -663,6 +719,9 @@ impl SftpConnection {
                         output
                             .stderr
                             .extend_from_slice(&data[..data.len().min(room)]);
+                        output.stderr_tail.extend_from_slice(&data);
+                        let extra = output.stderr_tail.len().saturating_sub(256);
+                        output.stderr_tail.drain(..extra);
                     }
                     russh::ChannelMsg::ExitStatus { exit_status } => {
                         output.status = Some(exit_status)
@@ -706,54 +765,199 @@ impl SftpConnection {
         }
     }
 
+    /// True when the account shell can pipe through `gzip -1`. The probe
+    /// compresses one fixed word and checks it on the Mac, so a missing
+    /// `gzip` or a shell without `{ }` gives false (D-027 section 7b.6).
+    pub fn gzip_pipe_available(&self) -> bool {
+        use std::io::Read;
+        let Some(stdout) = self.exec(
+            "{ echo qadren; echo qadren-exit=0 >&2; } | gzip -1".to_owned(),
+            OPERATION_TIMEOUT,
+        ) else {
+            return false;
+        };
+        let mut text = String::new();
+        flate2::read::GzDecoder::new(stdout.as_slice())
+            .read_to_string(&mut text)
+            .is_ok()
+            && text == "qadren\n"
+    }
+
+    /// The base tables of one MySQL database with their estimated sizes,
+    /// from one read-only `information_schema` query through `mysql`
+    /// (D-027 section 7b.10). A table whose name QADREN cannot put in a
+    /// rule is left out.
+    pub fn mysql_tables(
+        &self,
+        access: &MysqlAccess,
+    ) -> std::result::Result<Vec<TableInfo>, MysqlDumpError> {
+        if !plain_database(&access.database) {
+            return Err(MysqlDumpError::Failed);
+        }
+        let query = "SELECT TABLE_NAME, COALESCE(DATA_LENGTH,0)+COALESCE(INDEX_LENGTH,0), \
+                     TABLE_ROWS FROM information_schema.TABLES \
+                     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE' \
+                     ORDER BY TABLE_NAME";
+        let command = format!(
+            "mysql --defaults-extra-file=/dev/stdin --batch --skip-column-names \
+             --default-character-set=utf8mb4 -e {} {}",
+            shell_quote(query),
+            shell_quote(&access.database)
+        );
+        let mut stdout = Vec::new();
+        let mut overflow = false;
+        let output = self
+            .exec_streaming(command, &access.option_file(), OPERATION_TIMEOUT, |data| {
+                stdout.extend_from_slice(data);
+                overflow |= stdout.len() > 4 * 1024 * 1024;
+                !overflow
+            })
+            .ok_or(MysqlDumpError::Failed)?;
+        if String::from_utf8_lossy(&output.stderr).contains("Access denied") {
+            return Err(MysqlDumpError::Refused);
+        }
+        if output.status != Some(0) || overflow {
+            return Err(MysqlDumpError::Failed);
+        }
+        let text = String::from_utf8(stdout).map_err(|_| MysqlDumpError::Failed)?;
+        Ok(text
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split('\t');
+                let name = fields.next()?;
+                let bytes = fields.next()?.parse().ok()?;
+                let rows = fields.next().and_then(|value| value.parse().ok());
+                plain_table_name(name).then(|| TableInfo {
+                    name: name.to_owned(),
+                    bytes,
+                    rows,
+                })
+            })
+            .collect())
+    }
+
     /// Dumps one MySQL database through `mysqldump` (D-027 section 7b) and
     /// gives the SQL text to `sink` in chunks. `sink` returns false to stop.
     /// The dump is consistent for InnoDB tables, takes no table lock, and
-    /// has no dump date, so the same data gives the same bytes. It is
-    /// complete only when `mysqldump` exits with 0 and the text ends with
+    /// has no dump date, so the same data gives the same bytes. Each part
+    /// is complete only when `mysqldump` exits with 0 and the text ends with
     /// its `-- Dump completed` line.
+    ///
+    /// The first part has the data of all tables except `structure_only`,
+    /// and the routines, triggers, and events. A second part has only the
+    /// structure of the `structure_only` tables (section 7b.10). With
+    /// `compress`, the server pipes each part through `gzip -1` and the Mac
+    /// decompresses it; the gzip check sum is verified (section 7b.6).
+    /// Returns the SQL bytes and the bytes that came over the network.
     pub fn mysql_dump(
         &self,
         access: &MysqlAccess,
+        structure_only: &[String],
+        compress: bool,
         mut sink: impl FnMut(&[u8]) -> bool,
-    ) -> std::result::Result<u64, MysqlDumpError> {
-        if access.database.is_empty()
-            || access.database.starts_with('-')
-            || access.database.contains(|ch: char| ch.is_control())
+    ) -> std::result::Result<(u64, u64), MysqlDumpError> {
+        if !plain_database(&access.database)
+            || !structure_only.iter().all(|name| plain_table_name(name))
         {
             return Err(MysqlDumpError::Failed);
         }
-        let command = format!(
+        let database = shell_quote(&access.database);
+        let mut data = String::from(
             "mysqldump --defaults-extra-file=/dev/stdin --single-transaction --quick \
              --skip-lock-tables --no-tablespaces --set-gtid-purged=OFF --routines --triggers \
-             --events --hex-blob --default-character-set=utf8mb4 --skip-dump-date {}",
-            shell_quote(&access.database)
+             --events --hex-blob --default-character-set=utf8mb4 --skip-dump-date",
         );
-        let mut tail: Vec<u8> = Vec::new();
-        let mut stopped = false;
+        for table in structure_only {
+            data.push_str(&format!(
+                " --ignore-table={}",
+                shell_quote(&format!("{}.{table}", access.database))
+            ));
+        }
+        data.push_str(&format!(" {database}"));
+        let mut parts = vec![data];
+        if !structure_only.is_empty() {
+            let mut structure = format!(
+                "mysqldump --defaults-extra-file=/dev/stdin --no-data --single-transaction \
+                 --skip-lock-tables --no-tablespaces --set-gtid-purged=OFF --triggers \
+                 --default-character-set=utf8mb4 --skip-dump-date {database}"
+            );
+            for table in structure_only {
+                structure.push(' ');
+                structure.push_str(&shell_quote(table));
+            }
+            parts.push(structure);
+        }
+        let mut writer = SinkWriter {
+            sink: &mut sink,
+            tail: Vec::new(),
+            bytes: 0,
+            stopped: false,
+        };
+        let mut network = 0_u64;
+        for command in parts {
+            writer.tail.clear();
+            network += self.dump_part(access, command, compress, &mut writer)?;
+        }
+        Ok((writer.bytes, network))
+    }
+
+    /// Runs one `mysqldump` command into `writer` and checks its end.
+    fn dump_part(
+        &self,
+        access: &MysqlAccess,
+        command: String,
+        compress: bool,
+        writer: &mut SinkWriter<'_>,
+    ) -> std::result::Result<u64, MysqlDumpError> {
+        use std::io::Write;
+        // The pipe gives the exit status of gzip, so the exit status of
+        // mysqldump goes to stderr as the last line.
+        let command = if compress {
+            format!("{{ {command}; echo qadren-exit=$? >&2; }} | gzip -1")
+        } else {
+            command
+        };
+        let mut decoder = compress.then(|| flate2::write::GzDecoder::new(Vec::new()));
+        let mut broken = false;
         let output = self
             .exec_streaming(command, &access.option_file(), DUMP_TIMEOUT, |data| {
-                tail.extend_from_slice(data);
-                if tail.len() > 256 {
-                    tail.drain(..tail.len() - 256);
+                match decoder.as_mut() {
+                    Some(decoder) => {
+                        broken = decoder.write_all(data).is_err();
+                        let text = std::mem::take(decoder.get_mut());
+                        !broken && writer.accept(&text)
+                    }
+                    None => writer.accept(data),
                 }
-                stopped = !sink(data);
-                !stopped
             })
             .ok_or(MysqlDumpError::Failed)?;
-        if stopped {
+        if writer.stopped {
             return Err(MysqlDumpError::Stopped);
         }
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("Access denied") {
+        if String::from_utf8_lossy(&output.stderr).contains("Access denied") {
             return Err(MysqlDumpError::Refused);
         }
-        let completed = String::from_utf8_lossy(&tail)
-            .trim_end()
-            .ends_with("-- Dump completed");
-        match output.status {
-            Some(0) if completed => Ok(output.stdout_bytes),
-            _ => Err(MysqlDumpError::Failed),
+        let exited = match decoder {
+            Some(mut decoder) => {
+                // `try_finish` verifies the gzip check sum and length.
+                let finished = !broken && decoder.try_finish().is_ok();
+                let text = std::mem::take(decoder.get_mut());
+                let accepted = writer.accept(&text);
+                if writer.stopped {
+                    return Err(MysqlDumpError::Stopped);
+                }
+                let tail = String::from_utf8_lossy(&output.stderr_tail);
+                finished
+                    && accepted
+                    && output.status == Some(0)
+                    && tail.trim_end().ends_with("qadren-exit=0")
+            }
+            None => output.status == Some(0),
+        };
+        if exited && writer.completed() {
+            Ok(output.stdout_bytes)
+        } else {
+            Err(MysqlDumpError::Failed)
         }
     }
 

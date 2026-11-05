@@ -110,6 +110,60 @@ pub extern "C" fn qadren_ispmanager_databases(
         .into_raw()
 }
 
+/// The base tables of one MySQL database with their estimated sizes, for
+/// the table rules of the Scenario editor (D-027 section 7b.10). The access
+/// facts come from the panel and stay in memory. The query reads
+/// `information_schema` only.
+#[no_mangle]
+pub extern "C" fn qadren_ispmanager_database_tables(
+    url: *const c_char,
+    login: *const c_char,
+    password: *const c_char,
+    ssh_port: u16,
+    host_key: *const c_char,
+    database: *const c_char,
+) -> *mut c_char {
+    let value = match (
+        input(url).and_then(|url| ispmanager::PanelUrl::parse(url.trim()).ok()),
+        input(login),
+        input(password),
+        input(host_key).filter(|key| !key.is_empty()),
+        input(database),
+    ) {
+        (Some(url), Some(login), Some(password), Some(host_key), Some(database))
+            if ssh_port > 0 =>
+        {
+            let host = url.host().to_owned();
+            let access = ispmanager::Session::new(url, login.clone(), password.clone())
+                .map_err(|_| "ispmanager_unavailable")
+                .and_then(|mut session| ispmanager::mysql_access(&mut session, &database));
+            match access {
+                Err(error) => json!({"ok": false, "error": error}),
+                Ok(access) => match ispmanager_sftp::SftpConnection::open(
+                    &host, ssh_port, &login, &password, &host_key,
+                ) {
+                    Err(error) => json!({
+                        "ok": false,
+                        "error": "sftp",
+                        "transport": ispmanager::FileTransport::from(error)
+                    }),
+                    Ok(connection) => match connection.mysql_tables(&access) {
+                        Ok(tables) => json!({"ok": true, "data": tables}),
+                        Err(ispmanager_sftp::MysqlDumpError::Refused) => {
+                            json!({"ok": false, "error": "ispmanager_database_refused"})
+                        }
+                        Err(_) => json!({"ok": false, "error": "ispmanager_database_tables_failed"}),
+                    },
+                },
+            }
+        }
+        _ => json!({"ok": false, "error": "invalid_input"}),
+    };
+    CString::new(value.to_string())
+        .expect("JSON cannot contain NUL")
+        .into_raw()
+}
+
 /// # Safety
 /// `pointer` must come from `qadren_ispmanager_check` and be freed one time.
 #[no_mangle]

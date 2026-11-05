@@ -1691,12 +1691,30 @@ private struct ISPmanagerConnectionForm: View {
 
 private struct ScenariosSettingsView: View {
     @ObservedObject var scenarios: ScenarioSettings
+    /// The Scenario whose run request is in progress.
+    @State private var startingRun: String?
+    @State private var runNotice: (text: String, failed: Bool)?
     let connections: [StorageEntry]
     let createScenario: () -> Void
     let createBackup: () -> Void
     let editScenario: (ScenarioEntry) -> Void
     let editSchedules: (ScenarioEntry) -> Void
     let previewScenario: (ScenarioEntry) -> Void
+
+    private func startRun(_ scenario: ScenarioEntry) {
+        startingRun = scenario.id
+        runNotice = nil
+        Task {
+            do {
+                let token = try YandexScenarioAccess.token(for: scenario)
+                try await Task.detached { try WorkerIPC.runNow(scenarioID: scenario.id, accessToken: token) }.value
+                runNotice = ("Сценарий «\(scenario.name)» передан фоновой службе. Если он уже выполнялся, новый запуск не начат. Ход запуска виден на виджете сценария.", false)
+            } catch {
+                runNotice = ("Не удалось запустить «\(scenario.name)»: " + error.localizedDescription, true)
+            }
+            startingRun = nil
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -1717,6 +1735,9 @@ private struct ScenariosSettingsView: View {
             }
             if let error = scenarios.error {
                 SettingsNotice(text: error, symbol: "exclamationmark.triangle")
+            }
+            if let runNotice {
+                SettingsNotice(text: runNotice.text, symbol: runNotice.failed ? "exclamationmark.triangle" : "play.circle")
             }
             if scenarios.entries.isEmpty {
                 SettingsEmptyState(
@@ -1755,11 +1776,26 @@ private struct ScenariosSettingsView: View {
                                       : isLocalScenario(scenario)
                                       ? "Настроить расписания сценария"
                                       : "Настроить расписания. Вход в Яндекс фоновая служба получает от QADREN: после перезапуска Mac запуск ждёт, пока вы откроете QADREN")
-                            Button("Проверить план") { previewScenario(scenario) }
-                                .disabled(!isSupportedScenario(scenario))
-                                .help(isSupportedScenario(scenario)
-                                      ? "Прочитать только метаданные обеих сторон и показать план без передачи файлов"
-                                      : "Сценарий использует подключение, которое QADREN не поддерживает")
+                            if scenario.databasesOnly {
+                                // D-027 section 7b: a dump is taken again in each run and
+                                // compared with the copy after it, so there is no plan.
+                                Label("План не нужен", systemImage: "cylinder.split.1x2")
+                                    .foregroundStyle(.secondary)
+                                    .help("В сценарии выбраны только базы данных. Каждый запуск снимает дамп заново и после дампа сравнивает его с копией: одинаковый дамп не перезаписывается. Запустите сценарий кнопкой «Запустить».")
+                            } else {
+                                Button("Проверить план") { previewScenario(scenario) }
+                                    .disabled(!isSupportedScenario(scenario))
+                                    .help(isSupportedScenario(scenario)
+                                          ? "Прочитать только метаданные обеих сторон и показать план без передачи файлов"
+                                          : "Сценарий использует подключение, которое QADREN не поддерживает")
+                            }
+                            // The same manual run as "Запустить" of the Scenario widget, so
+                            // that a run does not depend on a widget on the panel.
+                            Button("Запустить", systemImage: "play.fill") { startRun(scenario) }
+                                .disabled(!isSupportedScenario(scenario) || !scenario.enabled || startingRun != nil)
+                                .help(!scenario.enabled
+                                      ? "Сценарий выключен. Включите его переключателем слева"
+                                      : "Запустить сценарий сейчас: как запуск по расписанию. Ход запуска виден на виджете сценария")
                         }
                         EndpointLine(
                             title: "Источник",
@@ -1926,7 +1962,7 @@ private struct ScenarioDryRunView: View {
                         loadPlan()
                     }
                 }
-                    .disabled(isLoading)
+                    .disabled(isLoading || scenario.databasesOnly)
             }
             Text("Кнопка читает только имена, размеры и MD5 выбранных объектов на обеих сторонах. Она не открывает содержимое, не создаёт Job и не передаёт файлы. Большая папка на Яндекс Диске читается долго, иногда десятки минут.")
                 .font(.callout).foregroundStyle(.secondary)
@@ -1940,7 +1976,14 @@ private struct ScenarioDryRunView: View {
             if let skippedNotice {
                 SettingsNotice(text: skippedNotice, symbol: "link")
             }
-            if isLoading {
+            if scenario.databasesOnly {
+                SettingsEmptyState(
+                    title: "Плана файлов нет",
+                    detail: "В сценарии выбраны только базы данных. Каждый запуск снимает их дампы заново, поэтому план не нужен: запустите сценарий кнопкой «Запустить».",
+                    symbol: "cylinder.split.1x2"
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if isLoading {
                 ProgressView(planProgress ?? "Чтение метаданных и построение плана…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let largePlan {
@@ -3474,6 +3517,11 @@ private struct BackupScenarioEditorView: View {
                 Label("Папка files повторяет сервер: всё, чего нет в выбранных папках на сервере, удаляется из неё — также исключённые и снятые с выбора файлы и файлы, которые положили туда вручную. Удалённое попадает в Корзину, если она есть на томе назначения.", systemImage: "arrow.triangle.2.circlepath")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                if !selection.contains(where: { $0.category == "files" && $0.rule == "include" }) && deletionMode == .simple {
+                    Label("Файлы не выбраны: при запуске всё содержимое папки files удаляется — папки целиком, в Корзину, если она есть на томе назначения.", systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 Label("Сейчас копируются файлы, папки и базы MySQL. Почта, Cron и другие типы появятся следующими шагами.", systemImage: "info.circle")
                     .font(.caption).foregroundStyle(.secondary)
                 if let error {
@@ -3757,7 +3805,7 @@ private struct ISPmanagerFilePanel: View {
                         .labelStyle(.iconOnly).buttonStyle(.borderless)
                 }
             }
-            Text("Папка копируется целиком, также новые файлы в ней. Снимите галочку внутри выбранной папки, чтобы исключить объект со всем содержимым. Исключённое не копируется и не удаляется из копии.")
+            Text("Папка копируется целиком, также новые файлы в ней. Снимите галочку внутри выбранной папки, чтобы исключить объект со всем содержимым. Исключённое не копируется, а его прежняя копия удаляется из папки files.")
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -3878,7 +3926,7 @@ private struct ISPmanagerFilePanel: View {
 }
 
 /// The MySQL databases of an ISPmanager source (D-027 section 7b). Each
-/// checked database gets one current dump, `databases/<name>.sql.gz`.
+/// checked database gets one current dump, `databases/<name>.sql`.
 private struct ISPmanagerDatabasePanel: View {
     let connection: StorageEntry
     @Binding var selection: Set<BackupResource>
@@ -3904,6 +3952,10 @@ private struct ISPmanagerDatabasePanel: View {
                 ForEach(names, id: \.self) { name in
                     Toggle(name, isOn: binding(for: name))
                         .toggleStyle(.checkbox)
+                    if selection.contains(resource(name)) {
+                        ISPmanagerTableRules(connection: connection, database: name, selection: $selection)
+                            .padding(.leading, 20)
+                    }
                 }
                 // A selected database that the panel no longer lists stays
                 // visible, so that the user can remove it.
@@ -3913,7 +3965,7 @@ private struct ISPmanagerDatabasePanel: View {
                     }
                     .toggleStyle(.checkbox)
                 }
-                Text("Дамп снимается mysqldump по SSH в одной транзакции, без блокировки таблиц. Логин и пароль базы QADREN берёт из панели при каждом запуске и нигде не хранит. Каждая база — один актуальный файл databases/<имя>.sql.gz.")
+                Text("Дамп снимается mysqldump по SSH в одной транзакции, без блокировки таблиц. Если на сервере есть gzip, данные сжимаются только на время передачи. Логин и пароль базы QADREN берёт из панели при каждом запуске и нигде не хранит. Каждая база — один актуальный файл databases/<имя>.sql.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -3924,7 +3976,7 @@ private struct ISPmanagerDatabasePanel: View {
 
     private var missing: [String] {
         selection
-            .filter { $0.category == "databases" && !names.contains($0.provider_id) }
+            .filter { $0.category == "databases" && $0.rule == "include" && !names.contains($0.provider_id) }
             .map(\.provider_id)
             .sorted()
     }
@@ -3937,7 +3989,14 @@ private struct ISPmanagerDatabasePanel: View {
         Binding(
             get: { selection.contains(resource(name)) },
             set: { checked in
-                if checked { selection.insert(resource(name)) } else { selection.remove(resource(name)) }
+                if checked {
+                    selection.insert(resource(name))
+                } else {
+                    // The table rules go with their database.
+                    selection = selection.filter {
+                        $0 != resource(name) && !($0.category == "databases" && $0.provider_id.hasPrefix(name + "/"))
+                    }
+                }
             }
         )
     }
@@ -3969,6 +4028,132 @@ private struct ISPmanagerDatabasePanel: View {
             failure = text
         case let .failure(.transport(transport)):
             failure = transport.message(port: 22)
+        }
+    }
+}
+
+/// The tables of one selected database (D-027 section 7b.10). A checked
+/// table is dumped with its data. An unchecked table keeps only its
+/// structure: for cache, sessions, logs, and statistics. The list loads when
+/// the user opens it.
+private struct ISPmanagerTableRules: View {
+    let connection: StorageEntry
+    let database: String
+    @Binding var selection: Set<BackupResource>
+    @State private var expanded = false
+    @State private var tables: [ISPmanagerTable]?
+    @State private var loading = false
+    @State private var failure: String?
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            VStack(alignment: .leading, spacing: 6) {
+                if let failure {
+                    SettingsNotice(text: failure, symbol: "exclamationmark.triangle") {
+                        Button("Повторить") { Task { await load() } }
+                    }
+                } else if let tables, tables.isEmpty {
+                    Text("В базе нет таблиц.").foregroundStyle(.secondary)
+                }
+                ForEach(tables ?? []) { table in
+                    Toggle(isOn: binding(for: table.name)) {
+                        HStack {
+                            Text(table.name).font(.body.monospaced())
+                            if selection.contains(resource(table.name)) {
+                                Text("без данных").font(.caption).foregroundStyle(.orange)
+                            }
+                            Spacer()
+                            Text(ByteCountFormatter.string(fromByteCount: Int64(clamping: table.bytes), countStyle: .file))
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                    }
+                    .toggleStyle(.checkbox)
+                }
+                // A rule for a table that the server no longer lists stays
+                // visible, so that the user can remove it.
+                ForEach(missing, id: \.self) { name in
+                    Toggle(isOn: binding(for: name)) {
+                        Text("\(name) — нет в базе")
+                    }
+                    .toggleStyle(.checkbox)
+                }
+                Text("Отмеченные таблицы копируются с данными. Снимите галочку, и таблица попадёт в дамп только структурой, без строк: так удобно пропускать кэш, сессии, логи и статистику. Размеры — оценка MySQL.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.top, 4)
+        } label: {
+            HStack {
+                Text(ruleCount == 0 ? "Таблицы: все с данными" : "Таблицы: без данных — \(ruleCount)")
+                if loading { ProgressView().controlSize(.small) }
+            }
+        }
+        .onChange(of: expanded) { open in
+            if open && tables == nil && !loading { Task { await load() } }
+        }
+    }
+
+    private var prefix: String { database + "/" }
+
+    private var ruleCount: Int {
+        selection.filter { $0.rule == "structure_only" && $0.provider_id.hasPrefix(prefix) }.count
+    }
+
+    private var missing: [String] {
+        guard let tables else { return [] }
+        return selection
+            .filter { $0.rule == "structure_only" && $0.provider_id.hasPrefix(prefix) }
+            .map { String($0.provider_id.dropFirst(prefix.count)) }
+            .filter { name in !tables.contains { $0.name == name } }
+            .sorted()
+    }
+
+    private func resource(_ table: String) -> BackupResource {
+        BackupResource(category: "databases", provider_id: prefix + table, kind: "object", rule: "structure_only")
+    }
+
+    /// Checked means "with data": the rule exists only for an unchecked table.
+    private func binding(for table: String) -> Binding<Bool> {
+        Binding(
+            get: { !selection.contains(resource(table)) },
+            set: { checked in
+                if checked { selection.remove(resource(table)) } else { selection.insert(resource(table)) }
+            }
+        )
+    }
+
+    private func load() async {
+        guard let url = connection.endpoint_url else {
+            failure = "У подключения нет адреса панели."
+            return
+        }
+        let credentials: LoginCredentials
+        let settings: ISPmanagerSettings
+        do {
+            guard let saved = try ISPmanagerKeychain.read(connection.id) else {
+                failure = "Логин и пароль не сохранены. Откройте подключение в разделе «Подключения»."
+                return
+            }
+            credentials = saved
+            settings = try StorageRegistryBridge.ispmanagerSettings(id: connection.id)
+        } catch {
+            failure = "Не удалось прочитать настройки подключения: " + error.localizedDescription
+            return
+        }
+        loading = true
+        let result = await ISPmanagerDatabases.tables(
+            url: url, credentials: credentials, settings: settings, database: database
+        )
+        loading = false
+        switch result {
+        case let .success(value):
+            tables = value
+            failure = nil
+        case let .failure(.message(text)):
+            failure = text
+        case let .failure(.transport(transport)):
+            failure = transport.message(port: settings.ssh_port)
         }
     }
 }

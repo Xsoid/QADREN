@@ -8,6 +8,7 @@
 //! executor gets the MD5 before the attempt from `md5sum` on the server or,
 //! without a shell, from one SFTP read. The download must give the same
 //! bytes before the publish.
+use std::time::{Duration, Instant};
 use crate::confirmation::Confirmation;
 use crate::ispmanager_sftp::{SftpConnection, SftpReadError, SftpReader};
 use crate::job_execution::{
@@ -492,18 +493,44 @@ fn plain_database_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'$'))
 }
 
+/// How long the stages of one database export took and how many bytes it
+/// moved, for the Worker log (D-027 section 7b, D-028). It holds no name.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DatabaseExportTiming {
+    pub compressed: bool,
+    /// `mysqldump` on the server, the transfer, and the staging write.
+    pub dump: Duration,
+    pub sql_bytes: u64,
+    pub network_bytes: u64,
+    /// The read of the destination file for the MD5 comparison.
+    pub compare: Duration,
+    /// The durable attempt and the publish into the copy.
+    pub publish: Duration,
+}
+
+/// The stage of one database export, for the progress of the run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportProgress {
+    /// The dump runs; `bytes` of SQL text are in the staging file.
+    Dump { bytes: u64 },
+    /// The dump is complete: comparison with the copy and the publish.
+    Publish,
+}
+
 /// The Job of one database export in one run.
 pub fn database_export_job_id(run_id: &str, database: &str) -> String {
     let digest = format!("{:x}", md5::compute(database.as_bytes()));
     format!("ispdb-{run_id}-{}", &digest[..16])
 }
 
-/// Dump one selected MySQL database into `databases/<name>.sql.gz` of the
-/// Backup/export copy (D-027 section 7b). The dump goes into a private
+/// Dump one selected MySQL database into `databases/<name>.sql` of the
+/// Backup/export copy (D-027 section 7b). Tables with the `structure_only`
+/// rule keep only their structure. When the server can pipe through
+/// `gzip -1`, only the transfer is compressed. The dump goes into a private
 /// staging file first. Only a complete dump is published: as a new file
 /// with no-overwrite, or through the approved replacement protocol with a
 /// durable attempt. A dump with the same bytes as the destination file
-/// gives no effect. `keep_going` is read during the dump; false stops it
+/// gives no effect. `progress` is called during the dump; false stops it
 /// before the publish.
 #[allow(clippy::too_many_arguments)]
 pub fn run_ispmanager_database_export(
@@ -515,7 +542,8 @@ pub fn run_ispmanager_database_export(
     connection: &SftpConnection,
     access: &crate::ispmanager_sftp::MysqlAccess,
     staging_dir: &Path,
-    keep_going: &dyn Fn() -> bool,
+    progress: &dyn Fn(ExportProgress) -> bool,
+    timing: &mut DatabaseExportTiming,
 ) -> Result<DatabaseExportStatus, &'static str> {
     use crate::ispmanager_sftp::MysqlDumpError;
     use std::io::Write;
@@ -527,14 +555,22 @@ pub fn run_ispmanager_database_export(
     let registry = Registry::open(registry_path).map_err(|_| "registry_unavailable")?;
     let scenario = backup_scenario(&registry, scenario_id, scenario_revision)
         .map_err(|_| "scenario_unavailable")?;
-    let selected = registry
+    let resources = registry
         .backup_resources(scenario_id, scenario_revision)
-        .map_err(|_| "registry_unavailable")?
+        .map_err(|_| "registry_unavailable")?;
+    let selected = resources
         .iter()
         .any(|r| r.category == "databases" && r.rule == "include" && r.provider_id == database);
     if !selected {
         return Err("invalid_selection");
     }
+    // The tables that the dump keeps without their data (section 7b.10).
+    let prefix = format!("{database}/");
+    let structure_only: Vec<String> = resources
+        .iter()
+        .filter(|r| r.category == "databases" && r.rule == "structure_only")
+        .filter_map(|r| r.provider_id.strip_prefix(&prefix).map(ToOwned::to_owned))
+        .collect();
     let destination_connection = scenario.right_connection_id.clone();
     if !enabled_local_connection(registry_path, &destination_connection) {
         return Err("local_scenario_connection_unavailable");
@@ -555,7 +591,7 @@ pub fn run_ispmanager_database_export(
 
     // 1. The dump, read-only on the server, into a private staging file.
     std::fs::create_dir_all(staging_dir).map_err(|_| "local_root_unavailable")?;
-    let staging = staging_dir.join(format!("{job_id}.sql.gz"));
+    let staging = staging_dir.join(format!("{job_id}.sql"));
     let _ = std::fs::remove_file(&staging);
     let file = std::fs::OpenOptions::new()
         .write(true)
@@ -565,19 +601,26 @@ pub fn run_ispmanager_database_export(
     let remove_staging = || {
         let _ = std::fs::remove_file(&staging);
     };
-    let mut encoder = flate2::write::GzEncoder::new(
-        HashingWriter {
-            inner: io::BufWriter::new(file),
-            context: md5::Context::new(),
-            total: 0,
-        },
-        flate2::Compression::default(),
-    );
+    // The dump stays plain SQL. Archives are a separate Scenario mode later.
+    let mut hashing = HashingWriter {
+        inner: io::BufWriter::new(file),
+        context: md5::Context::new(),
+        total: 0,
+    };
     let mut write_failed = false;
-    let dumped = connection.mysql_dump(access, |data| {
-        write_failed = encoder.write_all(data).is_err();
-        !write_failed && keep_going()
+    let started = Instant::now();
+    let compress = connection.gzip_pipe_available();
+    timing.compressed = compress;
+    let dumped = connection.mysql_dump(access, &structure_only, compress, |data| {
+        write_failed = hashing.write_all(data).is_err();
+        !write_failed
+            && progress(ExportProgress::Dump {
+                bytes: hashing.total,
+            })
     });
+    if let Ok((sql, network)) = dumped {
+        (timing.sql_bytes, timing.network_bytes) = (sql, network);
+    }
     if let Err(error) = dumped {
         remove_staging();
         return Err(match error {
@@ -587,7 +630,7 @@ pub fn run_ispmanager_database_export(
             MysqlDumpError::Failed => "ispmanager_database_dump_failed",
         });
     }
-    let written = encoder.finish().and_then(|mut hashing| {
+    let written = (|| -> io::Result<(u64, String)> {
         hashing.inner.flush()?;
         let file = hashing
             .inner
@@ -595,14 +638,17 @@ pub fn run_ispmanager_database_export(
             .map_err(|error| error.into_error())?;
         file.sync_all()?;
         Ok((hashing.total, format!("{:x}", hashing.context.compute())))
-    });
+    })();
     let Ok((size, md5)) = written else {
         remove_staging();
         return Err("local_root_unavailable");
     };
 
+    timing.dump = started.elapsed();
+    let _ = progress(ExportProgress::Publish);
     // 2. The same bytes as the destination file give no effect.
-    let target = Path::new("databases").join(format!("{database}.sql.gz"));
+    let compared = Instant::now();
+    let target = Path::new("databases").join(format!("{database}.sql"));
     let target_text = target.to_string_lossy().into_owned();
     let replace = match destination.stat(&target) {
         Ok(entry) if entry.is_directory => {
@@ -620,6 +666,7 @@ pub fn run_ispmanager_database_export(
                     && format!("{:x}", hashing.context.compute()) == md5
                 {
                     remove_staging();
+                    timing.compare = compared.elapsed();
                     return Ok(DatabaseExportStatus::Unchanged { bytes: size, md5 });
                 }
             }
@@ -632,6 +679,8 @@ pub fn run_ispmanager_database_export(
         }
     };
 
+    timing.compare = compared.elapsed();
+    let publish_started = Instant::now();
     // 3. The publish: a durable attempt, then no-overwrite or replacement.
     let root_identity = local_root_identity_key(&destination).map_err(|_| {
         remove_staging();
@@ -709,6 +758,7 @@ pub fn run_ispmanager_database_export(
     store
         .complete_attempt_with_scenario_copy_baseline(&job_id, &attempt_id, &receipt, None)
         .map_err(store_error)?;
+    timing.publish = publish_started.elapsed();
     Ok(if replace {
         DatabaseExportStatus::Updated { bytes: size, md5 }
     } else {

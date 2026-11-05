@@ -419,7 +419,7 @@ impl Registry {
         db.pragma_update(None, "foreign_keys", "ON")?;
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 33 {
+        if version > 34 {
             return Err(RegistryError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -998,6 +998,35 @@ impl Registry {
                  CREATE INDEX batch_children_by_batch
                    ON scenario_create_batch_children(batch_id, state);
                  PRAGMA user_version = 33;
+                 COMMIT;",
+            )?;
+        }
+        if version <= 33 {
+            // D-027 section 7b.10: a table of a selected database can keep
+            // only its structure. SQLite cannot change a CHECK, so the table
+            // is copied once.
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE scenario_revision_resources_v34 (
+                    scenario_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL CHECK(revision > 0),
+                    category TEXT NOT NULL,
+                    provider_id TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK(kind IN ('file','dir','symlink','object')),
+                    rule TEXT NOT NULL DEFAULT 'include'
+                      CHECK(rule IN ('include','exclude','structure_only')),
+                    PRIMARY KEY(scenario_id,revision,category,provider_id),
+                    FOREIGN KEY(scenario_id,revision)
+                      REFERENCES scenario_revisions(scenario_id,revision) ON DELETE RESTRICT
+                 );
+                 INSERT INTO scenario_revision_resources_v34(
+                    scenario_id,revision,category,provider_id,kind,rule)
+                 SELECT scenario_id,revision,category,provider_id,kind,rule
+                 FROM scenario_revision_resources;
+                 DROP TABLE scenario_revision_resources;
+                 ALTER TABLE scenario_revision_resources_v34
+                   RENAME TO scenario_revision_resources;
+                 PRAGMA user_version = 34;
                  COMMIT;",
             )?;
         }
@@ -4211,8 +4240,9 @@ pub struct BackupResource {
     pub category: String,
     pub provider_id: String,
     pub kind: String,
-    /// `include`, or `exclude` for an object inside a selected folder that
-    /// the Scenario leaves out with all its content.
+    /// `include`; `exclude` for an object inside a selected folder that the
+    /// Scenario leaves out with all its content; or `structure_only` for a
+    /// table `<database>/<table>` whose dump has no data (D-027 7b.10).
     #[serde(default = "BackupResource::include")]
     pub rule: String,
 }
@@ -4223,7 +4253,7 @@ impl BackupResource {
     }
 
     fn valid(&self) -> bool {
-        if !matches!(self.rule.as_str(), "include" | "exclude") {
+        if !matches!(self.rule.as_str(), "include" | "exclude" | "structure_only") {
             return false;
         }
         let text_ok = |text: &str| {
@@ -4234,24 +4264,39 @@ impl BackupResource {
         }
         match self.category.as_str() {
             "files" => {
-                matches!(self.kind.as_str(), "file" | "dir" | "symlink")
+                self.rule != "structure_only"
+                    && matches!(self.kind.as_str(), "file" | "dir" | "symlink")
                     && self.provider_id.starts_with('/')
                     && !self
                         .provider_id
                         .split('/')
                         .any(|part| part == "." || part == "..")
             }
-            // A MySQL database name, which is also its dump file name.
+            // A MySQL database name, which is also its dump file name, or
+            // `<database>/<table>` for a table that keeps only its structure.
             "databases" => {
+                let database_ok = |name: &str| {
+                    name.len() <= 64
+                        && !name.is_empty()
+                        && !name.starts_with(['.', '-'])
+                        && name.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric()
+                                || matches!(byte, b'_' | b'-' | b'.' | b'$')
+                        })
+                };
                 self.kind == "object"
-                    && self.rule == "include"
-                    && self.provider_id.len() <= 64
-                    && !self.provider_id.starts_with(['.', '-'])
-                    && self.provider_id.bytes().all(|byte| {
-                        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'$')
-                    })
+                    && match self.rule.as_str() {
+                        "include" => database_ok(&self.provider_id),
+                        "structure_only" => {
+                            self.provider_id.split_once('/').is_some_and(|(db, table)| {
+                                database_ok(db)
+                                    && crate::ispmanager_sftp::plain_table_name(table)
+                            })
+                        }
+                        _ => false,
+                    }
             }
-            _ => self.kind == "object",
+            _ => self.kind == "object" && self.rule != "structure_only",
         }
     }
 }
@@ -4405,7 +4450,16 @@ impl Registry {
                             .starts_with(&format!("{}/", include.provider_id))
                 })
         });
-        if includes.is_empty() || excluded_alone {
+        // A table rule needs its selected database.
+        let table_alone = draft.resources.iter().any(|r| {
+            r.rule == "structure_only"
+                && !includes.iter().any(|include| {
+                    include.category == "databases"
+                        && r.provider_id
+                            .starts_with(&format!("{}/", include.provider_id))
+                })
+        });
+        if includes.is_empty() || excluded_alone || table_alone {
             return Err(RegistryError::InvalidSelection);
         }
         let adapter = |id: &str| -> Result<String> {

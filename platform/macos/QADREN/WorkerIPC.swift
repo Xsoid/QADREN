@@ -458,6 +458,14 @@ enum WorkerIPC {
         )
     }
 
+    /// The database step of the active run of one Scenario: the cleanup of
+    /// `files/`, the dump, or the publish (D-027 section 7b). Nil when the
+    /// run has no database step now.
+    static func databaseProgress(scenarioID: String) throws -> WorkerDatabaseProgress? {
+        struct Answer: Decodable { let progress: WorkerDatabaseProgress? }
+        return try plan(PlanRequest(command: "database_progress", scenario_id: scenarioID), as: Answer.self).progress
+    }
+
     static func planPage(planID: String, action: String?, search: String?, offset: Int, limit: Int) throws -> [WorkerPlanRow] {
         struct Answer: Decodable { let items: [WorkerPlanRow] }
         return try plan(
@@ -497,4 +505,16 @@ enum WorkerIPC {
             }
         }
     }
+}
+
+/// What the database step of a run does now.
+struct WorkerDatabaseProgress: Decodable, Equatable {
+    let run_id: String
+    /// `cleanup`, `dump`, or `publish`.
+    let stage: String
+    /// The current database, from 1; 0 during the cleanup.
+    let index: Int
+    let total: Int
+    /// SQL bytes of the current dump so far.
+    let bytes: UInt64
 }

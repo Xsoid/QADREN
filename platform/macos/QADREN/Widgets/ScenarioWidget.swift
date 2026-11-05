@@ -45,6 +45,9 @@ struct ScenarioWidgetSnapshot: Equatable {
     var from: Endpoint?
     var to: Endpoint?
     var twoWay = false
+    /// A Backup/export run with databases and no files: its "planning" is
+    /// the database dump.
+    var databasesOnly = false
     var enabled = false
     var found = false
     var run: ScenarioRunState?
@@ -55,6 +58,8 @@ struct ScenarioWidgetSnapshot: Equatable {
     /// A plan that is being made now: by "Проверить план" or by a run in
     /// planning. Shows how far the snapshots are.
     var planCheck: PlanCheck?
+    /// The database step of the active run (D-027 section 7b).
+    var databaseProgress: WorkerDatabaseProgress?
     var nextRunAt: Date?
     var hasSchedule = false
     var schedulePaused = false
@@ -118,6 +123,7 @@ struct ScenarioWidgetSnapshot: Equatable {
         let left = endpoint(entry.left_connection_id, entry.left_root, selected: reversed ? 0 : selected)
         let right = endpoint(entry.right_connection_id, entry.right_root, selected: reversed ? selected : 0)
         snapshot.twoWay = entry.direction == "bidirectional"
+        snapshot.databasesOnly = entry.databasesOnly
         (snapshot.from, snapshot.to) = reversed ? (right, left) : (left, right)
         do {
             let run = try StorageRegistryBridge.scenarioRunState(scenarioID: scenarioID)
@@ -148,6 +154,9 @@ struct ScenarioWidgetSnapshot: Equatable {
                 snapshot.planCheck = reversed
                     ? PlanCheck(source: right, destination: left)
                     : PlanCheck(source: left, destination: right)
+            }
+            if run.active != nil, entry.isBackup {
+                snapshot.databaseProgress = try? WorkerIPC.databaseProgress(scenarioID: scenarioID)
             }
             let schedules = try StorageRegistryBridge.listScenarioSchedules(scenarioID: scenarioID).filter(\.enabled)
             snapshot.hasSchedule = !schedules.isEmpty
@@ -228,6 +237,20 @@ struct ScenarioStage: Equatable {
                 return ScenarioStage(frame: action ? .needsAction : .waiting, tone: action ? .needsAction : .waiting, headline: "Ожидание", detail: detail, active: true)
             }
             let trigger = active.trigger == "schedule" ? "по расписанию" : "вручную"
+            if let progress = snapshot.databaseProgress {
+                let base = progress.total > 1 ? "база \(progress.index) из \(progress.total)" : "база"
+                let detail = switch progress.stage {
+                case "cleanup": "Очистка папки files: файлы не выбраны."
+                case "publish": "Дамп готов: \(base) записывается в копию."
+                default: progress.bytes > 0
+                    ? "Дамп: \(base), получено \(ByteCountFormatter.string(fromByteCount: Int64(clamping: progress.bytes), countStyle: .file))."
+                    : "Дамп: \(base), подключение к серверу."
+                }
+                return ScenarioStage(frame: .active, tone: .active, headline: "Копия базы", detail: detail, active: true, moving: true)
+            }
+            if active.state == "planning" && snapshot.databasesOnly {
+                return ScenarioStage(frame: .active, tone: .active, headline: "Дамп баз", detail: "Снимаются дампы баз данных, запуск \(trigger).", active: true, moving: true)
+            }
             if active.state == "planning" {
                 let detail = snapshot.planCheck?.detail ?? "Снимки и план, запуск \(trigger)."
                 return ScenarioStage(frame: .active, tone: .active, headline: "Планирование", detail: detail, active: true, moving: true)
