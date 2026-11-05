@@ -463,9 +463,10 @@ pub unsafe extern "C" fn qadren_jobs_run_local_file_copy(
         Err(crate::job_execution::LocalFileCopyError::VerificationFailed) => {
             response(json!({"ok":false,"error":"verification_failed"}))
         }
-        Err(crate::job_execution::LocalFileCopyError::Remote(_)) => {
-            response(json!({"ok":false,"error":"provider_error"}))
-        }
+        Err(
+            crate::job_execution::LocalFileCopyError::Remote(_)
+            | crate::job_execution::LocalFileCopyError::Sftp(_),
+        ) => response(json!({"ok":false,"error":"provider_error"})),
         Err(crate::job_execution::LocalFileCopyError::OutcomeUnknown(_)) => {
             response(json!({"ok":false,"error":"outcome_unknown"}))
         }
@@ -571,9 +572,10 @@ pub unsafe extern "C" fn qadren_jobs_run_local_file_replace(
         Err(crate::job_execution::LocalFileCopyError::VerificationFailed) => {
             response(json!({"ok":false,"error":"verification_failed"}))
         }
-        Err(crate::job_execution::LocalFileCopyError::Remote(_)) => {
-            response(json!({"ok":false,"error":"provider_error"}))
-        }
+        Err(
+            crate::job_execution::LocalFileCopyError::Remote(_)
+            | crate::job_execution::LocalFileCopyError::Sftp(_),
+        ) => response(json!({"ok":false,"error":"provider_error"})),
         Err(crate::job_execution::LocalFileCopyError::OutcomeUnknown(_)) => {
             response(json!({"ok":false,"error":"outcome_unknown"}))
         }
@@ -686,9 +688,10 @@ pub unsafe extern "C" fn qadren_jobs_run_local_scenario_file_copy(
         Err(crate::job_execution::LocalFileCopyError::VerificationFailed) => {
             response(json!({"ok":false,"error":"verification_failed"}))
         }
-        Err(crate::job_execution::LocalFileCopyError::Remote(_)) => {
-            response(json!({"ok":false,"error":"provider_error"}))
-        }
+        Err(
+            crate::job_execution::LocalFileCopyError::Remote(_)
+            | crate::job_execution::LocalFileCopyError::Sftp(_),
+        ) => response(json!({"ok":false,"error":"provider_error"})),
         Err(crate::job_execution::LocalFileCopyError::OutcomeUnknown(_)) => {
             response(json!({"ok":false,"error":"outcome_unknown"}))
         }
@@ -800,9 +803,10 @@ pub unsafe extern "C" fn qadren_jobs_run_local_scenario_file_replace(
         Err(crate::job_execution::LocalFileCopyError::VerificationFailed) => {
             response(json!({"ok":false,"error":"verification_failed"}))
         }
-        Err(crate::job_execution::LocalFileCopyError::Remote(_)) => {
-            response(json!({"ok":false,"error":"provider_error"}))
-        }
+        Err(
+            crate::job_execution::LocalFileCopyError::Remote(_)
+            | crate::job_execution::LocalFileCopyError::Sftp(_),
+        ) => response(json!({"ok":false,"error":"provider_error"})),
         Err(crate::job_execution::LocalFileCopyError::OutcomeUnknown(_)) => {
             response(json!({"ok":false,"error":"outcome_unknown"}))
         }

@@ -319,6 +319,7 @@ pub fn plan_scoped(
     let scope = ScenarioScope {
         selected_paths,
         deletion_mode: scope.deletion_mode,
+        excluded_paths: scope.excluded_paths.clone(),
     };
     let skipped = skipped_left
         .iter()
@@ -467,6 +468,63 @@ pub fn plan_path(
         right: right_change,
         action,
     }
+}
+
+/// The plan item of one path of a Backup/export Scenario. Its `files/`
+/// destination is a mirror of the source scope (D-027 section 5.6a): a
+/// destination object that the source scope does not have is a deletion,
+/// also without a confirmed state, also outside the selection or inside an
+/// exclusion. The caller gives an outside path only when the destination
+/// has an object there. A collision, a name variant, or a skipped entry
+/// stays non-executable.
+pub fn plan_mirror_path(
+    scope: &ScenarioScope,
+    observation: &PathObservation<'_>,
+    collides: bool,
+) -> PlanItem {
+    let PathObservation {
+        path,
+        confirmed: state,
+        left,
+        right,
+        skipped,
+    } = *observation;
+    // A `.qadren-` staging or replacement file of the local executor can be
+    // the evidence of an UNKNOWN effect; the mirror never deletes it.
+    let extra = left.is_none() && right.is_some() && !executor_own_file(path);
+    if scope.classify(path, name_key) != ScopeMatch::Outside {
+        let mut item = plan_path(SyncDirection::LeftToRight, scope, observation, collides);
+        if extra && item.action == PlanAction::NoAction {
+            item.action = PlanAction::DeleteRequiresDecision { on_left: false };
+        }
+        return item;
+    }
+    let action = if skipped || !valid_path(path) {
+        PlanAction::NeedsVerification {
+            reason: SKIPPED_ENTRY_REASON,
+        }
+    } else if collides {
+        PlanAction::NeedsVerification {
+            reason: NAME_COLLISION_REASON,
+        }
+    } else if extra {
+        PlanAction::DeleteRequiresDecision { on_left: false }
+    } else {
+        PlanAction::NoAction
+    };
+    PlanItem {
+        relative_path: path.to_owned(),
+        left: delta(left, state.and_then(|entry| entry.left.as_ref())),
+        right: delta(right, state.and_then(|entry| entry.right.as_ref())),
+        action,
+    }
+}
+
+/// True for a staging or replacement file of the local executor.
+pub fn executor_own_file(path: &str) -> bool {
+    path.rsplit('/')
+        .next()
+        .is_some_and(|leaf| leaf.starts_with(".qadren-"))
 }
 
 #[cfg(test)]
@@ -911,6 +969,7 @@ mod tests {
                 .map(|path| (*path).to_owned())
                 .collect(),
             deletion_mode: DeletionMode::Simple,
+            excluded_paths: Vec::new(),
         }
     }
 
@@ -919,6 +978,7 @@ mod tests {
         let scope = ScenarioScope {
             selected_paths: vec!["Docs".into(), "notes.txt".into()],
             deletion_mode: DeletionMode::Paranoid,
+            excluded_paths: Vec::new(),
         };
         let left = [
             file("Docs/a.txt", "a", None),

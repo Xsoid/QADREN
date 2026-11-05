@@ -1347,7 +1347,12 @@ impl LocalFilesystem {
 
     #[cfg(target_os = "macos")]
     fn trash_directory(&self, path: &Path) -> Result<Option<File>> {
-        let identity = secure::file_identity(&self.root_fd, path)?;
+        // The Trash serves the volume of the entry: a file or a folder.
+        let device = match secure::file_identity(&self.root_fd, path) {
+            Ok(identity) => identity.device,
+            Err(LocalError::UnsafeEntry) => secure::directory_identity(&self.root_fd, path)?.0,
+            Err(error) => return Err(error),
+        };
         #[cfg(test)]
         if let Some(directory) = tests::TEST_TRASH.with(|value| value.borrow().clone()) {
             return secure::root(&directory).map(Some);
@@ -1359,14 +1364,14 @@ impl LocalFilesystem {
         // Unit tests must never use the real Trash of the user.
         #[cfg(test)]
         {
-            let _ = identity;
+            let _ = device;
             Ok(None)
         }
         #[cfg(not(test))]
-        secure::system_trash_directory(&self.root_fd, identity.device)
+        secure::system_trash_directory(&self.root_fd, device)
     }
 
-    /// Whether the volume of this regular file has a usable system Trash.
+    /// Whether the volume of this regular file or folder has a usable system Trash.
     /// This has no effect on the file; `trash_file` checks it again.
     pub fn trash_available(&self, path: &Path) -> Result<bool> {
         Self::relative(path)?;
@@ -1397,6 +1402,41 @@ impl LocalFilesystem {
         {
             let _ = path;
             Ok(false)
+        }
+    }
+
+    /// Move one checked folder with all its content into the system Trash
+    /// of its volume as one entry (D-027 section 5.6b). Returns `Ok(false)`
+    /// before any effect when this volume has no usable Trash.
+    pub fn trash_directory_tree(&self, path: &Path) -> Result<bool> {
+        Self::relative(path)?;
+        #[cfg(target_os = "macos")]
+        {
+            match self.trash_directory(path)? {
+                Some(trash) => {
+                    secure::trash_directory_into(&self.root_fd, path, &trash).map(|()| true)
+                }
+                None => Ok(false),
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = path;
+            Ok(false)
+        }
+    }
+
+    /// Delete one checked folder with all its content (D-027 section 5.6b).
+    /// The caller records a durable attempt; a partial removal is UNKNOWN.
+    pub fn delete_directory_tree(&self, path: &Path) -> Result<()> {
+        Self::relative(path)?;
+        #[cfg(unix)]
+        {
+            secure::delete_directory_tree(&self.root_fd, path)
+        }
+        #[cfg(not(unix))]
+        {
+            Err(LocalError::UnsafeEntry)
         }
     }
 

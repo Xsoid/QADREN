@@ -3,6 +3,8 @@ import SwiftUI
 
 extension Notification.Name {
     static let qadrenStorageConnectionsDidChange = Notification.Name("qadren.storage-connections.did-change")
+    /// A widget asks the Settings window to show the Connections section.
+    static let qadrenShowConnectionSettings = Notification.Name("qadren.settings.show-connections")
 }
 
 @MainActor
@@ -110,6 +112,70 @@ final class StorageConnections: ObservableObject {
         )
     }
 
+    /// Saves one ISPmanager panel connection with its login and password
+    /// (D-027), in the same fail-closed order as an SMB share.
+    @discardableResult
+    func addISPmanager(
+        name: String, url: String, sshPort: UInt16, credentials: LoginCredentials,
+        outcome: ISPmanagerCheckReport?
+    ) throws -> String {
+        let id = try StorageRegistryBridge.addISPmanager(name: name, url: url)
+        refresh()
+        publishChange()
+        try StorageRegistryBridge.setISPmanagerSSHPort(id: id, port: sshPort)
+        try saveISPmanagerCredentials(id: id, credentials: credentials, outcome: outcome)
+        return id
+    }
+
+    /// No Scenario uses an ISPmanager connection yet, so its URL can change.
+    /// Another URL or port clears the confirmed SSH host key in Core.
+    func updateISPmanager(
+        id: String, url: String, sshPort: UInt16, credentials: LoginCredentials,
+        outcome: ISPmanagerCheckReport?
+    ) throws {
+        try StorageRegistryBridge.setISPmanagerEndpoint(id: id, url: url)
+        try StorageRegistryBridge.setISPmanagerSSHPort(id: id, port: sshPort)
+        try saveISPmanagerCredentials(id: id, credentials: credentials, outcome: outcome)
+    }
+
+    /// Stores the SSH host key fingerprint that the user confirmed (D-027
+    /// section 7a).
+    func confirmISPmanagerHostKey(id: String, fingerprint: String) throws {
+        try StorageRegistryBridge.confirmISPmanagerHostKey(id: id, fingerprint: fingerprint)
+        publishChange()
+    }
+
+    /// Records the status and keeps the report, so that it survives a restart.
+    func recordISPmanagerCheck(id: String, outcome: ISPmanagerCheckReport) {
+        do {
+            try StorageRegistryBridge.recordISPmanagerCheck(id: id, report: outcome)
+            try StorageRegistryBridge.setStatus(id: id, status: outcome.effectiveStatus)
+            refresh()
+            publishChange()
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    private func saveISPmanagerCredentials(
+        id: String, credentials: LoginCredentials, outcome: ISPmanagerCheckReport?
+    ) throws {
+        defer {
+            refresh()
+            publishChange()
+        }
+        try StorageRegistryBridge.setStatus(id: id, status: "requires_auth")
+        try ISPmanagerKeychain.store(credentials, for: id)
+        guard try ISPmanagerKeychain.read(id) == credentials else {
+            throw StorageError.operation("Keychain copy could not be verified")
+        }
+        try StorageRegistryBridge.setCredential(id: id)
+        try StorageRegistryBridge.setStatus(id: id, status: outcome?.effectiveStatus ?? "disconnected")
+        if let outcome {
+            try StorageRegistryBridge.recordISPmanagerCheck(id: id, report: outcome)
+        }
+    }
+
     @discardableResult
     func addLocalComputer() -> String? {
         do {
@@ -194,6 +260,14 @@ final class StorageConnections: ObservableObject {
                 )
                 // Local cleanup only: unmount and remove the empty directory.
                 SMBMounts.release(id)
+            case "ispmanager":
+                try ConnectionRemoval.run(
+                    adapter: entry.adapter,
+                    disable: disable,
+                    ensureNoUnresolvedAttempts: ensureNoUnresolvedAttempts,
+                    deleteCredential: { try ISPmanagerKeychain.delete(id) },
+                    deleteRecord: deleteRecord
+                )
             case "local_filesystem":
                 try ConnectionRemoval.removeLocal(
                     disable: disable,

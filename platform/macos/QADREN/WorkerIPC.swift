@@ -232,6 +232,24 @@ enum WorkerIPC {
         guard response.ok, response.status == "updated" else { throw WorkerIPCError.invalidResponse }
     }
 
+    /// The ISPmanager login of one connection for SFTP reads (D-027). The
+    /// Worker keeps it in memory only.
+    static func provideISPmanagerCredentials(
+        connectionID: String, login: String, password: String, socketPath: String? = nil
+    ) throws {
+        struct Request: Encodable {
+            let command = "provide_ispmanager_credentials"
+            let connection_id: String
+            let login: String
+            let password: String
+        }
+        let payload = try JSONEncoder().encode(
+            Request(connection_id: connectionID, login: login, password: password)
+        ) + Data([0x0a])
+        let response = try send(payload, socketPath: socketPath ?? defaultSocketPath(), timeoutSeconds: 2)
+        guard response.ok, response.status == "updated" else { throw WorkerIPCError.invalidResponse }
+    }
+
     static func cancelScenarioCreateBatch(receiptID: String, socketPath: String? = nil) throws {
         let payload = try JSONEncoder().encode(
             WorkerScenarioCreateBatchCancellationRequest(batch_id: receiptID)
@@ -440,6 +458,14 @@ enum WorkerIPC {
         )
     }
 
+    /// The database step of the active run of one Scenario: the cleanup of
+    /// `files/`, the dump, or the publish (D-027 section 7b). Nil when the
+    /// run has no database step now.
+    static func databaseProgress(scenarioID: String) throws -> WorkerDatabaseProgress? {
+        struct Answer: Decodable { let progress: WorkerDatabaseProgress? }
+        return try plan(PlanRequest(command: "database_progress", scenario_id: scenarioID), as: Answer.self).progress
+    }
+
     static func planPage(planID: String, action: String?, search: String?, offset: Int, limit: Int) throws -> [WorkerPlanRow] {
         struct Answer: Decodable { let items: [WorkerPlanRow] }
         return try plan(
@@ -479,4 +505,16 @@ enum WorkerIPC {
             }
         }
     }
+}
+
+/// What the database step of a run does now.
+struct WorkerDatabaseProgress: Decodable, Equatable {
+    let run_id: String
+    /// `cleanup`, `dump`, or `publish`.
+    let stage: String
+    /// The current database, from 1; 0 during the cleanup.
+    let index: Int
+    let total: Int
+    /// SQL bytes of the current dump so far.
+    let bytes: UInt64
 }

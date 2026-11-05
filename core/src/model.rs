@@ -93,6 +93,10 @@ pub struct ScenarioScope {
     /// Relative paths under each root. A directory includes all its content.
     pub selected_paths: Vec<String>,
     pub deletion_mode: DeletionMode,
+    /// Relative paths inside a selected folder that the Scenario leaves out,
+    /// with all their content (D-027 section 6). The most specific rule wins:
+    /// a selected path inside an excluded folder is in the Scenario again.
+    pub excluded_paths: Vec<String>,
 }
 
 /// The relation of one relative path to a Scenario selection.
@@ -143,6 +147,9 @@ impl ScenarioScope {
     /// Classify a relative path. `name_key` is the conservative comparison
     /// key of the planner (NFC and lowercase).
     pub fn classify(&self, path: &str, name_key: impl Fn(&str) -> String) -> ScopeMatch {
+        if self.excluded(path, &name_key) {
+            return ScopeMatch::Outside;
+        }
         if self.selected_paths.is_empty()
             || self
                 .selected_paths
@@ -161,6 +168,30 @@ impl ScenarioScope {
         } else {
             ScopeMatch::Outside
         }
+    }
+
+    /// True when the nearest rule above `path` is an exclusion. A name
+    /// variant of an excluded path also counts as excluded: the comparison
+    /// leaves out more, never less.
+    pub fn excluded(&self, path: &str, name_key: impl Fn(&str) -> String) -> bool {
+        let key = name_key(path);
+        let depth = |rule: &String| rule.len();
+        let nearest_exclusion = self
+            .excluded_paths
+            .iter()
+            .filter(|rule| is_inside(path, rule) || is_inside(&key, &name_key(rule)))
+            .map(depth)
+            .max();
+        let Some(exclusion) = nearest_exclusion else {
+            return false;
+        };
+        let nearest_selection = self
+            .selected_paths
+            .iter()
+            .filter(|rule| is_inside(path, rule))
+            .map(depth)
+            .max();
+        nearest_selection.is_none_or(|selection| selection <= exclusion)
     }
 }
 
@@ -466,6 +497,7 @@ mod tests {
         let scope = ScenarioScope {
             selected_paths: vec!["Docs".to_owned(), "notes.txt".to_owned()],
             deletion_mode: DeletionMode::Simple,
+            excluded_paths: Vec::new(),
         };
         assert_eq!(scope.classify("Docs", key), ScopeMatch::Inside);
         assert_eq!(scope.classify("Docs/a/b.txt", key), ScopeMatch::Inside);

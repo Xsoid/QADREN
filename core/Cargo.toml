@@ -13,6 +13,11 @@ crate-type = ["staticlib", "rlib"]
 name = "qadren-worker"
 path = "src/bin/qadren_worker.rs"
 
+# Gate 0 read-only ISPmanager probe (D-027, proposed). The app does not ship it.
+[[bin]]
+name = "qadren-ispmanager-probe"
+path = "src/bin/qadren_ispmanager_probe.rs"
+
 [features]
 # Builds narrow test fixtures for native macOS acceptance. The production app
 # never enables this feature.
@@ -25,11 +30,15 @@ chrono-tz = "0.10"
 # names that APFS treats as the same file (Unicode form).
 icu_normalizer = { version = "2", default-features = false, features = ["compiled_data"] }
 libc = "0.2"
+flate2 = "1"
 md5 = "0.7"
 rusqlite = { version = "0.32", features = ["bundled"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+russh = { version = "0.65", default-features = false, features = ["ring", "rsa"] }
+russh-sftp = "3.0"
+tokio = { version = "1", default-features = false, features = ["rt", "net", "time", "io-util"] }
 
 # On macOS 27, stripping compile-time proc-macro dylibs can make dyld reject
 # them (mis-aligned LINKEDIT string pool / E0463 missing derive crate).

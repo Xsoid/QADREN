@@ -5,18 +5,21 @@ import NetFS
 import Network
 import Security
 
-/// Login and password of one SMB share connection (D-021). They live only in
-/// the Keychain item of that `connection_id`, never in SQLite or the address.
-struct SMBCredentials: Codable, Equatable {
+/// A login and a password of one connection: an SMB share (D-021) or an
+/// ISPmanager panel (D-027). They live only in the Keychain item of that
+/// `connection_id`, never in SQLite or the address.
+struct LoginCredentials: Codable, Equatable {
     var login: String
     var password: String
 }
+typealias SMBCredentials = LoginCredentials
 
 /// Keychain records are isolated by StorageConnection ID, as for Yandex Disk.
-enum SMBKeychain {
-    private static let service = "dev.qadren.smb.credentials"
+/// Each connector has its own Keychain service.
+struct LoginKeychain: Sendable {
+    let service: String
 
-    private static func query(_ connectionID: String) -> [String: Any] {
+    private func query(_ connectionID: String) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -24,7 +27,7 @@ enum SMBKeychain {
         ]
     }
 
-    static func read(_ connectionID: String) throws -> SMBCredentials? {
+    func read(_ connectionID: String) throws -> LoginCredentials? {
         var q = query(connectionID)
         q[kSecReturnData as String] = true
         q[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -32,13 +35,13 @@ enum SMBKeychain {
         let status = SecItemCopyMatching(q as CFDictionary, &item)
         if status == errSecItemNotFound { return nil }
         guard status == errSecSuccess, let data = item as? Data,
-              let credentials = try? JSONDecoder().decode(SMBCredentials.self, from: data) else {
+              let credentials = try? JSONDecoder().decode(LoginCredentials.self, from: data) else {
             throw StorageError.operation("Keychain read failed")
         }
         return credentials
     }
 
-    static func store(_ credentials: SMBCredentials, for connectionID: String) throws {
+    func store(_ credentials: LoginCredentials, for connectionID: String) throws {
         guard !credentials.login.isEmpty && !connectionID.isEmpty else {
             throw StorageError.operation("Empty credentials")
         }
@@ -56,13 +59,15 @@ enum SMBKeychain {
         }
     }
 
-    static func delete(_ connectionID: String) throws {
+    func delete(_ connectionID: String) throws {
         let result = SecItemDelete(query(connectionID) as CFDictionary)
         guard result == errSecSuccess || result == errSecItemNotFound else {
             throw StorageError.operation("Keychain removal failed")
         }
     }
 }
+
+let SMBKeychain = LoginKeychain(service: "dev.qadren.smb.credentials")
 
 /// The address of an SMB share: `smb://host[:port]/share[/folder]`. Core
 /// stores and validates the same text; this type only builds the mount URL.

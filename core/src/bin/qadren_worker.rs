@@ -5,6 +5,12 @@
 //! network or remote-Worker protocol.
 
 use qadren_core::confirmation::{Confirmation, EvidenceLevel};
+use qadren_core::ispmanager_execution::{
+    run_ispmanager_database_export, run_ispmanager_scenario_delete,
+    run_ispmanager_scenario_file_download, run_ispmanager_scenario_update, DatabaseExportStatus,
+};
+use qadren_core::ispmanager_sftp::SftpConnection;
+use qadren_core::job_execution::SftpFailure;
 use qadren_core::job_execution::{
     local_directory_reconciliation_candidates, local_file_copy_reconciliation_candidates,
     reconcile_local_directory_create, reconcile_local_file_copy, reconcile_local_rule_delete,
@@ -20,15 +26,15 @@ use qadren_core::local_fs::LocalFilesystem;
 use qadren_core::model::{ConfirmedFileVersion, JobState, ScenarioReference};
 use qadren_core::plan_store;
 use qadren_core::registry::{
-    BatchChildDue, BatchChildKind, DueBatchChild, Registry, RegistryError, RunWriteLock,
-    ScenarioRun, ScheduleRunStart,
+    BackupDatabaseResult, BatchChildDue, BatchChildKind, DueBatchChild, Registry, RegistryError,
+    RunWriteLock, ScenarioRun, ScheduleRunStart,
 };
 use qadren_core::scenario_planner::{ObservedFile, PlanAction};
 use qadren_core::schedule_dispatch::dispatch_pending_schedule_jobs;
 use qadren_core::snapshot::{
-    walk_local_step, walk_yandex_step, SnapshotError, SnapshotKey, SnapshotStore,
+    walk_local_step, walk_sftp_step, walk_yandex_step, SnapshotError, SnapshotKey, SnapshotStore,
 };
-use qadren_core::storage_access::{SMB_SHARE, YANDEX_DISK};
+use qadren_core::storage_access::{ISPMANAGER, SMB_SHARE, YANDEX_DISK};
 use qadren_core::yandex::{YandexError, YandexMetadataClient};
 use qadren_core::yandex_execution::{
     run_yandex_scenario_delete, run_yandex_scenario_file_download, run_yandex_scenario_update,
@@ -225,6 +231,66 @@ fn yandex_source_connection(
         .then_some(source)
 }
 
+/// The ISPmanager source connection of a Backup/export revision (D-027).
+fn ispmanager_source_connection(
+    registry: &Registry,
+    scenario_id: &str,
+    revision: u64,
+) -> Option<String> {
+    let scenario = registry
+        .get_scenario_revision(scenario_id, revision)
+        .ok()??;
+    (scenario.direction == "left_to_right"
+        && matches!(registry.get(&scenario.left_connection_id), Ok(Some(connection)) if connection.adapter == ISPMANAGER))
+        .then_some(scenario.left_connection_id)
+}
+
+/// Open the SFTP session of an ISPmanager connection with the login that the
+/// app gave in memory and the host key that the user confirmed.
+fn open_sftp(paths: &WorkerPaths, connection_id: &str) -> Result<SftpConnection, &'static str> {
+    let (login, password) = runner()
+        .ispmanager_login(connection_id)
+        .ok_or("ispmanager_login_required")?;
+    let registry = Registry::open(&paths.registry).map_err(|_| "registry_unavailable")?;
+    let connection = registry
+        .get(connection_id)
+        .ok()
+        .flatten()
+        .filter(|connection| connection.enabled && connection.adapter == ISPMANAGER)
+        .ok_or("ispmanager_connection_unavailable")?;
+    let url = connection
+        .endpoint_url
+        .as_deref()
+        .and_then(|url| qadren_core::ispmanager::PanelUrl::parse(url).ok())
+        .ok_or("ispmanager_connection_unavailable")?;
+    let settings = registry
+        .ispmanager_settings(connection_id)
+        .map_err(|_| "registry_unavailable")?;
+    let host_key = settings
+        .host_key_sha256
+        .ok_or("ispmanager_host_key_unconfirmed")?;
+    drop(registry);
+    SftpConnection::open(url.host(), settings.ssh_port, &login, &password, &host_key).map_err(
+        |error| {
+            use qadren_core::ispmanager_sftp::SftpCheck;
+            let code = match error {
+                SftpCheck::HostKeyChanged { .. } | SftpCheck::HostKeyUnconfirmed { .. } => {
+                    "ispmanager_host_key_changed"
+                }
+                SftpCheck::AuthRefused => "ispmanager_sign_in_refused",
+                _ => return "ispmanager_network_error",
+            };
+            // A changed host key or a refused login needs the user: the
+            // Connections widget shows it with a way to the fix.
+            if let Ok(registry) = Registry::open(&paths.registry) {
+                let _ =
+                    registry.mark_checked(connection_id, "requires_auth", unix_now(), Some(code));
+            }
+            code
+        },
+    )
+}
+
 /// Run one Yandex Disk to Mac download. `None` replacement is a Create.
 fn run_yandex_download(
     paths: &WorkerPaths,
@@ -305,7 +371,8 @@ fn dispatch_due(paths: &WorkerPaths) -> Result<(usize, usize), String> {
         .map_err(|_| "schedule_dispatch_unavailable".to_string())?;
     drop(jobs);
     drop(registry);
-    advance_scenario_runs(paths)?;
+    // A dispatched schedule slot is a new run.
+    wake_runs();
     Ok((staged, dispatched))
 }
 
@@ -321,7 +388,12 @@ fn reconcile_unknown_rule_deletes(paths: &WorkerPaths) {
         attempt.status == "unknown"
             && matches!(
                 attempt.operation_kind.as_deref(),
-                Some("local_rule_trash" | "local_rule_delete")
+                Some(
+                    "local_rule_trash"
+                        | "local_rule_delete"
+                        | "local_rule_trash_folder"
+                        | "local_rule_delete_folder"
+                )
             )
     }) {
         // One unresolvable Job must not stop the other checks.
@@ -479,12 +551,22 @@ fn reconcile_unknown_scenario_creates(
         // Both endpoints can use the same Local connection ("This Mac"). Try
         // each root of that connection. Reconciliation is read-only and checks
         // the durable root identity, so a wrong root stays StillUnknown.
-        let roots = [
-            (&scenario.left_connection_id, &scenario.left_root),
-            (&scenario.right_connection_id, &scenario.right_root),
+        let mut roots = vec![
+            (&scenario.left_connection_id, scenario.left_root.clone()),
+            (&scenario.right_connection_id, scenario.right_root.clone()),
         ];
+        // A Backup/export database dump is next to `files/`, in the copy root
+        // (D-027 section 7b).
+        if registry.scenario_mode(&scenario_id).ok().as_deref() == Some("backup_export") {
+            if let Some(root) = Path::new(&scenario.right_root).parent() {
+                roots.push((
+                    &scenario.right_connection_id,
+                    root.to_string_lossy().into_owned(),
+                ));
+            }
+        }
         for (_, destination_root) in roots
-            .into_iter()
+            .iter()
             .filter(|(connection, _)| **connection == destination_connection_id)
         {
             // Remove junk staging of the interrupted write first. This never
@@ -818,20 +900,164 @@ fn advance_scenario_run(paths: &WorkerPaths, run: &ScenarioRun) -> Result<(), St
         }
         Err(_) => return Err("registry_unavailable".to_string()),
     }
-    // A Yandex Disk run without a token from the app waits (D-024 stage A).
+    // A Yandex Disk run without a token from the app waits (D-024 stage A),
+    // and a Backup/export run without its ISPmanager login (D-027).
     let needs_sign_in =
         yandex_source_connection(&registry, &run.scenario.scenario_id, run.scenario.revision)
-            .is_some_and(|connection| runner().token(&connection).is_none());
+            .is_some_and(|connection| runner().token(&connection).is_none())
+            || ispmanager_source_connection(
+                &registry,
+                &run.scenario.scenario_id,
+                run.scenario.revision,
+            )
+            .is_some_and(|connection| runner().ispmanager_login(&connection).is_none());
     let finished = match run.state.as_str() {
         "planning" => advance_planning_run(paths, &registry, run, needs_sign_in)?,
-        "executing" => advance_executing_run(&registry, run, needs_sign_in)?,
+        "executing" => advance_executing_run(paths, &registry, run, needs_sign_in)?,
         _ => false,
     };
     drop(registry);
     if finished {
+        write_backup_manifest(paths, &run.id);
         finish_run_job(paths, &run.id)?;
     }
     Ok(())
+}
+
+/// Write `manifest.json` into the root of a Backup/export copy after a run
+/// (D-027 section 5.6). It replaces the previous manifest atomically and
+/// does not go into the Trash: it describes the last run only. A failure
+/// leaves the previous manifest and does not change the run result.
+fn write_backup_manifest(paths: &WorkerPaths, run_id: &str) {
+    let Ok(registry) = Registry::open(&paths.registry) else {
+        return;
+    };
+    let Ok(Some(run)) = registry.scenario_run(run_id) else {
+        return;
+    };
+    let (id, revision) = (&run.scenario.scenario_id, run.scenario.revision);
+    if registry.scenario_mode(id).ok().as_deref() != Some("backup_export") {
+        return;
+    }
+    let Ok(Some(scenario)) = registry.get_scenario_revision(id, revision) else {
+        return;
+    };
+    if !qadren_core::storage_access::connection_id_ready(
+        &registry,
+        &paths.registry,
+        &scenario.right_connection_id,
+    ) {
+        return;
+    }
+    let Some(root) = Path::new(&scenario.right_root).parent() else {
+        return;
+    };
+    let resources = registry.backup_resources(id, revision).unwrap_or_default();
+    let summary = run
+        .batch_id
+        .as_deref()
+        .and_then(|batch| {
+            registry
+                .scenario_create_batch_summary(batch, unix_now())
+                .ok()
+        })
+        .flatten();
+    let result = match (run.state.as_str(), &summary) {
+        ("completed", Some(summary)) if summary.failed + summary.unknown == 0 => "complete",
+        ("completed", None) => "complete",
+        ("cancelled", _) => "cancelled",
+        (_, Some(summary)) if summary.completed > 0 => "partial",
+        _ => "failed",
+    };
+    let finished_at = chrono::DateTime::<chrono::Utc>::from_timestamp(
+        run.finished_at.unwrap_or_else(unix_now),
+        0,
+    )
+    .map(|time| time.to_rfc3339());
+    let selected_databases: Vec<_> = resources
+        .iter()
+        .filter(|resource| resource.category == "databases")
+        .collect();
+    let database_results = registry
+        .backup_database_results(&run.id)
+        .unwrap_or_default();
+    let mut manifest = serde_json::json!({
+        "format": "qadren-ispmanager-backup/1",
+        "scenario_id": id,
+        "scenario_revision": revision,
+        "run_id": run.id,
+        "trigger": run.trigger,
+        "result": result,
+        "error": run.error,
+        "finished_at": finished_at,
+        "categories": {
+            "files": {
+                "folder": "files",
+                "artifact": "file",
+                "transport": "sftp",
+                "integrity": "byte count and MD5 checked before publish",
+                "selected": resources
+                    .iter()
+                    .filter(|resource| resource.category == "files")
+                    .collect::<Vec<_>>(),
+                "items": summary.as_ref().map(|summary| serde_json::json!({
+                    "total": summary.total,
+                    "completed": summary.completed,
+                    "failed": summary.failed,
+                    "unknown": summary.unknown,
+                    "cancelled": summary.cancelled,
+                    "not_executed": run.deferred_items,
+                })),
+                "omissions": "symbolic links and special files are not copied",
+            },
+        },
+    });
+    if !selected_databases.is_empty() {
+        manifest["categories"]["databases"] = serde_json::json!({
+            "folder": "databases",
+            "artifact": "database dump",
+            "format": "mysqldump SQL, not compressed (<database>.sql)",
+            "transport": "mysqldump over SSH, through gzip -1 when the server has gzip; access facts from the panel",
+            "structure_only": "a selected table with rule structure_only has its structure and no data",
+            "consistency": "one transaction for InnoDB tables; no table lock",
+            "integrity": "exit status 0 and the final dump line checked before publish; md5 of the .sql file",
+            "selected": selected_databases,
+            "results": database_results,
+        });
+    }
+    let Ok(text) = serde_json::to_vec_pretty(&manifest) else {
+        return;
+    };
+    let staging = root.join(format!(".qadren-manifest-{}.tmp", std::process::id()));
+    let written = (|| -> std::io::Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging)?;
+        file.write_all(&text)?;
+        file.sync_all()?;
+        fs::rename(&staging, root.join("manifest.json"))
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&staging);
+        eprintln!(
+            "qadren-worker: {} manifest of run {run_id} not written",
+            log_time()
+        );
+    }
+}
+
+/// True for a Backup/export revision without a selected file or folder.
+fn backup_without_files(registry: &Registry, run: &ScenarioRun) -> bool {
+    let (id, revision) = (&run.scenario.scenario_id, run.scenario.revision);
+    registry.scenario_mode(id).ok().as_deref() == Some("backup_export")
+        && registry
+            .backup_resources(id, revision)
+            .is_ok_and(|resources| {
+                !resources
+                    .iter()
+                    .any(|r| r.category == "files" && r.rule == "include")
+            })
 }
 
 /// Request the plan of a planning run, or start the batch of its complete
@@ -842,6 +1068,41 @@ fn advance_planning_run(
     run: &ScenarioRun,
     needs_sign_in: bool,
 ) -> Result<bool, String> {
+    // A newer revision was saved: this run cannot execute, so it ends now
+    // and does not walk for a plan that it would refuse (found on 2026-11-04).
+    if !registry
+        .is_current_scenario_revision(&run.scenario.scenario_id, run.scenario.revision)
+        .map_err(|_| "registry_unavailable".to_string())?
+    {
+        return finish_run(registry, run, "failed", Some("scenario_revision_stale"));
+    }
+    // A Backup/export revision with databases and no files has no file plan:
+    // an empty file selection would mean the whole home folder.
+    if backup_without_files(registry, run) {
+        return match advance_backup_databases(paths, registry, run)? {
+            DatabaseStep::Running | DatabaseStep::None if needs_sign_in => registry
+                .set_scenario_run_waiting(&run.id, Some("needs_sign_in"))
+                .map(|_| false)
+                .map_err(|_| "registry_unavailable".to_string()),
+            DatabaseStep::Running => Ok(false),
+            DatabaseStep::None => finish_run(registry, run, "completed", None),
+            DatabaseStep::Done { failed: true, .. } => {
+                finish_run(registry, run, "failed", Some("databases_failed"))
+            }
+            DatabaseStep::Done {
+                cancelled: true, ..
+            } => finish_run(registry, run, "cancelled", None),
+            DatabaseStep::Done { .. }
+                if cleanup_failures()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(&run.id) =>
+            {
+                finish_run(registry, run, "failed", Some("files_cleanup_failed"))
+            }
+            DatabaseStep::Done { .. } => finish_run(registry, run, "completed", None),
+        };
+    }
     let Some(plan_id) = run.plan_id.as_deref() else {
         let request = internal_request("start_plan", &run.scenario)
             .ok_or_else(|| "invalid_request".to_string())?;
@@ -897,6 +1158,7 @@ fn advance_planning_run(
 /// Finish an executing run when its batch has no pending child. Returns
 /// true when the run finished.
 fn advance_executing_run(
+    paths: &WorkerPaths,
     registry: &Registry,
     run: &ScenarioRun,
     needs_sign_in: bool,
@@ -919,12 +1181,489 @@ fn advance_executing_run(
         ("failed", Some("items_unknown"))
     } else if summary.failed > 0 {
         ("failed", Some("items_failed"))
-    } else if summary.cancelled > 0 {
+    } else if summary.cancelled > 0 || summary.cancellation_requested {
         ("cancelled", None)
     } else {
         ("completed", None)
     };
+    // The databases of a Backup/export run follow its files (D-027 section
+    // 7b). A stopped run starts no dump.
+    if state != "cancelled" {
+        match advance_backup_databases(paths, registry, run)? {
+            DatabaseStep::Running => {
+                registry
+                    .set_scenario_run_waiting(&run.id, None)
+                    .map_err(|_| "registry_unavailable".to_string())?;
+                return Ok(false);
+            }
+            DatabaseStep::Done { failed: true, .. } if state == "completed" => {
+                return finish_run(registry, run, "failed", Some("databases_failed"));
+            }
+            DatabaseStep::Done {
+                cancelled: true, ..
+            } if state == "completed" => {
+                return finish_run(registry, run, "cancelled", None);
+            }
+            _ => {}
+        }
+    }
     finish_run(registry, run, state, error)
+}
+
+enum DatabaseStep {
+    None,
+    Running,
+    Done { failed: bool, cancelled: bool },
+}
+
+fn run_wake() -> &'static (Mutex<bool>, std::sync::Condvar) {
+    static WAKE: OnceLock<(Mutex<bool>, std::sync::Condvar)> = OnceLock::new();
+    WAKE.get_or_init(Default::default)
+}
+
+/// Ask the run thread to advance the Scenario runs now, for example when a
+/// run starts or the database export of a run ends. Without it a run waited
+/// up to one poll pass (found on 2026-11-06).
+fn wake_runs() {
+    let (woken, signal) = run_wake();
+    *woken.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+    signal.notify_all();
+}
+
+/// Wait for `wake_runs` until `deadline`. True when it was called.
+fn wait_for_run_wake(deadline: std::time::Instant) -> bool {
+    let (woken, signal) = run_wake();
+    let mut flag = woken.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    while !*flag {
+        let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) else {
+            return false;
+        };
+        flag = signal
+            .wait_timeout(flag, left)
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .0;
+    }
+    *flag = false;
+    true
+}
+
+/// What the database step of an active run does now, for the Scenario
+/// widget. It lives in memory: after a Worker restart the step starts again.
+#[derive(Debug, Clone, Serialize)]
+struct DatabaseProgress {
+    scenario_id: String,
+    run_id: String,
+    /// `cleanup` of `files/`, `dump`, or `publish`.
+    stage: &'static str,
+    /// The current database, from 1; 0 during the cleanup.
+    index: usize,
+    total: usize,
+    /// SQL bytes of the current dump so far.
+    bytes: u64,
+}
+
+fn database_progress() -> &'static Mutex<HashMap<String, DatabaseProgress>> {
+    static PROGRESS: OnceLock<Mutex<HashMap<String, DatabaseProgress>>> = OnceLock::new();
+    PROGRESS.get_or_init(Default::default)
+}
+
+fn set_database_progress(run: &ScenarioRun, stage: &'static str, index: usize, total: usize, bytes: u64) {
+    database_progress()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(
+            run.id.clone(),
+            DatabaseProgress {
+                scenario_id: run.scenario.scenario_id.clone(),
+                run_id: run.id.clone(),
+                stage,
+                index,
+                total,
+                bytes,
+            },
+        );
+}
+
+/// The database step of the active run of one Scenario, if any.
+fn database_progress_status(request: &Request) -> serde_json::Value {
+    let Some(scenario_id) = request.scenario_id.as_deref() else {
+        return serde_json::json!({"ok": false, "status": "invalid_request"});
+    };
+    let progress = database_progress()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .values()
+        .find(|progress| progress.scenario_id == scenario_id)
+        .cloned();
+    serde_json::json!({"ok": true, "progress": progress})
+}
+
+/// Runs whose `files/` cleanup failed in this Worker process.
+fn cleanup_failures() -> &'static Mutex<std::collections::HashSet<String>> {
+    static RUNS: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    RUNS.get_or_init(Default::default)
+}
+
+/// The `files/` copy of a revision without a file rule is a mirror of an
+/// empty selection: every object in it is outside the source scope, so it
+/// is deleted (D-027 section 5.6a, owner decision 2026-11-06). Each top
+/// folder goes into the Trash as one entry, each top file as one file. No
+/// server check is needed for a path outside the scope. Executor files,
+/// links, and special files stay. Only the simple deletion rule deletes.
+/// Returns false when an effect failed or its outcome is unknown.
+fn clean_backup_files(paths: &WorkerPaths, run: &ScenarioRun) -> bool {
+    let (id, revision) = (&run.scenario.scenario_id, run.scenario.revision);
+    let Ok(registry) = Registry::open(&paths.registry) else {
+        return false;
+    };
+    let simple = registry
+        .get_scenario_revision_scope(id, revision)
+        .is_ok_and(|scope| scope.deletion_mode == qadren_core::model::DeletionMode::Simple);
+    let Ok(Some(scenario)) = registry.get_scenario_revision(id, revision) else {
+        return false;
+    };
+    drop(registry);
+    if !simple {
+        return true;
+    }
+    let root = Path::new(&scenario.right_root);
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        // No `files/` yet: nothing to delete.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return true,
+        Err(_) => return false,
+    };
+    let mut clean = true;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            clean = false;
+            continue;
+        };
+        let Some(name) = entry.file_name().to_str().map(ToOwned::to_owned) else {
+            clean = false;
+            continue;
+        };
+        if name.starts_with(".qadren-") {
+            continue;
+        }
+        let Ok(kind) = entry.file_type() else {
+            clean = false;
+            continue;
+        };
+        if !kind.is_dir() && !kind.is_file() {
+            continue;
+        }
+        let digest = format!("{:x}", md5::compute(name.as_bytes()));
+        let job_id = format!("ispclean-{}-{}", run.id, &digest[..16]);
+        let outcome = if kind.is_dir() {
+            qadren_core::job_execution::run_backup_mirror_delete_folder(
+                &paths.jobs,
+                &paths.registry,
+                id,
+                revision,
+                &name,
+                &job_id,
+            )
+        } else {
+            qadren_core::job_execution::run_backup_mirror_delete(
+                &paths.jobs,
+                &paths.registry,
+                id,
+                revision,
+                &name,
+                &job_id,
+            )
+        };
+        let ok = matches!(
+            outcome,
+            Ok(qadren_core::job_execution::LocalRuleDeleteStatus::MovedToTrash
+                | qadren_core::job_execution::LocalRuleDeleteStatus::DeletedPermanently
+                | qadren_core::job_execution::LocalRuleDeleteStatus::Existing(JobState::Completed))
+        );
+        if !ok {
+            eprintln!(
+                "qadren-worker: {} run {} files cleanup {}: {:?}",
+                log_time(),
+                run.id,
+                if kind.is_dir() { "folder" } else { "file" },
+                outcome.err()
+            );
+        }
+        clean &= ok;
+    }
+    clean
+}
+
+/// Runs of which the databases are being exported now. A run has at most
+/// one export thread.
+fn database_runs() -> &'static Mutex<std::collections::HashSet<String>> {
+    static RUNS: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    RUNS.get_or_init(Default::default)
+}
+
+/// The selected databases of a Backup/export run and their state. It starts
+/// one export thread for the databases without a result.
+fn advance_backup_databases(
+    paths: &WorkerPaths,
+    registry: &Registry,
+    run: &ScenarioRun,
+) -> Result<DatabaseStep, String> {
+    let (id, revision) = (&run.scenario.scenario_id, run.scenario.revision);
+    if registry.scenario_mode(id).ok().as_deref() != Some("backup_export") {
+        return Ok(DatabaseStep::None);
+    }
+    let databases: Vec<String> = registry
+        .backup_resources(id, revision)
+        .map_err(|_| "registry_unavailable".to_string())?
+        .into_iter()
+        .filter(|r| r.category == "databases" && r.rule == "include")
+        .map(|r| r.provider_id)
+        .collect();
+    if databases.is_empty() {
+        return Ok(DatabaseStep::None);
+    }
+    let results = registry
+        .backup_database_results(&run.id)
+        .map_err(|_| "registry_unavailable".to_string())?;
+    let missing: Vec<String> = databases
+        .iter()
+        .filter(|database| {
+            !results
+                .iter()
+                .any(|result| &result.provider_id == *database)
+        })
+        .cloned()
+        .collect();
+    if missing.is_empty() {
+        return Ok(DatabaseStep::Done {
+            failed: results.iter().any(|result| result.result == "failed"),
+            cancelled: results.iter().any(|result| result.result == "cancelled"),
+        });
+    }
+    let Some(connection_id) = ispmanager_source_connection(registry, id, revision) else {
+        return Err("ispmanager_connection_unavailable".to_string());
+    };
+    if !database_runs()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(run.id.clone())
+    {
+        return Ok(DatabaseStep::Running);
+    }
+    let paths = paths.clone();
+    let run = run.clone();
+    let clean_files = backup_without_files(registry, &run);
+    thread::spawn(move || {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if clean_files {
+                set_database_progress(&run, "cleanup", 0, missing.len(), 0);
+            }
+            if clean_files && !clean_backup_files(&paths, &run) {
+                cleanup_failures()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(run.id.clone());
+            }
+            export_run_databases(&paths, &run, &connection_id, &missing)
+        }));
+        if outcome.is_err() {
+            eprintln!(
+                "qadren-worker: {} database export of run {} panicked",
+                log_time(),
+                run.id
+            );
+        }
+        database_runs()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&run.id);
+        database_progress()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&run.id);
+        wake_runs();
+    });
+    Ok(DatabaseStep::Running)
+}
+
+/// True while the run is active and no stop was requested.
+fn run_still_active(paths: &WorkerPaths, run: &ScenarioRun) -> bool {
+    let Ok(registry) = Registry::open(&paths.registry) else {
+        return true;
+    };
+    let Ok(Some(current)) = registry.scenario_run(&run.id) else {
+        return false;
+    };
+    if !matches!(current.state.as_str(), "planning" | "executing") {
+        return false;
+    }
+    !current.batch_id.as_deref().is_some_and(|batch| {
+        matches!(
+            registry.scenario_create_batch_summary(batch, unix_now()),
+            Ok(Some(summary)) if summary.cancellation_requested
+        )
+    })
+}
+
+/// Export the databases of one run, one after another. Each database gets
+/// a durable result. The access facts come from the panel for each
+/// database and stay in memory.
+fn export_run_databases(
+    paths: &WorkerPaths,
+    run: &ScenarioRun,
+    connection_id: &str,
+    databases: &[String],
+) {
+    let record =
+        |database: &str, result: &str, error: Option<&str>, done: Option<(u64, String)>| {
+            if let Ok(registry) = Registry::open(&paths.registry) {
+                let (bytes, md5) =
+                    done.map_or((None, None), |(bytes, md5)| (Some(bytes), Some(md5)));
+                let _ = registry.record_backup_database_result(
+                    &run.id,
+                    &BackupDatabaseResult {
+                        provider_id: database.to_owned(),
+                        result: result.to_owned(),
+                        error: error.map(str::to_owned),
+                        bytes,
+                        md5,
+                        finished_at: unix_now(),
+                    },
+                );
+            }
+            eprintln!(
+                "qadren-worker: {} run {} database export {result}{}",
+                log_time(),
+                run.id,
+                error.map_or(String::new(), |error| format!(": {error}"))
+            );
+        };
+    let fail_all = |code: &str| {
+        for database in databases {
+            record(database, "failed", Some(code), None);
+        }
+    };
+    let Some((login, password)) = runner().ispmanager_login(connection_id) else {
+        // The run waits for the login; the next advance starts again.
+        return;
+    };
+    let url = Registry::open(&paths.registry)
+        .ok()
+        .and_then(|registry| registry.get(connection_id).ok().flatten())
+        .and_then(|connection| connection.endpoint_url)
+        .and_then(|url| qadren_core::ispmanager::PanelUrl::parse(&url).ok());
+    let Some(url) = url else {
+        return fail_all("ispmanager_connection_unavailable");
+    };
+    let Ok(mut session) = qadren_core::ispmanager::Session::new(url, login, password) else {
+        return fail_all("ispmanager_network_error");
+    };
+    let connected = std::time::Instant::now();
+    let connection = match open_sftp(paths, connection_id) {
+        Ok(connection) => connection,
+        Err(code) => return fail_all(code),
+    };
+    eprintln!(
+        "qadren-worker: {} run {} database export ssh sign-in {:.1}s",
+        log_time(),
+        run.id,
+        connected.elapsed().as_secs_f64()
+    );
+    let staging = paths
+        .registry
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("database-staging");
+    let checked = Mutex::new(std::time::Instant::now());
+    let keep_going = || {
+        let mut last = checked
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if last.elapsed() < Duration::from_secs(5) {
+            return true;
+        }
+        *last = std::time::Instant::now();
+        run_still_active(paths, run)
+    };
+    for (index, database) in databases.iter().enumerate() {
+        set_database_progress(run, "dump", index + 1, databases.len(), 0);
+        if !run_still_active(paths, run) {
+            record(database, "cancelled", Some("stopped_by_user"), None);
+            continue;
+        }
+        let asked = std::time::Instant::now();
+        let access = match qadren_core::ispmanager::mysql_access(&mut session, database) {
+            Ok(access) => access,
+            Err(code) => {
+                record(database, "failed", Some(code), None);
+                continue;
+            }
+        };
+        let access_time = asked.elapsed();
+        let mut timing = qadren_core::ispmanager_execution::DatabaseExportTiming::default();
+        let status = run_ispmanager_database_export(
+            &paths.jobs,
+            &paths.registry,
+            &run.scenario.scenario_id,
+            run.scenario.revision,
+            &run.id,
+            &connection,
+            &access,
+            &staging,
+            &|step| match step {
+                qadren_core::ispmanager_execution::ExportProgress::Dump { bytes } => {
+                    // Each chunk only changes the byte count.
+                    if let Some(progress) = database_progress()
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .get_mut(&run.id)
+                    {
+                        progress.bytes = bytes;
+                    }
+                    keep_going()
+                }
+                qadren_core::ispmanager_execution::ExportProgress::Publish => {
+                    set_database_progress(run, "publish", index + 1, databases.len(), 0);
+                    true
+                }
+            },
+            &mut timing,
+        );
+        drop(access);
+        // The stages of one export, without the database name (D-028).
+        eprintln!(
+            "qadren-worker: {} run {} database export timing: panel access {:.1}s, dump {:.1}s, \
+             sql {} bytes, network {} bytes, gzip {}, compare {:.1}s, publish {:.1}s",
+            log_time(),
+            run.id,
+            access_time.as_secs_f64(),
+            timing.dump.as_secs_f64(),
+            timing.sql_bytes,
+            timing.network_bytes,
+            if timing.compressed { "on" } else { "off" },
+            timing.compare.as_secs_f64(),
+            timing.publish.as_secs_f64()
+        );
+        match status {
+            Ok(DatabaseExportStatus::Created { bytes, md5 }) => {
+                record(database, "created", None, Some((bytes, md5)))
+            }
+            Ok(DatabaseExportStatus::Updated { bytes, md5 }) => {
+                record(database, "updated", None, Some((bytes, md5)))
+            }
+            Ok(DatabaseExportStatus::Unchanged { bytes, md5 }) => {
+                record(database, "unchanged", None, Some((bytes, md5)))
+            }
+            Ok(DatabaseExportStatus::Existing(JobState::Completed)) => {
+                record(database, "updated", None, None)
+            }
+            Ok(DatabaseExportStatus::Existing(_)) => {
+                record(database, "failed", Some("items_unknown"), None)
+            }
+            Err("stopped_by_user") => record(database, "cancelled", Some("stopped_by_user"), None),
+            Err(code) => record(database, "failed", Some(code), None),
+        }
+    }
 }
 
 fn finish_run(
@@ -1106,26 +1845,32 @@ fn snapshot_keys(
     let scenario = registry
         .get_scenario_revision(scenario_id, revision)
         .ok()??;
-    let selection = registry
+    let scope = registry
         .get_scenario_revision_scope(scenario_id, revision)
-        .ok()?
-        .selected_paths;
-    let key = |connection_id: &str, root: &str| {
+        .ok()?;
+    let (selection, exclusions) = (scope.selected_paths, scope.excluded_paths);
+    // The `files/` destination of a Backup/export Scenario is a mirror of
+    // the source scope: its snapshot covers the whole folder, so an object
+    // outside the selection or inside an exclusion becomes a deletion
+    // (D-027 section 5.6a).
+    let mirror = registry.scenario_mode(scenario_id).ok().as_deref() == Some("backup_export");
+    let key = |connection_id: &str, root: &str, whole: bool| {
         let adapter = registry.get(connection_id).ok()??.adapter;
         Some(SnapshotKey {
             connection_id: connection_id.to_owned(),
-            kind: if adapter == YANDEX_DISK {
-                YANDEX_DISK.to_owned()
+            kind: if adapter == YANDEX_DISK || adapter == ISPMANAGER {
+                adapter
             } else {
                 "local".to_owned()
             },
             root: root.to_owned(),
-            selection: selection.clone(),
+            selection: if whole { vec![] } else { selection.clone() },
+            exclusions: if whole { vec![] } else { exclusions.clone() },
         })
     };
     Some((
-        key(&scenario.left_connection_id, &scenario.left_root)?,
-        key(&scenario.right_connection_id, &scenario.right_root)?,
+        key(&scenario.left_connection_id, &scenario.left_root, false)?,
+        key(&scenario.right_connection_id, &scenario.right_root, mirror)?,
     ))
 }
 
@@ -1133,7 +1878,14 @@ fn snapshot_keys(
 /// exits (D-024 stage 3).
 fn run_snapshots_forever(paths: WorkerPaths) {
     loop {
-        let worked = run_snapshot_pass(&paths);
+        // A panic in one pass must not stop every later walk (found on
+        // 2026-11-04: one SFTP panic stopped all snapshots).
+        let worked =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_snapshot_pass(&paths)))
+                .unwrap_or_else(|_| {
+                    eprintln!("qadren-worker: {} snapshot pass panicked", log_time());
+                    false
+                });
         thread::sleep(if worked {
             Duration::from_millis(5)
         } else {
@@ -1153,7 +1905,27 @@ fn run_snapshot_pass(paths: &WorkerPaths) -> bool {
     let client = YandexMetadataClient::new().ok();
     let mut worked = false;
     for snapshot in walking {
-        let result = if snapshot.key.kind == YANDEX_DISK {
+        let result = if snapshot.key.kind == ISPMANAGER {
+            // Without a login from the app the walk waits.
+            if runner()
+                .ispmanager_login(&snapshot.key.connection_id)
+                .is_none()
+            {
+                continue;
+            }
+            match runner().checkout_sftp(paths, &snapshot.key.connection_id) {
+                Ok(connection) => {
+                    let result = walk_sftp_step(&store, &connection, &snapshot.key, &snapshot.id);
+                    let healthy = !matches!(result, Err(SnapshotError::Transient(_)));
+                    runner().checkin_sftp(&snapshot.key.connection_id, connection, healthy);
+                    result
+                }
+                Err(code @ ("ispmanager_host_key_unconfirmed" | "ispmanager_host_key_changed")) => {
+                    Err(SnapshotError::Blocked(code.into()))
+                }
+                Err(code) => Err(SnapshotError::Transient(code.into())),
+            }
+        } else if snapshot.key.kind == YANDEX_DISK {
             // Without a token from the app the walk waits.
             let (Some(token), Some(client)) =
                 (runner().token(&snapshot.key.connection_id), client.as_ref())
@@ -1217,6 +1989,19 @@ fn run_snapshot_pass(paths: &WorkerPaths) -> bool {
     if !worked {
         if let Ok(registry) = Registry::open(&paths.registry) {
             let _ = plan_store::remove_plans_of_removed_scenarios(store.connection(), &registry);
+            // Snapshots of old revisions and removed Scenarios only take space.
+            if let Ok(scenarios) = registry.list_scenarios() {
+                let current: std::collections::HashSet<String> = scenarios
+                    .iter()
+                    .filter_map(|scenario| {
+                        snapshot_keys(&registry, &scenario.id, scenario.revision)
+                    })
+                    .flat_map(|(left, right)| [left.fingerprint(), right.fingerprint()])
+                    .collect();
+                if !current.is_empty() {
+                    let _ = store.prune_unused_keys(&current);
+                }
+            }
         }
         let _ = store.prune();
     }
@@ -1469,7 +2254,7 @@ fn executable_actions(
             .scenario_source_wins_confirmed(&reference.scenario_id, reference.revision)
             .map_err(|_| "registry_unavailable")?;
     Ok(if confirmed {
-        vec!["create", "update", "delete"]
+        vec!["create", "update", "delete", "delete_folder"]
     } else {
         vec!["create"]
     })
@@ -1560,6 +2345,31 @@ fn start_snapshots(paths: &WorkerPaths, request: &Request) -> serde_json::Value 
     let Some((left, right)) = snapshot_keys(&registry, scenario_id, revision) else {
         return serde_json::json!({"ok": false, "status": "scenario_unavailable"});
     };
+    // A Backup/export revision without files has no file plan: an empty file
+    // selection would mean the whole home folder (D-027 section 7b).
+    if left.kind == ISPMANAGER
+        && registry
+            .backup_resources(scenario_id, revision)
+            .is_ok_and(|resources| {
+                !resources
+                    .iter()
+                    .any(|r| r.category == "files" && r.rule == "include")
+            })
+    {
+        return serde_json::json!({"ok": false, "status": "backup_without_files"});
+    }
+    // The `files/` folder of a Backup/export destination (D-027 section 5.2)
+    // must exist before the destination walk: a missing root is an error.
+    if left.kind == ISPMANAGER {
+        let files_root = Path::new(&right.root);
+        if let (Some(parent), Some(name)) = (files_root.parent(), files_root.file_name()) {
+            let created = LocalFilesystem::open(parent)
+                .and_then(|destination| destination.create_directory_tree(Path::new(name)));
+            if created.is_err() && !files_root.is_dir() {
+                return serde_json::json!({"ok": false, "status": "local_root_unavailable"});
+            }
+        }
+    }
     if let (Some(connection), Some(AccessToken(token))) = (
         yandex_source_connection(&registry, scenario_id, revision),
         request.access_token.as_ref(),
@@ -1602,10 +2412,20 @@ fn snapshot_status(paths: &WorkerPaths, request: &Request) -> serde_json::Value 
     })
 }
 
-/// Batch children that one pass of the run thread reads (D-024).
-const DUE_PAGE: usize = 256;
 /// Parallel downloads for each Yandex Disk connection (D-024).
 const YANDEX_PARALLEL_DOWNLOADS: usize = 2;
+
+/// Idle SFTP sessions for each ISPmanager connection: one for the walk and
+/// the parallel downloads (`YANDEX_PARALLEL_DOWNLOADS`).
+const SFTP_POOL_SIZE: usize = 3;
+/// A session idle longer than this closes: the SSH inactivity timeout of
+/// the client is 60 s.
+const SFTP_IDLE_LIMIT: Duration = Duration::from_secs(30);
+
+struct PooledSftp {
+    connection: SftpConnection,
+    returned: std::time::Instant,
+}
 
 /// State of the run thread that the IPC thread can read (D-024).
 struct Runner {
@@ -1613,6 +2433,12 @@ struct Runner {
     tokens: Mutex<HashMap<String, String>>,
     /// SMB logins and passwords by connection ID, from the app. Memory only.
     smb_logins: Mutex<HashMap<String, (String, String)>>,
+    /// ISPmanager logins and passwords by connection ID (D-027). Memory only.
+    ispmanager_logins: Mutex<HashMap<String, (String, String)>>,
+    /// Open SFTP sessions by connection ID that wait for the next file or
+    /// walk step. One SSH sign-in for each file was too slow and fills the
+    /// server log (2026-11-04).
+    sftp_pool: Mutex<HashMap<String, Vec<PooledSftp>>>,
     /// The login that the server refused, by connection ID. The app sends
     /// the same login again every minute; it is not used again.
     smb_refused: Mutex<HashMap<String, (String, String)>>,
@@ -1633,6 +2459,61 @@ impl Runner {
     /// True while a restart waits: running effects finish, new ones wait.
     fn draining(&self) -> bool {
         unix_now() < self.drain_until.load(Ordering::SeqCst)
+    }
+
+    fn remember_ispmanager_login(&self, connection_id: &str, login: &str, password: &str) {
+        let credentials = (login.to_owned(), password.to_owned());
+        let changed = self.ispmanager_logins.lock().is_ok_and(|mut logins| {
+            logins.insert(connection_id.to_owned(), credentials.clone()) != Some(credentials)
+        });
+        // Sessions of an earlier login are not used again.
+        if changed {
+            if let Ok(mut pool) = self.sftp_pool.lock() {
+                pool.remove(connection_id);
+            }
+        }
+    }
+
+    /// An idle session from the pool, or a new one.
+    fn checkout_sftp(
+        &self,
+        paths: &WorkerPaths,
+        connection_id: &str,
+    ) -> Result<SftpConnection, &'static str> {
+        let pooled = self.sftp_pool.lock().ok().and_then(|mut pool| {
+            let sessions = pool.get_mut(connection_id)?;
+            sessions.retain(|session| session.returned.elapsed() < SFTP_IDLE_LIMIT);
+            sessions.pop()
+        });
+        match pooled {
+            Some(session) => Ok(session.connection),
+            None => open_sftp(paths, connection_id),
+        }
+    }
+
+    /// Return a session after use. A session after a network or session
+    /// error closes instead.
+    fn checkin_sftp(&self, connection_id: &str, connection: SftpConnection, healthy: bool) {
+        if !healthy {
+            return;
+        }
+        if let Ok(mut pool) = self.sftp_pool.lock() {
+            let sessions = pool.entry(connection_id.to_owned()).or_default();
+            if sessions.len() < SFTP_POOL_SIZE {
+                sessions.push(PooledSftp {
+                    connection,
+                    returned: std::time::Instant::now(),
+                });
+            }
+        }
+    }
+
+    fn ispmanager_login(&self, connection_id: &str) -> Option<(String, String)> {
+        self.ispmanager_logins
+            .lock()
+            .ok()?
+            .get(connection_id)
+            .cloned()
     }
 
     fn remember_token(&self, connection_id: &str, token: &str) {
@@ -1677,6 +2558,8 @@ fn runner() -> &'static Runner {
     RUNNER.get_or_init(|| Runner {
         tokens: Mutex::new(HashMap::new()),
         smb_logins: Mutex::new(HashMap::new()),
+        ispmanager_logins: Mutex::new(HashMap::new()),
+        sftp_pool: Mutex::new(HashMap::new()),
         smb_refused: Mutex::new(HashMap::new()),
         smb_retry: Mutex::new(HashMap::new()),
         active: AtomicUsize::new(0),
@@ -1689,32 +2572,135 @@ fn unix_now() -> i64 {
     i64::try_from(log_time()).unwrap_or(i64::MAX)
 }
 
-/// The run thread: start due batch children until the Worker exits.
+/// The run thread: give every Scenario run with due files its own lane until
+/// the Worker exits. One shared page let a run of long or failing downloads
+/// hold back every other run (found on 2026-11-04).
 fn run_batches_forever(paths: WorkerPaths) {
     loop {
-        run_due_batch_children(&paths);
+        // A panic in one pass must not stop every later effect.
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| start_lanes(&paths))).is_err() {
+            eprintln!("qadren-worker: {} batch pass panicked", log_time());
+        }
         thread::sleep(Duration::from_secs(1));
     }
 }
 
-/// One pass over the batch children that are due now. A Yandex Disk batch
-/// without a token waits until the app sends one.
-fn run_due_batch_children(paths: &WorkerPaths) {
+/// Batches whose lane runs now.
+fn lanes() -> &'static Mutex<std::collections::HashSet<String>> {
+    static LANES: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    LANES.get_or_init(Default::default)
+}
+
+/// Start a lane for each batch with due children that has none.
+fn start_lanes(paths: &WorkerPaths) {
     if runner().draining() {
         return;
     }
-    let Ok(registry) = Registry::open(&paths.registry) else {
+    let Ok(batches) = Registry::open(&paths.registry)
+        .and_then(|registry| registry.due_scenario_batches(unix_now()))
+    else {
         return;
     };
-    // D-024 scale rules: one bounded page per pass, read through an index.
-    // D-025 section 11: the page takes children of each batch in turn.
-    let Ok(due) = registry.due_scenario_create_batch_children(unix_now(), DUE_PAGE) else {
+    for batch in batches {
+        let started = lanes()
+            .lock()
+            .is_ok_and(|mut lanes| lanes.insert(batch.clone()));
+        if started {
+            let paths = paths.clone();
+            thread::spawn(move || {
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_lane(&paths, &batch)
+                }))
+                .is_err()
+                {
+                    eprintln!(
+                        "qadren-worker: {} lane of batch {batch} panicked",
+                        log_time()
+                    );
+                }
+                if let Ok(mut lanes) = lanes().lock() {
+                    lanes.remove(&batch);
+                }
+            });
+        }
+    }
+}
+
+/// Files of one run that a lane reads at a time.
+const LANE_PAGE: usize = 32;
+/// Parallel effects of one run.
+const LANE_THREADS: usize = 2;
+
+/// Run the due children of one batch, page by page, until none is due. A
+/// batch that waits for a token or a login keeps its lane and checks again.
+fn run_lane(paths: &WorkerPaths, batch: &str) {
+    loop {
+        if runner().draining() {
+            return;
+        }
+        let Some((due, cancelled, queue)) = lane_items(paths, batch) else {
+            return;
+        };
+        if due == 0 {
+            return;
+        }
+        // A stopped run cancels page after page at once; only a run that
+        // waits for a token or a login pauses (found on 2026-11-04).
+        if queue.is_empty() && cancelled == 0 {
+            thread::sleep(Duration::from_secs(5));
+            continue;
+        }
+        if queue.is_empty() {
+            continue;
+        }
+        run_pool(paths, queue, LANE_THREADS);
+    }
+}
+
+/// All batches one after another, for one Worker pass (`--once`, tests).
+fn run_due_batch_children(paths: &WorkerPaths) {
+    let Ok(batches) = Registry::open(&paths.registry)
+        .and_then(|registry| registry.due_scenario_batches(unix_now()))
+    else {
         return;
     };
-    // The Yandex Disk source and the left and right connections of each batch.
-    type Endpoints = (Option<String>, Option<(String, String)>);
-    let mut endpoints: HashMap<String, Endpoints> = HashMap::new();
+    for batch in batches {
+        if let Some((_, _, queue)) = lane_items(paths, &batch) {
+            run_pool(paths, queue, LANE_THREADS);
+        }
+    }
+}
+
+/// One page of a batch as pool items: the number of due children, the
+/// number cancelled now, and the children that can run now. A Yandex Disk
+/// batch without a token and an ISPmanager batch without a login wait for
+/// the app.
+fn lane_items(
+    paths: &WorkerPaths,
+    batch: &str,
+) -> Option<(usize, usize, std::collections::VecDeque<PoolItem>)> {
+    let registry = Registry::open(&paths.registry).ok()?;
+    let due = registry
+        .due_children_of_batch(batch, unix_now(), LANE_PAGE)
+        .ok()?;
+    let count = due.len();
+    let Some(first) = due.first() else {
+        return Some((0, 0, Default::default()));
+    };
+    if first.cancellation_requested {
+        let cancelled = registry.cancel_pending_batch_children(batch).ok()?;
+        return Some((count, cancelled, Default::default()));
+    }
+    let (scenario, revision) = (first.scenario.scenario_id.clone(), first.scenario.revision);
+    let sides = registry
+        .get_scenario_revision(&scenario, revision)
+        .ok()
+        .flatten()
+        .map(|scenario| (scenario.left_connection_id, scenario.right_connection_id));
+    let yandex = yandex_source_connection(&registry, &scenario, revision);
+    let ispmanager = ispmanager_source_connection(&registry, &scenario, revision);
     let mut queue = std::collections::VecDeque::new();
+    let mut cancelled = 0;
     for child in due {
         if child.cancellation_requested {
             let _ = registry.finish_scenario_create_batch_child(
@@ -1723,30 +2709,21 @@ fn run_due_batch_children(paths: &WorkerPaths) {
                 "cancelled",
                 None,
             );
+            cancelled += 1;
             continue;
         }
-        let (source, sides) = endpoints
-            .entry(child.batch_id.clone())
-            .or_insert_with(|| {
-                let (scenario, revision) = (&child.scenario.scenario_id, child.scenario.revision);
-                let sides = registry
-                    .get_scenario_revision(scenario, revision)
-                    .ok()
-                    .flatten()
-                    .map(|scenario| (scenario.left_connection_id, scenario.right_connection_id));
-                (
-                    yandex_source_connection(&registry, scenario, revision),
-                    sides,
-                )
-            })
-            .clone();
-        let Some((left, right)) = sides else {
+        let Some((left, right)) = sides.clone() else {
             continue;
         };
         let destination = if child.source_is_left { right } else { left };
         let mut slots = vec![format!("write:{destination}")];
-        if let Some(connection) = &source {
-            // A Yandex batch waits for its token; its children stay pending.
+        if let Some(connection) = &ispmanager {
+            if runner().ispmanager_login(connection).is_none() {
+                continue;
+            }
+            slots.push(format!("sftp:{connection}"));
+        }
+        if let Some(connection) = &yandex {
             if runner().token(connection).is_none() {
                 continue;
             }
@@ -1754,92 +2731,114 @@ fn run_due_batch_children(paths: &WorkerPaths) {
         }
         queue.push_back(PoolItem {
             child,
-            yandex: source,
+            yandex: yandex.clone(),
+            ispmanager: ispmanager.clone(),
             slots,
         });
     }
-    drop(registry);
-    run_pool(paths, queue);
+    Some((count, cancelled, queue))
 }
 
-/// Effect threads for each pass (D-025 section 11).
-const EFFECT_THREADS: usize = 4;
-/// Parallel effects in one destination connection (Local Filesystem or SMB).
-const DESTINATION_PARALLEL_EFFECTS: usize = 2;
+/// Parallel effects in one destination connection (Local Filesystem or SMB),
+/// over all lanes. Each lane has `LANE_THREADS`, so two runs into one
+/// destination both move: with 2, long downloads of one run held both slots
+/// (found on 2026-11-04).
+const DESTINATION_PARALLEL_EFFECTS: usize = 4;
 
 struct PoolItem {
     child: DueBatchChild,
     yandex: Option<String>,
+    /// The ISPmanager source of a Backup/export child (D-027).
+    ispmanager: Option<String>,
     /// Limited resources that this child uses: its destination connection
-    /// and, for a Yandex Disk source, the download slots of that connection.
+    /// and, for a remote source, the download slots of that connection.
     slots: Vec<String>,
 }
 
 fn slot_limit(slot: &str) -> usize {
-    if slot.starts_with("yandex:") {
+    if slot.starts_with("yandex:") || slot.starts_with("sftp:") {
         YANDEX_PARALLEL_DOWNLOADS
     } else {
         DESTINATION_PARALLEL_EFFECTS
     }
 }
 
-/// Run the queue on a fixed pool of threads. A thread takes the first child
-/// whose connections have a free slot, so a full connection does not block
-/// children of other connections.
-fn run_pool(paths: &WorkerPaths, queue: std::collections::VecDeque<PoolItem>) {
-    struct State {
-        queue: std::collections::VecDeque<PoolItem>,
-        busy: HashMap<String, usize>,
-    }
-    let state = Mutex::new(State {
-        queue,
-        busy: HashMap::new(),
-    });
-    let freed = std::sync::Condvar::new();
+/// Connection slots that every lane shares, so that parallel runs keep the
+/// limits of each connection.
+struct SlotTable {
+    busy: Mutex<HashMap<String, usize>>,
+    freed: std::sync::Condvar,
+}
+
+fn slot_table() -> &'static SlotTable {
+    static TABLE: OnceLock<SlotTable> = OnceLock::new();
+    TABLE.get_or_init(|| SlotTable {
+        busy: Mutex::new(HashMap::new()),
+        freed: std::sync::Condvar::new(),
+    })
+}
+
+/// Run one lane page on `threads` threads. A thread takes the first child
+/// whose connections have a free slot; a full connection does not block
+/// children that use other connections.
+fn run_pool(paths: &WorkerPaths, queue: std::collections::VecDeque<PoolItem>, threads: usize) {
+    let queue = Mutex::new(queue);
+    let table = slot_table();
     thread::scope(|scope| {
-        for _ in 0..EFFECT_THREADS {
+        for _ in 0..threads {
             scope.spawn(|| loop {
-                let Ok(mut guard) = state.lock() else {
-                    return;
-                };
                 let item = loop {
                     // A waiting restart takes effect before the next child.
-                    if guard.queue.is_empty() || runner().draining() {
+                    if runner().draining() {
                         return;
                     }
-                    let free = guard.queue.iter().position(|item| {
-                        item.slots.iter().all(|slot| {
-                            guard.busy.get(slot).copied().unwrap_or(0) < slot_limit(slot)
-                        })
+                    let Ok(mut pending) = queue.lock() else {
+                        return;
+                    };
+                    if pending.is_empty() {
+                        return;
+                    }
+                    let Ok(mut busy) = table.busy.lock() else {
+                        return;
+                    };
+                    let free = pending.iter().position(|item| {
+                        item.slots
+                            .iter()
+                            .all(|slot| busy.get(slot).copied().unwrap_or(0) < slot_limit(slot))
                     });
                     if let Some(index) = free {
-                        let item = guard.queue.remove(index).expect("position is in range");
+                        let item = pending.remove(index).expect("position is in range");
                         for slot in &item.slots {
-                            *guard.busy.entry(slot.clone()).or_default() += 1;
+                            *busy.entry(slot.clone()).or_default() += 1;
                         }
                         break item;
                     }
-                    let Ok(next) = freed.wait(guard) else {
-                        return;
-                    };
-                    guard = next;
+                    drop(pending);
+                    // Another lane can free the slot; check again at least
+                    // every second.
+                    let _ = table.freed.wait_timeout(busy, Duration::from_secs(1));
                 };
-                drop(guard);
                 run_pool_item(paths, &item);
-                if let Ok(mut guard) = state.lock() {
+                if let Ok(mut busy) = table.busy.lock() {
                     for slot in &item.slots {
-                        if let Some(count) = guard.busy.get_mut(slot) {
-                            *count -= 1;
+                        if let Some(count) = busy.get_mut(slot) {
+                            *count = count.saturating_sub(1);
                         }
                     }
                 }
-                freed.notify_all();
+                table.freed.notify_all();
             });
         }
     });
 }
 
 fn run_pool_item(paths: &WorkerPaths, item: &PoolItem) {
+    if let Some(connection) = &item.ispmanager {
+        if still_due(paths, &item.child) {
+            run_ispmanager_batch_child(paths, &item.child, connection);
+        }
+        return;
+    }
     match &item.yandex {
         Some(connection) => {
             // A 401 removes the token; the batch then waits.
@@ -1886,6 +2885,69 @@ fn job_state(paths: &WorkerPaths, job_id: &str) -> Option<JobState> {
         .get(job_id)
         .ok()?
         .map(|job| job.state)
+}
+
+/// Run one child of a Backup/export batch on its own SFTP session and
+/// record its outcome (D-027 section 7a).
+fn run_ispmanager_batch_child(paths: &WorkerPaths, child: &DueBatchChild, connection_id: &str) {
+    runner().active.fetch_add(1, Ordering::SeqCst);
+    let result = (|| {
+        if let Some(state) = job_state(paths, &child.job_id) {
+            return Ok(LocalFileCopyStatus::Existing(state));
+        }
+        let connection = runner()
+            .checkout_sftp(paths, connection_id)
+            .map_err(|_| LocalFileCopyError::Sftp(SftpFailure::SessionUnavailable))?;
+        let (scenario_id, revision) = (&child.scenario.scenario_id, child.scenario.revision);
+        let result = match child.kind {
+            BatchChildKind::Create => run_ispmanager_scenario_file_download(
+                &paths.jobs,
+                &paths.registry,
+                scenario_id,
+                revision,
+                &child.relative_path,
+                &child.job_id,
+                &connection,
+                None,
+            ),
+            BatchChildKind::Update => run_ispmanager_scenario_update(
+                &paths.jobs,
+                &paths.registry,
+                scenario_id,
+                revision,
+                &child.relative_path,
+                &child.job_id,
+                &connection,
+            ),
+            BatchChildKind::Delete | BatchChildKind::DeleteFolder => {
+                run_ispmanager_scenario_delete(
+                    &paths.jobs,
+                    &paths.registry,
+                    scenario_id,
+                    revision,
+                    &child.relative_path,
+                    &child.job_id,
+                    &connection,
+                    child.kind == BatchChildKind::DeleteFolder,
+                )
+                .map(|status| match status {
+                    LocalRuleDeleteStatus::MovedToTrash
+                    | LocalRuleDeleteStatus::DeletedPermanently => LocalFileCopyStatus::Completed,
+                    LocalRuleDeleteStatus::Existing(state) => LocalFileCopyStatus::Existing(state),
+                })
+            }
+        };
+        let healthy = !matches!(
+            result,
+            Err(LocalFileCopyError::Sftp(
+                SftpFailure::Network | SftpFailure::SessionUnavailable
+            ))
+        );
+        runner().checkin_sftp(connection_id, connection, healthy);
+        result
+    })();
+    record_batch_child_outcome(paths, child, None, result);
+    runner().active.fetch_sub(1, Ordering::SeqCst);
 }
 
 /// Run one batch child and record its outcome, or schedule its retry.
@@ -1937,6 +2999,8 @@ fn run_batch_child(paths: &WorkerPaths, child: &DueBatchChild, yandex: Option<(&
                     &client,
                 )
                 .map(deleted),
+                // Only a Backup/export mirror deletes a whole folder.
+                BatchChildKind::DeleteFolder => Err(LocalFileCopyError::ScenarioScopeMismatch),
             };
         }
         match child.kind {
@@ -1964,6 +3028,7 @@ fn run_batch_child(paths: &WorkerPaths, child: &DueBatchChild, yandex: Option<(&
                 )
                 .map(deleted)
             }
+            BatchChildKind::DeleteFolder => return Err(LocalFileCopyError::ScenarioScopeMismatch),
         }
         let registry =
             Registry::open(&paths.registry).map_err(|_| LocalFileCopyError::ScenarioUnavailable)?;
@@ -2043,6 +3108,17 @@ fn classify(error: &LocalFileCopyError) -> (Failure, String) {
             };
             (failure, code)
         }
+        E::Sftp(failure) => match failure {
+            SftpFailure::NotFound => (Failure::Permanent, "ispmanager_not_found".into()),
+            SftpFailure::PermissionDenied => {
+                (Failure::Permanent, "ispmanager_permission_denied".into())
+            }
+            SftpFailure::SessionUnavailable => {
+                (Failure::Transient, "ispmanager_session_unavailable".into())
+            }
+            SftpFailure::Network => (Failure::Transient, "ispmanager_network_error".into()),
+            SftpFailure::Changed => (Failure::Transient, "ispmanager_source_changed".into()),
+        },
         E::OutcomeUnknown(_) => (Failure::Unproven, "outcome_unknown".into()),
         E::VerificationFailed => (Failure::Unproven, "verification_failed".into()),
         E::ConnectionUnavailable => (Failure::Transient, "local_connection_unavailable".into()),
@@ -2789,6 +3865,10 @@ fn handle_client(mut stream: UnixStream, paths: &WorkerPaths, stop: &mut bool) {
             let answer = plan_status(paths, &request);
             let _ = writeln!(stream, "{answer}");
         }
+        "database_progress" => {
+            let answer = database_progress_status(&request);
+            let _ = writeln!(stream, "{answer}");
+        }
         "plan_page" => {
             let answer = plan_page(paths, &request);
             let _ = writeln!(stream, "{answer}");
@@ -2799,10 +3879,12 @@ fn handle_client(mut stream: UnixStream, paths: &WorkerPaths, stop: &mut bool) {
         }
         "stop_run" => {
             let answer = stop_scenario_run(paths, &request);
+            wake_runs();
             let _ = writeln!(stream, "{answer}");
         }
         "run_now" => {
             let answer = run_scenario_now(paths, &request);
+            wake_runs();
             let _ = writeln!(stream, "{answer}");
         }
         "start_snapshot" => {
@@ -2822,6 +3904,30 @@ fn handle_client(mut stream: UnixStream, paths: &WorkerPaths, stop: &mut bool) {
                     if !connection.is_empty() && !token.is_empty() =>
                 {
                     runner().remember_token(connection, token);
+                    true
+                }
+                _ => false,
+            };
+            respond(
+                &mut stream,
+                &Response {
+                    ok,
+                    status: if ok { "updated" } else { "invalid_request" },
+                    staged: None,
+                    dispatched: None,
+                },
+            );
+        }
+        "provide_ispmanager_credentials" => {
+            let ok = match (
+                request.connection_id.as_deref(),
+                request.login.as_deref(),
+                request.password.as_ref(),
+            ) {
+                (Some(connection), Some(login), Some(AccessToken(password)))
+                    if !connection.is_empty() && !login.is_empty() =>
+                {
+                    runner().remember_ispmanager_login(connection, login, password);
                     true
                 }
                 _ => false,
@@ -3158,6 +4264,7 @@ fn run(paths: WorkerPaths, once: bool) -> Result<(), String> {
     JobStore::claim_for_process(&paths.jobs).map_err(|_| "job_store_unavailable".to_string())?;
     if once {
         dispatch_due(&paths)?;
+        advance_scenario_runs(&paths)?;
         run_due_batch_children(&paths);
         return Ok(());
     }
@@ -3178,6 +4285,20 @@ fn run(paths: WorkerPaths, once: bool) -> Result<(), String> {
                 let _ = dispatch_due(&paths);
             }
             thread::sleep(POLL_INTERVAL);
+        });
+    }
+    // The runs advance on their own thread. Reconciliation of UNKNOWN Jobs
+    // can list large folders on a slow network drive for minutes; a manual
+    // run waited for it before it started (found on 2026-11-06). A new run
+    // or a finished step wakes this thread; otherwise it checks each poll
+    // interval (D-028).
+    {
+        let paths = paths.clone();
+        thread::spawn(move || loop {
+            if !runner().draining() {
+                let _ = advance_scenario_runs(&paths);
+            }
+            wait_for_run_wake(std::time::Instant::now() + POLL_INTERVAL);
         });
     }
     remove_stale_socket(&paths.socket)?;
@@ -3315,6 +4436,8 @@ mod tests {
         let runner = Runner {
             tokens: Mutex::new(HashMap::new()),
             smb_logins: Mutex::new(HashMap::new()),
+            ispmanager_logins: Mutex::new(HashMap::new()),
+            sftp_pool: Mutex::new(HashMap::new()),
             smb_refused: Mutex::new(HashMap::new()),
             smb_retry: Mutex::new(HashMap::new()),
             active: AtomicUsize::new(0),

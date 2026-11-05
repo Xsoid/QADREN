@@ -159,6 +159,25 @@ private func registryAdd(_ path: UnsafePointer<CChar>?, _ adapter: UnsafePointer
 private func registryAddSMBShare(_ path: UnsafePointer<CChar>?, _ name: UnsafePointer<CChar>?, _ url: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_set_smb_endpoint")
 private func registrySetSMBEndpoint(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ url: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_registry_add_ispmanager")
+private func registryAddISPmanager(_ path: UnsafePointer<CChar>?, _ name: UnsafePointer<CChar>?, _ url: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_registry_set_ispmanager_endpoint")
+private func registrySetISPmanagerEndpoint(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ url: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_registry_ispmanager_settings")
+private func registryISPmanagerSettings(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_registry_set_ispmanager_ssh_port")
+private func registrySetISPmanagerSSHPort(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ port: UInt16) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_registry_record_ispmanager_check")
+private func registryRecordISPmanagerCheck(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ report: UnsafePointer<CChar>?, _ at: Int64) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_registry_confirm_ispmanager_host_key")
+private func registryConfirmISPmanagerHostKey(_ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ fingerprint: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("qadren_scenarios_save_backup")
+private func scenarioSaveBackup(
+    _ path: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?, _ name: UnsafePointer<CChar>?,
+    _ sourceID: UnsafePointer<CChar>?, _ destinationID: UnsafePointer<CChar>?,
+    _ destinationRoot: UnsafePointer<CChar>?, _ sourceRoot: UnsafePointer<CChar>?,
+    _ resources: UnsafePointer<CChar>?, _ deletionMode: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_ensure_local_computer")
 private func registryEnsureLocalComputer(_ path: UnsafePointer<CChar>?, _ name: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("qadren_registry_rename")
@@ -194,7 +213,8 @@ struct StorageEntry: Decodable, Identifiable {
     let status: String
     let credential_ref: String?
     let provider_account_id: String?
-    /// SMB share address (D-021). It never contains a login or a password.
+    /// SMB share address (D-021) or ISPmanager panel URL (D-027). It never
+    /// contains a login or a password.
     var endpoint_url: String?
 }
 struct ScenarioEntry: Decodable, Identifiable {
@@ -214,6 +234,30 @@ struct ScenarioEntry: Decodable, Identifiable {
     /// D-024: retry a temporarily unavailable file every 24 h after the
     /// retry schedule. A Scenario parameter outside the revision.
     var retry_until_success: Bool = true
+    /// `sync` or `backup_export` (D-027 section 5).
+    var mode: String = "sync"
+    /// The typed selection of a Backup/export Scenario revision.
+    var resources: [BackupResource] = []
+
+    var isBackup: Bool { mode == "backup_export" }
+    /// A Backup/export revision with databases and no file rule: it has no
+    /// file plan, and a run dumps the databases only (D-027 section 7b).
+    var databasesOnly: Bool {
+        isBackup && !resources.contains { $0.category == "files" && $0.rule == "include" }
+    }
+}
+
+/// One selected resource of a Backup/export Scenario (D-027 section 6). For
+/// files, `provider_id` is an absolute server path and `kind` is `file`,
+/// `dir` (with all its content, also new), or `symlink`.
+struct BackupResource: Codable, Hashable {
+    let category: String
+    let provider_id: String
+    let kind: String
+    /// `include`; `exclude` for an object inside a selected folder that the
+    /// Scenario leaves out with all its content; or `structure_only` for a
+    /// table `<database>/<table>` whose dump has no data.
+    var rule = "include"
 }
 
 /// How a Scenario revision treats a deletion after a confirmed synchronization.
@@ -276,6 +320,8 @@ struct ScenarioRunState: Decodable, Equatable {
         let waiting_for_scenario: String?
         /// The file batch of an executing run.
         var batch_id: String? = nil
+        /// The Scenario revision that the run executes.
+        var revision: UInt64? = nil
     }
     /// The newest finished run, for the monitoring Scenario widget.
     struct LastRun: Decodable, Equatable {
@@ -320,6 +366,8 @@ struct ScenarioPlanAction: Decodable {
     let from_left: Bool?
     let on_left: Bool?
     let reason: String?
+    /// The file count of a whole-folder deletion (D-027 section 5.6b).
+    var files: Int? = nil
 }
 struct ScenarioPlanItem: Decodable, Identifiable {
     let relative_path: String
@@ -350,6 +398,9 @@ struct ScenarioBatchSummary: Decodable {
     let paused: Bool
     let total: Int
     let completed: Int
+    /// The `completed` items that replaced or deleted a file.
+    var completed_updates: Int? = nil
+    var completed_deletes: Int? = nil
     let failed: Int
     let cancelled: Int
     let unknown: Int
@@ -459,7 +510,7 @@ enum QADRENUserMessage {
         case "local_scenario_connection_unavailable":
             "Подключение сценария выключено или недоступно. Включите его в разделе «Подключения»."
         case "local_metadata_unavailable":
-            "Не удалось прочитать папку. QADREN не открывает папки, в которых есть символические ссылки или специальные файлы, и не следует по ссылкам. Проверьте папку или выберите другую."
+            "Не удалось прочитать папку. Возможно, диск ещё подключается или временно недоступен, нет прав на папку, или в ней есть символическая ссылка (по ссылкам QADREN не переходит). Нажмите «Повторить»; если ошибка останется, выберите другую папку."
         case "a symbolic link or special file has this name; QADREN does not synchronize it":
             "Под этим именем находится символическая ссылка или специальный файл. QADREN такие объекты не синхронизирует, поэтому действий с этим путём нет."
         case "conflict_stale":
@@ -494,6 +545,36 @@ enum QADRENUserMessage {
             "Папка сценария недоступна. Проверьте, что диск подключён и папка существует."
         case "yandex_incomplete_metadata":
             "Яндекс Диск вернул неполные метаданные. Обход продолжится автоматически."
+        case "invalid_panel_url":
+            "Адрес панели должен иметь вид https://сервер:порт/путь, например https://panel.example.com:1500/ispmgr. Логин и пароль в адрес не вписывайте."
+        case "unsupported_scenario_endpoint":
+            "Панель ISPmanager пока нельзя выбрать в сценарии. Сценарии резервного копирования с неё появятся на следующем этапе."
+        case "ispmanager_source_root_outdated":
+            "Сценарий сохранён до того, как домашняя папка аккаунта стала корнем источника, поэтому копия повторяла бы полный путь на сервере. Откройте сценарий через «Изменить» и сохраните его, затем запустите снова."
+        case "files_cleanup_failed":
+            "Файлы в сценарии не выбраны, но очистить папку files не удалось полностью. Дампы баз сняты. Подробности — в журнале фоновой службы."
+        case "databases_failed":
+            "Дамп одной или нескольких баз не снят. Файлы скопированы; прежние дампы этих баз в копии не изменены."
+        case "backup_without_files":
+            "В сценарии выбраны только базы данных: план файлов не нужен. Нажмите «Запустить»."
+        case "ispmanager_database_refused":
+            "MySQL не принял логин или пароль базы из панели. Дамп не снят."
+        case "ispmanager_database_dump_failed":
+            "mysqldump не закончил дамп базы. Дамп не сохранён; прежний файл в копии не изменён."
+        case "ispmanager_database_missing":
+            "Выбранной базы больше нет на панели. Уберите её из сценария."
+        case "ispmanager_database_access_unavailable":
+            "Панель не отдала пользователя или пароль базы. Дамп не снят."
+        case "ispmanager_database_tables_failed":
+            "Не удалось прочитать список таблиц базы через mysql по SSH."
+        case "ispmanager_unavailable":
+            "Панель ISPmanager не ответила или не приняла вход."
+        case "ispmanager_database_unsupported":
+            "Эта база не MySQL. QADREN пока снимает дампы только MySQL."
+        case "ispmanager_selected_missing":
+            "Выбранная папка или файл на сервере не найдены. Удалений нет. Откройте сценарий через «Изменить» и выберите объекты заново."
+        case "ispmanager_permission_denied":
+            "У аккаунта нет прав на чтение одной из выбранных папок на сервере. Удалений нет. Исключите эту папку или выдайте права."
         case "yandex_source_only":
             "Яндекс Диск пока может быть только источником сценария «В одну сторону», а назначением — этот Mac или сетевой диск."
         case "yandex_deletions_unsupported":
@@ -631,6 +712,41 @@ enum StorageRegistryBridge {
     static func listScenarios() throws -> [ScenarioEntry] {
         let database = try path
         return try database.withCString { try unwrap(scenarioList($0), as: [ScenarioEntry].self) }
+    }
+
+    /// Creates (nil `id`) or changes a Backup/export Scenario. Core checks the
+    /// connections and the selection; an empty selection is refused.
+    @discardableResult
+    static func saveBackupScenario(
+        id: String?, name: String, sourceID: String, destinationID: String,
+        destinationRoot: String, sourceRoot: String, resources: [BackupResource],
+        deletionMode: ScenarioDeletionMode
+    ) throws -> String {
+        let database = try path
+        let json = String(decoding: try JSONEncoder().encode(resources), as: UTF8.self)
+        let result: NewConnection = try database.withCString { db in
+            try (id ?? "").withCString { id in
+                try name.withCString { name in
+                    try sourceID.withCString { source in
+                        try destinationID.withCString { destination in
+                            try destinationRoot.withCString { root in
+                                try sourceRoot.withCString { home in
+                                    try json.withCString { resources in
+                                        try deletionMode.rawValue.withCString { mode in
+                                            try unwrap(
+                                                scenarioSaveBackup(db, id, name, source, destination, root, home, resources, mode),
+                                                as: NewConnection.self
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return result.id
     }
 
     static func createScenario(
@@ -1312,6 +1428,72 @@ enum StorageRegistryBridge {
             try id.withCString { value in
                 try address.withCString { url in
                     try unwrap(registrySetSMBEndpoint(db, value, url), as: Bool.self)
+                }
+            }
+        }
+    }
+
+    /// One ISPmanager panel connection (D-027). The URL has no credentials.
+    static func addISPmanager(name: String, url: String) throws -> String {
+        let database = try path
+        let result: NewConnection = try database.withCString { db in
+            try name.withCString { label in
+                try url.withCString { value in
+                    try unwrap(registryAddISPmanager(db, label, value), as: NewConnection.self)
+                }
+            }
+        }
+        return result.id
+    }
+
+    static func setISPmanagerEndpoint(id: String, url: String) throws {
+        let database = try path
+        let _: Bool = try database.withCString { db in
+            try id.withCString { value in
+                try url.withCString { endpoint in
+                    try unwrap(registrySetISPmanagerEndpoint(db, value, endpoint), as: Bool.self)
+                }
+            }
+        }
+    }
+
+    static func ispmanagerSettings(id: String) throws -> ISPmanagerSettings {
+        let database = try path
+        return try database.withCString { db in
+            try id.withCString { value in
+                try unwrap(registryISPmanagerSettings(db, value), as: ISPmanagerSettings.self)
+            }
+        }
+    }
+
+    static func setISPmanagerSSHPort(id: String, port: UInt16) throws {
+        let database = try path
+        let _: Bool = try database.withCString { db in
+            try id.withCString { value in
+                try unwrap(registrySetISPmanagerSSHPort(db, value, port), as: Bool.self)
+            }
+        }
+    }
+
+    static func recordISPmanagerCheck(id: String, report: ISPmanagerCheckReport) throws {
+        let database = try path
+        let json = String(decoding: try JSONEncoder().encode(report), as: UTF8.self)
+        let now = Int64(Date().timeIntervalSince1970)
+        let _: Bool = try database.withCString { db in
+            try id.withCString { value in
+                try json.withCString { text in
+                    try unwrap(registryRecordISPmanagerCheck(db, value, text, now), as: Bool.self)
+                }
+            }
+        }
+    }
+
+    static func confirmISPmanagerHostKey(id: String, fingerprint: String) throws {
+        let database = try path
+        let _: Bool = try database.withCString { db in
+            try id.withCString { value in
+                try fingerprint.withCString { key in
+                    try unwrap(registryConfirmISPmanagerHostKey(db, value, key), as: Bool.self)
                 }
             }
         }

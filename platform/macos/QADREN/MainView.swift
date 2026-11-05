@@ -120,8 +120,9 @@ struct MainView: View {
                     )
                     .padding(12)
                 } else {
-                    // Top alignment: widgets of different heights start on one line.
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 270), spacing: 10, alignment: .top)], spacing: 10) {
+                    // Columns, not rows: a row was as tall as its tallest widget
+                    // and left a gap under a short one (found on 2026-11-04).
+                    MonitoringMasonryLayout(minimumColumnWidth: 270, spacing: 10) {
                         ForEach(dashboardLayout.widgets) { widget in
                             MonitoringWidgetView(
                                 widget: widget, feed: feed, connections: connections,
@@ -316,3 +317,43 @@ struct YandexConnectionCard: View {
     }
 }
 
+
+/// Columns of equal width, at least `minimumColumnWidth` wide. Each widget,
+/// in layout order, goes into the shortest column, so a short widget leaves
+/// no gap below it.
+struct MonitoringMasonryLayout: Layout {
+    var minimumColumnWidth: CGFloat
+    var spacing: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? minimumColumnWidth
+        let frames = frames(for: width, subviews: subviews)
+        return CGSize(width: width, height: frames.map(\.maxY).max() ?? 0)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        for (frame, subview) in zip(frames(for: bounds.width, subviews: subviews), subviews) {
+            subview.place(
+                at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY),
+                proposal: ProposedViewSize(width: frame.width, height: frame.height)
+            )
+        }
+    }
+
+    private func frames(for width: CGFloat, subviews: Subviews) -> [CGRect] {
+        let count = max(1, Int((width + spacing) / (minimumColumnWidth + spacing)))
+        let columnWidth = max(0, (width - spacing * CGFloat(count - 1)) / CGFloat(count))
+        var heights = Array(repeating: CGFloat(0), count: count)
+        return subviews.map { subview in
+            let height = subview.sizeThatFits(ProposedViewSize(width: columnWidth, height: nil)).height
+            // The first of the shortest columns keeps the reading order.
+            let column = heights.indices.min { heights[$0] < heights[$1] } ?? 0
+            let frame = CGRect(
+                x: CGFloat(column) * (columnWidth + spacing), y: heights[column],
+                width: columnWidth, height: height
+            )
+            heights[column] += height + spacing
+            return frame
+        }
+    }
+}

@@ -16,7 +16,7 @@ use crate::model::{
 };
 use crate::registry::Registry;
 use crate::scenario_planner::{
-    name_key, plan_path, ObservedFile, PathObservation, PlanAction, SideChange,
+    name_key, plan_mirror_path, plan_path, ObservedFile, PathObservation, PlanAction, SideChange,
 };
 use crate::snapshot::{SnapshotError, SnapshotStore};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -75,6 +75,121 @@ pub fn ensure_schema(db: &Connection) -> Result<()> {
          ) WITHOUT ROWID;
          CREATE INDEX IF NOT EXISTS plan_items_by_action ON plan_items(plan_id, action, seq);",
     )?;
+    // A folder deletion row of a Backup/export mirror counts its files
+    // (D-027 section 5.6b).
+    let has_folder_files: bool = db.query_row(
+        "SELECT count(*) FROM pragma_table_info('plan_items') WHERE name='folder_files'",
+        [],
+        |row| row.get::<_, i64>(0).map(|count| count > 0),
+    )?;
+    if !has_folder_files {
+        db.execute_batch("ALTER TABLE plan_items ADD COLUMN folder_files INTEGER;")?;
+    }
+    Ok(())
+}
+
+/// The parent folders of a relative path, nearest last, without the root.
+fn parent_folders(path: &str) -> impl Iterator<Item = &str> {
+    path.match_indices('/')
+        .map(move |(index, _)| &path[..index])
+}
+
+/// D-027 section 5.6b: in a Backup/export mirror, a destination folder is
+/// one deletion when every planned object under it is a destination
+/// deletion and the source has no folder with that name there. Only the
+/// topmost such folder becomes a row; the file rows under it go. Any other
+/// row under a folder (a copy, a skipped entry, a `.qadren-` file, a
+/// collision) keeps that folder and its parents.
+fn group_folder_deletions(tx: &Connection, id: &str, left_snapshot: &str) -> Result<()> {
+    use std::collections::{HashMap, HashSet};
+    // Name keys: a folder that differs only by letter case or Unicode form
+    // is the same folder on a case-insensitive volume.
+    let mut keep: HashSet<String> = HashSet::new();
+    {
+        let mut statement = tx.prepare("SELECT path FROM snapshot_folders WHERE snapshot_id=?1")?;
+        let mut rows = statement.query([left_snapshot])?;
+        while let Some(row) = rows.next()? {
+            let path: String = row.get(0)?;
+            keep.extend(parent_folders(&path).map(name_key));
+            if !path.is_empty() {
+                keep.insert(name_key(&path));
+            }
+        }
+    }
+    struct Folder {
+        first_seq: i64,
+        files: i64,
+        bytes: i64,
+    }
+    let mut folders: HashMap<String, Folder> = HashMap::new();
+    let rows = "SELECT seq,relative_path,action,on_left,right_size FROM plan_items
+                WHERE plan_id=?1 ORDER BY seq";
+    {
+        let mut statement = tx.prepare(rows)?;
+        let mut rows = statement.query([id])?;
+        while let Some(row) = rows.next()? {
+            let seq: i64 = row.get(0)?;
+            let path: String = row.get(1)?;
+            let deletion = row.get::<_, String>(2)? == "delete"
+                && row.get::<_, Option<bool>>(3)? == Some(false);
+            let size = row.get::<_, Option<i64>>(4)?.unwrap_or(0);
+            for folder in parent_folders(&path) {
+                if !deletion {
+                    keep.insert(name_key(folder));
+                    continue;
+                }
+                let entry = folders.entry(folder.to_owned()).or_insert(Folder {
+                    first_seq: seq,
+                    files: 0,
+                    bytes: 0,
+                });
+                entry.files += 1;
+                entry.bytes += size;
+            }
+        }
+    }
+    let removable =
+        |folder: &str| folders.contains_key(folder) && !keep.contains(&name_key(folder));
+    let chosen: HashSet<&str> = folders
+        .keys()
+        .map(String::as_str)
+        .filter(|folder| removable(folder) && !parent_folders(folder).any(&removable))
+        .collect();
+    if chosen.is_empty() {
+        return Ok(());
+    }
+    let mut covered = Vec::new();
+    {
+        let mut statement = tx.prepare(rows)?;
+        let mut rows = statement.query([id])?;
+        while let Some(row) = rows.next()? {
+            let path: String = row.get(1)?;
+            if parent_folders(&path).any(|folder| chosen.contains(folder)) {
+                covered.push(row.get::<_, i64>(0)?);
+            }
+        }
+    }
+    let mut delete = tx.prepare_cached("DELETE FROM plan_items WHERE plan_id=?1 AND seq=?2")?;
+    for seq in covered {
+        delete.execute(params![id, seq])?;
+    }
+    // The row of each folder takes the place of its first file row. The source
+    // has no folder, and the destination still has it.
+    let mut insert = tx.prepare_cached(
+        "INSERT INTO plan_items(plan_id,seq,relative_path,action,from_left,on_left,reason,
+            left_change,right_change,right_size,folder_files)
+         VALUES(?1,?2,?3,'delete_folder',NULL,0,NULL,'removed','unchanged',?4,?5)",
+    )?;
+    for folder in chosen {
+        let entry = &folders[folder];
+        insert.execute(params![
+            id,
+            entry.first_seq,
+            folder,
+            entry.bytes,
+            entry.files
+        ])?;
+    }
     Ok(())
 }
 
@@ -278,7 +393,15 @@ pub fn build_plan(store_path: &std::path::Path, registry: &Registry, id: &str) -
         selected_paths: ScenarioScope::normalized_selection(&scope.selected_paths)
             .map_err(|_| SnapshotError::Blocked("invalid_selection".into()))?,
         deletion_mode: scope.deletion_mode,
+        excluded_paths: scope.excluded_paths,
     };
+    // A Backup/export destination is a mirror of the source scope (D-027
+    // section 5.6a). Its destination snapshot covers all of `files/`.
+    let mirror = direction == SyncDirection::LeftToRight
+        && registry
+            .scenario_mode(&reference.scenario_id)
+            .map_err(|_| SnapshotError::Blocked("scenario_unavailable".into()))?
+            == "backup_export";
     let tx = db.unchecked_transaction()?;
     tx.execute("UPDATE plans SET state='building' WHERE id=?1", [id])?;
     tx.execute("DELETE FROM plan_items WHERE plan_id=?1", [id])?;
@@ -338,9 +461,14 @@ pub fn build_plan(store_path: &std::path::Path, registry: &Registry, id: &str) -
         let mut current_key: Option<String> = None;
         let mut group: BTreeMap<String, GroupPath> = BTreeMap::new();
         let mut flush = |group: &mut BTreeMap<String, GroupPath>, seq: &mut i64| -> Result<()> {
+            // In a mirror, a destination object outside the scope stays in
+            // the group: it is a deletion, and it counts for a collision.
             let in_scope: Vec<_> = std::mem::take(group)
                 .into_iter()
-                .filter(|(path, _)| scope.classify(path, name_key) != ScopeMatch::Outside)
+                .filter(|(path, entry)| {
+                    scope.classify(path, name_key) != ScopeMatch::Outside
+                        || (mirror && entry.right.is_some())
+                })
                 .collect();
             let collides = in_scope.len() > 1;
             for (path, entry) in in_scope {
@@ -356,18 +484,18 @@ pub fn build_plan(store_path: &std::path::Path, registry: &Registry, id: &str) -
                     .as_ref()
                     .filter(|(_, special)| !*special)
                     .map(|(file, _)| file);
-                let item = plan_path(
-                    direction,
-                    &scope,
-                    &PathObservation {
-                        path: &path,
-                        confirmed: entry.confirmed.as_ref(),
-                        left,
-                        right,
-                        skipped,
-                    },
-                    collides,
-                );
+                let observation = PathObservation {
+                    path: &path,
+                    confirmed: entry.confirmed.as_ref(),
+                    left,
+                    right,
+                    skipped,
+                };
+                let item = if mirror {
+                    plan_mirror_path(&scope, &observation, collides)
+                } else {
+                    plan_path(direction, &scope, &observation, collides)
+                };
                 let (kind, from_left, on_left, reason) = match item.action {
                     PlanAction::NoAction => ("no_action", None, None, None),
                     PlanAction::Create { from_left } => ("create", Some(from_left), None, None),
@@ -449,6 +577,9 @@ pub fn build_plan(store_path: &std::path::Path, registry: &Registry, id: &str) -
             [id],
         )?;
     }
+    if mirror && scope.deletion_mode == DeletionMode::Simple {
+        group_folder_deletions(&tx, id, &left_snapshot)?;
+    }
     // 4. Counts and bytes for each action, from the source side.
     let source_left = !matches!(direction, SyncDirection::RightToLeft);
     let counts = {
@@ -512,12 +643,14 @@ pub fn build_plan(store_path: &std::path::Path, registry: &Registry, id: &str) -
 /// A removed Scenario never needs its plans again; the snapshot prune then
 /// frees the snapshots that only these plans kept.
 pub fn remove_plans_of_removed_scenarios(db: &Connection, registry: &Registry) -> Result<usize> {
-    let existing: std::collections::HashSet<String> = registry
+    let scenarios = registry
         .list_scenarios()
-        .map_err(|_| SnapshotError::Blocked("registry_unavailable".into()))?
-        .into_iter()
-        .map(|scenario| scenario.id)
+        .map_err(|_| SnapshotError::Blocked("registry_unavailable".into()))?;
+    let existing: std::collections::HashSet<String> = scenarios
+        .iter()
+        .map(|scenario| scenario.id.clone())
         .collect();
+    let old_revisions = remove_plans_of_old_revisions(db, registry, &scenarios)?;
     let stored: Vec<String> = db
         .prepare("SELECT DISTINCT scenario_id FROM plans")?
         .query_map([], |row| row.get(0))?
@@ -533,6 +666,41 @@ pub fn remove_plans_of_removed_scenarios(db: &Connection, registry: &Registry) -
         }
         removed += tx.execute("DELETE FROM plans WHERE scenario_id=?1", [scenario_id])?;
         tx.commit()?;
+    }
+    Ok(removed + old_revisions)
+}
+
+/// Remove the plans of revisions that are no longer current. A new revision
+/// plans again, so these plans and their snapshots only take space (found on
+/// 2026-11-04). The plan of an active run stays until the run ends.
+fn remove_plans_of_old_revisions(
+    db: &Connection,
+    registry: &Registry,
+    scenarios: &[crate::registry::Scenario],
+) -> Result<usize> {
+    let mut removed = 0;
+    for scenario in scenarios {
+        let active_plan = registry
+            .active_scenario_run(&scenario.id)
+            .map_err(|_| SnapshotError::Blocked("registry_unavailable".into()))?
+            .and_then(|run| run.plan_id);
+        let old: Vec<String> = db
+            .prepare("SELECT id FROM plans WHERE scenario_id=?1 AND revision!=?2")?
+            .query_map(params![scenario.id, scenario.revision as i64], |row| {
+                row.get(0)
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        for plan in old
+            .iter()
+            .filter(|plan| active_plan.as_deref() != Some(plan.as_str()))
+        {
+            let tx = db.unchecked_transaction()?;
+            for table in ["plan_items", "plan_baselines"] {
+                tx.execute(&format!("DELETE FROM {table} WHERE plan_id=?1"), [plan])?;
+            }
+            removed += tx.execute("DELETE FROM plans WHERE id=?1", [plan])?;
+            tx.commit()?;
+        }
     }
     Ok(removed)
 }
@@ -559,7 +727,7 @@ pub fn plan_page(
     let mut statement = db.prepare(
         "SELECT relative_path,action,from_left,on_left,reason,left_change,right_change,
                 left_size,left_revision,left_md5,left_special,
-                right_size,right_revision,right_md5,right_special
+                right_size,right_revision,right_md5,right_special,folder_files
          FROM plan_items
          WHERE plan_id=?1 AND (?2 IS NULL OR action=?2)
            AND (?3 IS NULL OR relative_path LIKE ?3 ESCAPE '\\')
@@ -591,6 +759,7 @@ pub fn plan_page(
                         "from_left": row.get::<_, Option<bool>>(2)?,
                         "on_left": row.get::<_, Option<bool>>(3)?,
                         "reason": row.get::<_, Option<String>>(4)?,
+                        "files": row.get::<_, Option<i64>>(15)?,
                     },
                     "left": row.get::<_, String>(5)?,
                     "right": row.get::<_, String>(6)?,
@@ -606,7 +775,7 @@ pub fn plan_page(
 /// One page of the executable rows after `after_seq` (D-025 section 6).
 /// Returns the rows of the listed actions as (path, action, source_is_left)
 /// and the last `seq` read, or `None` at the end. `action` is `create`,
-/// `update`, or `delete`. For a Delete, `source_is_left` names the side
+/// `update`, `delete`, or `delete_folder`. For a deletion, `source_is_left` names the side
 /// whose object is absent.
 #[allow(clippy::type_complexity)]
 pub fn plan_effects_page(
@@ -618,7 +787,7 @@ pub fn plan_effects_page(
 ) -> Result<(Vec<(String, String, bool)>, Option<i64>)> {
     let mut statement = db.prepare(
         "SELECT seq,relative_path,action,from_left,on_left FROM plan_items
-         WHERE plan_id=?1 AND action IN ('create','update','delete') AND seq>?2
+         WHERE plan_id=?1 AND action IN ('create','update','delete','delete_folder') AND seq>?2
          ORDER BY seq LIMIT ?3",
     )?;
     let mut rows = Vec::new();
@@ -630,7 +799,7 @@ pub fn plan_effects_page(
         if !actions.contains(&action.as_str()) {
             continue;
         }
-        let source_is_left = if action == "delete" {
+        let source_is_left = if action == "delete" || action == "delete_folder" {
             !row.get::<_, Option<bool>>(4)?.unwrap_or(false)
         } else {
             row.get::<_, Option<bool>>(3)?.unwrap_or(true)

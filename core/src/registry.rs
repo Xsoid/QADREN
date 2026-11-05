@@ -16,6 +16,16 @@ use serde::Serialize;
 use std::path::Path;
 use std::str::FromStr;
 
+/// SFTP settings of one ISPmanager connection (D-027 section 7a).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct IspmanagerSettings {
+    pub ssh_port: u16,
+    pub host_key_sha256: Option<String>,
+    /// The report of the last connection check, as Core produced it.
+    pub last_check: Option<serde_json::Value>,
+    pub last_check_at: Option<i64>,
+}
+
 #[derive(Debug)]
 pub enum RegistryError {
     Database(rusqlite::Error),
@@ -44,6 +54,12 @@ pub enum RegistryError {
     /// A Yandex Disk connection is not the source of a one-way Scenario
     /// with a destination on this Mac (D-023, stage 1).
     UnsupportedYandexScope,
+    /// An ISPmanager panel URL is not `https://host[:port][/path]`, or it
+    /// carries user information or a query (D-027).
+    InvalidPanelUrl,
+    /// The connection cannot be a Scenario endpoint yet. An ISPmanager
+    /// connection is a source of a Backup/export Scenario only (D-027).
+    UnsupportedScenarioEndpoint,
     /// Another run of the Scenario is active (D-025 section 2).
     ScenarioRunActive,
     /// A batch item of the Scenario has an unknown result. Its record must
@@ -220,6 +236,10 @@ pub struct ScenarioBatchSummary {
     pub paused: bool,
     pub total: u64,
     pub completed: u64,
+    /// The `completed` children that replaced a destination file.
+    pub completed_updates: u64,
+    /// The `completed` children that deleted a file or a whole folder.
+    pub completed_deletes: u64,
     pub failed: u64,
     pub cancelled: u64,
     pub unknown: u64,
@@ -253,6 +273,9 @@ pub enum BatchChildKind {
     Create,
     Update,
     Delete,
+    /// A whole destination folder of a Backup/export mirror (D-027
+    /// section 5.6b).
+    DeleteFolder,
 }
 
 impl BatchChildKind {
@@ -261,6 +284,7 @@ impl BatchChildKind {
             Self::Create => "create",
             Self::Update => "update",
             Self::Delete => "delete",
+            Self::DeleteFolder => "delete_folder",
         }
     }
 
@@ -269,6 +293,7 @@ impl BatchChildKind {
             "create" => Some(Self::Create),
             "update" => Some(Self::Update),
             "delete" => Some(Self::Delete),
+            "delete_folder" => Some(Self::DeleteFolder),
             _ => None,
         }
     }
@@ -398,7 +423,7 @@ impl Registry {
         db.pragma_update(None, "foreign_keys", "ON")?;
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 27 {
+        if version > 34 {
             return Err(RegistryError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -862,6 +887,153 @@ impl Registry {
                  COMMIT;",
             )?;
         }
+        if version <= 27 {
+            // D-027 section 7a: the SFTP port and the confirmed host key of an
+            // ISPmanager connection. A fingerprint is not a secret.
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE ispmanager_settings (
+                     connection_id TEXT PRIMARY KEY NOT NULL
+                         REFERENCES storage_connections(id) ON DELETE CASCADE,
+                     ssh_port INTEGER NOT NULL DEFAULT 22 CHECK(ssh_port BETWEEN 1 AND 65535),
+                     host_key_sha256 TEXT
+                 );
+                 PRAGMA user_version = 28;
+                 COMMIT;",
+            )?;
+        }
+        if version <= 28 {
+            // D-027: the last connection check survives a restart. The report
+            // has result classes only, never a password or a session ID.
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE ispmanager_settings ADD COLUMN last_check_json TEXT;
+                 ALTER TABLE ispmanager_settings ADD COLUMN last_check_at INTEGER;
+                 PRAGMA user_version = 29;
+                 COMMIT;",
+            )?;
+        }
+        if version <= 29 {
+            // D-027 sections 5 and 6: the Backup/export Scenario mode and its
+            // typed selection. A resource is a provider object, not a path
+            // relative to a root. An empty selection means nothing.
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE scenarios ADD COLUMN mode TEXT NOT NULL DEFAULT 'sync'
+                   CHECK(mode IN ('sync','backup_export'));
+                 ALTER TABLE scenario_revisions ADD COLUMN mode TEXT NOT NULL DEFAULT 'sync'
+                   CHECK(mode IN ('sync','backup_export'));
+                 CREATE TABLE scenario_revision_resources (
+                    scenario_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL CHECK(revision > 0),
+                    category TEXT NOT NULL,
+                    provider_id TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK(kind IN ('file','dir','symlink','object')),
+                    PRIMARY KEY(scenario_id,revision,category,provider_id),
+                    FOREIGN KEY(scenario_id,revision)
+                      REFERENCES scenario_revisions(scenario_id,revision) ON DELETE RESTRICT
+                 );
+                 PRAGMA user_version = 30;
+                 COMMIT;",
+            )?;
+        }
+        if version <= 30 {
+            // D-027 section 6: a rule can leave out a folder or a file inside
+            // a selected folder.
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE scenario_revision_resources ADD COLUMN rule TEXT NOT NULL
+                   DEFAULT 'include' CHECK(rule IN ('include','exclude'));
+                 PRAGMA user_version = 31;
+                 COMMIT;",
+            )?;
+        }
+        if version <= 31 {
+            // D-027 section 7b: the result of each selected database in one
+            // Backup/export run. It holds no access facts.
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE backup_database_results (
+                    run_id TEXT NOT NULL,
+                    provider_id TEXT NOT NULL,
+                    result TEXT NOT NULL
+                      CHECK(result IN ('created','updated','unchanged','failed','cancelled')),
+                    error TEXT,
+                    bytes INTEGER,
+                    md5 TEXT,
+                    finished_at INTEGER NOT NULL,
+                    PRIMARY KEY(run_id, provider_id)
+                 );
+                 PRAGMA user_version = 32;
+                 COMMIT;",
+            )?;
+        }
+        if version <= 32 {
+            // D-027 section 5.6b: a Backup/export mirror deletes a whole
+            // destination folder as one batch child. SQLite cannot change a
+            // CHECK, so the table is copied once.
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE scenario_create_batch_children_v33 (
+                    batch_id TEXT NOT NULL REFERENCES scenario_create_batches(id) ON DELETE RESTRICT,
+                    relative_path TEXT NOT NULL,
+                    source_is_left INTEGER NOT NULL CHECK(source_is_left IN (0,1)),
+                    job_id TEXT NOT NULL UNIQUE,
+                    state TEXT NOT NULL DEFAULT 'pending'
+                      CHECK(state IN ('pending','completed','failed','cancelled','unknown')),
+                    retries INTEGER NOT NULL DEFAULT 0 CHECK(retries >= 0),
+                    next_retry_at INTEGER,
+                    last_error TEXT,
+                    kind TEXT NOT NULL DEFAULT 'create'
+                      CHECK(kind IN ('create','update','delete','delete_folder')),
+                    PRIMARY KEY(batch_id,relative_path)
+                 );
+                 INSERT INTO scenario_create_batch_children_v33(
+                    batch_id,relative_path,source_is_left,job_id,state,
+                    retries,next_retry_at,last_error,kind)
+                 SELECT batch_id,relative_path,source_is_left,job_id,state,
+                    retries,next_retry_at,last_error,kind
+                 FROM scenario_create_batch_children;
+                 DROP TABLE scenario_create_batch_children;
+                 ALTER TABLE scenario_create_batch_children_v33
+                   RENAME TO scenario_create_batch_children;
+                 CREATE INDEX batch_children_due
+                   ON scenario_create_batch_children(state, next_retry_at);
+                 CREATE INDEX batch_children_by_batch
+                   ON scenario_create_batch_children(batch_id, state);
+                 PRAGMA user_version = 33;
+                 COMMIT;",
+            )?;
+        }
+        if version <= 33 {
+            // D-027 section 7b.10: a table of a selected database can keep
+            // only its structure. SQLite cannot change a CHECK, so the table
+            // is copied once.
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE scenario_revision_resources_v34 (
+                    scenario_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL CHECK(revision > 0),
+                    category TEXT NOT NULL,
+                    provider_id TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK(kind IN ('file','dir','symlink','object')),
+                    rule TEXT NOT NULL DEFAULT 'include'
+                      CHECK(rule IN ('include','exclude','structure_only')),
+                    PRIMARY KEY(scenario_id,revision,category,provider_id),
+                    FOREIGN KEY(scenario_id,revision)
+                      REFERENCES scenario_revisions(scenario_id,revision) ON DELETE RESTRICT
+                 );
+                 INSERT INTO scenario_revision_resources_v34(
+                    scenario_id,revision,category,provider_id,kind,rule)
+                 SELECT scenario_id,revision,category,provider_id,kind,rule
+                 FROM scenario_revision_resources;
+                 DROP TABLE scenario_revision_resources;
+                 ALTER TABLE scenario_revision_resources_v34
+                   RENAME TO scenario_revision_resources;
+                 PRAGMA user_version = 34;
+                 COMMIT;",
+            )?;
+        }
         Ok(Self { db })
     }
 
@@ -987,6 +1159,142 @@ impl Registry {
             "UPDATE storage_connections SET endpoint_url=?1 WHERE id=?2 AND adapter='smb_share'",
             params![url, id],
         )?)
+    }
+
+    /// Add one ISPmanager panel connection (D-027). The panel URL is
+    /// validated and has no credentials. The login and the password stay in
+    /// the platform credential store. Connections are never deduplicated.
+    pub fn add_ispmanager(&self, name: &str, url: &str) -> Result<String> {
+        if !valid_name(name) {
+            return Err(RegistryError::InvalidName);
+        }
+        let url = normalized_panel_url(url)?;
+        let id: String = self
+            .db
+            .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
+        self.db.execute(
+            "INSERT INTO storage_connections(id,adapter,name,endpoint_url)
+             VALUES (?1,'ispmanager',?2,?3)",
+            params![id, name.trim(), url],
+        )?;
+        Ok(id)
+    }
+
+    /// Change the panel URL of an ISPmanager connection. Another URL can be
+    /// another server, so the confirmed host key is cleared.
+    pub fn set_ispmanager_endpoint(&self, id: &str, url: &str) -> Result<()> {
+        let url = normalized_panel_url(url)?;
+        let current = self.get(id)?.ok_or(RegistryError::NotFound)?;
+        if current.adapter != crate::storage_access::ISPMANAGER {
+            return Err(RegistryError::NotFound);
+        }
+        if current.endpoint_url.as_deref() == Some(url.as_str()) {
+            return Ok(());
+        }
+        self.db.execute(
+            "UPDATE storage_connections SET endpoint_url=?1 WHERE id=?2",
+            params![url, id],
+        )?;
+        self.db.execute(
+            "UPDATE ispmanager_settings SET host_key_sha256=NULL WHERE connection_id=?1",
+            [id],
+        )?;
+        Ok(())
+    }
+
+    /// The SFTP port and the confirmed host key fingerprint (D-027 section
+    /// 7a). A connection without a settings row uses port 22 and has no key.
+    pub fn ispmanager_settings(&self, id: &str) -> Result<IspmanagerSettings> {
+        let row = self
+            .db
+            .query_row(
+                "SELECT ssh_port,host_key_sha256,last_check_json,last_check_at
+                 FROM ispmanager_settings WHERE connection_id=?1",
+                [id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        Ok(match row {
+            Some((port, host_key_sha256, last_check, last_check_at)) => IspmanagerSettings {
+                ssh_port: u16::try_from(port).unwrap_or(crate::ispmanager_sftp::DEFAULT_PORT),
+                host_key_sha256,
+                last_check: last_check.and_then(|text| serde_json::from_str(&text).ok()),
+                last_check_at,
+            },
+            None => IspmanagerSettings {
+                ssh_port: crate::ispmanager_sftp::DEFAULT_PORT,
+                host_key_sha256: None,
+                last_check: None,
+                last_check_at: None,
+            },
+        })
+    }
+
+    /// Another port can be another SSH server, so the confirmed host key is
+    /// cleared when the port changes.
+    pub fn set_ispmanager_ssh_port(&self, id: &str, port: u16) -> Result<()> {
+        if port == 0 {
+            return Err(RegistryError::InvalidEndpoint);
+        }
+        self.require_ispmanager(id)?;
+        self.db.execute(
+            "INSERT INTO ispmanager_settings(connection_id,ssh_port) VALUES (?1,?2)
+             ON CONFLICT(connection_id) DO UPDATE SET
+                 host_key_sha256=CASE WHEN ssh_port=excluded.ssh_port THEN host_key_sha256 END,
+                 ssh_port=excluded.ssh_port",
+            params![id, port],
+        )?;
+        Ok(())
+    }
+
+    /// Stores the host key fingerprint that the user confirmed.
+    pub fn confirm_ispmanager_host_key(&self, id: &str, fingerprint: &str) -> Result<()> {
+        let valid = fingerprint.starts_with("SHA256:")
+            && fingerprint.len() <= 128
+            && fingerprint.bytes().all(|byte| byte.is_ascii_graphic());
+        if !valid {
+            return Err(RegistryError::InvalidEndpoint);
+        }
+        self.require_ispmanager(id)?;
+        self.db.execute(
+            "INSERT INTO ispmanager_settings(connection_id,host_key_sha256) VALUES (?1,?2)
+             ON CONFLICT(connection_id) DO UPDATE SET host_key_sha256=excluded.host_key_sha256",
+            params![id, fingerprint],
+        )?;
+        Ok(())
+    }
+
+    /// Stores the report of the last connection check. The report must be a
+    /// JSON object from `ispmanager::check`.
+    pub fn record_ispmanager_check(&self, id: &str, report: &str, at: i64) -> Result<()> {
+        let parsed: serde_json::Value =
+            serde_json::from_str(report).map_err(|_| RegistryError::InvalidEndpoint)?;
+        if !parsed.is_object() || report.len() > 256 * 1024 {
+            return Err(RegistryError::InvalidEndpoint);
+        }
+        self.require_ispmanager(id)?;
+        self.db.execute(
+            "INSERT INTO ispmanager_settings(connection_id,last_check_json,last_check_at)
+             VALUES (?1,?2,?3)
+             ON CONFLICT(connection_id) DO UPDATE SET
+                 last_check_json=excluded.last_check_json,last_check_at=excluded.last_check_at",
+            params![id, report, at],
+        )?;
+        Ok(())
+    }
+
+    fn require_ispmanager(&self, id: &str) -> Result<()> {
+        match self.get(id)? {
+            Some(entry) if entry.adapter == crate::storage_access::ISPMANAGER => Ok(()),
+            _ => Err(RegistryError::NotFound),
+        }
     }
 
     /// Provider account ID may repeat; connections are never deduplicated by it.
@@ -1126,7 +1434,8 @@ impl Registry {
     }
 
     /// Refuse a Yandex Disk endpoint that is not the source of a one-way
-    /// Scenario to this Mac (D-023, stage 1).
+    /// Scenario to this Mac (D-023, stage 1), and every ISPmanager endpoint
+    /// (D-027).
     fn require_yandex_scope(
         &self,
         left_connection_id: &str,
@@ -1144,11 +1453,12 @@ impl Registry {
                 .optional()?
                 .unwrap_or_default())
         };
-        if crate::storage_access::yandex_scope_allowed(
-            &adapter(left_connection_id)?,
-            &adapter(right_connection_id)?,
-            direction,
-        ) {
+        let (left, right) = (adapter(left_connection_id)?, adapter(right_connection_id)?);
+        // The Backup/export Scenario mode does not exist yet (D-027 section 5).
+        if left == crate::storage_access::ISPMANAGER || right == crate::storage_access::ISPMANAGER {
+            return Err(RegistryError::UnsupportedScenarioEndpoint);
+        }
+        if crate::storage_access::yandex_scope_allowed(&left, &right, direction) {
             Ok(())
         } else {
             Err(RegistryError::UnsupportedYandexScope)
@@ -2099,34 +2409,32 @@ impl Registry {
     /// `pending`, without a retry time in the future, in a batch that is not
     /// paused. A cancelled batch is included, so that the Worker records
     /// `cancelled`.
-    pub fn due_scenario_create_batch_children(
+    /// Batches with a child that is due now, in creation order.
+    pub fn due_scenario_batches(&self, now: i64) -> Result<Vec<String>> {
+        let mut statement = self.db.prepare(
+            "SELECT b.id FROM scenario_create_batches b
+             WHERE b.paused=0 AND EXISTS (
+               SELECT 1 FROM scenario_create_batch_children c
+               WHERE c.batch_id=b.id AND c.state='pending'
+                 AND (c.next_retry_at IS NULL OR c.next_retry_at<=?1
+                      OR b.cancellation_requested=1))
+             ORDER BY b.rowid",
+        )?;
+        let rows = statement
+            .query_map([now], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// A bounded page of the due children of one batch, in row order. It
+    /// reads through the `batch_children_by_batch` index.
+    pub fn due_children_of_batch(
         &self,
+        batch_id: &str,
         now: i64,
         limit: usize,
     ) -> Result<Vec<DueBatchChild>> {
-        // D-025 section 11: a bounded page from each batch in turn, so that
-        // one large run does not stop the others. Each query reads through
-        // the `batch_children_by_batch` index in row order.
-        let batches = {
-            let mut statement = self.db.prepare(
-                "SELECT b.id FROM scenario_create_batches b
-                 WHERE b.paused=0 AND EXISTS (
-                   SELECT 1 FROM scenario_create_batch_children c
-                   WHERE c.batch_id=b.id AND c.state='pending'
-                     AND (c.next_retry_at IS NULL OR c.next_retry_at<=?1
-                          OR b.cancellation_requested=1))
-                 ORDER BY b.rowid",
-            )?;
-            let rows = statement
-                .query_map([now], |row| row.get::<_, String>(0))?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            rows
-        };
-        if batches.is_empty() || limit == 0 {
-            return Ok(Vec::new());
-        }
-        let share = (limit / batches.len()).max(1);
-        let mut statement = self.db.prepare(
+        let mut statement = self.db.prepare_cached(
             "SELECT c.batch_id,b.scenario_id,b.scenario_revision,c.relative_path,c.source_is_left,
                     c.job_id,c.retries,b.cancellation_requested,c.kind
              FROM scenario_create_batch_children c
@@ -2136,27 +2444,42 @@ impl Registry {
              ORDER BY c.rowid
              LIMIT ?3",
         )?;
+        let rows = statement
+            .query_map(params![batch_id, now, limit as i64], |row| {
+                Ok(DueBatchChild {
+                    batch_id: row.get(0)?,
+                    scenario: ScenarioReference {
+                        scenario_id: row.get(1)?,
+                        revision: row.get::<_, i64>(2)? as u64,
+                    },
+                    relative_path: row.get(3)?,
+                    source_is_left: row.get(4)?,
+                    job_id: row.get(5)?,
+                    retries: row.get(6)?,
+                    cancellation_requested: row.get(7)?,
+                    kind: BatchChildKind::parse(&row.get::<_, String>(8)?)
+                        .unwrap_or(BatchChildKind::Create),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn due_scenario_create_batch_children(
+        &self,
+        now: i64,
+        limit: usize,
+    ) -> Result<Vec<DueBatchChild>> {
+        // D-025 section 11: a bounded page from each batch in turn, so that
+        // one large run does not stop the others.
+        let batches = self.due_scenario_batches(now)?;
+        if batches.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let share = (limit / batches.len()).max(1);
         let mut pages = Vec::with_capacity(batches.len());
         for batch in batches.iter().take(limit) {
-            let page = statement
-                .query_map(params![batch, now, share as i64], |row| {
-                    Ok(DueBatchChild {
-                        batch_id: row.get(0)?,
-                        scenario: ScenarioReference {
-                            scenario_id: row.get(1)?,
-                            revision: row.get::<_, i64>(2)? as u64,
-                        },
-                        relative_path: row.get(3)?,
-                        source_is_left: row.get(4)?,
-                        job_id: row.get(5)?,
-                        retries: row.get(6)?,
-                        cancellation_requested: row.get(7)?,
-                        kind: BatchChildKind::parse(&row.get::<_, String>(8)?)
-                            .unwrap_or(BatchChildKind::Create),
-                    })
-                })?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            pages.push(page.into_iter());
+            pages.push(self.due_children_of_batch(batch, now, share)?.into_iter());
         }
         // Interleave the pages: one child of each batch in turn.
         let mut due = Vec::new();
@@ -2248,6 +2571,8 @@ impl Registry {
             paused,
             total: 0,
             completed: 0,
+            completed_updates: 0,
+            completed_deletes: 0,
             failed: 0,
             cancelled: 0,
             unknown: 0,
@@ -2261,8 +2586,8 @@ impl Registry {
         let mut statement = self.db.prepare(
             "SELECT state,
                     CASE WHEN state='pending' AND next_retry_at>?2 THEN 1 ELSE 0 END,
-                    count(*), min(CASE WHEN state='pending' THEN next_retry_at END)
-             FROM scenario_create_batch_children WHERE batch_id=?1 GROUP BY 1,2",
+                    count(*), min(CASE WHEN state='pending' THEN next_retry_at END), kind
+             FROM scenario_create_batch_children WHERE batch_id=?1 GROUP BY 1,2,5",
         )?;
         let rows = statement.query_map(params![batch_id, now], |row| {
             Ok((
@@ -2270,19 +2595,31 @@ impl Registry {
                 row.get::<_, bool>(1)?,
                 row.get::<_, i64>(2)? as u64,
                 row.get::<_, Option<i64>>(3)?,
+                row.get::<_, String>(4)?,
             ))
         })?;
         for row in rows {
-            let (state, waiting, count, next) = row?;
+            let (state, waiting, count, next, kind) = row?;
             summary.total += count;
             match (state.as_str(), waiting) {
-                ("completed", _) => summary.completed += count,
+                ("completed", _) => {
+                    summary.completed += count;
+                    match kind.as_str() {
+                        "update" => summary.completed_updates += count,
+                        "delete" | "delete_folder" => summary.completed_deletes += count,
+                        _ => {}
+                    }
+                }
                 ("failed", _) => summary.failed += count,
                 ("cancelled", _) => summary.cancelled += count,
                 ("unknown", _) => summary.unknown += count,
                 ("pending", true) => {
                     summary.retry_waiting += count;
-                    summary.next_retry_at = next;
+                    // One row for each kind: keep the earliest retry.
+                    summary.next_retry_at = match (summary.next_retry_at, next) {
+                        (Some(a), Some(b)) => Some(a.min(b)),
+                        (a, b) => a.or(b),
+                    };
                 }
                 _ => summary.due += count,
             }
@@ -2860,6 +3197,63 @@ impl Registry {
         }
     }
 
+    /// Cancel every pending child of a batch whose stop the user requested, in
+    /// one statement. A pending child has no Job yet, so nothing else changes.
+    /// One update for each child took minutes for a large run (2026-11-04).
+    pub fn backup_database_results(&self, run_id: &str) -> Result<Vec<BackupDatabaseResult>> {
+        let mut statement = self.db.prepare(
+            "SELECT provider_id, result, error, bytes, md5, finished_at
+             FROM backup_database_results WHERE run_id=?1 ORDER BY provider_id",
+        )?;
+        let rows = statement
+            .query_map([run_id], |row| {
+                Ok(BackupDatabaseResult {
+                    provider_id: row.get(0)?,
+                    result: row.get(1)?,
+                    error: row.get(2)?,
+                    bytes: row.get::<_, Option<i64>>(3)?.map(|bytes| bytes as u64),
+                    md5: row.get(4)?,
+                    finished_at: row.get(5)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Record the result of one database. A second record keeps the first.
+    pub fn record_backup_database_result(
+        &self,
+        run_id: &str,
+        result: &BackupDatabaseResult,
+    ) -> Result<()> {
+        self.db.execute(
+            "INSERT OR IGNORE INTO backup_database_results
+             (run_id, provider_id, result, error, bytes, md5, finished_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                run_id,
+                result.provider_id,
+                result.result,
+                result.error,
+                result.bytes.map(|bytes| bytes as i64),
+                result.md5,
+                result.finished_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn cancel_pending_batch_children(&self, batch_id: &str) -> Result<usize> {
+        Ok(self.db.execute(
+            "UPDATE scenario_create_batch_children
+             SET state='cancelled', next_retry_at=NULL
+             WHERE batch_id=?1 AND state='pending'
+               AND EXISTS (SELECT 1 FROM scenario_create_batches b
+                           WHERE b.id=?1 AND b.cancellation_requested=1)",
+            [batch_id],
+        )?)
+    }
+
     /// Enable or disable one schedule without changing its already claimed
     /// occurrences. Re-enabling must never replay an older local slot.
     pub fn set_scenario_schedule_enabled(
@@ -2964,6 +3358,7 @@ impl Registry {
             "DELETE FROM scenario_conflict_tasks WHERE scenario_id=?1",
             "DELETE FROM file_sync_states WHERE scenario_id=?1",
             "DELETE FROM scenario_revision_selection WHERE scenario_id=?1",
+            "DELETE FROM scenario_revision_resources WHERE scenario_id=?1",
             "DELETE FROM scenario_source_wins_consents WHERE scenario_id=?1",
             "DELETE FROM scenario_automation WHERE scenario_id=?1",
             "DELETE FROM scenario_revisions WHERE scenario_id=?1",
@@ -3247,16 +3642,42 @@ impl Registry {
             .optional()?;
         let deletion_mode = DeletionMode::parse(&mode.ok_or(RegistryError::NotFound)?)
             .ok_or(RegistryError::IntegrityFailed)?;
+        // A Backup/export revision selects server paths (D-027 section 6). The
+        // source root is the home folder of the account, so a path is the
+        // server path relative to it; the destination keeps it below `files/`.
+        // The home folder itself selects the whole root.
         let mut statement = self.db.prepare(
             "SELECT relative_path FROM scenario_revision_selection
-             WHERE scenario_id=?1 AND revision=?2 ORDER BY relative_path",
+             WHERE scenario_id=?1 AND revision=?2
+             UNION
+             SELECT CASE WHEN r.provider_id=v.left_root THEN ''
+                         ELSE substr(r.provider_id, length(rtrim(v.left_root,'/'))+2) END
+             FROM scenario_revision_resources r
+             JOIN scenario_revisions v ON v.scenario_id=r.scenario_id AND v.revision=r.revision
+             WHERE r.scenario_id=?1 AND r.revision=?2 AND r.category='files' AND r.rule='include'
+             ORDER BY 1",
         )?;
-        let selected_paths = statement
+        let mut selected_paths = statement
+            .query_map(params![id, revision as i64], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<String>, _>>()?;
+        if selected_paths.iter().any(String::is_empty) {
+            selected_paths.clear();
+        }
+        let mut statement = self.db.prepare(
+            "SELECT CASE WHEN r.provider_id=v.left_root THEN ''
+                         ELSE substr(r.provider_id, length(rtrim(v.left_root,'/'))+2) END
+             FROM scenario_revision_resources r
+             JOIN scenario_revisions v ON v.scenario_id=r.scenario_id AND v.revision=r.revision
+             WHERE r.scenario_id=?1 AND r.revision=?2 AND r.category='files' AND r.rule='exclude'
+             ORDER BY 1",
+        )?;
+        let excluded_paths = statement
             .query_map(params![id, revision as i64], |row| row.get(0))?
             .collect::<std::result::Result<Vec<String>, _>>()?;
         Ok(ScenarioScope {
             selected_paths,
             deletion_mode,
+            excluded_paths,
         })
     }
 
@@ -3275,6 +3696,28 @@ impl Registry {
                 reference.scenario_id,
                 reference.revision as i64,
                 relative_path
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Remove the confirmed baselines of every path under one folder after a
+    /// verified folder deletion (D-027 section 5.6b). The range uses the
+    /// primary key: `0` is the next character after `/`.
+    pub fn forget_confirmed_file_states_under(
+        &self,
+        reference: &ScenarioReference,
+        folder: &str,
+    ) -> Result<()> {
+        self.db.execute(
+            "DELETE FROM file_sync_states
+             WHERE scenario_id=?1 AND scenario_revision=?2
+               AND relative_path>=?3 AND relative_path<?4",
+            params![
+                reference.scenario_id,
+                reference.revision as i64,
+                format!("{folder}/"),
+                format!("{folder}0")
             ],
         )?;
         Ok(())
@@ -3374,6 +3817,38 @@ impl Registry {
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into);
         states
+    }
+
+    /// The confirmed state of one path, or `None` (D-028: one indexed row,
+    /// not the whole baseline).
+    pub fn confirmed_file_state(
+        &self,
+        reference: &ScenarioReference,
+        relative_path: &str,
+    ) -> Result<Option<FileSyncState>> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT relative_path,
+                    left_object_revision,left_size,left_checksum_md5,
+                    right_object_revision,right_size,right_checksum_md5
+                 FROM file_sync_states
+                 WHERE scenario_id=?1 AND scenario_revision=?2 AND relative_path=?3",
+                params![
+                    reference.scenario_id,
+                    reference.revision as i64,
+                    relative_path
+                ],
+                |row| {
+                    Ok(FileSyncState {
+                        scenario: reference.clone(),
+                        relative_path: row.get(0)?,
+                        left: decode_confirmed_version(row, 1, 2, 3)?,
+                        right: decode_confirmed_version(row, 4, 5, 6)?,
+                    })
+                },
+            )
+            .optional()?)
     }
 
     /// One page of confirmed file states after `after_path`, in path order
@@ -3761,6 +4236,313 @@ pub fn scenario_roots_overlap(left: &str, right: &str) -> bool {
 
 /// Store a normalized selection for one revision. An empty selection stores
 /// no rows and means the complete root.
+/// One selected resource of a Backup/export Scenario revision (D-027
+/// section 6). For the Files category, `provider_id` is an absolute server
+/// path; `kind` is `file`, `dir` (recursive, new descendants included),
+/// `symlink`, or `object` for a logical provider object.
+/// The result of one selected database in one Backup/export run (D-027
+/// section 7b).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BackupDatabaseResult {
+    pub provider_id: String,
+    /// `created`, `updated`, `unchanged`, `failed`, or `cancelled`.
+    pub result: String,
+    pub error: Option<String>,
+    pub bytes: Option<u64>,
+    pub md5: Option<String>,
+    pub finished_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct BackupResource {
+    pub category: String,
+    pub provider_id: String,
+    pub kind: String,
+    /// `include`; `exclude` for an object inside a selected folder that the
+    /// Scenario leaves out with all its content; or `structure_only` for a
+    /// table `<database>/<table>` whose dump has no data (D-027 7b.10).
+    #[serde(default = "BackupResource::include")]
+    pub rule: String,
+}
+
+impl BackupResource {
+    fn include() -> String {
+        "include".to_owned()
+    }
+
+    fn valid(&self) -> bool {
+        if !matches!(self.rule.as_str(), "include" | "exclude" | "structure_only") {
+            return false;
+        }
+        let text_ok = |text: &str| {
+            !text.is_empty() && text.len() <= 4096 && !text.chars().any(char::is_control)
+        };
+        if !text_ok(&self.category) || !text_ok(&self.provider_id) {
+            return false;
+        }
+        match self.category.as_str() {
+            "files" => {
+                self.rule != "structure_only"
+                    && matches!(self.kind.as_str(), "file" | "dir" | "symlink")
+                    && self.provider_id.starts_with('/')
+                    && !self
+                        .provider_id
+                        .split('/')
+                        .any(|part| part == "." || part == "..")
+            }
+            // A MySQL database name, which is also its dump file name, or
+            // `<database>/<table>` for a table that keeps only its structure.
+            "databases" => {
+                let database_ok = |name: &str| {
+                    name.len() <= 64
+                        && !name.is_empty()
+                        && !name.starts_with(['.', '-'])
+                        && name.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric()
+                                || matches!(byte, b'_' | b'-' | b'.' | b'$')
+                        })
+                };
+                self.kind == "object"
+                    && match self.rule.as_str() {
+                        "include" => database_ok(&self.provider_id),
+                        "structure_only" => {
+                            self.provider_id.split_once('/').is_some_and(|(db, table)| {
+                                database_ok(db)
+                                    && crate::ispmanager_sftp::plain_table_name(table)
+                            })
+                        }
+                        _ => false,
+                    }
+            }
+            _ => self.kind == "object" && self.rule != "structure_only",
+        }
+    }
+}
+
+/// The fields of a Backup/export Scenario revision.
+#[derive(Debug, Clone, Copy)]
+pub struct BackupScenarioDraft<'a> {
+    pub name: &'a str,
+    pub source_connection_id: &'a str,
+    pub destination_connection_id: &'a str,
+    pub destination_root: &'a str,
+    /// The home folder of the account: the source root (D-027 section 6).
+    pub source_root: &'a str,
+    pub resources: &'a [BackupResource],
+    /// Deletions inside selected folders (D-027 section 5.4).
+    pub deletion_mode: DeletionMode,
+}
+
+impl Registry {
+    /// Create a Backup/export Scenario (D-027 section 5). The source is an
+    /// ISPmanager connection; the destination is This Mac or an SMB share.
+    pub fn create_backup_scenario(&self, draft: BackupScenarioDraft<'_>) -> Result<String> {
+        self.validate_backup_draft(&draft)?;
+        let files_root = backup_files_root(draft.destination_root);
+        let id: String = self
+            .db
+            .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        transaction.execute(
+            "INSERT INTO scenarios(id,name,left_connection_id,left_root,right_connection_id,
+                                   right_root,direction,mode,deletion_mode)
+             VALUES(?1,?2,?3,?7,?4,?5,'left_to_right','backup_export',?6)",
+            params![
+                id,
+                draft.name.trim(),
+                draft.source_connection_id,
+                draft.destination_connection_id,
+                files_root,
+                draft.deletion_mode.as_str(),
+                draft.source_root
+            ],
+        )?;
+        insert_backup_revision(&transaction, &id, 1, draft.resources)?;
+        transaction.commit()?;
+        Ok(id)
+    }
+
+    /// Store a new revision of a Backup/export Scenario and return it. Older
+    /// revisions keep their own selection. The source connection does not
+    /// change.
+    pub fn update_backup_scenario(&self, id: &str, draft: BackupScenarioDraft<'_>) -> Result<u64> {
+        self.validate_backup_draft(&draft)?;
+        let files_root = backup_files_root(draft.destination_root);
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let changed = transaction.execute(
+            "UPDATE scenarios SET name=?1,right_connection_id=?2,right_root=?3,deletion_mode=?6,
+                                  left_root=?7,revision=revision+1
+             WHERE id=?4 AND mode='backup_export' AND left_connection_id=?5",
+            params![
+                draft.name.trim(),
+                draft.destination_connection_id,
+                files_root,
+                id,
+                draft.source_connection_id,
+                draft.deletion_mode.as_str(),
+                draft.source_root
+            ],
+        )?;
+        if changed == 0 {
+            return Err(RegistryError::NotFound);
+        }
+        let revision: i64 =
+            transaction.query_row("SELECT revision FROM scenarios WHERE id=?1", [id], |row| {
+                row.get(0)
+            })?;
+        insert_backup_revision(&transaction, id, revision as u64, draft.resources)?;
+        transaction.commit()?;
+        Ok(revision as u64)
+    }
+
+    /// `sync` or `backup_export`.
+    pub fn scenario_mode(&self, id: &str) -> Result<String> {
+        self.db
+            .query_row("SELECT mode FROM scenarios WHERE id=?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()?
+            .ok_or(RegistryError::NotFound)
+    }
+
+    /// The typed selection of one Backup/export Scenario revision.
+    pub fn backup_resources(&self, id: &str, revision: u64) -> Result<Vec<BackupResource>> {
+        let mut statement = self.db.prepare(
+            "SELECT category,provider_id,kind,rule FROM scenario_revision_resources
+             WHERE scenario_id=?1 AND revision=?2 ORDER BY category,provider_id",
+        )?;
+        let rows = statement.query_map(params![id, revision as i64], |row| {
+            Ok(BackupResource {
+                category: row.get(0)?,
+                provider_id: row.get(1)?,
+                kind: row.get(2)?,
+                rule: row.get(3)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    fn validate_backup_draft(&self, draft: &BackupScenarioDraft<'_>) -> Result<()> {
+        let root = draft.source_root;
+        let root_valid = root.starts_with('/')
+            && !root.chars().any(char::is_control)
+            && !root.split('/').any(|part| part == "." || part == "..");
+        if !valid_name(draft.name) || !draft.destination_root.starts_with('/') || !root_valid {
+            return Err(RegistryError::InvalidName);
+        }
+        // Every file rule is the home folder or inside it.
+        let inside = |path: &str| {
+            path == root
+                || root == "/"
+                || path.starts_with(&format!("{}/", root.trim_end_matches('/')))
+        };
+        if draft
+            .resources
+            .iter()
+            .any(|r| r.category == "files" && !inside(&r.provider_id))
+        {
+            return Err(RegistryError::InvalidSelection);
+        }
+        if !draft.resources.iter().all(BackupResource::valid) {
+            return Err(RegistryError::InvalidSelection);
+        }
+        // An empty selection means nothing; an exclusion needs a selected
+        // folder above it.
+        let includes: Vec<&BackupResource> = draft
+            .resources
+            .iter()
+            .filter(|r| r.rule == "include")
+            .collect();
+        let excluded_alone = draft.resources.iter().any(|r| {
+            r.rule == "exclude"
+                && !includes.iter().any(|include| {
+                    include.kind == "dir"
+                        && r.provider_id
+                            .starts_with(&format!("{}/", include.provider_id))
+                })
+        });
+        // A table rule needs its selected database.
+        let table_alone = draft.resources.iter().any(|r| {
+            r.rule == "structure_only"
+                && !includes.iter().any(|include| {
+                    include.category == "databases"
+                        && r.provider_id
+                            .starts_with(&format!("{}/", include.provider_id))
+                })
+        });
+        if includes.is_empty() || excluded_alone || table_alone {
+            return Err(RegistryError::InvalidSelection);
+        }
+        let adapter = |id: &str| -> Result<String> {
+            Ok(self.get(id)?.ok_or(RegistryError::NotFound)?.adapter)
+        };
+        let source = adapter(draft.source_connection_id)?;
+        let destination = adapter(draft.destination_connection_id)?;
+        if source != crate::storage_access::ISPMANAGER
+            || !matches!(
+                destination.as_str(),
+                crate::storage_access::LOCAL_FILESYSTEM | crate::storage_access::SMB_SHARE
+            )
+        {
+            return Err(RegistryError::UnsupportedScenarioEndpoint);
+        }
+        Ok(())
+    }
+}
+
+/// The destination root of the Files category: `<destination>/files`
+/// (D-027 section 5.2). The Scenario stores this root; the other data types
+/// use sibling folders of it.
+pub fn backup_files_root(destination_root: &str) -> String {
+    let base = destination_root.trim_end_matches('/');
+    if base.ends_with("/files") {
+        base.to_owned()
+    } else {
+        format!("{base}/files")
+    }
+}
+
+fn insert_backup_revision(
+    transaction: &rusqlite::Transaction<'_>,
+    id: &str,
+    revision: u64,
+    resources: &[BackupResource],
+) -> Result<()> {
+    transaction.execute(
+        "INSERT INTO scenario_revisions(
+            scenario_id,revision,name,left_connection_id,left_root,
+            right_connection_id,right_root,direction,deletion_mode,mode
+         )
+         SELECT id,?2,name,left_connection_id,left_root,
+                right_connection_id,right_root,direction,deletion_mode,mode
+         FROM scenarios WHERE id=?1",
+        params![id, revision as i64],
+    )?;
+    for resource in resources {
+        transaction.execute(
+            "INSERT OR IGNORE INTO scenario_revision_resources(
+                scenario_id,revision,category,provider_id,kind,rule
+             ) VALUES(?1,?2,?3,?4,?5,?6)",
+            params![
+                id,
+                revision as i64,
+                resource.category,
+                resource.provider_id,
+                resource.kind,
+                resource.rule
+            ],
+        )?;
+    }
+    Ok(())
+}
+
 fn insert_revision_selection(
     transaction: &rusqlite::Transaction<'_>,
     id: &str,
@@ -3822,6 +4604,12 @@ fn normalized_smb_url(url: &str) -> Option<String> {
         return None;
     }
     Some(format!("smb://{}/{}", authority, segments.join("/")))
+}
+
+fn normalized_panel_url(url: &str) -> Result<String> {
+    crate::ispmanager::PanelUrl::parse(url.trim())
+        .map(|url| url.as_str().to_owned())
+        .map_err(|_| RegistryError::InvalidPanelUrl)
 }
 
 fn valid_adapter(adapter: &str) -> bool {
@@ -4548,6 +5336,7 @@ mod tests {
         let scope = ScenarioScope {
             selected_paths: vec!["Docs/a.txt".into(), "Docs".into(), "Photos".into()],
             deletion_mode: DeletionMode::Simple,
+            excluded_paths: Vec::new(),
         };
         let id = db
             .create_scenario_with_scope(
@@ -4565,6 +5354,7 @@ mod tests {
             ScenarioScope {
                 selected_paths: vec!["Docs".into(), "Photos".into()],
                 deletion_mode: DeletionMode::Simple,
+                excluded_paths: Vec::new(),
             }
         );
 
@@ -4606,6 +5396,7 @@ mod tests {
             let scope = ScenarioScope {
                 selected_paths: vec![path.into()],
                 deletion_mode: DeletionMode::Paranoid,
+                excluded_paths: Vec::new(),
             };
             assert!(matches!(
                 db.create_scenario_with_scope(

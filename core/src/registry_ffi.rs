@@ -190,6 +190,8 @@ fn registry_error_code(error: &RegistryError) -> &'static str {
         RegistryError::InvalidEndpoint => "invalid_smb_address",
         RegistryError::RootOutsideConnection => "smb_root_outside_mount",
         RegistryError::UnsupportedYandexScope => "yandex_source_only",
+        RegistryError::InvalidPanelUrl => "invalid_panel_url",
+        RegistryError::UnsupportedScenarioEndpoint => "unsupported_scenario_endpoint",
         _ => "registry_error",
     }
 }
@@ -224,7 +226,10 @@ pub extern "C" fn qadren_scenarios_list(path: *const c_char) -> *mut c_char {
         for item in db.list_scenarios()? {
             let scope = db.get_scenario_revision_scope(&item.id, item.revision)?;
             let retry_until_success = db.scenario_retry_until_success(&item.id)?;
+            let mode = db.scenario_mode(&item.id)?;
+            let resources = db.backup_resources(&item.id, item.revision)?;
             entries.push(json!({
+                "mode": mode, "resources": resources,
                 "id": item.id, "name": item.name, "left_connection_id": item.left_connection_id,
                 "left_root": item.left_root, "right_connection_id": item.right_connection_id,
                 "right_root": item.right_root, "direction": item.direction, "enabled": item.enabled,
@@ -234,6 +239,70 @@ pub extern "C" fn qadren_scenarios_list(path: *const c_char) -> *mut c_char {
             }));
         }
         Ok(json!(entries))
+    })
+}
+
+/// Create (empty `id`) or change a Backup/export Scenario (D-027 section 5).
+/// `resources` is a JSON array of `{category, provider_id, kind}`.
+#[no_mangle]
+pub extern "C" fn qadren_scenarios_save_backup(
+    path: *const c_char,
+    id: *const c_char,
+    name: *const c_char,
+    source_id: *const c_char,
+    destination_id: *const c_char,
+    destination_root: *const c_char,
+    source_root: *const c_char,
+    resources: *const c_char,
+    deletion_mode: *const c_char,
+) -> *mut c_char {
+    let (
+        Some(id),
+        Some(name),
+        Some(source_id),
+        Some(destination_id),
+        Some(root),
+        Some(source_root),
+        Some(resources),
+        Some(deletion_mode),
+    ) = (
+        input(id),
+        input(name),
+        input(source_id),
+        input(destination_id),
+        input(destination_root),
+        input(source_root),
+        input(resources),
+        input(deletion_mode).and_then(|mode| crate::model::DeletionMode::parse(&mode)),
+    )
+    else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    let Ok(resources) = serde_json::from_str::<Vec<crate::registry::BackupResource>>(&resources)
+    else {
+        return output(json!({"ok":false,"error":"invalid_selection"}));
+    };
+    with_registry(path, |db| {
+        let draft = crate::registry::BackupScenarioDraft {
+            name: &name,
+            source_connection_id: &source_id,
+            destination_connection_id: &destination_id,
+            destination_root: &root,
+            source_root: &source_root,
+            resources: &resources,
+            deletion_mode,
+        };
+        // The editor showed "the source always wins" before this save, and
+        // the user confirmed it (D-027 section 5.1).
+        if id.is_empty() {
+            let id = db.create_backup_scenario(draft)?;
+            db.confirm_scenario_source_wins(&id, 1)?;
+            Ok(json!({"id": id}))
+        } else {
+            let revision = db.update_backup_scenario(&id, draft)?;
+            db.confirm_scenario_source_wins(&id, revision)?;
+            Ok(json!({"id": id}))
+        }
     })
 }
 
@@ -290,6 +359,7 @@ fn scope_input(value: &str) -> Option<ScenarioScope> {
     Some(ScenarioScope {
         selected_paths: input.selected_paths,
         deletion_mode: DeletionMode::parse(&input.deletion_mode)?,
+        excluded_paths: Vec::new(),
     })
 }
 
@@ -856,7 +926,8 @@ pub extern "C" fn qadren_scenario_run_state(
                 Some(json!({
                     "id": run.id, "trigger": run.trigger, "state": run.state,
                     "waiting_reason": run.waiting_reason, "created_at": run.created_at,
-                    "waiting_for_scenario": waiting_for, "batch_id": run.batch_id
+                    "waiting_for_scenario": waiting_for, "batch_id": run.batch_id,
+                    "revision": run.scenario.revision
                 }))
             }
             None => None,
@@ -1227,6 +1298,94 @@ pub extern "C" fn qadren_registry_set_smb_endpoint(
     };
     with_registry(path, |db| {
         db.set_smb_endpoint(&id, &url)?;
+        Ok(json!(true))
+    })
+}
+
+/// Add one ISPmanager panel connection (D-027). The URL carries no
+/// credentials; the platform keeps the login and the password.
+#[no_mangle]
+pub extern "C" fn qadren_registry_add_ispmanager(
+    path: *const c_char,
+    name: *const c_char,
+    url: *const c_char,
+) -> *mut c_char {
+    let (Some(name), Some(url)) = (input(name), input(url)) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    with_registry(path, |db| {
+        Ok(json!({"id": db.add_ispmanager(&name, &url)?}))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn qadren_registry_set_ispmanager_endpoint(
+    path: *const c_char,
+    id: *const c_char,
+    url: *const c_char,
+) -> *mut c_char {
+    let (Some(id), Some(url)) = (input(id), input(url)) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    with_registry(path, |db| {
+        db.set_ispmanager_endpoint(&id, &url)?;
+        Ok(json!(true))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn qadren_registry_ispmanager_settings(
+    path: *const c_char,
+    id: *const c_char,
+) -> *mut c_char {
+    let Some(id) = input(id) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    with_registry(path, |db| Ok(json!(db.ispmanager_settings(&id)?)))
+}
+
+#[no_mangle]
+pub extern "C" fn qadren_registry_set_ispmanager_ssh_port(
+    path: *const c_char,
+    id: *const c_char,
+    port: u16,
+) -> *mut c_char {
+    let Some(id) = input(id) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    with_registry(path, |db| {
+        db.set_ispmanager_ssh_port(&id, port)?;
+        Ok(json!(true))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn qadren_registry_record_ispmanager_check(
+    path: *const c_char,
+    id: *const c_char,
+    report: *const c_char,
+    at: i64,
+) -> *mut c_char {
+    let (Some(id), Some(report)) = (input(id), input(report)) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    with_registry(path, |db| {
+        db.record_ispmanager_check(&id, &report, at)?;
+        Ok(json!(true))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn qadren_registry_confirm_ispmanager_host_key(
+    path: *const c_char,
+    id: *const c_char,
+    fingerprint: *const c_char,
+) -> *mut c_char {
+    let (Some(id), Some(fingerprint)) = (input(id), input(fingerprint)) else {
+        return output(json!({"ok":false,"error":"invalid_input"}));
+    };
+    with_registry(path, |db| {
+        db.confirm_ispmanager_host_key(&id, &fingerprint)?;
         Ok(json!(true))
     })
 }

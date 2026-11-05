@@ -8,7 +8,7 @@ enum ConnectionRemoval {
     }
 
     /// Adapters whose connection owns a Keychain item.
-    private static let credentialAdapters: Set<String> = ["yandex_disk", "smb_share"]
+    private static let credentialAdapters: Set<String> = ["yandex_disk", "smb_share", "ispmanager"]
 
     static func run(
         adapter: String,

@@ -234,6 +234,10 @@ struct SettingsPanelView: View {
     @StateObject private var scenarios = ScenarioSettings()
     @State private var selection: SettingsPanelSection? = .connections
     @State private var isEditingScenario = false
+    @State private var creatingBackup = false
+    /// The ISPmanager connection that the user picked as a source in the
+    /// regular editor; the Backup/export editor opens with it.
+    @State private var backupSourceID: String?
     @State private var editedScenario: ScenarioEntry?
     @State private var schedulesScenario: ScenarioEntry?
     @State private var previewScenario: ScenarioEntry?
@@ -267,9 +271,25 @@ struct SettingsPanelView: View {
                             scenario: previewScenario,
                             done: { self.previewScenario = nil }
                         )
+                    } else if isEditingScenario, editedScenario?.isBackup ?? creatingBackup {
+                        BackupScenarioEditorView(
+                            sources: connections.entries.filter { $0.adapter == StorageConnector.ispmanager.rawValue },
+                            initialSourceID: backupSourceID,
+                            destinations: scenarioEndpoints.filter { ["local_filesystem", "smb_share"].contains($0.adapter) },
+                            scenario: editedScenario,
+                            save: saveBackupScenario,
+                            removeScenario: removeScenario,
+                            cancel: { isEditingScenario = false }
+                        )
                     } else if isEditingScenario {
                         ScenarioEditorView(
                             connections: scenarioEndpoints,
+                            backupSources: editedScenario == nil
+                                ? connections.entries.filter { $0.adapter == StorageConnector.ispmanager.rawValue } : [],
+                            chooseBackupSource: { id in
+                                backupSourceID = id
+                                creatingBackup = true
+                            },
                             scenario: editedScenario,
                             saveScenario: saveScenario,
                             removeScenario: removeScenario,
@@ -280,6 +300,7 @@ struct SettingsPanelView: View {
                             scenarios: scenarios,
                             connections: connections.entries,
                             createScenario: beginScenarioCreation,
+                            createBackup: beginBackupCreation,
                             editScenario: beginScenarioEditing,
                             editSchedules: { schedulesScenario = $0 },
                             previewScenario: { previewScenario = $0 }
@@ -296,6 +317,9 @@ struct SettingsPanelView: View {
         .onAppear {
             connections.refresh()
             scenarios.refresh()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .qadrenShowConnectionSettings)) { _ in
+            selection = .connections
         }
     }
 
@@ -316,7 +340,41 @@ struct SettingsPanelView: View {
     private func beginScenarioCreation() {
         schedulesScenario = nil
         editedScenario = nil
+        creatingBackup = false
         isEditingScenario = true
+    }
+
+    private func beginBackupCreation() {
+        schedulesScenario = nil
+        editedScenario = nil
+        backupSourceID = nil
+        creatingBackup = true
+        isEditingScenario = true
+    }
+
+    private func saveBackupScenario(
+        _ name: String, _ sourceID: String, _ destinationID: String,
+        _ destinationRoot: String, _ sourceRoot: String, _ resources: [BackupResource],
+        _ deletionMode: ScenarioDeletionMode
+    ) -> String? {
+        do {
+            let resolvedDestination = destinationID == "local-computer"
+                ? try (connections.entries.first { $0.adapter == "local_filesystem" && $0.enabled }?.id
+                    ?? StorageRegistryBridge.ensureLocalComputer())
+                : destinationID
+            try StorageRegistryBridge.saveBackupScenario(
+                id: editedScenario?.id, name: name, sourceID: sourceID,
+                destinationID: resolvedDestination, destinationRoot: destinationRoot,
+                sourceRoot: sourceRoot, resources: resources, deletionMode: deletionMode
+            )
+            scenarios.refresh()
+            connections.refresh()
+            editedScenario = nil
+            isEditingScenario = false
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
     }
 
     private func beginScenarioEditing(_ scenario: ScenarioEntry) {
@@ -382,6 +440,7 @@ enum StorageConnector: String, CaseIterable, Identifiable {
     case thisMac = "local_filesystem"
     case networkDrive = "smb_share"
     case yandexDisk = "yandex_disk"
+    case ispmanager = "ispmanager"
 
     var id: String { rawValue }
 
@@ -394,6 +453,7 @@ enum StorageConnector: String, CaseIterable, Identifiable {
         case .thisMac: "Этот Mac"
         case .networkDrive: "Сетевой диск (SMB)"
         case .yandexDisk: "Яндекс.Диск"
+        case .ispmanager: "ISPmanager"
         }
     }
 
@@ -402,6 +462,7 @@ enum StorageConnector: String, CaseIterable, Identifiable {
         case .thisMac: "laptopcomputer"
         case .networkDrive: "server.rack"
         case .yandexDisk: "cloud"
+        case .ispmanager: "globe"
         }
     }
 
@@ -410,6 +471,7 @@ enum StorageConnector: String, CaseIterable, Identifiable {
         case .thisMac: QDTheme.cyan
         case .networkDrive: QDTheme.blue
         case .yandexDisk: QDTheme.warning
+        case .ispmanager: QDTheme.success
         }
     }
 
@@ -418,6 +480,7 @@ enum StorageConnector: String, CaseIterable, Identifiable {
         case .thisMac: "Папки и диски этого Mac. Одно подключение на Mac, создаётся автоматически."
         case .networkDrive: "Общая папка по протоколу SMB: NAS, компьютер Windows или другой Mac. Логин и пароль хранятся в Keychain."
         case .yandexDisk: "Облачное хранилище. Подключений может быть сколько угодно."
+        case .ispmanager: "Панель хостинга ISPmanager 6. Только источник резервной копии: QADREN читает данные и ничего не меняет на сервере. Логин и пароль хранятся в Keychain."
         }
     }
 }
@@ -430,6 +493,8 @@ private enum ConnectionsRoute: Hashable {
     case connectors
     case newNetworkDrive
     case editNetworkDrive(String)
+    case newISPmanager
+    case editISPmanager(String)
 }
 
 private struct ConnectionsSettingsView: View {
@@ -448,6 +513,7 @@ private struct ConnectionsSettingsView: View {
                 case .connectors:
                     ConnectorListView(connections: connections) { connector in
                         if connector == .networkDrive { route = .newNetworkDrive }
+                        if connector == .ispmanager { route = .newISPmanager }
                         if connector == .yandexDisk {
                             // The new card has "Войти в Яндекс" (D-023).
                             connections.addYandex()
@@ -462,6 +528,18 @@ private struct ConnectionsSettingsView: View {
                 case let .editNetworkDrive(id):
                     if let entry = connections.entries.first(where: { $0.id == id }) {
                         SMBConnectionForm(
+                            connections: connections, editing: entry,
+                            onDone: { route = .list }, onCancel: { route = .list }
+                        )
+                    }
+                case .newISPmanager:
+                    ISPmanagerConnectionForm(
+                        connections: connections, editing: nil,
+                        onDone: { route = .list }, onCancel: { route = .connectors }
+                    )
+                case let .editISPmanager(id):
+                    if let entry = connections.entries.first(where: { $0.id == id }) {
+                        ISPmanagerConnectionForm(
                             connections: connections, editing: entry,
                             onDone: { route = .list }, onCancel: { route = .list }
                         )
@@ -481,6 +559,7 @@ private struct ConnectionsSettingsView: View {
         }
         .onChange(of: connections.entries.map(\.id)) { ids in
             if case let .editNetworkDrive(id) = route, !ids.contains(id) { route = .list }
+            if case let .editISPmanager(id) = route, !ids.contains(id) { route = .list }
         }
     }
 
@@ -497,7 +576,13 @@ private struct ConnectionsSettingsView: View {
                 .init(title: "Добавить подключение") { route = .connectors },
                 .init(title: StorageConnector.networkDrive.title)
             ]
-        case let .editNetworkDrive(id):
+        case .newISPmanager:
+            return [
+                root,
+                .init(title: "Добавить подключение") { route = .connectors },
+                .init(title: StorageConnector.ispmanager.title)
+            ]
+        case let .editNetworkDrive(id), let .editISPmanager(id):
             let name = connections.entries.first { $0.id == id }?.name ?? "Подключение"
             return [root, .init(title: name) { route = .list }, .init(title: "Адрес и вход")]
         }
@@ -539,7 +624,10 @@ private struct ConnectionsSettingsView: View {
                 onRemove: { connections.remove(entry.id) },
                 onRename: { connections.rename(entry.id, name: $0) },
                 onSetEnabled: { connections.setEnabled(entry.id, enabled: $0) },
-                onEditAddress: { route = .editNetworkDrive(entry.id) }
+                onEditAddress: {
+                    route = entry.adapter == StorageConnector.ispmanager.rawValue
+                        ? .editISPmanager(entry.id) : .editNetworkDrive(entry.id)
+                }
             )
             .id(entry.id + (entry.enabled ? ":enabled" : ":disabled") + ":" + entry.name)
         }
@@ -629,6 +717,8 @@ private struct ConnectionCard: View {
             "Будут удалены только локальная запись QADREN и её ключ в Keychain. Файлы на Яндекс.Диске не изменятся."
         case .networkDrive:
             "Будут удалены только локальная запись QADREN и логин с паролем в Keychain. Файлы на сетевом диске не изменятся."
+        case .ispmanager:
+            "Будут удалены только локальная запись QADREN и логин с паролем в Keychain. Данные на сервере ISPmanager не изменятся."
         default:
             "Будет удалена только лишняя локальная запись QADREN. Файлы на этом Mac не изменятся."
         }
@@ -666,7 +756,13 @@ private struct ConnectionCard: View {
             if connector == .networkDrive {
                 SMBConnectionDetails(entry: entry, connections: connections, onEdit: onEditAddress)
             }
-            if connector == .yandexDisk {
+            if connector == .ispmanager {
+                ISPmanagerConnectionDetails(entry: entry, connections: connections, onEdit: onEditAddress)
+            }
+            if connector == .ispmanager {
+                Text("Панель — только источник резервной копии. Сценарии резервного копирования с неё появятся на следующем этапе; сейчас доступны вход и список возможностей.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else if connector == .yandexDisk {
                 YandexConnectionDetails(entry: entry, connections: connections)
                     // The connection object reads `enabled` once.
                     .id(entry.id + (entry.enabled ? "-on" : "-off"))
@@ -724,7 +820,7 @@ private struct ConnectionCard: View {
                 }
             }
             Spacer()
-            if (connector == .networkDrive || connector == .yandexDisk) && entry.enabled {
+            if [.networkDrive, .yandexDisk, .ispmanager].contains(connector) && entry.enabled {
                 let state = SMBConnectionDetails.status(entry.status)
                 QDStatusLabel(kind: state.kind, text: state.text)
             } else if entry.enabled {
@@ -786,6 +882,8 @@ private struct ConnectorListView: View {
             return (.ready, "Доступен. Подключений может быть сколько угодно.")
         case .yandexDisk:
             return (.ready, "Доступен как источник: с Яндекс Диска на этот Mac. Подключений может быть сколько угодно.")
+        case .ispmanager:
+            return (.needsAction, "Первый этап: вход и список возможностей панели. Сценарии резервного копирования — на следующем этапе.")
         }
     }
 }
@@ -1233,13 +1331,390 @@ private struct SMBConnectionForm: View {
     }
 }
 
+/// The panel URL and the login of one ISPmanager connection (D-027), the
+/// sign-in check, and the capability list of the last check. The password is
+/// never shown.
+private struct ISPmanagerConnectionDetails: View {
+    let entry: StorageEntry
+    @ObservedObject var connections: StorageConnections
+    let onEdit: () -> Void
+    @State private var credentials: LoginCredentials?
+    @State private var settings = ISPmanagerSettings.defaults
+    @State private var checking = false
+    @State private var report: ISPmanagerCheckReport?
+    @State private var problem: String?
+    @State private var confirmChangedKey = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 10) {
+                GridRow {
+                    Text("Панель").foregroundStyle(.secondary)
+                    Text(entry.endpoint_url ?? "Не задана")
+                        .font(.body.monospaced())
+                        .textSelection(.enabled)
+                        .lineLimit(1).truncationMode(.middle)
+                }
+                GridRow {
+                    Text("Вход").foregroundStyle(.secondary)
+                    Text(credentials.map { "Логин «\($0.login)», пароль сохранён в Keychain" } ?? "Логин и пароль не сохранены")
+                        .foregroundStyle(credentials == nil ? .orange : .primary)
+                }
+                GridRow {
+                    Text("SSH").foregroundStyle(.secondary)
+                    Text(settings.host_key_sha256.map { "Порт \(settings.ssh_port), ключ сервера подтверждён: \($0)" }
+                        ?? "Порт \(settings.ssh_port), ключ сервера не подтверждён")
+                        .font(.callout)
+                        .textSelection(.enabled)
+                        .lineLimit(1).truncationMode(.middle)
+                }
+            }
+            HStack(spacing: 10) {
+                Button("Проверить вход и возможности", systemImage: "checkmark.shield") { check() }
+                    .disabled(checking || credentials == nil || !entry.enabled)
+                Button("Изменить адрес и вход", systemImage: "key", action: onEdit)
+                    .disabled(checking)
+                if checking {
+                    ProgressView().controlSize(.small)
+                    Text("Читаю списки панели…").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if let report {
+                SettingsNotice(
+                    text: report.message,
+                    symbol: report.status == "connected" ? "checkmark.circle" : "exclamationmark.triangle"
+                )
+                if let transport = report.file_transport {
+                    SettingsNotice(
+                        text: transport.message(port: settings.ssh_port),
+                        symbol: transport.isSFTP ? "lock.shield" : "arrow.triangle.branch"
+                    ) {
+                        if transport.reason == "host_key_unconfirmed", let fingerprint = transport.fingerprint {
+                            Button("Подтвердить ключ сервера") { confirm(fingerprint) }
+                                .disabled(checking)
+                        }
+                        if transport.reason == "host_key_changed" {
+                            Button("Подтвердить новый ключ…") { confirmChangedKey = true }
+                                .disabled(checking)
+                        }
+                    }
+                }
+                if let databases = report.databases {
+                    SettingsNotice(
+                        text: databases.lines.joined(separator: "\n"),
+                        symbol: "cylinder.split.1x2"
+                    )
+                }
+                if !report.categories.isEmpty {
+                    ISPmanagerCapabilityList(categories: report.categories)
+                }
+            }
+            if let problem {
+                SettingsNotice(text: problem, symbol: "exclamationmark.triangle")
+            }
+        }
+        .onAppear(perform: load)
+        .confirmationDialog("Принять новый ключ SSH-сервера?", isPresented: $confirmChangedKey) {
+            if let fingerprint = report?.file_transport?.fingerprint {
+                Button("Принять новый ключ") { confirm(fingerprint) }
+            }
+        } message: {
+            Text("Принимайте новый ключ, только если вы знаете, что ключ сервера сменили. Иначе это может быть подмена сервера, и пароль уйдёт чужому серверу.")
+        }
+    }
+
+    private func load() {
+        do {
+            credentials = try ISPmanagerKeychain.read(entry.id)
+            settings = try StorageRegistryBridge.ispmanagerSettings(id: entry.id)
+            // The last check stays visible after a restart.
+            if report == nil { report = settings.last_check }
+            problem = nil
+        } catch {
+            credentials = nil
+            problem = "Не удалось прочитать настройки подключения: " + error.localizedDescription
+        }
+    }
+
+    private func check() {
+        guard let url = entry.endpoint_url, let credentials else { return load() }
+        checking = true
+        report = nil
+        let settings = settings
+        Task {
+            let result = await ISPmanagerCheck.run(url: url, credentials: credentials, settings: settings)
+            checking = false
+            report = result
+            connections.recordISPmanagerCheck(id: entry.id, outcome: result)
+        }
+    }
+
+    /// Stores the fingerprint that the user confirmed, then checks again so
+    /// that SFTP signs in with the confirmed key.
+    private func confirm(_ fingerprint: String) {
+        do {
+            try connections.confirmISPmanagerHostKey(id: entry.id, fingerprint: fingerprint)
+            load()
+            check()
+        } catch {
+            problem = "Не удалось сохранить ключ сервера: " + error.localizedDescription
+        }
+    }
+}
+
+/// The 18 resource categories of D-027 with the state that the check saw.
+/// A readable list is not a verified export, and the text says so.
+private struct ISPmanagerCapabilityList: View {
+    let categories: [ISPmanagerCategoryReport]
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Возможности аккаунта").font(.headline)
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 6) {
+                ForEach(categories) { category in
+                    let state = ISPmanagerCategory.state(category)
+                    GridRow {
+                        Text(ISPmanagerCategory.title(category.category))
+                        QDStatusLabel(kind: state.kind, text: state.text)
+                        // A failed row shows the error type itself, not only
+                        // in the tooltip, so that the reason is visible.
+                        Text(category.state == "verified_metadata_only"
+                            ? category.functions.map(\.function).joined(separator: ", ")
+                            : detail(category, separator: "; "))
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2).truncationMode(.tail)
+                            .textSelection(.enabled)
+                            .help(detail(category, separator: "\n"))
+                    }
+                }
+            }
+            Text("Проверка только читает списки. Экспорт содержимого будет проверяться отдельно для каждой категории.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(10)
+        .background(.quaternary.opacity(0.4), in: shape)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Возможности аккаунта ISPmanager")
+    }
+
+    /// Function results for the tooltip: no values from the panel.
+    private func detail(_ category: ISPmanagerCategoryReport, separator: String) -> String {
+        category.functions
+            .map { "\($0.function): \($0.error ?? $0.result)" }
+            .joined(separator: separator)
+    }
+}
+
+/// Adds an ISPmanager panel connection, or changes the URL, the login, and
+/// the password of an existing one. "Проверить и сохранить" signs in first;
+/// a failed check offers to save without the check.
+private struct ISPmanagerConnectionForm: View {
+    @ObservedObject var connections: StorageConnections
+    let editing: StorageEntry?
+    let onDone: () -> Void
+    let onCancel: () -> Void
+    @State private var name = "ISPmanager"
+    @State private var url = ""
+    @State private var sshPort = "22"
+    @State private var login = ""
+    @State private var password = ""
+    @State private var saved = ISPmanagerSettings.defaults
+    @State private var checking = false
+    @State private var outcome: ISPmanagerCheckReport?
+    @State private var problem: String?
+
+    private var urlValid: Bool { ISPmanagerAddress.isValid(url) }
+    private var port: UInt16? { UInt16(sshPort.trimmingCharacters(in: .whitespaces)).flatMap { $0 > 0 ? $0 : nil } }
+    /// The confirmed host key stays only for the same panel URL and port.
+    private var settings: ISPmanagerSettings {
+        let samePlace = editing?.endpoint_url == url.trimmingCharacters(in: .whitespaces)
+            && saved.ssh_port == port
+        return ISPmanagerSettings(ssh_port: port ?? 22, host_key_sha256: samePlace ? saved.host_key_sha256 : nil)
+    }
+    private var complete: Bool {
+        urlValid && port != nil && !login.trimmingCharacters(in: .whitespaces).isEmpty && !password.isEmpty
+            && (editing != nil || !name.trimmingCharacters(in: .whitespaces).isEmpty)
+    }
+    private var credentials: LoginCredentials {
+        LoginCredentials(login: login.trimmingCharacters(in: .whitespaces), password: password)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                Image(systemName: StorageConnector.ispmanager.symbol)
+                    .font(.title2)
+                    .foregroundStyle(StorageConnector.ispmanager.tint)
+                    .frame(width: 44, height: 44)
+                    .background(StorageConnector.ispmanager.tint.opacity(0.15), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(editing == nil ? "ISPmanager" : "Адрес и вход «\(editing?.name ?? "")»")
+                        .font(.largeTitle.bold())
+                    Text("Панель хостинга ISPmanager 6. Только чтение: QADREN ничего не меняет на сервере.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 10) {
+                if editing == nil {
+                    GridRow {
+                        Text("Название").foregroundStyle(.secondary)
+                        TextField("Название подключения", text: $name).textFieldStyle(.roundedBorder)
+                    }
+                }
+                GridRow {
+                    Text("Адрес").foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 4) {
+                        TextField("https://panel.example.com:1500/ispmgr", text: $url)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.body.monospaced())
+                        Text(url.isEmpty || urlValid
+                            ? "Адрес панели с портом и путём, например https://panel.example.com:1500/ispmgr."
+                            : QADRENUserMessage.text(for: "invalid_panel_url"))
+                            .font(.caption)
+                            .foregroundStyle(url.isEmpty || urlValid ? Color.secondary : Color.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                GridRow {
+                    Text("Порт SSH").foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 4) {
+                        TextField("22", text: $sshPort)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.body.monospaced())
+                            .frame(width: 90)
+                        Text(port == nil
+                            ? "Порт — число от 1 до 65535."
+                            : "Если у аккаунта есть SSH, файлы читаются по SFTP с этим логином и паролем. Иначе — через API панели.")
+                            .font(.caption)
+                            .foregroundStyle(port == nil ? Color.orange : Color.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                GridRow {
+                    Text("Логин").foregroundStyle(.secondary)
+                    TextField("Пользователь панели", text: $login)
+                        .textFieldStyle(.roundedBorder)
+                        .textContentType(.username)
+                }
+                GridRow {
+                    Text("Пароль").foregroundStyle(.secondary)
+                    SecureField("Пароль", text: $password)
+                        .textFieldStyle(.roundedBorder)
+                        .textContentType(.password)
+                }
+            }
+            Label("После сохранения нажмите «Проверить вход и возможности» на карточке: там один раз подтверждается ключ SSH-сервера.", systemImage: "lock.shield")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Label("QADREN запоминает логин и пароль в Keychain этого Mac и передаёт их панели только в теле HTTPS-запроса. В адрес, базу QADREN и журналы они не попадают. QADREN входит только с правами этого аккаунта.", systemImage: "key.fill")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let outcome, outcome.status != "connected" {
+                SettingsNotice(text: outcome.message + " Можно исправить данные или сохранить подключение без проверки.", symbol: "exclamationmark.triangle")
+            }
+            if let problem {
+                SettingsNotice(text: problem, symbol: "exclamationmark.triangle")
+            }
+            HStack {
+                if checking {
+                    ProgressView().controlSize(.small)
+                    Text("Вхожу в панель и читаю списки…").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Отмена", action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                if outcome != nil && outcome?.status != "connected" {
+                    Button("Сохранить без проверки") { save(outcome) }
+                        .disabled(checking || !complete)
+                }
+                Button("Проверить и сохранить", action: checkAndSave)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(checking || !complete)
+            }
+        }
+        .frame(maxWidth: 640, alignment: .leading)
+        .onAppear(perform: load)
+        .onChange(of: url) { _ in outcome = nil }
+        .onChange(of: sshPort) { _ in outcome = nil }
+        .onChange(of: login) { _ in outcome = nil }
+        .onChange(of: password) { _ in outcome = nil }
+    }
+
+    private func load() {
+        guard let editing else { return }
+        url = editing.endpoint_url ?? ""
+        if let settings = try? StorageRegistryBridge.ispmanagerSettings(id: editing.id) {
+            saved = settings
+            sshPort = String(settings.ssh_port)
+        }
+        if let credentials = try? ISPmanagerKeychain.read(editing.id) {
+            login = credentials.login
+            password = credentials.password
+        }
+    }
+
+    private func checkAndSave() {
+        checking = true
+        problem = nil
+        let url = url.trimmingCharacters(in: .whitespaces)
+        let credentials = credentials
+        let settings = settings
+        Task {
+            let result = await ISPmanagerCheck.run(url: url, credentials: credentials, settings: settings)
+            checking = false
+            outcome = result
+            if result.status == "connected" { save(result) }
+        }
+    }
+
+    private func save(_ result: ISPmanagerCheckReport?) {
+        let url = url.trimmingCharacters(in: .whitespaces)
+        do {
+            if let editing {
+                try connections.updateISPmanager(
+                    id: editing.id, url: url, sshPort: port ?? 22, credentials: credentials, outcome: result
+                )
+            } else {
+                try connections.addISPmanager(
+                    name: name, url: url, sshPort: port ?? 22, credentials: credentials, outcome: result
+                )
+            }
+            onDone()
+        } catch {
+            problem = error.localizedDescription
+        }
+    }
+}
+
 private struct ScenariosSettingsView: View {
     @ObservedObject var scenarios: ScenarioSettings
+    /// The Scenario whose run request is in progress.
+    @State private var startingRun: String?
+    @State private var runNotice: (text: String, failed: Bool)?
     let connections: [StorageEntry]
     let createScenario: () -> Void
+    let createBackup: () -> Void
     let editScenario: (ScenarioEntry) -> Void
     let editSchedules: (ScenarioEntry) -> Void
     let previewScenario: (ScenarioEntry) -> Void
+
+    private func startRun(_ scenario: ScenarioEntry) {
+        startingRun = scenario.id
+        runNotice = nil
+        Task {
+            do {
+                let token = try YandexScenarioAccess.token(for: scenario)
+                try await Task.detached { try WorkerIPC.runNow(scenarioID: scenario.id, accessToken: token) }.value
+                runNotice = ("Сценарий «\(scenario.name)» передан фоновой службе. Если он уже выполнялся, новый запуск не начат. Ход запуска виден на виджете сценария.", false)
+            } catch {
+                runNotice = ("Не удалось запустить «\(scenario.name)»: " + error.localizedDescription, true)
+            }
+            startingRun = nil
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -1250,11 +1725,19 @@ private struct ScenariosSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
+                if connections.contains(where: { $0.adapter == StorageConnector.ispmanager.rawValue }) {
+                    Button("Резервная копия ISPmanager", systemImage: "globe", action: createBackup)
+                        .disabled(supportedConnections.isEmpty)
+                        .help("Сценарий резервной копии: панель ISPmanager → этот Mac или сетевой диск")
+                }
                 Button("Создать сценарий", action: createScenario)
                     .disabled(supportedConnections.isEmpty)
             }
             if let error = scenarios.error {
                 SettingsNotice(text: error, symbol: "exclamationmark.triangle")
+            }
+            if let runNotice {
+                SettingsNotice(text: runNotice.text, symbol: runNotice.failed ? "exclamationmark.triangle" : "play.circle")
             }
             if scenarios.entries.isEmpty {
                 SettingsEmptyState(
@@ -1272,7 +1755,7 @@ private struct ScenariosSettingsView: View {
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(scenario.name).font(.headline)
-                                Text("Ревизия \(scenario.revision) · \(directionTitle(scenario.direction))")
+                                Text("Ревизия \(scenario.revision) · \(scenario.isBackup ? "резервная копия" : directionTitle(scenario.direction))")
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                             Spacer()
@@ -1293,16 +1776,31 @@ private struct ScenariosSettingsView: View {
                                       : isLocalScenario(scenario)
                                       ? "Настроить расписания сценария"
                                       : "Настроить расписания. Вход в Яндекс фоновая служба получает от QADREN: после перезапуска Mac запуск ждёт, пока вы откроете QADREN")
-                            Button("Проверить план") { previewScenario(scenario) }
-                                .disabled(!isSupportedScenario(scenario))
-                                .help(isSupportedScenario(scenario)
-                                      ? "Прочитать только метаданные обеих сторон и показать план без передачи файлов"
-                                      : "Сценарий использует подключение, которое QADREN не поддерживает")
+                            if scenario.databasesOnly {
+                                // D-027 section 7b: a dump is taken again in each run and
+                                // compared with the copy after it, so there is no plan.
+                                Label("План не нужен", systemImage: "cylinder.split.1x2")
+                                    .foregroundStyle(.secondary)
+                                    .help("В сценарии выбраны только базы данных. Каждый запуск снимает дамп заново и после дампа сравнивает его с копией: одинаковый дамп не перезаписывается. Запустите сценарий кнопкой «Запустить».")
+                            } else {
+                                Button("Проверить план") { previewScenario(scenario) }
+                                    .disabled(!isSupportedScenario(scenario))
+                                    .help(isSupportedScenario(scenario)
+                                          ? "Прочитать только метаданные обеих сторон и показать план без передачи файлов"
+                                          : "Сценарий использует подключение, которое QADREN не поддерживает")
+                            }
+                            // The same manual run as "Запустить" of the Scenario widget, so
+                            // that a run does not depend on a widget on the panel.
+                            Button("Запустить", systemImage: "play.fill") { startRun(scenario) }
+                                .disabled(!isSupportedScenario(scenario) || !scenario.enabled || startingRun != nil)
+                                .help(!scenario.enabled
+                                      ? "Сценарий выключен. Включите его переключателем слева"
+                                      : "Запустить сценарий сейчас: как запуск по расписанию. Ход запуска виден на виджете сценария")
                         }
                         EndpointLine(
                             title: "Источник",
                             connection: connectionName(scenario.left_connection_id),
-                            root: scenario.left_root
+                            root: scenario.isBackup ? "выбрано объектов: \(scenario.resources.filter { $0.rule == "include" }.count)" : scenario.left_root
                         )
                         EndpointLine(
                             title: "Назначение",
@@ -1336,7 +1834,11 @@ private struct ScenariosSettingsView: View {
 
     /// A one-way Scenario from Yandex Disk to this Mac (D-023), or a local one.
     private func isSupportedScenario(_ scenario: ScenarioEntry) -> Bool {
-        isLocalScenario(scenario) || YandexScenarioAccess.sourceConnectionID(scenario, entries: connections) != nil
+        if scenario.isBackup {
+            return connections.first { $0.id == scenario.left_connection_id }?.adapter == StorageConnector.ispmanager.rawValue
+                && ["local_filesystem", "smb_share"].contains(connections.first { $0.id == scenario.right_connection_id }?.adapter)
+        }
+        return isLocalScenario(scenario) || YandexScenarioAccess.sourceConnectionID(scenario, entries: connections) != nil
     }
 
     /// Both endpoints are on this Mac: "This Mac" or a network drive that
@@ -1349,6 +1851,11 @@ private struct ScenariosSettingsView: View {
     }
 
     private func scenarioScopeSummary(_ scenario: ScenarioEntry) -> String {
+        if scenario.isBackup {
+            let deletions = scenario.deletion_mode == ScenarioDeletionMode.simple.rawValue
+                ? "удаления: простая синхронизация" : "удаления: параноик"
+            return "Резервная копия: одна актуальная копия по типам данных · " + deletions
+        }
         let objects = scenario.selected_paths.isEmpty
             ? "Вся папка"
             : "Выбрано объектов: \(scenario.selected_paths.count)"
@@ -1362,6 +1869,9 @@ private struct ScenariosSettingsView: View {
     private func scenarioStatus(_ scenario: ScenarioEntry) -> String {
         if !isSupportedScenario(scenario) {
             return "Сценарий использует подключение, которое QADREN не поддерживает. Его запуск, изменение и расписания недоступны; запись сохранена локально."
+        }
+        if scenario.isBackup {
+            return "Панель ISPmanager → копия: файлы читаются по SFTP, копия обновляется по серверу. Запуск — из этого окна, с панели мониторинга или по расписанию."
         }
         if !isLocalScenario(scenario) {
             return "Яндекс Диск → Mac: план и перенос запускаются из этого окна или по расписанию. После перезапуска Mac запуск по расписанию ждёт, пока вы откроете QADREN. Удаления на Mac пока недоступны."
@@ -1452,7 +1962,7 @@ private struct ScenarioDryRunView: View {
                         loadPlan()
                     }
                 }
-                    .disabled(isLoading)
+                    .disabled(isLoading || scenario.databasesOnly)
             }
             Text("Кнопка читает только имена, размеры и MD5 выбранных объектов на обеих сторонах. Она не открывает содержимое, не создаёт Job и не передаёт файлы. Большая папка на Яндекс Диске читается долго, иногда десятки минут.")
                 .font(.callout).foregroundStyle(.secondary)
@@ -1466,7 +1976,14 @@ private struct ScenarioDryRunView: View {
             if let skippedNotice {
                 SettingsNotice(text: skippedNotice, symbol: "link")
             }
-            if isLoading {
+            if scenario.databasesOnly {
+                SettingsEmptyState(
+                    title: "Плана файлов нет",
+                    detail: "В сценарии выбраны только базы данных. Каждый запуск снимает их дампы заново, поэтому план не нужен: запустите сценарий кнопкой «Запустить».",
+                    symbol: "cylinder.split.1x2"
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if isLoading {
                 ProgressView(planProgress ?? "Чтение метаданных и построение плана…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let largePlan {
@@ -1497,7 +2014,7 @@ private struct ScenarioDryRunView: View {
             } else {
                 let creates = plan.filter { $0.action.kind == "create" }
                 let updates = plan.filter { $0.action.kind == "update" }
-                let ruleDeletes = plan.filter { $0.action.kind == "delete" }
+                let ruleDeletes = plan.filter { ["delete", "delete_folder"].contains($0.action.kind) }
                 // All Creates, Updates, and rule Deletes run through one
                 // Scenario Run (D-025): no limit on the number of files, and
                 // the write-root lock applies.
@@ -1838,6 +2355,7 @@ private struct ScenarioDryRunView: View {
         let counts = info.counts ?? [:]
         let kinds: [(String, String)] = [
             ("create", "Создать"), ("update", "Заменить"), ("delete", "Удалить по правилу"),
+            ("delete_folder", "Удалить папку целиком"),
             ("delete_requires_decision", "Удаление — нужно решение"), ("conflict", "Конфликт"),
             ("needs_verification", "Требует проверки"), ("no_action", "Без действия"),
         ]
@@ -1854,7 +2372,7 @@ private struct ScenarioDryRunView: View {
                         Text("Конфликты, удаления с отдельным решением и объекты, которые требуют проверки, синхронизация не выполняет.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
-                    if ["create", "update", "delete"].contains(where: { (counts[$0]?.count ?? 0) > 0 }) {
+                    if ["create", "update", "delete", "delete_folder"].contains(where: { (counts[$0]?.count ?? 0) > 0 }) {
                         synchronizeButton(info)
                     }
                 }
@@ -1919,7 +2437,7 @@ private struct ScenarioDryRunView: View {
 
     private func synchronize(_ info: WorkerPlanInfo) {
         let counts = info.counts ?? [:]
-        let replacesOrDeletes = (counts["update"]?.count ?? 0) + (counts["delete"]?.count ?? 0) > 0
+        let replacesOrDeletes = ["update", "delete", "delete_folder"].contains { (counts[$0]?.count ?? 0) > 0 }
         if scenario.direction != "bidirectional", replacesOrDeletes,
            (try? StorageRegistryBridge.scenarioSourceWins(scenario: scenario, confirm: false)) != true {
             confirmSourceWins = true
@@ -2202,6 +2720,8 @@ private struct ScenarioDryRunView: View {
         case "update": return action.from_left == true ? "обновить справа" : "обновить слева"
         case "delete_requires_decision": return "нужно отдельное решение"
         case "delete": return action.on_left == true ? "удалить слева по правилу" : "удалить справа по правилу"
+        case "delete_folder":
+            return action.files.map { "удалить папку целиком, файлов: \($0)" } ?? "удалить папку целиком"
         case "conflict": return "конфликт"
         case "needs_verification": return "нужна проверка"
         default: return "без действия"
@@ -2379,7 +2899,7 @@ private struct ScenarioSchedulesView: View {
     private var needsLoginHandoff: Bool {
         let entries = (try? StorageRegistryBridge.list()) ?? []
         return [scenario.left_connection_id, scenario.right_connection_id].contains { id in
-            ["yandex_disk", "smb_share"].contains(entries.first { $0.id == id }?.adapter ?? "")
+            ["yandex_disk", "smb_share", "ispmanager"].contains(entries.first { $0.id == id }?.adapter ?? "")
         }
     }
 
@@ -2730,6 +3250,10 @@ enum ScheduleWording {
 
 private struct ScenarioEditorView: View {
     let connections: [StorageEntry]
+    /// ISPmanager connections offered as a source. Picking one opens the
+    /// Backup/export editor (D-027 section 5).
+    var backupSources: [StorageEntry] = []
+    var chooseBackupSource: (String) -> Void = { _ in }
     let scenario: ScenarioEntry?
     let saveScenario: (String, String, String, String, String, String, ScenarioScopeDraft) -> String?
     let removeScenario: (String) -> String?
@@ -2789,7 +3313,7 @@ private struct ScenarioEditorView: View {
                     ScenarioFolderPanel(
                         role: direction == "bidirectional" ? "Левая папка" : "Источник",
                         symbol: "arrow.right.circle",
-                        connections: connections,
+                        connections: direction == "bidirectional" ? connections : connections + backupSources,
                         connectionID: $leftID,
                         root: $leftRoot,
                         selection: $scope.selectedPaths,
@@ -2876,7 +3400,8 @@ private struct ScenarioEditorView: View {
                 rightID = first.id
             }
         }
-        .onChange(of: leftID) { _ in
+        .onChange(of: leftID) { id in
+            if backupSources.contains(where: { $0.id == id }) { return chooseBackupSource(id) }
             // A Yandex Disk source supports one way only (D-023).
             if sourceIsYandex { direction = "left_to_right" }
         }
@@ -2900,6 +3425,736 @@ private struct ScenarioEditorView: View {
     }
     private func save() {
         error = saveScenario(name, leftID, leftRoot, rightID, rightRoot, direction, scope)
+    }
+}
+
+/// Editor of a Backup/export Scenario (D-027 section 5): an ISPmanager
+/// source with a typed selection and a This Mac or SMB destination. It has
+/// no direction, no deletion rule, and no replacement.
+private struct BackupScenarioEditorView: View {
+    let sources: [StorageEntry]
+    var initialSourceID: String?
+    let destinations: [StorageEntry]
+    let scenario: ScenarioEntry?
+    let save: (String, String, String, String, String, [BackupResource], ScenarioDeletionMode) -> String?
+    let removeScenario: (String) -> String?
+    let cancel: () -> Void
+    /// Simple synchronization is the default (owner decision 2026-11-02).
+    @State private var deletionMode = ScenarioDeletionMode.simple
+    @State private var confirmRule = false
+    @State private var name = ""
+    @State private var sourceID = ""
+    @State private var destinationID = ""
+    @State private var destinationRoot = ""
+    @State private var selection: Set<BackupResource> = []
+    /// The home folder of the account: the source root (D-027 section 6).
+    @State private var home = ""
+    @State private var error: String?
+    @State private var confirmRemoval = false
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                HStack(alignment: .firstTextBaseline) {
+                    Button("Назад", systemImage: "chevron.left", action: cancel)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(scenario == nil ? "Новая резервная копия" : "Изменить резервную копию").font(.largeTitle.bold())
+                        Text("Резервная копия читает выбранные объекты панели ISPmanager и записывает их в папку назначения. На сервере ничего не меняется.")
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button(scenario == nil ? "Создать сценарий" : "Сохранить изменения") {
+                        // Each save makes a revision whose "source always wins"
+                        // rule Core records as confirmed (D-027 section 5.1).
+                        confirmRule = true
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!canSave)
+                }
+                GroupBox("Основные параметры") {
+                    VStack(alignment: .leading, spacing: 14) {
+                        TextField("Например, «Сайт → NAS»", text: $name)
+                            .textFieldStyle(.roundedBorder)
+                            .accessibilityLabel("Название сценария")
+                        if sources.count > 1 {
+                            Picker("Панель", selection: $sourceID) {
+                                ForEach(sources) { Text($0.name).tag($0.id) }
+                            }
+                            .disabled(scenario != nil)
+                        }
+                    }
+                }
+                HStack(alignment: .top, spacing: 16) {
+                    if let source = sources.first(where: { $0.id == sourceID }) {
+                        ISPmanagerFilePanel(connection: source, selection: $selection, home: $home)
+                            .id(source.id)
+                    }
+                    ScenarioFolderPanel(
+                        role: "Назначение",
+                        symbol: "arrow.left.circle",
+                        connections: destinations,
+                        connectionID: $destinationID,
+                        root: $destinationRoot,
+                        selection: .constant([]),
+                        showsSelection: false,
+                        excludesYandex: true
+                    )
+                }
+                if let source = sources.first(where: { $0.id == sourceID }) {
+                    ISPmanagerDatabasePanel(connection: source, selection: $selection)
+                        .id(source.id)
+                }
+                ScenarioDeletionModeBox(
+                    mode: deletionMode,
+                    bidirectional: false,
+                    networkDrive: destinations.first { $0.id == destinationID }?.adapter == "smb_share",
+                    choose: { deletionMode = $0 }
+                )
+                Label("В папке назначения хранится одна актуальная копия: подпапки по типам данных (files, databases, mailboxes, cron…) и файл manifest.json. Каждый запуск обновляет их. Пустой выбор — ничего не копируется.", systemImage: "square.stack.3d.down.right")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                // D-027 section 5.6a: `files/` is a mirror of the source scope.
+                Label("Папка files повторяет сервер: всё, чего нет в выбранных папках на сервере, удаляется из неё — также исключённые и снятые с выбора файлы и файлы, которые положили туда вручную. Удалённое попадает в Корзину, если она есть на томе назначения.", systemImage: "arrow.triangle.2.circlepath")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if !selection.contains(where: { $0.category == "files" && $0.rule == "include" }) && deletionMode == .simple {
+                    Label("Файлы не выбраны: при запуске всё содержимое папки files удаляется — папки целиком, в Корзину, если она есть на томе назначения.", systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Label("Сейчас копируются файлы, папки и базы MySQL. Почта, Cron и другие типы появятся следующими шагами.", systemImage: "info.circle")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let error {
+                    SettingsNotice(text: error, symbol: "exclamationmark.triangle")
+                }
+                if scenario != nil {
+                    Button("Удалить сценарий", systemImage: "trash", role: .destructive) { confirmRemoval = true }
+                }
+            }
+            .padding(24)
+        }
+        .confirmationDialog("Удалить сценарий «\(scenario?.name ?? name)»?", isPresented: $confirmRemoval) {
+            Button("Удалить сценарий", role: .destructive) {
+                if let scenario { error = removeScenario(scenario.id) }
+            }
+        } message: {
+            Text("QADREN удалит с этого Mac только сценарий. Данные на сервере и копия в назначении не изменятся.")
+        }
+        .alert("Источник всегда прав", isPresented: $confirmRule) {
+            Button("Отмена", role: .cancel) {}
+            Button("Подтвердить", role: .destructive, action: commit)
+        } message: {
+            Text(ruleText)
+        }
+        .onAppear {
+            if let scenario {
+                name = scenario.name
+                sourceID = scenario.left_connection_id
+                destinationID = scenario.right_connection_id
+                // Core stores `<destination>/files` (D-027 section 5.2).
+                destinationRoot = scenario.right_root.hasSuffix("/files")
+                    ? String(scenario.right_root.dropLast("/files".count)) : scenario.right_root
+                selection = Set(scenario.resources)
+                deletionMode = ScenarioDeletionMode(rawValue: scenario.deletion_mode) ?? .simple
+            } else {
+                sourceID = initialSourceID ?? sources.first?.id ?? ""
+                destinationID = destinations.first?.id ?? ""
+            }
+        }
+    }
+
+    private var canSave: Bool {
+        !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !sourceID.isEmpty && !destinationID.isEmpty && !destinationRoot.isEmpty
+            && !home.isEmpty
+            && selection.contains { $0.rule == "include" && (!isFile($0) || isInsideHome($0)) }
+    }
+
+    private func isFile(_ resource: BackupResource) -> Bool { resource.category == "files" }
+
+    private func isInsideHome(_ resource: BackupResource) -> Bool {
+        resource.provider_id == home || resource.provider_id.hasPrefix(home + "/")
+    }
+
+    private var ruleText: String {
+        let deletions = deletionMode == .simple
+            ? "Файл, удалённый на сервере внутри выбранной папки, удаляется и в копии без вопроса."
+            : "Каждое удаление в копии будет ждать вашего подтверждения."
+        let trash = destinations.first { $0.id == destinationID }?.adapter == "smb_share"
+            ? "На сетевом диске Корзины обычно нет: заменённая или удалённая версия пропадает навсегда."
+            : "Заменённая или удалённая версия уходит в Корзину."
+        return "Копия в назначении обновляется по серверу: изменённые файлы и дампы баз заменяются. " + deletions + " " + trash
+            + " Если выбранный объект пропал или недоступен, в копии ничего не удаляется."
+    }
+
+    private func commit() {
+        // File rules outside the home folder are not part of this source.
+        let inside = selection.filter { !isFile($0) || isInsideHome($0) }
+        error = save(name, sourceID, destinationID, destinationRoot, home, Array(inside), deletionMode)
+    }
+}
+
+/// The SFTP file browser of an ISPmanager source (D-027 section 7a). It has
+/// the QADREN browser behavior: breadcrumbs, Up, Home, a path field, folder
+/// opening, hidden files, and checkboxes that stay while the user moves
+/// between branches. It reads names, types, and sizes only.
+private struct ISPmanagerFilePanel: View {
+    let connection: StorageEntry
+    @Binding var selection: Set<BackupResource>
+    /// The home folder of the account. The browser does not go above it:
+    /// it is the source root of the backup (D-027 section 6).
+    @Binding var home: String
+    @State private var listing: ISPmanagerDirListing?
+    @State private var loading = false
+    @State private var failure: String?
+    @State private var pathDraft = ""
+    @State private var showsPathField = false
+
+    var body: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Label("Источник", systemImage: "arrow.right.circle").font(.headline)
+                    Spacer()
+                    Text(connection.name).foregroundStyle(.secondary).lineLimit(1)
+                }
+                toolbar
+                if showsPathField {
+                    HStack {
+                        TextField("/var/www/site", text: $pathDraft)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.body.monospaced())
+                            .onSubmit(openDraft)
+                        Button("Перейти", action: openDraft)
+                            .disabled(!insideHome(pathDraft))
+                    }
+                }
+                breadcrumbs
+                entries
+                summary
+            }
+            .padding(6)
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .task { if listing == nil { await load(nil) } }
+    }
+
+    private var toolbar: some View {
+        HStack(spacing: 8) {
+            Button("Домой", systemImage: "house") { Task { await load(nil) } }
+                .help("Домашняя папка аккаунта")
+            Button("Вверх", systemImage: "arrow.up") {
+                if let parent = listing?.parent { Task { await load(parent) } }
+            }
+            .disabled(listing?.parent == nil || listing?.path == home || loading)
+            .keyboardShortcut(.upArrow, modifiers: .command)
+            Button("Путь", systemImage: "character.cursor.ibeam") {
+                pathDraft = listing?.path ?? home
+                showsPathField.toggle()
+            }
+            .help("Перейти к папке по пути")
+            Button("Обновить", systemImage: "arrow.clockwise") {
+                Task { await load(listing?.path) }
+            }
+            .disabled(loading)
+            Spacer()
+            if loading { ProgressView().controlSize(.small) }
+        }
+        .labelStyle(.iconOnly)
+    }
+
+    private var breadcrumbs: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 4) {
+                ForEach(Array(crumbs.enumerated()), id: \.offset) { index, crumb in
+                    if index > 0 {
+                        Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary)
+                    }
+                    Button(crumb.title) { Task { await load(crumb.path) } }
+                        .buttonStyle(.link)
+                        .disabled(loading || crumb.path == listing?.path)
+                }
+            }
+            .font(.callout.monospaced())
+        }
+        .accessibilityLabel("Путь в папках сервера")
+    }
+
+    /// Breadcrumbs start at the home folder, shown as "~".
+    private var crumbs: [(title: String, path: String)] {
+        guard let path = listing?.path, insideHome(path) else { return [] }
+        var result: [(String, String)] = [("~", home)]
+        var current = home
+        for part in path.dropFirst(home.count).split(separator: "/") {
+            current += "/" + part
+            result.append((String(part), current))
+        }
+        return result
+    }
+
+    private func insideHome(_ path: String) -> Bool {
+        let path = path.trimmingCharacters(in: .whitespaces)
+        return !home.isEmpty && (path == home || path.hasPrefix(home + "/"))
+    }
+
+    @ViewBuilder
+    private var entries: some View {
+        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+        Group {
+            if let failure {
+                SettingsNotice(text: failure, symbol: "exclamationmark.triangle") {
+                    Button("Повторить") { Task { await load(listing?.path) } }
+                }
+            } else if let listing {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        if listing.entries.isEmpty {
+                            Text("Папка пуста").foregroundStyle(.secondary).padding(8)
+                        }
+                        ForEach(listing.entries) { entry in
+                            row(entry, in: listing.path)
+                            Divider().opacity(0.4)
+                        }
+                    }
+                }
+                // Each folder starts at the top: a short list must not stay
+                // below the scroll offset of the previous folder.
+                .id(listing.path)
+                .frame(height: 320)
+                .background(.quaternary.opacity(0.3), in: shape)
+                Text("Объектов в папке: \(listing.entries.count)")
+                    .font(.caption).foregroundStyle(.secondary)
+                if listing.truncated {
+                    Text("В папке больше \(listing.entries.count) объектов; показана только часть. Выберите папку целиком или перейдите глубже по пути.")
+                        .font(.caption).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } else {
+                HStack {
+                    ProgressView().controlSize(.small)
+                    Text("Подключаюсь по SFTP…").foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, minHeight: 120)
+            }
+        }
+    }
+
+    private func row(_ entry: ISPmanagerDirEntry, in folder: String) -> some View {
+        let path = folder == "/" ? "/" + entry.name : folder + "/" + entry.name
+        let rule = nearestRule(for: path)
+        let checked = rule?.rule == "include"
+        let inherited = rule != nil && rule?.provider_id != path
+        let selectable = entry.kind != "other"
+        return HStack(spacing: 8) {
+            Toggle("", isOn: Binding(
+                get: { checked },
+                set: { toggle(entry, path: path, on: $0) }
+            ))
+            .toggleStyle(.checkbox)
+            .labelsHidden()
+            .disabled(!selectable)
+            .help(!selectable ? "Устройство, сокет или канал не копируется"
+                : checked && inherited ? "Входит в выбранную папку. Снимите галочку, чтобы исключить"
+                : checked ? "Выбрано" : rule?.rule == "exclude" ? "Исключено" : "Выбрать")
+            Image(systemName: symbol(entry.kind))
+                .foregroundStyle(entry.kind == "dir" ? StorageConnector.ispmanager.tint : .secondary)
+                .frame(width: 18)
+            if entry.kind == "dir" {
+                Button(entry.name) { Task { await load(path) } }
+                    .buttonStyle(.plain)
+                    .lineLimit(1).truncationMode(.middle)
+                    .help("Открыть папку")
+            } else {
+                Text(entry.name).lineLimit(1).truncationMode(.middle)
+            }
+            if rule?.rule == "exclude" && rule?.provider_id == path {
+                Text("исключено").font(.caption).foregroundStyle(.orange)
+            }
+            if hasRules(inside: path) {
+                Image(systemName: "minus.circle").font(.caption).foregroundStyle(.secondary)
+                    .help("Внутри есть отдельно выбранные или исключённые объекты")
+            }
+            Spacer(minLength: 8)
+            Text(detail(entry)).font(.caption.monospaced()).foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 8).padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder
+    private var summary: some View {
+        let rules = selection.filter { $0.category == "files" }.sorted { $0.provider_id < $1.provider_id }
+        let included = rules.filter { $0.rule == "include" }.count
+        let excluded = rules.count - included
+        VStack(alignment: .leading, spacing: 4) {
+            Text(rules.isEmpty ? "Ничего не выбрано"
+                : "Выбрано объектов: \(included)" + (excluded > 0 ? " · исключено: \(excluded)" : ""))
+                .font(.caption.weight(.semibold))
+            ForEach(rules, id: \.self) { resource in
+                HStack(spacing: 6) {
+                    Image(systemName: resource.rule == "exclude" ? "nosign" : symbol(resource.kind))
+                        .font(.caption)
+                        .foregroundStyle(resource.rule == "exclude" ? Color.orange : Color.secondary)
+                    Text(resource.provider_id + ruleSuffix(resource))
+                        .font(.caption.monospaced())
+                        .lineLimit(1).truncationMode(.middle)
+                        .textSelection(.enabled)
+                    Spacer(minLength: 4)
+                    Button("Убрать", systemImage: "xmark.circle") { remove(resource) }
+                        .labelStyle(.iconOnly).buttonStyle(.borderless)
+                }
+            }
+            Text("Папка копируется целиком, также новые файлы в ней. Снимите галочку внутри выбранной папки, чтобы исключить объект со всем содержимым. Исключённое не копируется, а его прежняя копия удаляется из папки files.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func ruleSuffix(_ resource: BackupResource) -> String {
+        switch (resource.rule, resource.kind) {
+        case ("exclude", "dir"): "/ — исключить папку"
+        case ("exclude", _): " — исключить"
+        case (_, "dir"): "/ — вся папка"
+        default: ""
+        }
+    }
+
+    private func symbol(_ kind: String) -> String {
+        switch kind {
+        case "dir": "folder"
+        case "symlink": "arrow.uturn.right.square"
+        case "other": "questionmark.square.dashed"
+        default: "doc"
+        }
+    }
+
+    private func detail(_ entry: ISPmanagerDirEntry) -> String {
+        switch entry.kind {
+        case "dir": ""
+        case "symlink": "ссылка"
+        case "other": "спецфайл"
+        default: entry.size.map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file) } ?? ""
+        }
+    }
+
+    private static func isInside(_ path: String, _ rule: String) -> Bool {
+        path == rule || path.hasPrefix(rule == "/" ? "/" : rule + "/")
+    }
+
+    /// The most specific rule at or above `path` (D-027 section 6). A file
+    /// rule covers only that file.
+    private func nearestRule(for path: String, excludingExact: Bool = false) -> BackupResource? {
+        selection
+            .filter { rule in
+                rule.category == "files"
+                    && (rule.provider_id == path ? !excludingExact
+                        : rule.kind == "dir" && Self.isInside(path, rule.provider_id))
+            }
+            .max { $0.provider_id.count < $1.provider_id.count }
+    }
+
+    private func hasRules(inside path: String) -> Bool {
+        selection.contains { $0.provider_id.hasPrefix(path + "/") }
+    }
+
+    /// A new choice for `path` replaces every rule in its subtree. A rule is
+    /// stored only when the choice differs from the rule above.
+    private func toggle(_ entry: ISPmanagerDirEntry, path: String, on: Bool) {
+        let kind = entry.kind == "dir" ? "dir" : entry.kind == "symlink" ? "symlink" : "file"
+        selection = selection.filter { $0.provider_id != path && !$0.provider_id.hasPrefix(path + "/") }
+        let inheritedOn = nearestRule(for: path)?.rule == "include"
+        if on != inheritedOn {
+            selection.insert(BackupResource(
+                category: "files", provider_id: path, kind: kind, rule: on ? "include" : "exclude"
+            ))
+        }
+    }
+
+    /// Removing a selected folder also removes the rules inside it.
+    private func remove(_ resource: BackupResource) {
+        selection = selection.filter {
+            $0 != resource && !(resource.rule == "include" && resource.kind == "dir"
+                && $0.provider_id.hasPrefix(resource.provider_id + "/"))
+        }
+    }
+
+    private func openDraft() {
+        let path = pathDraft.trimmingCharacters(in: .whitespaces)
+        guard insideHome(path) else { return }
+        showsPathField = false
+        Task { await load(path) }
+    }
+
+    private func load(_ path: String?) async {
+        guard let url = connection.endpoint_url else {
+            failure = "У подключения нет адреса панели."
+            return
+        }
+        let credentials: LoginCredentials
+        let settings: ISPmanagerSettings
+        do {
+            guard let saved = try ISPmanagerKeychain.read(connection.id) else {
+                failure = "Логин и пароль не сохранены. Откройте подключение в разделе «Подключения»."
+                return
+            }
+            credentials = saved
+            settings = try StorageRegistryBridge.ispmanagerSettings(id: connection.id)
+        } catch {
+            failure = "Не удалось прочитать настройки подключения: " + error.localizedDescription
+            return
+        }
+        loading = true
+        let result = await ISPmanagerSFTP.list(url: url, credentials: credentials, settings: settings, path: path)
+        loading = false
+        switch result {
+        case let .success(value):
+            // The home folder is the source root; a path above it is not shown.
+            home = value.home
+            if !insideHome(value.path) {
+                await load(nil)
+                return
+            }
+            listing = value
+            failure = nil
+        case let .failure(.transport(transport)):
+            failure = transport.message(port: settings.ssh_port)
+        case let .failure(.message(text)):
+            failure = text
+        }
+    }
+}
+
+/// The MySQL databases of an ISPmanager source (D-027 section 7b). Each
+/// checked database gets one current dump, `databases/<name>.sql`.
+private struct ISPmanagerDatabasePanel: View {
+    let connection: StorageEntry
+    @Binding var selection: Set<BackupResource>
+    @State private var names: [String] = []
+    @State private var loading = false
+    @State private var failure: String?
+
+    var body: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Label("Базы данных", systemImage: "cylinder.split.1x2").font(.headline)
+                    Spacer()
+                    if loading { ProgressView().controlSize(.small) }
+                }
+                if let failure {
+                    SettingsNotice(text: failure, symbol: "exclamationmark.triangle") {
+                        Button("Повторить") { Task { await load() } }
+                    }
+                } else if names.isEmpty && !loading {
+                    Text("У аккаунта нет баз MySQL.").foregroundStyle(.secondary)
+                }
+                ForEach(names, id: \.self) { name in
+                    Toggle(name, isOn: binding(for: name))
+                        .toggleStyle(.checkbox)
+                    if selection.contains(resource(name)) {
+                        ISPmanagerTableRules(connection: connection, database: name, selection: $selection)
+                            .padding(.leading, 20)
+                    }
+                }
+                // A selected database that the panel no longer lists stays
+                // visible, so that the user can remove it.
+                ForEach(missing, id: \.self) { name in
+                    Toggle(isOn: binding(for: name)) {
+                        Text("\(name) — нет на панели")
+                    }
+                    .toggleStyle(.checkbox)
+                }
+                Text("Дамп снимается mysqldump по SSH в одной транзакции, без блокировки таблиц. Если на сервере есть gzip, данные сжимаются только на время передачи. Логин и пароль базы QADREN берёт из панели при каждом запуске и нигде не хранит. Каждая база — один актуальный файл databases/<имя>.sql.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(6)
+        }
+        .task { await load() }
+    }
+
+    private var missing: [String] {
+        selection
+            .filter { $0.category == "databases" && $0.rule == "include" && !names.contains($0.provider_id) }
+            .map(\.provider_id)
+            .sorted()
+    }
+
+    private func resource(_ name: String) -> BackupResource {
+        BackupResource(category: "databases", provider_id: name, kind: "object")
+    }
+
+    private func binding(for name: String) -> Binding<Bool> {
+        Binding(
+            get: { selection.contains(resource(name)) },
+            set: { checked in
+                if checked {
+                    selection.insert(resource(name))
+                } else {
+                    // The table rules go with their database.
+                    selection = selection.filter {
+                        $0 != resource(name) && !($0.category == "databases" && $0.provider_id.hasPrefix(name + "/"))
+                    }
+                }
+            }
+        )
+    }
+
+    private func load() async {
+        guard let url = connection.endpoint_url else {
+            failure = "У подключения нет адреса панели."
+            return
+        }
+        let credentials: LoginCredentials
+        do {
+            guard let saved = try ISPmanagerKeychain.read(connection.id) else {
+                failure = "Логин и пароль не сохранены. Откройте подключение в разделе «Подключения»."
+                return
+            }
+            credentials = saved
+        } catch {
+            failure = "Не удалось прочитать вход подключения: " + error.localizedDescription
+            return
+        }
+        loading = true
+        let result = await ISPmanagerDatabases.list(url: url, credentials: credentials)
+        loading = false
+        switch result {
+        case let .success(value):
+            names = value
+            failure = nil
+        case let .failure(.message(text)):
+            failure = text
+        case let .failure(.transport(transport)):
+            failure = transport.message(port: 22)
+        }
+    }
+}
+
+/// The tables of one selected database (D-027 section 7b.10). A checked
+/// table is dumped with its data. An unchecked table keeps only its
+/// structure: for cache, sessions, logs, and statistics. The list loads when
+/// the user opens it.
+private struct ISPmanagerTableRules: View {
+    let connection: StorageEntry
+    let database: String
+    @Binding var selection: Set<BackupResource>
+    @State private var expanded = false
+    @State private var tables: [ISPmanagerTable]?
+    @State private var loading = false
+    @State private var failure: String?
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            VStack(alignment: .leading, spacing: 6) {
+                if let failure {
+                    SettingsNotice(text: failure, symbol: "exclamationmark.triangle") {
+                        Button("Повторить") { Task { await load() } }
+                    }
+                } else if let tables, tables.isEmpty {
+                    Text("В базе нет таблиц.").foregroundStyle(.secondary)
+                }
+                ForEach(tables ?? []) { table in
+                    Toggle(isOn: binding(for: table.name)) {
+                        HStack {
+                            Text(table.name).font(.body.monospaced())
+                            if selection.contains(resource(table.name)) {
+                                Text("без данных").font(.caption).foregroundStyle(.orange)
+                            }
+                            Spacer()
+                            Text(ByteCountFormatter.string(fromByteCount: Int64(clamping: table.bytes), countStyle: .file))
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                    }
+                    .toggleStyle(.checkbox)
+                }
+                // A rule for a table that the server no longer lists stays
+                // visible, so that the user can remove it.
+                ForEach(missing, id: \.self) { name in
+                    Toggle(isOn: binding(for: name)) {
+                        Text("\(name) — нет в базе")
+                    }
+                    .toggleStyle(.checkbox)
+                }
+                Text("Отмеченные таблицы копируются с данными. Снимите галочку, и таблица попадёт в дамп только структурой, без строк: так удобно пропускать кэш, сессии, логи и статистику. Размеры — оценка MySQL.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.top, 4)
+        } label: {
+            HStack {
+                Text(ruleCount == 0 ? "Таблицы: все с данными" : "Таблицы: без данных — \(ruleCount)")
+                if loading { ProgressView().controlSize(.small) }
+            }
+        }
+        .onChange(of: expanded) { open in
+            if open && tables == nil && !loading { Task { await load() } }
+        }
+    }
+
+    private var prefix: String { database + "/" }
+
+    private var ruleCount: Int {
+        selection.filter { $0.rule == "structure_only" && $0.provider_id.hasPrefix(prefix) }.count
+    }
+
+    private var missing: [String] {
+        guard let tables else { return [] }
+        return selection
+            .filter { $0.rule == "structure_only" && $0.provider_id.hasPrefix(prefix) }
+            .map { String($0.provider_id.dropFirst(prefix.count)) }
+            .filter { name in !tables.contains { $0.name == name } }
+            .sorted()
+    }
+
+    private func resource(_ table: String) -> BackupResource {
+        BackupResource(category: "databases", provider_id: prefix + table, kind: "object", rule: "structure_only")
+    }
+
+    /// Checked means "with data": the rule exists only for an unchecked table.
+    private func binding(for table: String) -> Binding<Bool> {
+        Binding(
+            get: { !selection.contains(resource(table)) },
+            set: { checked in
+                if checked { selection.remove(resource(table)) } else { selection.insert(resource(table)) }
+            }
+        )
+    }
+
+    private func load() async {
+        guard let url = connection.endpoint_url else {
+            failure = "У подключения нет адреса панели."
+            return
+        }
+        let credentials: LoginCredentials
+        let settings: ISPmanagerSettings
+        do {
+            guard let saved = try ISPmanagerKeychain.read(connection.id) else {
+                failure = "Логин и пароль не сохранены. Откройте подключение в разделе «Подключения»."
+                return
+            }
+            credentials = saved
+            settings = try StorageRegistryBridge.ispmanagerSettings(id: connection.id)
+        } catch {
+            failure = "Не удалось прочитать настройки подключения: " + error.localizedDescription
+            return
+        }
+        loading = true
+        let result = await ISPmanagerDatabases.tables(
+            url: url, credentials: credentials, settings: settings, database: database
+        )
+        loading = false
+        switch result {
+        case let .success(value):
+            tables = value
+            failure = nil
+        case let .failure(.message(text)):
+            failure = text
+        case let .failure(.transport(transport)):
+            failure = transport.message(port: settings.ssh_port)
+        }
     }
 }
 
@@ -3058,8 +4313,12 @@ private struct ScenarioFolderPanel: View {
                     }
                     .frame(height: 280, alignment: .top)
                 } else if let error = browser.error {
-                    SettingsNotice(text: error, symbol: "exclamationmark.triangle")
-                        .frame(height: 280, alignment: .top)
+                    // A network drive can be absent for a moment, for example
+                    // while QADREN mounts it again after a restart.
+                    SettingsNotice(text: error, symbol: "exclamationmark.triangle") {
+                        Button("Повторить") { showConnection() }
+                    }
+                    .frame(height: 280, alignment: .top)
                 } else {
                     List(browser.entries) { entry in
                         row(entry)
