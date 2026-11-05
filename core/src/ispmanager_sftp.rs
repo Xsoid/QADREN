@@ -843,12 +843,18 @@ impl SftpConnection {
     /// is complete only when `mysqldump` exits with 0 and the text ends with
     /// its `-- Dump completed` line.
     ///
-    /// The first part has the data of all tables except `structure_only`,
-    /// and the routines, triggers, and events. A second part has only the
-    /// structure of the `structure_only` tables (section 7b.10). With
-    /// `compress`, the server pipes each part through `gzip -1` and the Mac
-    /// decompresses it; the gzip check sum is verified (section 7b.6).
-    /// Returns the SQL bytes and the bytes that came over the network.
+    /// Without `structure_only` tables, the dump is one ordinary
+    /// `mysqldump`. With them it has three parts, in the order of one
+    /// ordinary dump (section 7b.10):
+    /// 1. the structure of all tables and views, without triggers;
+    /// 2. the data of all tables except `structure_only`, in one
+    ///    transaction, without triggers;
+    /// 3. the triggers, routines, and events.
+    /// The triggers come after the data, so a restore does not fire them
+    /// for each row. With `compress`, the server pipes each part through
+    /// `gzip -1` and the Mac decompresses it; the gzip check sum is
+    /// verified (section 7b.6). Returns the SQL bytes and the bytes that
+    /// came over the network.
     pub fn mysql_dump(
         &self,
         access: &MysqlAccess,
@@ -862,31 +868,30 @@ impl SftpConnection {
             return Err(MysqlDumpError::Failed);
         }
         let database = shell_quote(&access.database);
-        let mut data = String::from(
-            "mysqldump --defaults-extra-file=/dev/stdin --single-transaction --quick \
-             --skip-lock-tables --no-tablespaces --set-gtid-purged=OFF --routines --triggers \
-             --events --hex-blob --default-character-set=utf8mb4 --skip-dump-date",
-        );
-        for table in structure_only {
-            data.push_str(&format!(
-                " --ignore-table={}",
-                shell_quote(&format!("{}.{table}", access.database))
-            ));
-        }
-        data.push_str(&format!(" {database}"));
-        let mut parts = vec![data];
-        if !structure_only.is_empty() {
-            let mut structure = format!(
-                "mysqldump --defaults-extra-file=/dev/stdin --no-data --single-transaction \
-                 --skip-lock-tables --no-tablespaces --set-gtid-purged=OFF --triggers \
-                 --default-character-set=utf8mb4 --skip-dump-date {database}"
-            );
+        let base = "mysqldump --defaults-extra-file=/dev/stdin --single-transaction \
+                    --skip-lock-tables --no-tablespaces --set-gtid-purged=OFF \
+                    --default-character-set=utf8mb4 --skip-dump-date";
+        let parts = if structure_only.is_empty() {
+            vec![format!(
+                "{base} --quick --routines --triggers --events --hex-blob {database}"
+            )]
+        } else {
+            let mut data = format!("{base} --quick --no-create-info --skip-triggers --hex-blob");
             for table in structure_only {
-                structure.push(' ');
-                structure.push_str(&shell_quote(table));
+                data.push_str(&format!(
+                    " --ignore-table={}",
+                    shell_quote(&format!("{}.{table}", access.database))
+                ));
             }
-            parts.push(structure);
-        }
+            data.push_str(&format!(" {database}"));
+            vec![
+                format!("{base} --no-data --skip-triggers {database}"),
+                data,
+                format!(
+                    "{base} --no-data --no-create-info --triggers --routines --events {database}"
+                ),
+            ]
+        };
         let mut writer = SinkWriter {
             sink: &mut sink,
             tail: Vec::new(),
