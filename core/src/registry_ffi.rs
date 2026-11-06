@@ -918,7 +918,10 @@ pub extern "C" fn qadren_scenario_run_state(
                 .backup_object_results(run_id)?
                 .into_iter()
                 .map(|result| {
-                    json!({"category": result.category, "result": result.result, "error": result.error})
+                    json!({
+                        "category": result.category, "provider_id": result.provider_id,
+                        "result": result.result, "error": result.error
+                    })
                 })
                 .collect())
         };

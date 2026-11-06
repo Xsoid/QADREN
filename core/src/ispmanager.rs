@@ -108,7 +108,7 @@ impl Category {
 /// Reads of one parent object (D-027 section 7b): a nested list with `elid`
 /// and an edit form opened without `sok`. Without `sok` the panel only
 /// returns the form; it saves nothing.
-const OBJECT_READS: [&str; 3] = ["db.users", "db.users.edit", "domain.record"];
+const OBJECT_READS: [&str; 4] = ["db.users", "db.users.edit", "domain.record", "domain.record.edit"];
 
 /// The only functions that the client sends. `auth` opens a session; every
 /// other entry is a documented list function or an object read.
@@ -423,6 +423,9 @@ pub struct FunctionReport {
 pub struct ExportProbe {
     /// `domain.record` of the first DNS zone.
     pub dns_records: Option<FunctionReport>,
+    /// The form `domain.record.edit` of the first MX record, opened without
+    /// `sok`: its field names. The list has no MX priority.
+    pub dns_record_form: Option<Vec<String>>,
     /// The account home has an `email` folder (SFTP).
     pub mail_folder: Option<bool>,
     /// A mailbox folder below `email/<domain>/` has `cur`, `new`, and `tmp`.
@@ -732,6 +735,7 @@ pub fn object_names(session: &mut Session, category: &str) -> Result<Vec<String>
     let func = match category {
         "dns" => "domain",
         "mail" => "emaildomain",
+        "sites" => "webdomain",
         _ => return Err(IspError::NotAllowed(category.to_owned())),
     };
     let doc = session.read(func, &[])?;
@@ -763,6 +767,75 @@ fn sorted(mut items: Vec<Value>) -> Vec<Value> {
     items
 }
 
+/// What a site file holds besides the site settings (D-027 section 7c).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SiteOptions {
+    /// The certificates whose `webdomains` name the site.
+    pub ssl: bool,
+    /// The FTP users whose home folder is the site root or inside it.
+    pub ftp: bool,
+}
+
+const SSL_FIELDS: &[&str] = &[
+    "name", "type", "info", "valid_after", "webdomains", "emaildomains",
+    "is_letsencrypt", "letsencrypt", "mail_ssl", "active",
+];
+
+/// True when a comma or space separated domain list names the site or its
+/// `www.` name.
+fn names_site(domains: &str, site: &str) -> bool {
+    let www = format!("www.{site}");
+    domains
+        .split([',', ' ', ';'])
+        .map(str::trim)
+        .any(|domain| domain.eq_ignore_ascii_case(site) || domain.eq_ignore_ascii_case(&www))
+}
+
+/// True when an FTP home folder belongs to the site: the site root or a
+/// folder inside it, or a folder of the site above its root whose path has
+/// the site name (the panel root is `/www/<site>/web`, the FTP home is often
+/// `/www/<site>`). A shared folder such as `/` or `/www` does not belong to
+/// one site. Both paths are as the panel gives them, from the account home.
+fn home_in_site(home: &str, docroot: &str, site: &str) -> bool {
+    let home = home.trim_end_matches('/');
+    let root = docroot.trim_end_matches('/');
+    if home.is_empty() || root.is_empty() {
+        return false;
+    }
+    let inside = |path: &str, base: &str| path == base || path.starts_with(&format!("{base}/"));
+    inside(home, root) || (inside(root, home) && home.split('/').any(|part| part == site))
+}
+
+/// One site of the account for the Scenario editor: its root folder and
+/// its database, if the panel names one (D-027 section 7c).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SiteOverview {
+    pub name: String,
+    pub docroot: Option<String>,
+    pub database: Option<String>,
+}
+
+pub fn sites_overview(session: &mut Session) -> Result<Vec<SiteOverview>> {
+    let doc = session.read("webdomain", &[])?;
+    let mut sites: Vec<SiteOverview> = elements(&doc)
+        .into_iter()
+        .filter_map(|site| {
+            let name = text(site, "name").filter(|name| crate::registry::domain_name(name))?;
+            Some(SiteOverview {
+                name,
+                // Absolute, or relative to the account home: the editor
+                // resolves a relative root against the home folder.
+                docroot: text(site, "docroot")
+                    .filter(|root| !root.is_empty() && !root.split('/').any(|part| part == "..")),
+                database: text(site, "database").filter(|db| !db.is_empty()),
+            })
+        })
+        .collect();
+    sites.sort_by(|a, b| a.name.cmp(&b.name));
+    sites.dedup_by(|a, b| a.name == b.name);
+    Ok(sites)
+}
+
 /// The export of one Backup/export object from the panel (D-027 section
 /// 10): `cron` (`all`), `dns` (a zone), or `mail` (a mail domain). It reads
 /// list functions only and takes the listed fields, without internal keys.
@@ -771,6 +844,7 @@ pub fn export_object(
     session: &mut Session,
     category: &str,
     provider_id: &str,
+    site: SiteOptions,
 ) -> std::result::Result<Vec<u8>, &'static str> {
     let read = |session: &mut Session, func: &str, params: &[(&str, &str)]| {
         session
@@ -843,6 +917,76 @@ pub fn export_object(
                 "mailboxes": sorted(mailboxes),
             })
         }
+        "sites" => {
+            let site_options = site;
+            let doc = read(session, "webdomain", &[])?;
+            let site = elements(&doc)
+                .into_iter()
+                .find(|site| text(site, "name").as_deref() == Some(provider_id))
+                .ok_or("ispmanager_object_missing")?;
+            let docroot = text(site, "docroot");
+            let mut value = serde_json::json!({
+                "format": "qadren-ispmanager-site/1",
+                "source": "webdomain",
+                "site": pick(site, &[
+                    "name", "active", "docroot", "public_docroot", "ipaddr", "handler",
+                    "php", "php_mode", "php_version", "secure", "database", "git",
+                    "cgi_site_settings",
+                ]),
+            });
+            if site_options.ssl {
+                let doc = read(session, "sslcert", &[])?;
+                let certificates = elements(&doc)
+                    .into_iter()
+                    .filter(|cert| {
+                        text(cert, "webdomains").is_some_and(|domains| names_site(&domains, provider_id))
+                    })
+                    .map(|cert| pick(cert, SSL_FIELDS))
+                    .collect();
+                value["certificates"] = Value::Array(sorted(certificates));
+            }
+            if site_options.ftp {
+                let doc = read(session, "ftp.user", &[])?;
+                let users = elements(&doc)
+                    .into_iter()
+                    .filter(|user| {
+                        text(user, "home").is_some_and(|home| {
+                            docroot.as_deref().is_some_and(|root| home_in_site(&home, root, provider_id))
+                        })
+                    })
+                    .map(|user| pick(user, &["name", "home", "active"]))
+                    .collect();
+                value["ftp_users"] = Value::Array(sorted(users));
+            }
+            value
+        }
+        "ssl" => {
+            let doc = read(session, "sslcert", &[])?;
+            // The list has no private key; `key` is the list key of the panel.
+            let certificates = elements(&doc)
+                .into_iter()
+                .map(|cert| pick(cert, SSL_FIELDS))
+                .collect();
+            serde_json::json!({
+                "format": "qadren-ispmanager-ssl/1",
+                "source": "sslcert",
+                "note": "Certificate list only. Private keys are not in this file.",
+                "certificates": sorted(certificates),
+            })
+        }
+        "ftp" => {
+            let doc = read(session, "ftp.user", &[])?;
+            let users = elements(&doc)
+                .into_iter()
+                .map(|user| pick(user, &["name", "home", "active"]))
+                .collect();
+            serde_json::json!({
+                "format": "qadren-ispmanager-ftp/1",
+                "source": "ftp.user",
+                "note": "Passwords are not in this file.",
+                "users": sorted(users),
+            })
+        }
         _ => return Err("invalid_selection"),
     };
     let mut bytes = serde_json::to_vec_pretty(&value).map_err(|_| "invalid_request")?;
@@ -913,15 +1057,33 @@ fn function_report(function: &'static str, outcome: Result<ListOutcome>) -> Func
     }
 }
 
-/// The records of the first DNS zone, read with `elid` (D-027 section 10).
-fn probe_dns_records(session: &mut Session) -> Option<FunctionReport> {
-    let zones = session.read("domain", &[]).ok()?;
-    let zone = elements(&zones).into_iter().next().cloned()?;
-    let (_, key) = key_field(&zone, &["name", "key", "id"])?;
-    let outcome = session
-        .read("domain.record", &[("elid", &key)])
-        .map(|doc| classify_list(&doc));
-    Some(function_report("domain.record", outcome))
+/// The records of the first DNS zone, read with `elid`, and the form of
+/// its first MX record without `sok` (D-027 section 7c).
+fn probe_dns_records(session: &mut Session) -> (Option<FunctionReport>, Option<Vec<String>>) {
+    let Some(zone) = session
+        .read("domain", &[])
+        .ok()
+        .and_then(|zones| elements(&zones).into_iter().next().cloned())
+    else {
+        return (None, None);
+    };
+    let Some((_, key)) = key_field(&zone, &["name", "key", "id"]) else {
+        return (None, None);
+    };
+    let records = session.read("domain.record", &[("elid", &key)]);
+    let form = records.as_ref().ok().and_then(|doc| {
+        let mx = elements(doc)
+            .into_iter()
+            .find(|record| text(record, "rtype").is_some_and(|kind| kind.starts_with("MX")))?
+            .clone();
+        let rkey = text(&mx, "rkey")?;
+        let form = session
+            .read("domain.record.edit", &[("elid", &rkey), ("plid", &key)])
+            .ok()?;
+        Some(sorted_fields(&form))
+    });
+    let outcome = records.map(|doc| classify_list(&doc));
+    (Some(function_report("domain.record", outcome)), form)
 }
 
 /// The form of mailbox names in the `email` list (D-027 section 7c).
@@ -1043,8 +1205,10 @@ pub fn check(url: &str, login: &str, password: &str, sftp: SftpTarget<'_>) -> Ch
     let file_transport =
         ispmanager_sftp::check(&host, sftp.port, login, password, sftp.host_key_sha256);
     let (mut databases, access) = probe_databases(&mut session);
+    let (dns_records, dns_record_form) = probe_dns_records(&mut session);
     let mut export_probe = ExportProbe {
-        dns_records: probe_dns_records(&mut session),
+        dns_records,
+        dns_record_form,
         mailbox_names: probe_mailbox_names(&mut session),
         ..ExportProbe::default()
     };

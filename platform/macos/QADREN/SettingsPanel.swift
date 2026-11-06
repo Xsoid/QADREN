@@ -3549,7 +3549,7 @@ private struct BackupScenarioEditorView: View {
                         .font(.caption).foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                Label("Сейчас копируются файлы и папки, базы MySQL, задания Cron, DNS-зоны и настройки почты. Письма и другие типы появятся следующими шагами.", systemImage: "info.circle")
+                Label("Копируются файлы и папки (в том числе письма), базы MySQL, задания Cron, настройки сайтов, SSL-сертификатов, FTP, DNS-зон и почты.", systemImage: "info.circle")
                     .font(.caption).foregroundStyle(.secondary)
                 if let error {
                     SettingsNotice(text: error, symbol: "exclamationmark.triangle")
@@ -4069,6 +4069,7 @@ private struct ISPmanagerSettingsPanel: View {
     let home: String
     @State private var zones: [String] = []
     @State private var domains: [String] = []
+    @State private var sites: [ISPmanagerSite] = []
     @State private var loading = false
     @State private var failure: String?
 
@@ -4087,9 +4088,14 @@ private struct ISPmanagerSettingsPanel: View {
                 }
                 Toggle("Задания Cron — все задания аккаунта", isOn: binding("cron", "all"))
                     .toggleStyle(.checkbox)
+                Toggle("SSL-сертификаты — список, без закрытых ключей", isOn: binding("ssl", "all"))
+                    .toggleStyle(.checkbox)
+                Toggle("Пользователи FTP — без паролей", isOn: binding("ftp", "all"))
+                    .toggleStyle(.checkbox)
+                sitesSection
                 list(title: "DNS-зоны", category: "dns", names: zones, empty: "У аккаунта нет DNS-зон.")
                 list(title: "Почтовые домены", category: "mail", names: domains, empty: "У аккаунта нет почтовых доменов.")
-                Text("Каждый объект — один файл JSON в копии: cron/jobs.json, dns/<зона>.json, mail/<домен>.json. QADREN только читает списки панели. Задания Cron не запускаются. Пароли ящиков и письма в эти файлы не попадают.")
+                Text("Каждый объект — один файл JSON в копии: cron/jobs.json, ssl/certificates.json, ftp/users.json, sites/<сайт>.json, dns/<зона>.json, mail/<домен>.json. QADREN только читает списки панели. Задания Cron не запускаются. Пароли, закрытые ключи и письма в эти файлы не попадают; файлы сайтов копируются через выбор файлов выше.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Text("Письма хранятся на сервере как файлы, в папке email/<домен> домашней папки. «Письма» у домена добавляет эту папку в выбор файлов выше: письма копируются в files/email/<домен> вместе с файлами, по одному файлу на письмо, и при следующих запусках копируются только новые.")
@@ -4118,6 +4124,138 @@ private struct ISPmanagerSettingsPanel: View {
             Toggle(isOn: binding(category, name)) { Text("\(name) — нет на панели") }
                 .toggleStyle(.checkbox)
         }
+    }
+
+    /// Sites: "all sites" at run time, or single sites; each with the parts
+    /// that go with it (D-027 section 7c).
+    @ViewBuilder
+    private var sitesSection: some View {
+        let all = selection.contains(BackupResource(category: "sites", provider_id: "all", kind: "object"))
+        Text("Сайты").font(.subheadline.weight(.semibold)).padding(.top, 4)
+        if sites.isEmpty && !loading && failure == nil {
+            Text("У аккаунта нет сайтов.").foregroundStyle(.secondary)
+        }
+        if !sites.isEmpty || all {
+            Toggle("Все сайты — и те, что появятся позже", isOn: Binding(
+                get: { all },
+                set: { on in
+                    // "All" replaces the single sites and their options.
+                    selection = selection.filter {
+                        !(["sites", "site_ssl", "site_ftp"].contains($0.category) && ($0.provider_id == "all" || on))
+                    }
+                    if on { selection.insert(BackupResource(category: "sites", provider_id: "all", kind: "object")) }
+                }
+            ))
+            .toggleStyle(.checkbox)
+        }
+        if all {
+            siteOptions("all", docroots: sites.compactMap(\.docroot).map(absoluteRoot), databases: sites.compactMap(\.database))
+                .padding(.leading, 20)
+        } else {
+            ForEach(sites) { site in
+                Toggle(site.name, isOn: Binding(
+                    get: { selection.contains(BackupResource(category: "sites", provider_id: site.name, kind: "object")) },
+                    set: { on in
+                        selection = selection.filter {
+                            !(["sites", "site_ssl", "site_ftp"].contains($0.category) && $0.provider_id == site.name)
+                        }
+                        if on { selection.insert(BackupResource(category: "sites", provider_id: site.name, kind: "object")) }
+                    }
+                ))
+                .toggleStyle(.checkbox)
+                if selection.contains(BackupResource(category: "sites", provider_id: site.name, kind: "object")) {
+                    siteOptions(site.name, docroots: site.docroot.map { [absoluteRoot($0)] } ?? [], databases: site.database.map { [$0] } ?? [])
+                        .padding(.leading, 20)
+                }
+            }
+            ForEach(missing("sites", sites.map(\.name)).filter { $0 != "all" }, id: \.self) { name in
+                Toggle(isOn: binding("sites", name)) { Text("\(name) — нет на панели") }
+                    .toggleStyle(.checkbox)
+            }
+        }
+    }
+
+    /// What goes with a site: its files (the site root), its database, and,
+    /// inside the site file, its certificates and FTP users.
+    @ViewBuilder
+    private func siteOptions(_ site: String, docroots: [String], databases: [String]) -> some View {
+        let all = site == "all"
+        let validDatabases = databases.filter(Self.plainDatabaseName)
+        VStack(alignment: .leading, spacing: 4) {
+            if home.isEmpty {
+                Text("файлы — откроется, когда загрузится выбор файлов выше")
+            } else if docroots.isEmpty {
+                Text("файлы — панель не сообщила корень сайта; выберите его папку в выборе файлов выше")
+            } else {
+                filesToggle(
+                    docroots,
+                    label: all ? "файлы всех сайтов — корни сайтов (\(docroots.count))"
+                        : "файлы — \(relativeToHome(docroots[0]))"
+                )
+            }
+            if !validDatabases.isEmpty {
+                Toggle(all ? "базы сайтов (\(Set(validDatabases).count))" : "база — \(validDatabases[0])", isOn: Binding(
+                    get: { validDatabases.allSatisfy { selection.contains(BackupResource(category: "databases", provider_id: $0, kind: "object")) } },
+                    set: { on in
+                        for name in validDatabases {
+                            let resource = BackupResource(category: "databases", provider_id: name, kind: "object")
+                            if on { selection.insert(resource) } else { selection.remove(resource) }
+                        }
+                    }
+                ))
+                .toggleStyle(.checkbox)
+            }
+            Toggle("SSL — сертификаты сайта в его файле настроек", isOn: binding("site_ssl", site))
+                .toggleStyle(.checkbox)
+            Toggle("FTP — пользователи, чья папка внутри сайта", isOn: binding("site_ftp", site))
+                .toggleStyle(.checkbox)
+        }
+        .font(.callout)
+        .foregroundStyle(.secondary)
+    }
+
+    private static func plainDatabaseName(_ name: String) -> Bool {
+        !name.isEmpty && name.count <= 64 && !name.hasPrefix(".") && !name.hasPrefix("-")
+            && name.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "_-.$".contains($0)) }
+    }
+
+    /// The panel gives a site root as the user sees it: from the account
+    /// home, also when it starts with `/` (for example `/www/<site>/web`).
+    /// A root that already starts with the home folder stays as it is.
+    private func absoluteRoot(_ root: String) -> String {
+        if root == home || root.hasPrefix(home + "/") { return root }
+        return home + (root.hasPrefix("/") ? root : "/" + root)
+    }
+
+    private func relativeToHome(_ path: String) -> String {
+        path.hasPrefix(home + "/") ? String(path.dropFirst(home.count + 1)) : path
+    }
+
+    /// File rules for `paths`: on when every path is selected. A path that a
+    /// selected folder already covers stays as it is.
+    private func filesToggle(_ paths: [String], label: String) -> some View {
+        let insideHome = paths.filter { $0 == home || $0.hasPrefix(home + "/") }
+        let covered = insideHome.allSatisfy { nearestFileRule($0)?.rule == "include" }
+        return Toggle(isOn: Binding(
+            get: { !insideHome.isEmpty && covered },
+            set: { on in
+                for path in insideHome {
+                    if on {
+                        if nearestFileRule(path)?.rule != "include" {
+                            selection = selection.filter { !($0.category == "files" && ($0.provider_id == path || $0.provider_id.hasPrefix(path + "/"))) }
+                            selection.insert(BackupResource(category: "files", provider_id: path, kind: "dir", rule: "include"))
+                        }
+                    } else {
+                        selection = selection.filter { !($0.category == "files" && ($0.provider_id == path || $0.provider_id.hasPrefix(path + "/"))) }
+                    }
+                }
+            }
+        )) {
+            Text(insideHome.isEmpty ? label + " — вне домашней папки аккаунта, недоступно" : label)
+        }
+        .toggleStyle(.checkbox)
+        .disabled(insideHome.isEmpty)
+        .help(insideHome.isEmpty ? "Корень сайта вне домашней папки аккаунта" : "Добавляет корень сайта в выбор файлов")
     }
 
     private func lettersPath(_ domain: String) -> String {
@@ -4193,9 +4331,15 @@ private struct ISPmanagerSettingsPanel: View {
         loading = true
         async let zoneList = ISPmanagerDatabases.objectNames(url: url, credentials: credentials, category: "dns")
         async let domainList = ISPmanagerDatabases.objectNames(url: url, credentials: credentials, category: "mail")
-        let (zoneResult, domainResult) = await (zoneList, domainList)
+        async let siteList = ISPmanagerDatabases.sites(url: url, credentials: credentials)
+        let (zoneResult, domainResult, siteResult) = await (zoneList, domainList, siteList)
         loading = false
         failure = nil
+        switch siteResult {
+        case let .success(value): sites = value
+        case let .failure(.message(text)): failure = text
+        case let .failure(.transport(transport)): failure = transport.message(port: 22)
+        }
         for (result, apply) in [(zoneResult, { zones = $0 }), (domainResult, { domains = $0 })] as [(Swift.Result<[String], ISPmanagerSFTP.Failure>, ([String]) -> Void)] {
             switch result {
             case let .success(value): apply(value)

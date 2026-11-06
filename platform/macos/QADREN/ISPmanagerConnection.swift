@@ -22,6 +22,11 @@ private func ispmanagerDatabaseTables(
     _ sshPort: UInt16, _ hostKey: UnsafePointer<CChar>?, _ database: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
 
+@_silgen_name("qadren_ispmanager_sites")
+private func ispmanagerSites(
+    _ url: UnsafePointer<CChar>?, _ login: UnsafePointer<CChar>?, _ password: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
+
 @_silgen_name("qadren_ispmanager_object_names")
 private func ispmanagerObjectNames(
     _ url: UnsafePointer<CChar>?, _ login: UnsafePointer<CChar>?, _ password: UnsafePointer<CChar>?,
@@ -62,6 +67,7 @@ struct ISPmanagerFunctionReport: Codable, Equatable {
 /// 10): field names and yes/no facts only.
 struct ISPmanagerExportProbe: Codable, Equatable {
     var dns_records: ISPmanagerFunctionReport? = nil
+    var dns_record_form: [String]? = nil
     var mail_folder: Bool? = nil
     var maildir: Bool? = nil
     var mailbox_names: ISPmanagerMailboxNameProbe? = nil
@@ -428,6 +434,33 @@ enum ISPmanagerDatabases {
         }.value
     }
 
+    private struct SitesResult: Decodable {
+        let ok: Bool
+        let data: [ISPmanagerSite]?
+        let error: String?
+    }
+
+    /// The sites of the account with their root folders and databases
+    /// (D-027 section 7c). Core reads the `webdomain` list.
+    static func sites(url: String, credentials: LoginCredentials) async -> Swift.Result<[ISPmanagerSite], ISPmanagerSFTP.Failure> {
+        await Task.detached(priority: .userInitiated) {
+            let pointer = url.withCString { url in
+                credentials.login.withCString { login in
+                    credentials.password.withCString { password in
+                        ispmanagerSites(url, login, password)
+                    }
+                }
+            }
+            guard let pointer else { return .failure(.message("Нет ответа от Core.")) }
+            defer { ispmanagerFree(pointer) }
+            guard let result = try? JSONDecoder().decode(
+                SitesResult.self, from: Data(String(cString: pointer).utf8)
+            ) else { return .failure(.message("Неверный ответ Core.")) }
+            if let sites = result.data, result.ok { return .success(sites) }
+            return .failure(.message("Не удалось прочитать список сайтов (\(result.error ?? "ошибка"))."))
+        }.value
+    }
+
     private struct TablesResult: Decodable {
         let ok: Bool
         let data: [ISPmanagerTable]?
@@ -466,6 +499,15 @@ enum ISPmanagerDatabases {
             return .failure(.message(QADRENUserMessage.text(for: result.error ?? "ispmanager_database_tables_failed")))
         }.value
     }
+}
+
+/// One site of the account: its root folder and its database, when the
+/// panel names them.
+struct ISPmanagerSite: Decodable, Identifiable, Equatable {
+    var id: String { name }
+    let name: String
+    let docroot: String?
+    let database: String?
 }
 
 /// One base table of a MySQL database. `bytes` and `rows` are estimates.

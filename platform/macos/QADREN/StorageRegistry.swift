@@ -327,8 +327,10 @@ struct ScenarioRunState: Decodable, Equatable {
     }
     /// The result of one database, Cron, DNS zone, or mail domain of a run.
     struct ObjectResult: Decodable, Equatable {
-        /// `databases`, `cron`, `dns`, or `mail`.
+        /// `databases`, `cron`, `dns`, `mail`, `sites`, `ssl`, or `ftp`.
         let category: String
+        /// `all` marks the result of "all sites" as a whole.
+        var provider_id: String? = nil
         /// `created`, `updated`, `unchanged`, `failed`, or `cancelled`.
         let result: String
         let error: String?

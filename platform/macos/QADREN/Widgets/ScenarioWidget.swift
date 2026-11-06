@@ -77,7 +77,9 @@ struct ScenarioWidgetSnapshot: Equatable {
 
     struct Subsystem: Equatable {
         let category: String
-        let count: Int
+        /// Selected objects; nil for "all sites", whose count is known only
+        /// in a run.
+        let count: Int?
 
         var title: String {
             switch category {
@@ -85,14 +87,25 @@ struct ScenarioWidgetSnapshot: Equatable {
             case "cron": "Cron"
             case "dns": "DNS"
             case "mail": "Почта"
+            case "sites": "Сайты"
+            case "ssl": "SSL"
+            case "ftp": "FTP"
             default: category
             }
         }
     }
 
-    /// The object results of the active run, or of the last finished run.
+    /// The object results of the active run, or of the last finished run,
+    /// without the summary result of "all sites".
     var objectResults: [ScenarioRunState.ObjectResult] {
-        (run?.active != nil ? run?.active?.objects : run?.last?.objects) ?? []
+        ((run?.active != nil ? run?.active?.objects : run?.last?.objects) ?? [])
+            .filter { $0.provider_id != "all" }
+    }
+
+    /// Selected objects of one category; for "all sites" the sites that the
+    /// run has reached so far.
+    func total(of subsystem: Subsystem) -> Int {
+        subsystem.count ?? objectResults.filter { $0.category == subsystem.category }.count
     }
 
     /// Finished, failed, and total objects of the current or last run.
@@ -101,7 +114,7 @@ struct ScenarioWidgetSnapshot: Equatable {
         return (
             results.filter { ["created", "updated", "unchanged"].contains($0.result) }.count,
             results.filter { ["failed", "cancelled"].contains($0.result) }.count,
-            subsystems.reduce(0) { $0 + $1.count }
+            subsystems.reduce(0) { $0 + total(of: $1) }
         )
     }
     var nextRunAt: Date?
@@ -170,7 +183,10 @@ struct ScenarioWidgetSnapshot: Equatable {
         snapshot.databasesOnly = entry.databasesOnly
         if entry.isBackup {
             let included = entry.resources.filter { $0.rule == "include" }
-            snapshot.subsystems = ["databases", "cron", "dns", "mail"].compactMap { category in
+            snapshot.subsystems = ["databases", "cron", "dns", "mail", "sites", "ssl", "ftp"].compactMap { category in
+                if category == "sites", included.contains(where: { $0.category == "sites" && $0.provider_id == "all" }) {
+                    return ScenarioWidgetSnapshot.Subsystem(category: category, count: nil)
+                }
                 let count = included.filter { $0.category == category }.count
                 return count > 0 ? ScenarioWidgetSnapshot.Subsystem(category: category, count: count) : nil
             }
@@ -307,6 +323,9 @@ struct ScenarioStage: Equatable {
                 case "cron": "Cron: задания читаются с панели."
                 case "dns": "DNS: зона\(position) читается с панели."
                 case "mail": "Почта: домен\(position) читается с панели."
+                case "sites": "Сайты: сайт\(position) читается с панели."
+                case "ssl": "SSL: список сертификатов читается с панели."
+                case "ftp": "FTP: пользователи читаются с панели."
                 default: "Настройки читаются с панели."
                 }
                 let text = progress.stage == "settings" ? settingsText : detail
@@ -606,10 +625,11 @@ struct ScenarioWidget<Actions: View>: View {
                 let mine = results.filter { $0.category == subsystem.category }
                 let done = mine.filter { ["created", "updated", "unchanged"].contains($0.result) }.count
                 let failed = mine.contains { ["failed", "cancelled"].contains($0.result) }
+                let total = snapshot.total(of: subsystem)
                 let tone: QDStatusKind? = failed ? .failed
                     : current == subsystem.category ? .active
-                    : done == subsystem.count ? .ready : nil
-                readout("\(done)/\(subsystem.count)", subsystem.title, tone)
+                    : done == total && total > 0 ? .ready : nil
+                readout(subsystem.count == nil && total == 0 ? "все" : "\(done)/\(total)", subsystem.title, tone)
             }
         }
         .padding(.top, 14)

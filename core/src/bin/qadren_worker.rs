@@ -1073,6 +1073,9 @@ fn write_backup_manifest(paths: &WorkerPaths, run_id: &str) {
         ("cron", "cron", "jobs.json: all Cron jobs (command, schedule, state)", "scheduler"),
         ("dns", "dns", "<zone>.json: zone and records (name, type, TTL, value)", "domain, domain.record"),
         ("mail", "mail", "<domain>.json: mail domain and mailbox settings; no passwords, no letters", "emaildomain, email"),
+        ("sites", "sites", "<site>.json: web domain settings (root, PHP, handler, address)", "webdomain"),
+        ("ssl", "ssl", "certificates.json: certificate list; no private keys", "sslcert"),
+        ("ftp", "ftp", "users.json: FTP users and home folders; no passwords", "ftp.user"),
     ] {
         let selected = selected_of(category);
         if selected.is_empty() {
@@ -1491,7 +1494,11 @@ fn advance_backup_databases(
     }
     // The objects of the panel: Cron, DNS zones, mail domains, and
     // databases, in this order (D-027 sections 7b and 10).
-    let order = |category: &str| ["cron", "dns", "mail", "databases"].iter().position(|c| *c == category);
+    let order = |category: &str| {
+        ["cron", "dns", "mail", "sites", "ssl", "ftp", "databases"]
+            .iter()
+            .position(|c| *c == category)
+    };
     let mut objects: Vec<(String, String)> = registry
         .backup_resources(id, revision)
         .map_err(|_| "registry_unavailable".to_string())?
@@ -1651,20 +1658,53 @@ fn export_run_databases(
         .unwrap_or(Path::new("."))
         .join("database-staging");
     // Cron, DNS, and mail settings come from panel lists (section 10).
-    let settings: Vec<_> = objects
+    // The options of site files: certificates and FTP users (section 7c).
+    let resources = Registry::open(&paths.registry)
+        .and_then(|registry| {
+            registry.backup_resources(&run.scenario.scenario_id, run.scenario.revision)
+        })
+        .unwrap_or_default();
+    let option = |category: &str, site: &str| {
+        resources.iter().any(|r| {
+            r.category == category && r.rule == "include" && (r.provider_id == site || r.provider_id == "all")
+        })
+    };
+    // `sites`/`all` means all sites at run time: a new site needs no edit.
+    let all_sites = objects.iter().any(|(category, provider)| category == "sites" && provider == "all");
+    let mut settings: Vec<(String, String)> = objects
         .iter()
-        .filter(|(category, _)| category != "databases")
+        .filter(|(category, provider)| category != "databases" && !(category == "sites" && provider == "all"))
+        .cloned()
         .collect();
-    for (category, provider) in settings.iter().copied() {
+    let mut all_sites_failed = None;
+    if all_sites {
+        match qadren_core::ispmanager::object_names(&mut session, "sites") {
+            Ok(names) => {
+                for name in names {
+                    if !settings.iter().any(|(category, provider)| category == "sites" && *provider == name) {
+                        settings.push(("sites".to_owned(), name));
+                    }
+                }
+            }
+            Err(_) => all_sites_failed = Some("ispmanager_network_error"),
+        }
+    }
+    let mut site_failures = 0;
+    for (category, provider) in &settings {
         if !run_still_active(paths, run) {
             record(category, provider, "cancelled", Some("stopped_by_user"), None);
+            site_failures += usize::from(category == "sites");
             continue;
         }
         // The position among the objects of the same category.
         let same: Vec<_> = settings.iter().filter(|(other, _)| other == category).collect();
         let index = same.iter().position(|(_, other)| other == provider).unwrap_or(0) + 1;
         set_object_progress(run, "settings", category, index, same.len(), 0);
-        let status = qadren_core::ispmanager::export_object(&mut session, category, provider)
+        let site = qadren_core::ispmanager::SiteOptions {
+            ssl: option("site_ssl", provider),
+            ftp: option("site_ftp", provider),
+        };
+        let status = qadren_core::ispmanager::export_object(&mut session, category, provider, site)
             .and_then(|content| {
                 qadren_core::ispmanager_execution::run_ispmanager_object_export(
                     &paths.jobs,
@@ -1692,9 +1732,21 @@ fn export_run_databases(
                 record(category, provider, "updated", None, None)
             }
             Ok(DatabaseExportStatus::Existing(_)) => {
+                site_failures += usize::from(category == "sites");
                 record(category, provider, "failed", Some("items_unknown"), None)
             }
-            Err(code) => record(category, provider, "failed", Some(code), None),
+            Err(code) => {
+                site_failures += usize::from(category == "sites");
+                record(category, provider, "failed", Some(code), None)
+            }
+        }
+    }
+    // One result for `all`, so that the run sees the selection done.
+    if all_sites {
+        match all_sites_failed {
+            Some(code) => record("sites", "all", "failed", Some(code), None),
+            None if site_failures > 0 => record("sites", "all", "failed", Some("items_failed"), None),
+            None => record("sites", "all", "unchanged", None, None),
         }
     }
     if databases.is_empty() {

@@ -4348,10 +4348,19 @@ impl BackupResource {
                     }
             }
             // All Cron jobs of the account (D-027 section 10).
-            "cron" => self.kind == "object" && self.rule == "include" && self.provider_id == "all",
-            // A DNS zone or a mail domain, which is also its file name.
+            "cron" | "ssl" | "ftp" => {
+                self.kind == "object" && self.rule == "include" && self.provider_id == "all"
+            }
+            // A DNS zone, a mail domain, or a site, which is also its file name.
             "dns" | "mail" => {
                 self.kind == "object" && self.rule == "include" && domain_name(&self.provider_id)
+            }
+            // A site, `all` for all sites at run time, and the options of a
+            // site file: its certificates and its FTP users (D-027 7c).
+            "sites" | "site_ssl" | "site_ftp" => {
+                self.kind == "object"
+                    && self.rule == "include"
+                    && (self.provider_id == "all" || domain_name(&self.provider_id))
             }
             _ => false,
         }

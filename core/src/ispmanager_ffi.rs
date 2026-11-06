@@ -141,6 +141,34 @@ pub extern "C" fn qadren_ispmanager_object_names(
         .into_raw()
 }
 
+/// The sites of the account with their root folders and databases, for the
+/// site options of the Scenario editor (D-027 section 7c).
+#[no_mangle]
+pub extern "C" fn qadren_ispmanager_sites(
+    url: *const c_char,
+    login: *const c_char,
+    password: *const c_char,
+) -> *mut c_char {
+    let value = match (
+        input(url).and_then(|url| ispmanager::PanelUrl::parse(url.trim()).ok()),
+        input(login),
+        input(password),
+    ) {
+        (Some(url), Some(login), Some(password)) => {
+            match ispmanager::Session::new(url, login, password)
+                .and_then(|mut session| ispmanager::sites_overview(&mut session))
+            {
+                Ok(sites) => json!({"ok": true, "data": sites}),
+                Err(error) => json!({"ok": false, "error": error.to_string()}),
+            }
+        }
+        _ => json!({"ok": false, "error": "invalid_input"}),
+    };
+    CString::new(value.to_string())
+        .expect("JSON cannot contain NUL")
+        .into_raw()
+}
+
 /// The base tables of one MySQL database with their estimated sizes, for
 /// the table rules of the Scenario editor (D-027 section 7b.10). The access
 /// facts come from the panel and stay in memory. The query reads

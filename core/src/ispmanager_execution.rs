@@ -670,7 +670,9 @@ pub fn object_export_job_id(run_id: &str, category: &str, provider_id: &str) -> 
 fn object_target(category: &str, provider_id: &str) -> Option<PathBuf> {
     match category {
         "cron" if provider_id == "all" => Some(PathBuf::from("cron/jobs.json")),
-        "dns" | "mail" if crate::registry::domain_name(provider_id) => {
+        "ssl" if provider_id == "all" => Some(PathBuf::from("ssl/certificates.json")),
+        "ftp" if provider_id == "all" => Some(PathBuf::from("ftp/users.json")),
+        "dns" | "mail" | "sites" if crate::registry::domain_name(provider_id) => {
             Some(Path::new(category).join(format!("{provider_id}.json")))
         }
         _ => None,
@@ -702,11 +704,16 @@ pub fn run_ispmanager_object_export(
     let registry = Registry::open(registry_path).map_err(|_| "registry_unavailable")?;
     let scenario = backup_scenario(&registry, scenario_id, scenario_revision)
         .map_err(|_| "scenario_unavailable")?;
+    // A site is selected by name or through `all` (D-027 section 7c).
     let selected = registry
         .backup_resources(scenario_id, scenario_revision)
         .map_err(|_| "registry_unavailable")?
         .iter()
-        .any(|r| r.category == category && r.rule == "include" && r.provider_id == provider_id);
+        .any(|r| {
+            r.category == category
+                && r.rule == "include"
+                && (r.provider_id == provider_id || (category == "sites" && r.provider_id == "all"))
+        });
     if !selected {
         return Err("invalid_selection");
     }

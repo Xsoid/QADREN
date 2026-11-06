@@ -33,14 +33,14 @@ No live check exists yet. Every category is `unverified`. "Candidate functions" 
 | # | Category | Candidate read functions | Content or metadata | Open questions |
 |---|---|---|---|---|
 | 1 | Files and directories | SFTP when the account has SSH access (D-027 section 7a); otherwise `file` (list, key `name`), `file.download` | Content | How `file` addresses a nested folder (`plid` or path). Pagination of large folders. Dotfiles, symlinks, special files, owner and mode fields. Whether `file.download` of one file streams directly or packs an archive on the server. Download of a folder. |
-| 2 | Websites and web domains | `webdomain` (key `name`), `webproxy` | Metadata | Which fields the list returns. Whether a read-only view of site settings exists without `*.edit`. |
+| 2 | Websites and web domains | `webdomain` (key `name`), `webproxy` | Metadata | `webdomain` exported to `sites/<site>.json` (D-027 section 7c). `webproxy` was denied for a user account. |
 | 3 | Databases | `db` (key `pair`), `db.server`, `db.users`, `db.dump` | Content and metadata | Whether `db.dump` selects exactly one database. Whether it writes a temporary file on the server. Format and compression. Consistency of the dump. Grants of `db.users`. Passwords are never recoverable. |
 | 4 | Mail domains | `emaildomain` (key `name`), `blacklist` | Metadata | Exported with the mailboxes to `mail/<domain>.json` (D-027 section 7c). |
 | 5 | Mailboxes | `email` (key `name`), `email.sorter`, `email.responder`, `email.setting` | Metadata; content unknown | The documentation shows no mailbox content export. Mailbox content stays `unverified` until a live check finds an exact, read-only path. Whether `email.responder` and `email.setting` change state without `sok`. |
 | 6 | Cron | `scheduler` (key `key`) | Metadata | Exported to `cron/jobs.json` (D-027 section 7c). Never call `run`, `scheduler.suspend`, `scheduler.resume`, or `scheduler.delete`. |
 | 7 | DNS | `domain` (key `name`), `domain.record` (key `rkey`, with `elid` of the zone), `domain.dnssecinfo`, `techdomain`, `techdomain.records` | Metadata | Exported to `dns/<zone>.json` (D-027 section 7c). DNSSEC keys and a BIND zone file are open. |
-| 8 | SSL/TLS | `sslcert` (key `key`), `sslcert.csr` | Metadata | Whether the certificate and the chain are readable. Private keys are `unsupported` in this stage (D-027 section 9). |
-| 9 | FTP | `ftp.user` (key `name`) | Metadata | Roots and rights. FTP passwords are not exportable. |
+| 8 | SSL/TLS | `sslcert` (key `key`), `sslcert.csr` | Metadata | The list is exported to `ssl/certificates.json` (D-027 section 7c). The certificate and the chain are not read yet. Private keys are `unsupported` in this stage (D-027 section 9). |
+| 9 | FTP | `ftp.user` (key `name`) | Metadata | Exported to `ftp/users.json` (D-027 section 7c). FTP passwords are not exportable. |
 | 10 | ISPmanager accounts | `user` (key `name`), `admin`, `userrights`, `userstat`, `preset` | Metadata | Access level for each list. Template and limit fields. |
 | 11 | SSH | No API function for SSH keys or shell settings. `file` for `~/.ssh` | Content through files | SSH access of the account does not give an API function. Whether `file` can read `~/.ssh/authorized_keys` for the account. Otherwise `unsupported`. |
 | 12 | Web server services | `services` | Metadata | Configuration files are readable only through `file` with administrator rights. |
