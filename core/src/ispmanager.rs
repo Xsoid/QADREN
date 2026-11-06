@@ -767,6 +767,68 @@ fn sorted(mut items: Vec<Value>) -> Vec<Value> {
     items
 }
 
+/// The record type from the panel text, for example `MX` from
+/// `MX (mail server)`.
+fn record_type(rtype: &str) -> String {
+    rtype.split_whitespace().next().unwrap_or_default().to_ascii_uppercase()
+}
+
+/// A BIND zone file from the JSON of `export_object("dns", ...)` (D-027
+/// section 7c). Names are absolute. The SOA record is a comment: the panel
+/// gives only its primary name server, and a new server makes its own SOA.
+/// A record type that the file cannot write safely is a comment too.
+pub fn dns_zone_file(json: &[u8]) -> Option<Vec<u8>> {
+    let value: Value = serde_json::from_slice(json).ok()?;
+    let zone = value["zone"]["name"].as_str()?;
+    let field = |record: &Value, name: &str| record[name].as_str().unwrap_or_default().to_owned();
+    let absolute = |name: String| if name.ends_with('.') { name } else { format!("{name}.") };
+    let mut text = format!(
+        "; Zone {zone} from ISPmanager (domain, domain.record).\n\
+         ; QADREN writes the records of the panel list; MX and SRV values come\n\
+         ; from the record form. The SOA is a comment only.\n\
+         $ORIGIN {zone}.\n"
+    );
+    for record in value["records"].as_array()? {
+        let kind = record_type(&field(record, "rtype"));
+        let name = absolute(field(record, "name"));
+        let ttl = field(record, "ttl");
+        let ttl = if ttl.chars().all(|ch| ch.is_ascii_digit()) { ttl } else { String::new() };
+        let value = field(record, "value");
+        let data = match kind.as_str() {
+            "A" | "AAAA" => Some(value.clone()),
+            "NS" | "CNAME" | "PTR" => Some(absolute(value.clone())),
+            "MX" => Some(format!("{} {}", field(record, "priority"), absolute(value.clone()))),
+            "SRV" => Some(format!(
+                "{} {} {} {}",
+                field(record, "priority"),
+                field(record, "weight"),
+                field(record, "port"),
+                absolute(value.clone())
+            )),
+            "TXT" => Some(
+                value
+                    .as_bytes()
+                    .chunks(255)
+                    .map(|chunk| {
+                        let part = String::from_utf8_lossy(chunk);
+                        format!("\"{}\"", part.replace('\\', "\\\\").replace('"', "\\\""))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            ),
+            _ => None,
+        };
+        let comment = data.is_none() || data.as_deref().is_some_and(|data| data.contains('\n'));
+        let line = format!("{name}\t{ttl}\tIN\t{kind}\t{}", data.unwrap_or(value));
+        if comment {
+            text.push_str("; ");
+        }
+        text.push_str(&line.replace('\n', " "));
+        text.push('\n');
+    }
+    Some(text.into_bytes())
+}
+
 /// What a site file holds besides the site settings (D-027 section 7c).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SiteOptions {
@@ -874,14 +936,31 @@ pub fn export_object(
                 .find(|zone| text(zone, "name").as_deref() == Some(provider_id))
                 .ok_or("ispmanager_object_missing")?;
             let zone = pick(zone, &["name", "dtype", "dnssecstatus"]);
-            let records = read(session, "domain.record", &[("elid", provider_id)])?;
-            let records = elements(&records)
-                .into_iter()
-                .map(|record| pick(record, &["name", "rtype", "ttl", "value"]))
-                .collect();
+            let list = read(session, "domain.record", &[("elid", provider_id)])?;
+            let mut records = Vec::new();
+            for record in elements(&list) {
+                let mut item = pick(record, &["name", "rtype", "ttl", "value"]);
+                // The list has no MX or SRV priority, weight, or port: the
+                // record form has them. It is opened without `sok`.
+                let kind = record_type(&text(record, "rtype").unwrap_or_default());
+                if matches!(kind.as_str(), "MX" | "SRV") {
+                    let rkey = text(record, "rkey").ok_or("ispmanager_object_missing")?;
+                    let form = read(
+                        session,
+                        "domain.record.edit",
+                        &[("elid", &rkey), ("plid", provider_id)],
+                    )?;
+                    if let (Value::Object(item), Value::Object(extra)) =
+                        (&mut item, pick(&form, &["priority", "weight", "port"]))
+                    {
+                        item.extend(extra);
+                    }
+                }
+                records.push(item);
+            }
             serde_json::json!({
-                "format": "qadren-ispmanager-dns/1",
-                "source": "domain, domain.record",
+                "format": "qadren-ispmanager-dns/2",
+                "source": "domain, domain.record, domain.record.edit (MX and SRV)",
                 "zone": zone,
                 "records": sorted(records),
             })

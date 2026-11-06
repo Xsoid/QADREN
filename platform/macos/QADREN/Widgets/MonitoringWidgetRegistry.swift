@@ -14,7 +14,7 @@ struct MonitoringWidgetView<Actions: View>: View {
     var body: some View {
         switch widget.kind {
         case .system:
-            SystemWidget(feed: feed) { actions }
+            SystemWidget(feed: feed, expanded: widget.density == .expanded) { actions }
         case .scenario:
             ScenarioWidget(widget: widget, isEditing: isEditing, onSelectScenario: onSelectScenario) { actions }
         case .scenarios:

@@ -208,6 +208,7 @@ final class ScenarioScheduleSettings: ObservableObject {
 private enum SettingsPanelSection: String, CaseIterable, Hashable, Identifiable {
     case connections
     case scenarios
+    case daemons
     case application
 
     var id: Self { self }
@@ -215,6 +216,7 @@ private enum SettingsPanelSection: String, CaseIterable, Hashable, Identifiable 
         switch self {
         case .connections: "Подключения"
         case .scenarios: "Сценарии"
+        case .daemons: "Демоны"
         case .application: "Настройки приложения"
         }
     }
@@ -222,6 +224,7 @@ private enum SettingsPanelSection: String, CaseIterable, Hashable, Identifiable 
         switch self {
         case .connections: "externaldrive"
         case .scenarios: "arrow.triangle.branch"
+        case .daemons: "cpu"
         case .application: "gearshape"
         }
     }
@@ -305,6 +308,8 @@ struct SettingsPanelView: View {
                             previewScenario: { previewScenario = $0 }
                         )
                     }
+                case .daemons:
+                    DaemonsSettingsView()
                 case .application:
                     ApplicationSettingsView()
                 }
@@ -5142,13 +5147,41 @@ private struct WorkerServiceSection: View {
     }
 }
 
+/// Background services of QADREN (settings contract: Node and Service). The
+/// first one is the local Worker: its state, controls, and launch at login.
+struct DaemonsSettingsView: View {
+    var body: some View {
+        Form {
+            Section {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "cpu")
+                        .font(.title2)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Локальный Worker").font(.headline)
+                        Text("Фоновая служба на этом Mac. Выполняет сценарии, расписания и повторы, даже когда окно QADREN закрыто. Хранит пароли и токены подключений только в памяти.")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            WorkerServiceSection()
+            LaunchAtLoginSection()
+        }
+        .formStyle(.grouped)
+        .padding(20)
+        .navigationTitle("Демоны")
+    }
+}
+
 struct ApplicationSettingsView: View {
     @AppStorage("qadren.theme") private var themeRaw = QDThemeMode.dark.rawValue
     @AppStorage(QDGlitchSetting.key) private var glitchEffects = false
 
     var body: some View {
         Form {
-            LaunchAtLoginSection()
             Section("Оформление") {
                 Picker("Тема", selection: $themeRaw) {
                     ForEach(QDThemeMode.allCases) { mode in
@@ -5161,7 +5194,6 @@ struct ApplicationSettingsView: View {
                 Text("Короткие редкие помехи в заголовках виджетов, чтобы картинка панели не стояла неподвижно часами. Не работают, если в macOS включено «Уменьшение движения».")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            WorkerServiceSection()
             Section("Состояние приложения") {
                 LabeledContent("Настройки", value: "Отдельное окно")
                 LabeledContent("Выполнение сценариев", value: "Local Filesystem · Local Worker")

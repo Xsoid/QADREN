@@ -32,7 +32,8 @@ enum MonitoringWidgetKind: String, CaseIterable, Codable, Identifiable {
     /// The sizes that the widget type draws. One size means no choice.
     var supportedDensities: [MonitoringWidgetDensity] {
         switch self {
-        case .system, .scenarios: [.regular]
+        case .system: [.regular, .expanded]
+        case .scenarios: [.regular]
         case .scenario, .connections: MonitoringWidgetDensity.allCases
         }
     }

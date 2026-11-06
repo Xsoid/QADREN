@@ -960,28 +960,34 @@ fn advance_scenario_run(paths: &WorkerPaths, run: &ScenarioRun) -> Result<(), St
 /// does not go into the Trash: it describes the last run only. A failure
 /// leaves the previous manifest and does not change the run result.
 fn write_backup_manifest(paths: &WorkerPaths, run_id: &str) {
+    let skipped = |reason: &str| {
+        eprintln!(
+            "qadren-worker: {} manifest of run {run_id} skipped: {reason}",
+            log_time()
+        );
+    };
     let Ok(registry) = Registry::open(&paths.registry) else {
-        return;
+        return skipped("registry_unavailable");
     };
     let Ok(Some(run)) = registry.scenario_run(run_id) else {
-        return;
+        return skipped("run_unavailable");
     };
     let (id, revision) = (&run.scenario.scenario_id, run.scenario.revision);
     if registry.scenario_mode(id).ok().as_deref() != Some("backup_export") {
         return;
     }
     let Ok(Some(scenario)) = registry.get_scenario_revision(id, revision) else {
-        return;
+        return skipped("revision_unavailable");
     };
     if !qadren_core::storage_access::connection_id_ready(
         &registry,
         &paths.registry,
         &scenario.right_connection_id,
     ) {
-        return;
+        return skipped("destination_not_ready");
     }
     let Some(root) = Path::new(&scenario.right_root).parent() else {
-        return;
+        return skipped("root_unavailable");
     };
     let resources = registry.backup_resources(id, revision).unwrap_or_default();
     let summary = run
@@ -1100,14 +1106,21 @@ fn write_backup_manifest(paths: &WorkerPaths, run_id: &str) {
             .create_new(true)
             .open(&staging)?;
         file.write_all(&text)?;
-        file.sync_all()?;
+        // `sync_all` fails with ENOTSUP on an SMB share (found on 2026-11-06).
+        qadren_core::local_fs::sync_file(&file)?;
         fs::rename(&staging, root.join("manifest.json"))
     })();
-    if written.is_err() {
+    if written.is_ok() {
+        eprintln!("qadren-worker: {} manifest of run {run_id} written", log_time());
+    }
+    if let Err(error) = written {
         let _ = fs::remove_file(&staging);
+        // The error kind and code only: the path can name user content.
         eprintln!(
-            "qadren-worker: {} manifest of run {run_id} not written",
-            log_time()
+            "qadren-worker: {} manifest of run {run_id} not written: {:?} {:?}",
+            log_time(),
+            error.kind(),
+            error.raw_os_error()
         );
     }
 }
@@ -1704,19 +1717,33 @@ fn export_run_databases(
             ssl: option("site_ssl", provider),
             ftp: option("site_ftp", provider),
         };
+        let publish = |category: &str, content: &[u8]| {
+            qadren_core::ispmanager_execution::run_ispmanager_object_export(
+                &paths.jobs,
+                &paths.registry,
+                &run.scenario.scenario_id,
+                run.scenario.revision,
+                &run.id,
+                category,
+                provider,
+                content,
+                &staging,
+            )
+        };
         let status = qadren_core::ispmanager::export_object(&mut session, category, provider, site)
             .and_then(|content| {
-                qadren_core::ispmanager_execution::run_ispmanager_object_export(
-                    &paths.jobs,
-                    &paths.registry,
-                    &run.scenario.scenario_id,
-                    run.scenario.revision,
-                    &run.id,
-                    category,
-                    provider,
-                    &content,
-                    &staging,
-                )
+                let json = publish(category, &content)?;
+                if category != "dns" {
+                    return Ok(json);
+                }
+                // A DNS zone also gets its BIND zone file (section 7c).
+                let zone = qadren_core::ispmanager::dns_zone_file(&content).ok_or("invalid_request")?;
+                let file = publish("dns_zone", &zone)?;
+                Ok(match (&json, &file) {
+                    (DatabaseExportStatus::Unchanged { .. }, DatabaseExportStatus::Created { .. })
+                    | (DatabaseExportStatus::Unchanged { .. }, DatabaseExportStatus::Updated { .. }) => file,
+                    _ => json,
+                })
             });
         match status {
             Ok(DatabaseExportStatus::Created { bytes, md5 }) => {

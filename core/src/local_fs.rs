@@ -37,6 +37,20 @@ impl From<io::Error> for LocalError {
 }
 pub type Result<T> = std::result::Result<T, LocalError>;
 
+/// Flush a file to stable storage. On an SMB share macOS refuses the full
+/// flush (`F_FULLFSYNC`) with ENOTSUP; then plain `fsync` is used, the
+/// strongest flush the volume offers.
+pub fn sync_file(file: &std::fs::File) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        secure::sync(file)
+    }
+    #[cfg(not(unix))]
+    {
+        file.sync_all()
+    }
+}
+
 #[cfg(debug_assertions)]
 static TRASH_OVERRIDE: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
 

@@ -672,6 +672,9 @@ fn object_target(category: &str, provider_id: &str) -> Option<PathBuf> {
         "cron" if provider_id == "all" => Some(PathBuf::from("cron/jobs.json")),
         "ssl" if provider_id == "all" => Some(PathBuf::from("ssl/certificates.json")),
         "ftp" if provider_id == "all" => Some(PathBuf::from("ftp/users.json")),
+        "dns_zone" if crate::registry::domain_name(provider_id) => {
+            Some(Path::new("dns").join(format!("{provider_id}.zone")))
+        }
         "dns" | "mail" | "sites" if crate::registry::domain_name(provider_id) => {
             Some(Path::new(category).join(format!("{provider_id}.json")))
         }
@@ -710,7 +713,8 @@ pub fn run_ispmanager_object_export(
         .map_err(|_| "registry_unavailable")?
         .iter()
         .any(|r| {
-            r.category == category
+            // The zone file goes with its selected DNS zone.
+            r.category == if category == "dns_zone" { "dns" } else { category }
                 && r.rule == "include"
                 && (r.provider_id == provider_id || (category == "sites" && r.provider_id == "all"))
         });

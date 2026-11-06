@@ -305,7 +305,7 @@ pub(super) fn nfc(name: &str) -> String {
 /// Flush a file or directory to stable storage. On macOS `sync_all` uses
 /// `F_FULLFSYNC`, which smbfs refuses with ENOTSUP (checked on 2026-10-25 on
 /// an SMB share). Then plain `fsync` is the strongest flush the volume offers.
-fn sync(file: &File) -> io::Result<()> {
+pub(crate) fn sync(file: &File) -> io::Result<()> {
     match file.sync_all() {
         Err(error) if matches!(error.raw_os_error(), Some(libc::ENOTSUP | libc::EOPNOTSUPP)) => {
             if unsafe { libc::fsync(file.as_raw_fd()) } == 0 {

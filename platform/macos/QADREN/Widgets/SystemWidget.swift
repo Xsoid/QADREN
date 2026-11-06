@@ -124,6 +124,8 @@ extension MonitoringFeed {
 /// `system`: the background Worker service. One fixed presentation.
 struct SystemWidget<Actions: View>: View {
     @ObservedObject var feed: MonitoringFeed
+    /// "Подробно": the service controls stay on the widget at all times.
+    var expanded = false
     @ViewBuilder let actions: Actions
     @Environment(\.colorScheme) private var colorScheme
 
@@ -147,7 +149,9 @@ struct SystemWidget<Actions: View>: View {
                     }
                 }
                 .padding(.top, 14)
-                if let action = health.action {
+                // Expanded has its own restart button, so the same action is
+                // not shown twice.
+                if let action = health.action, !(expanded && action == .restart) {
                     Button {
                         perform(action)
                     } label: {
@@ -160,6 +164,9 @@ struct SystemWidget<Actions: View>: View {
                     .disabled(health.actionBlockedReason != nil)
                     .padding(.top, 14)
                 }
+                if expanded {
+                    serviceControls(health)
+                }
                 if let reason = health.actionBlockedReason {
                     Text(reason)
                         .font(QDCyber.heading(13, weight: .medium))
@@ -171,6 +178,59 @@ struct SystemWidget<Actions: View>: View {
                     .foregroundStyle(QDCyber.color(.mutedText, for: colorScheme))
                     .padding(.top, 12)
             }
+        }
+    }
+
+    /// Expanded: the registration line and Restart and Stop. Restart first
+    /// lets the Worker finish the files that run now (D-024); Stop asks for
+    /// a confirmation.
+    @ViewBuilder
+    private func serviceControls(_ health: WorkerServiceHealth) -> some View {
+        let busy = LocalWorkerController.isRestarting || LocalWorkerController.isDraining
+        Text("Служба: " + LocalWorkerController.statusText)
+            .font(QDCyber.heading(13, weight: .medium))
+            .foregroundStyle(QDCyber.color(.mutedText, for: colorScheme))
+            .padding(.top, 12)
+        if LocalWorkerController.isRegistered {
+            // Secondary controls: the outline style, one line each. A narrow
+            // widget shows the icons only; the help keeps the full text.
+            ViewThatFits(in: .horizontal) {
+                controls(busy: busy, titles: true)
+                controls(busy: busy, titles: false)
+            }
+            .padding(.top, 10)
+        }
+    }
+
+    private func controls(busy: Bool, titles: Bool) -> some View {
+        HStack(spacing: 8) {
+            Button {
+                perform(.restart)
+            } label: {
+                if titles {
+                    Label("Перезапуск", systemImage: "arrow.clockwise").lineLimit(1).fixedSize()
+                } else {
+                    Image(systemName: "arrow.clockwise")
+                }
+            }
+            .buttonStyle(QDCyberOutlineButtonStyle())
+            .disabled(busy)
+            .help("Перезапустить службу: она дописывает текущие файлы, не берёт новые и запускается заново")
+            .accessibilityLabel("Перезапустить службу")
+            Button {
+                LocalWorkerController.confirmAndStop()
+                Task { await feed.refresh() }
+            } label: {
+                if titles {
+                    Label("Стоп", systemImage: "stop.fill").lineLimit(1).fixedSize()
+                } else {
+                    Image(systemName: "stop.fill")
+                }
+            }
+            .buttonStyle(QDCyberOutlineButtonStyle())
+            .disabled(busy)
+            .help("Остановить фоновую службу: расписания не выполняются, пока вы её не запустите")
+            .accessibilityLabel("Остановить службу")
         }
     }
 
