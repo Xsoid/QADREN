@@ -4340,8 +4340,7 @@ impl BackupResource {
                         "include" => database_ok(&self.provider_id),
                         "structure_only" => {
                             self.provider_id.split_once('/').is_some_and(|(db, table)| {
-                                database_ok(db)
-                                    && crate::ispmanager_sftp::plain_table_name(table)
+                                database_ok(db) && crate::ispmanager_sftp::plain_table_name(table)
                             })
                         }
                         _ => false,
@@ -6354,6 +6353,11 @@ mod tests {
                  ALTER TABLE scenario_schedules DROP COLUMN anchor_utc;
                  ALTER TABLE scenario_runs DROP COLUMN write_lock;
                  ALTER TABLE scenario_runs DROP COLUMN waiting_for_scenario_id;
+                 DROP TABLE ispmanager_settings;
+                 DROP TABLE scenario_revision_resources;
+                 DROP TABLE backup_object_results;
+                 ALTER TABLE scenarios DROP COLUMN mode;
+                 ALTER TABLE scenario_revisions DROP COLUMN mode;
                  PRAGMA user_version = 25;",
             )
             .unwrap();

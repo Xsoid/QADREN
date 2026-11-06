@@ -108,7 +108,12 @@ impl Category {
 /// Reads of one parent object (D-027 section 7b): a nested list with `elid`
 /// and an edit form opened without `sok`. Without `sok` the panel only
 /// returns the form; it saves nothing.
-const OBJECT_READS: [&str; 4] = ["db.users", "db.users.edit", "domain.record", "domain.record.edit"];
+const OBJECT_READS: [&str; 4] = [
+    "db.users",
+    "db.users.edit",
+    "domain.record",
+    "domain.record.edit",
+];
 
 /// The only functions that the client sends. `auth` opens a session; every
 /// other entry is a documented list function or an object read.
@@ -571,9 +576,7 @@ fn probe_databases_into(
             return None;
         }
     };
-    let Some(db) = elements(&doc).first().copied().cloned() else {
-        return None;
-    };
+    let db = elements(&doc).first().copied().cloned()?;
     probe.db_fields = sorted_fields(&db);
     probe.server_info = db
         .keys()
@@ -590,9 +593,7 @@ fn probe_databases_into(
             })
         })
         .collect();
-    let Some((db_field, db_key)) = key_field(&db, &["pair", "key", "id", "name"]) else {
-        return None;
-    };
+    let (db_field, db_key) = key_field(&db, &["pair", "key", "id", "name"])?;
     probe.db_key_field = Some(db_field);
     let users = match session.read("db.users", &[("elid", &db_key)]) {
         Ok(users) => users,
@@ -608,9 +609,7 @@ fn probe_databases_into(
     };
     probe.users_result = Some("items");
     probe.user_fields = sorted_fields(&user);
-    let Some((user_field, user_key)) = key_field(&user, &["key", "id", "name"]) else {
-        return None;
-    };
+    let (user_field, user_key) = key_field(&user, &["key", "id", "name"])?;
     probe.user_key_field = Some(user_field);
     match session.read("db.users.edit", &[("elid", &user_key), ("plid", &db_key)]) {
         Ok(form) => {
@@ -755,7 +754,9 @@ fn pick(item: &serde_json::Map<String, Value>, fields: &[&str]) -> Value {
     Value::Object(
         fields
             .iter()
-            .filter_map(|field| text(item, field).map(|value| ((*field).to_owned(), Value::String(value))))
+            .filter_map(|field| {
+                text(item, field).map(|value| ((*field).to_owned(), Value::String(value)))
+            })
             .collect(),
     )
 }
@@ -770,7 +771,11 @@ fn sorted(mut items: Vec<Value>) -> Vec<Value> {
 /// The record type from the panel text, for example `MX` from
 /// `MX (mail server)`.
 fn record_type(rtype: &str) -> String {
-    rtype.split_whitespace().next().unwrap_or_default().to_ascii_uppercase()
+    rtype
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase()
 }
 
 /// A BIND zone file from the JSON of `export_object("dns", ...)` (D-027
@@ -781,7 +786,13 @@ pub fn dns_zone_file(json: &[u8]) -> Option<Vec<u8>> {
     let value: Value = serde_json::from_slice(json).ok()?;
     let zone = value["zone"]["name"].as_str()?;
     let field = |record: &Value, name: &str| record[name].as_str().unwrap_or_default().to_owned();
-    let absolute = |name: String| if name.ends_with('.') { name } else { format!("{name}.") };
+    let absolute = |name: String| {
+        if name.ends_with('.') {
+            name
+        } else {
+            format!("{name}.")
+        }
+    };
     let mut text = format!(
         "; Zone {zone} from ISPmanager (domain, domain.record).\n\
          ; QADREN writes the records of the panel list; MX and SRV values come\n\
@@ -792,12 +803,20 @@ pub fn dns_zone_file(json: &[u8]) -> Option<Vec<u8>> {
         let kind = record_type(&field(record, "rtype"));
         let name = absolute(field(record, "name"));
         let ttl = field(record, "ttl");
-        let ttl = if ttl.chars().all(|ch| ch.is_ascii_digit()) { ttl } else { String::new() };
+        let ttl = if ttl.chars().all(|ch| ch.is_ascii_digit()) {
+            ttl
+        } else {
+            String::new()
+        };
         let value = field(record, "value");
         let data = match kind.as_str() {
             "A" | "AAAA" => Some(value.clone()),
             "NS" | "CNAME" | "PTR" => Some(absolute(value.clone())),
-            "MX" => Some(format!("{} {}", field(record, "priority"), absolute(value.clone()))),
+            "MX" => Some(format!(
+                "{} {}",
+                field(record, "priority"),
+                absolute(value.clone())
+            )),
             "SRV" => Some(format!(
                 "{} {} {} {}",
                 field(record, "priority"),
@@ -839,8 +858,16 @@ pub struct SiteOptions {
 }
 
 const SSL_FIELDS: &[&str] = &[
-    "name", "type", "info", "valid_after", "webdomains", "emaildomains",
-    "is_letsencrypt", "letsencrypt", "mail_ssl", "active",
+    "name",
+    "type",
+    "info",
+    "valid_after",
+    "webdomains",
+    "emaildomains",
+    "is_letsencrypt",
+    "letsencrypt",
+    "mail_ssl",
+    "active",
 ];
 
 /// True when a comma or space separated domain list names the site or its
@@ -909,19 +936,28 @@ pub fn export_object(
     site: SiteOptions,
 ) -> std::result::Result<Vec<u8>, &'static str> {
     let read = |session: &mut Session, func: &str, params: &[(&str, &str)]| {
-        session
-            .read(func, params)
-            .map_err(|error| match error {
-                IspError::Panel(kind) if kind == "access" => "ispmanager_permission_denied",
-                _ => "ispmanager_network_error",
-            })
+        session.read(func, params).map_err(|error| match error {
+            IspError::Panel(kind) if kind == "access" => "ispmanager_permission_denied",
+            _ => "ispmanager_network_error",
+        })
     };
     let value = match category {
         "cron" => {
             let doc = read(session, "scheduler", &[])?;
             let jobs = elements(&doc)
                 .into_iter()
-                .map(|job| pick(job, &["command", "interval", "schedule_type", "active", "description"]))
+                .map(|job| {
+                    pick(
+                        job,
+                        &[
+                            "command",
+                            "interval",
+                            "schedule_type",
+                            "active",
+                            "description",
+                        ],
+                    )
+                })
                 .collect();
             serde_json::json!({
                 "format": "qadren-ispmanager-cron/1",
@@ -973,7 +1009,15 @@ pub fn export_object(
                 .ok_or("ispmanager_object_missing")?;
             let domain = pick(
                 domain,
-                &["name", "active", "dkim", "dmarc", "spamassassin", "defaction", "secure"],
+                &[
+                    "name",
+                    "active",
+                    "dkim",
+                    "dmarc",
+                    "spamassassin",
+                    "defaction",
+                    "secure",
+                ],
             );
             let suffix = format!("@{provider_id}");
             let boxes = read(session, "email", &[])?;
@@ -984,7 +1028,15 @@ pub fn export_object(
                 .map(|mailbox| {
                     pick(
                         mailbox,
-                        &["name", "active", "aliases", "dontsave", "responder", "spamassassin", "size_total"],
+                        &[
+                            "name",
+                            "active",
+                            "aliases",
+                            "dontsave",
+                            "responder",
+                            "spamassassin",
+                            "size_total",
+                        ],
                     )
                 })
                 .collect();
@@ -1018,7 +1070,8 @@ pub fn export_object(
                 let certificates = elements(&doc)
                     .into_iter()
                     .filter(|cert| {
-                        text(cert, "webdomains").is_some_and(|domains| names_site(&domains, provider_id))
+                        text(cert, "webdomains")
+                            .is_some_and(|domains| names_site(&domains, provider_id))
                     })
                     .map(|cert| pick(cert, SSL_FIELDS))
                     .collect();
@@ -1030,7 +1083,9 @@ pub fn export_object(
                     .into_iter()
                     .filter(|user| {
                         text(user, "home").is_some_and(|home| {
-                            docroot.as_deref().is_some_and(|root| home_in_site(&home, root, provider_id))
+                            docroot
+                                .as_deref()
+                                .is_some_and(|root| home_in_site(&home, root, provider_id))
                         })
                     })
                     .map(|user| pick(user, &["name", "home", "active"]))
@@ -1181,7 +1236,9 @@ fn probe_mailbox_names(session: &mut Session) -> Option<MailboxNameProbe> {
         let name = text(mailbox, "name").unwrap_or_default();
         probe.names_with_at += usize::from(name.contains('@'));
         probe.names_with_domain += usize::from(
-            domains.iter().any(|domain| name.ends_with(&format!("@{domain}"))),
+            domains
+                .iter()
+                .any(|domain| name.ends_with(&format!("@{domain}"))),
         );
         for field in mailbox.keys() {
             if text(mailbox, field).is_some_and(|value| domains.contains(&value))
@@ -1193,7 +1250,10 @@ fn probe_mailbox_names(session: &mut Session) -> Option<MailboxNameProbe> {
     }
     probe.domain_fields.sort();
     if let Some(first) = domains.first() {
-        for (param, slot) in [("elid", &mut probe.with_elid), ("plid", &mut probe.with_plid)] {
+        for (param, slot) in [
+            ("elid", &mut probe.with_elid),
+            ("plid", &mut probe.with_plid),
+        ] {
             *slot = session
                 .read("email", &[(param, first.as_str())])
                 .ok()
@@ -1222,7 +1282,8 @@ fn probe_mail_storage(connection: &ispmanager_sftp::SftpConnection, probe: &mut 
             })
             .unwrap_or_default()
     };
-    probe.mail_folder = Some(matches!(connection.lstat(&mail), Ok(Some(meta)) if meta.kind == "dir"));
+    probe.mail_folder =
+        Some(matches!(connection.lstat(&mail), Ok(Some(meta)) if meta.kind == "dir"));
     if probe.mail_folder != Some(true) {
         return;
     }

@@ -515,8 +515,7 @@ const RECONCILE_BACKOFF: [Duration; 5] = [
 
 /// For each UNKNOWN copy Job: the time of its next check and its step.
 fn reconcile_backoff() -> &'static Mutex<HashMap<String, (std::time::Instant, usize)>> {
-    static BACKOFF: OnceLock<Mutex<HashMap<String, (std::time::Instant, usize)>>> =
-        OnceLock::new();
+    static BACKOFF: OnceLock<Mutex<HashMap<String, (std::time::Instant, usize)>>> = OnceLock::new();
     BACKOFF.get_or_init(Default::default)
 }
 
@@ -1015,9 +1014,7 @@ fn write_backup_manifest(paths: &WorkerPaths, run_id: &str) {
         .iter()
         .filter(|resource| resource.category == "databases")
         .collect();
-    let object_results = registry
-        .backup_object_results(&run.id)
-        .unwrap_or_default();
+    let object_results = registry.backup_object_results(&run.id).unwrap_or_default();
     let results_of = |category: &str| -> Vec<_> {
         object_results
             .iter()
@@ -1076,12 +1073,42 @@ fn write_backup_manifest(paths: &WorkerPaths, run_id: &str) {
     }
     // D-027 section 10: panel settings as JSON, without secrets.
     for (category, folder, artifact, source) in [
-        ("cron", "cron", "jobs.json: all Cron jobs (command, schedule, state)", "scheduler"),
-        ("dns", "dns", "<zone>.json: zone and records (name, type, TTL, value)", "domain, domain.record"),
-        ("mail", "mail", "<domain>.json: mail domain and mailbox settings; no passwords, no letters", "emaildomain, email"),
-        ("sites", "sites", "<site>.json: web domain settings (root, PHP, handler, address)", "webdomain"),
-        ("ssl", "ssl", "certificates.json: certificate list; no private keys", "sslcert"),
-        ("ftp", "ftp", "users.json: FTP users and home folders; no passwords", "ftp.user"),
+        (
+            "cron",
+            "cron",
+            "jobs.json: all Cron jobs (command, schedule, state)",
+            "scheduler",
+        ),
+        (
+            "dns",
+            "dns",
+            "<zone>.json: zone and records (name, type, TTL, value)",
+            "domain, domain.record",
+        ),
+        (
+            "mail",
+            "mail",
+            "<domain>.json: mail domain and mailbox settings; no passwords, no letters",
+            "emaildomain, email",
+        ),
+        (
+            "sites",
+            "sites",
+            "<site>.json: web domain settings (root, PHP, handler, address)",
+            "webdomain",
+        ),
+        (
+            "ssl",
+            "ssl",
+            "certificates.json: certificate list; no private keys",
+            "sslcert",
+        ),
+        (
+            "ftp",
+            "ftp",
+            "users.json: FTP users and home folders; no passwords",
+            "ftp.user",
+        ),
     ] {
         let selected = selected_of(category);
         if selected.is_empty() {
@@ -1111,7 +1138,10 @@ fn write_backup_manifest(paths: &WorkerPaths, run_id: &str) {
         fs::rename(&staging, root.join("manifest.json"))
     })();
     if written.is_ok() {
-        eprintln!("qadren-worker: {} manifest of run {run_id} written", log_time());
+        eprintln!(
+            "qadren-worker: {} manifest of run {run_id} written",
+            log_time()
+        );
     }
     if let Err(error) = written {
         let _ = fs::remove_file(&staging);
@@ -1304,14 +1334,18 @@ fn run_wake() -> &'static (Mutex<bool>, std::sync::Condvar) {
 /// up to one poll pass (found on 2026-11-06).
 fn wake_runs() {
     let (woken, signal) = run_wake();
-    *woken.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+    *woken
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
     signal.notify_all();
 }
 
 /// Wait for `wake_runs` until `deadline`. True when it was called.
 fn wait_for_run_wake(deadline: std::time::Instant) -> bool {
     let (woken, signal) = run_wake();
-    let mut flag = woken.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut flag = woken
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     while !*flag {
         let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) else {
             return false;
@@ -1348,7 +1382,13 @@ fn database_progress() -> &'static Mutex<HashMap<String, DatabaseProgress>> {
     PROGRESS.get_or_init(Default::default)
 }
 
-fn set_database_progress(run: &ScenarioRun, stage: &'static str, index: usize, total: usize, bytes: u64) {
+fn set_database_progress(
+    run: &ScenarioRun,
+    stage: &'static str,
+    index: usize,
+    total: usize,
+    bytes: u64,
+) {
     set_object_progress(run, stage, "", index, total, bytes);
 }
 
@@ -1469,9 +1509,13 @@ fn clean_backup_files(paths: &WorkerPaths, run: &ScenarioRun) -> bool {
         };
         let ok = matches!(
             outcome,
-            Ok(qadren_core::job_execution::LocalRuleDeleteStatus::MovedToTrash
-                | qadren_core::job_execution::LocalRuleDeleteStatus::DeletedPermanently
-                | qadren_core::job_execution::LocalRuleDeleteStatus::Existing(JobState::Completed))
+            Ok(
+                qadren_core::job_execution::LocalRuleDeleteStatus::MovedToTrash
+                    | qadren_core::job_execution::LocalRuleDeleteStatus::DeletedPermanently
+                    | qadren_core::job_execution::LocalRuleDeleteStatus::Existing(
+                        JobState::Completed
+                    )
+            )
         );
         if !ok {
             eprintln!(
@@ -1614,32 +1658,38 @@ fn export_run_databases(
     connection_id: &str,
     objects: &[(String, String)],
 ) {
-    let record =
-        |category: &str, database: &str, result: &str, error: Option<&str>, done: Option<(u64, String)>| {
-            if let Ok(registry) = Registry::open(&paths.registry) {
-                let (bytes, md5) =
-                    done.map_or((None, None), |(bytes, md5)| (Some(bytes), Some(md5)));
-                let _ = registry.record_backup_object_result(
-                    &run.id,
-                    &BackupObjectResult {
-                        category: category.to_owned(),
-                        provider_id: database.to_owned(),
-                        result: result.to_owned(),
-                        error: error.map(str::to_owned),
-                        bytes,
-                        md5,
-                        finished_at: unix_now(),
-                    },
-                );
-            }
-            eprintln!(
-                "qadren-worker: {} run {} {} export {result}{}",
-                log_time(),
-                run.id,
-                if category == "databases" { "database" } else { category },
-                error.map_or(String::new(), |error| format!(": {error}"))
+    let record = |category: &str,
+                  database: &str,
+                  result: &str,
+                  error: Option<&str>,
+                  done: Option<(u64, String)>| {
+        if let Ok(registry) = Registry::open(&paths.registry) {
+            let (bytes, md5) = done.map_or((None, None), |(bytes, md5)| (Some(bytes), Some(md5)));
+            let _ = registry.record_backup_object_result(
+                &run.id,
+                &BackupObjectResult {
+                    category: category.to_owned(),
+                    provider_id: database.to_owned(),
+                    result: result.to_owned(),
+                    error: error.map(str::to_owned),
+                    bytes,
+                    md5,
+                    finished_at: unix_now(),
+                },
             );
-        };
+        }
+        eprintln!(
+            "qadren-worker: {} run {} {} export {result}{}",
+            log_time(),
+            run.id,
+            if category == "databases" {
+                "database"
+            } else {
+                category
+            },
+            error.map_or(String::new(), |error| format!(": {error}"))
+        );
+    };
     let fail_all = |code: &str| {
         for (category, provider) in objects {
             record(category, provider, "failed", Some(code), None);
@@ -1679,14 +1729,20 @@ fn export_run_databases(
         .unwrap_or_default();
     let option = |category: &str, site: &str| {
         resources.iter().any(|r| {
-            r.category == category && r.rule == "include" && (r.provider_id == site || r.provider_id == "all")
+            r.category == category
+                && r.rule == "include"
+                && (r.provider_id == site || r.provider_id == "all")
         })
     };
     // `sites`/`all` means all sites at run time: a new site needs no edit.
-    let all_sites = objects.iter().any(|(category, provider)| category == "sites" && provider == "all");
+    let all_sites = objects
+        .iter()
+        .any(|(category, provider)| category == "sites" && provider == "all");
     let mut settings: Vec<(String, String)> = objects
         .iter()
-        .filter(|(category, provider)| category != "databases" && !(category == "sites" && provider == "all"))
+        .filter(|(category, provider)| {
+            category != "databases" && !(category == "sites" && provider == "all")
+        })
         .cloned()
         .collect();
     let mut all_sites_failed = None;
@@ -1694,7 +1750,10 @@ fn export_run_databases(
         match qadren_core::ispmanager::object_names(&mut session, "sites") {
             Ok(names) => {
                 for name in names {
-                    if !settings.iter().any(|(category, provider)| category == "sites" && *provider == name) {
+                    if !settings
+                        .iter()
+                        .any(|(category, provider)| category == "sites" && *provider == name)
+                    {
                         settings.push(("sites".to_owned(), name));
                     }
                 }
@@ -1705,13 +1764,26 @@ fn export_run_databases(
     let mut site_failures = 0;
     for (category, provider) in &settings {
         if !run_still_active(paths, run) {
-            record(category, provider, "cancelled", Some("stopped_by_user"), None);
+            record(
+                category,
+                provider,
+                "cancelled",
+                Some("stopped_by_user"),
+                None,
+            );
             site_failures += usize::from(category == "sites");
             continue;
         }
         // The position among the objects of the same category.
-        let same: Vec<_> = settings.iter().filter(|(other, _)| other == category).collect();
-        let index = same.iter().position(|(_, other)| other == provider).unwrap_or(0) + 1;
+        let same: Vec<_> = settings
+            .iter()
+            .filter(|(other, _)| other == category)
+            .collect();
+        let index = same
+            .iter()
+            .position(|(_, other)| other == provider)
+            .unwrap_or(0)
+            + 1;
         set_object_progress(run, "settings", category, index, same.len(), 0);
         let site = qadren_core::ispmanager::SiteOptions {
             ssl: option("site_ssl", provider),
@@ -1737,11 +1809,18 @@ fn export_run_databases(
                     return Ok(json);
                 }
                 // A DNS zone also gets its BIND zone file (section 7c).
-                let zone = qadren_core::ispmanager::dns_zone_file(&content).ok_or("invalid_request")?;
+                let zone =
+                    qadren_core::ispmanager::dns_zone_file(&content).ok_or("invalid_request")?;
                 let file = publish("dns_zone", &zone)?;
                 Ok(match (&json, &file) {
-                    (DatabaseExportStatus::Unchanged { .. }, DatabaseExportStatus::Created { .. })
-                    | (DatabaseExportStatus::Unchanged { .. }, DatabaseExportStatus::Updated { .. }) => file,
+                    (
+                        DatabaseExportStatus::Unchanged { .. },
+                        DatabaseExportStatus::Created { .. },
+                    )
+                    | (
+                        DatabaseExportStatus::Unchanged { .. },
+                        DatabaseExportStatus::Updated { .. },
+                    ) => file,
                     _ => json,
                 })
             });
@@ -1772,7 +1851,9 @@ fn export_run_databases(
     if all_sites {
         match all_sites_failed {
             Some(code) => record("sites", "all", "failed", Some(code), None),
-            None if site_failures > 0 => record("sites", "all", "failed", Some("items_failed"), None),
+            None if site_failures > 0 => {
+                record("sites", "all", "failed", Some("items_failed"), None)
+            }
             None => record("sites", "all", "unchanged", None, None),
         }
     }
@@ -1809,7 +1890,13 @@ fn export_run_databases(
     for (index, database) in databases.iter().enumerate() {
         set_object_progress(run, "dump", "databases", index + 1, databases.len(), 0);
         if !run_still_active(paths, run) {
-            record("databases", database, "cancelled", Some("stopped_by_user"), None);
+            record(
+                "databases",
+                database,
+                "cancelled",
+                Some("stopped_by_user"),
+                None,
+            );
             continue;
         }
         let asked = std::time::Instant::now();
@@ -1881,7 +1968,13 @@ fn export_run_databases(
             Ok(DatabaseExportStatus::Existing(_)) => {
                 record("databases", database, "failed", Some("items_unknown"), None)
             }
-            Err("stopped_by_user") => record("databases", database, "cancelled", Some("stopped_by_user"), None),
+            Err("stopped_by_user") => record(
+                "databases",
+                database,
+                "cancelled",
+                Some("stopped_by_user"),
+                None,
+            ),
             Err(code) => record("databases", database, "failed", Some(code), None),
         }
     }
@@ -4738,9 +4831,17 @@ mod tests {
         run_due_batch_children(paths);
     }
 
+    /// The poll thread and the run thread of a running Worker in one call:
+    /// dispatch the due slots, then advance the runs.
+    fn dispatch_and_advance(paths: &WorkerPaths) -> Result<(usize, usize), String> {
+        let counts = dispatch_due(paths)?;
+        advance_scenario_runs(paths)?;
+        Ok(counts)
+    }
+
     fn drive_runs(paths: &WorkerPaths) {
         for _ in 0..6 {
-            dispatch_due(paths).unwrap();
+            dispatch_and_advance(paths).unwrap();
             while run_snapshot_pass(paths) {}
             run_pass(paths);
         }
@@ -4802,7 +4903,7 @@ mod tests {
                 current.minute() as u8,
             )
             .unwrap();
-        let (staged, dispatched) = dispatch_due(&paths).unwrap();
+        let (staged, dispatched) = dispatch_and_advance(&paths).unwrap();
         assert_eq!((staged, dispatched), (1, 1));
         assert_eq!(
             JobStore::open(&paths.jobs)
@@ -4856,7 +4957,7 @@ mod tests {
         // The receipt was saved by a controller that has now exited. A new
         // Worker process polls it from the existing Registry and owns effects.
         // The run thread executes batch children (D-024).
-        assert_eq!(dispatch_due(&paths).unwrap(), (0, 0));
+        assert_eq!(dispatch_and_advance(&paths).unwrap(), (0, 0));
         run_pass(&paths);
         assert_eq!(fs::read(right_root.join("first.txt")).unwrap(), b"first");
         assert_eq!(fs::read(right_root.join("second.txt")).unwrap(), b"second");
@@ -4880,7 +4981,7 @@ mod tests {
 
         // A subsequent restart finds no pending child and therefore creates no
         // duplicate Job or replacement effect.
-        assert_eq!(dispatch_due(&paths).unwrap(), (0, 0));
+        assert_eq!(dispatch_and_advance(&paths).unwrap(), (0, 0));
         run_pass(&paths);
         assert_eq!(
             JobStore::open(&paths.jobs)
@@ -4934,7 +5035,7 @@ mod tests {
             .unwrap();
         drop(registry);
 
-        assert_eq!(dispatch_due(&paths).unwrap(), (0, 0));
+        assert_eq!(dispatch_and_advance(&paths).unwrap(), (0, 0));
         run_pass(&paths);
         assert!(!right_root.join("first.txt").exists());
         assert!(!right_root.join("second.txt").exists());
@@ -4961,7 +5062,7 @@ mod tests {
             scheduled_fixture("scheduled-execution");
         fs::write(left_root.join("report.txt"), b"first version").unwrap();
         schedule_current_minute(&paths, &scenario);
-        assert_eq!(dispatch_due(&paths).unwrap(), (1, 1));
+        assert_eq!(dispatch_and_advance(&paths).unwrap(), (1, 1));
         // The slot starts a run; the poll itself copies nothing.
         let run = latest_run(&paths, &scenario);
         assert_eq!(
@@ -5128,7 +5229,7 @@ mod tests {
         );
         drop(registry);
 
-        assert_eq!(dispatch_due(&paths).unwrap(), (1, 1));
+        assert_eq!(dispatch_and_advance(&paths).unwrap(), (1, 1));
         drive_runs(&paths);
         assert_eq!(
             fs::read(right_root.join("missed.txt")).unwrap(),
@@ -5137,7 +5238,7 @@ mod tests {
         let jobs = JobStore::open(&paths.jobs).unwrap().list_jobs().unwrap();
         assert_eq!(jobs.len(), 2);
         assert!(jobs.iter().all(|job| job.state == JobState::Completed));
-        assert_eq!(dispatch_due(&paths).unwrap(), (0, 0));
+        assert_eq!(dispatch_and_advance(&paths).unwrap(), (0, 0));
         assert_eq!(
             JobStore::open(&paths.jobs)
                 .unwrap()
@@ -5184,7 +5285,7 @@ mod tests {
         drop(registry);
         schedule_current_minute(&paths, &first);
         schedule_current_minute(&paths, &second);
-        dispatch_due(&paths).unwrap();
+        dispatch_and_advance(&paths).unwrap();
         let waiting = [&first, &second]
             .into_iter()
             .map(|scenario| latest_run(&paths, scenario))
@@ -5432,7 +5533,7 @@ mod tests {
             ),
             Err("conflict_unavailable")
         );
-        assert_eq!(dispatch_due(&paths).unwrap(), (0, 0));
+        assert_eq!(dispatch_and_advance(&paths).unwrap(), (0, 0));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -5542,7 +5643,7 @@ mod tests {
         );
 
         schedule_current_minute(&paths, &scenario);
-        assert_eq!(dispatch_due(&paths).unwrap(), (1, 1));
+        assert_eq!(dispatch_and_advance(&paths).unwrap(), (1, 1));
         drive_runs(&paths);
         assert_eq!(
             fs::read(right_root.join("report.txt")).unwrap(),
@@ -5779,7 +5880,7 @@ mod tests {
 
         // dispatch_due is the first operation of a one-shot Worker start.
         // It must resolve only effects with positive metadata proof.
-        dispatch_due(&paths).unwrap();
+        dispatch_and_advance(&paths).unwrap();
         assert_eq!(
             JobStore::open(&paths.jobs).unwrap().state(&child).unwrap(),
             Some(JobState::Completed)

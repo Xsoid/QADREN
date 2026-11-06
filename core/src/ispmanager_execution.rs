@@ -8,7 +8,6 @@
 //! executor gets the MD5 before the attempt from `md5sum` on the server or,
 //! without a shell, from one SFTP read. The download must give the same
 //! bytes before the publish.
-use std::time::{Duration, Instant};
 use crate::confirmation::Confirmation;
 use crate::ispmanager_sftp::{SftpConnection, SftpReadError, SftpReader};
 use crate::job_execution::{
@@ -27,6 +26,7 @@ use crate::storage_access::ISPMANAGER;
 use crate::verification::VerifiedReceipt;
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, Instant};
 
 fn plain_relative(path: &str) -> bool {
     !path.is_empty()
@@ -662,7 +662,10 @@ pub fn run_ispmanager_database_export(
 
 /// The Job of one Cron, DNS, or mail export in one run.
 pub fn object_export_job_id(run_id: &str, category: &str, provider_id: &str) -> String {
-    let digest = format!("{:x}", md5::compute(format!("{category}:{provider_id}").as_bytes()));
+    let digest = format!(
+        "{:x}",
+        md5::compute(format!("{category}:{provider_id}").as_bytes())
+    );
     format!("ispobj-{run_id}-{}", &digest[..16])
 }
 
@@ -714,7 +717,12 @@ pub fn run_ispmanager_object_export(
         .iter()
         .any(|r| {
             // The zone file goes with its selected DNS zone.
-            r.category == if category == "dns_zone" { "dns" } else { category }
+            r.category
+                == if category == "dns_zone" {
+                    "dns"
+                } else {
+                    category
+                }
                 && r.rule == "include"
                 && (r.provider_id == provider_id || (category == "sites" && r.provider_id == "all"))
         });
@@ -822,17 +830,17 @@ fn publish_backup_file(
     timing.compare = compared.elapsed();
     let publish_started = Instant::now();
     // The publish: a durable attempt, then no-overwrite or replacement.
-    let root_identity = local_root_identity_key(&destination).map_err(|_| {
+    let root_identity = local_root_identity_key(destination).map_err(|_| {
         remove_staging();
         "local_root_unavailable"
     })?;
     let store_error = |_| "job_store_unavailable";
     store
-        .enqueue(&job_id, Some((scenario_id, scenario_revision)))
+        .enqueue(job_id, Some((scenario_id, scenario_revision)))
         .map_err(store_error)?;
     store
         .advance(
-            &job_id,
+            job_id,
             JobState::Queued,
             JobState::Running,
             Confirmation::Unknown,
@@ -846,7 +854,7 @@ fn publish_backup_file(
     };
     store
         .prepare_bound_attempt_with_root_identity(
-            &job_id,
+            job_id,
             &attempt_id,
             operation_kind,
             destination_connection,
@@ -857,7 +865,7 @@ fn publish_backup_file(
         )
         .map_err(store_error)?;
     let fail_before_effect = |store: &mut JobStore, code: &'static str| {
-        let _ = store.fail_attempt_before_effect(&job_id, &attempt_id);
+        let _ = store.fail_attempt_before_effect(job_id, &attempt_id);
         let _ = std::fs::remove_file(staging);
         Err(code)
     };
@@ -896,7 +904,7 @@ fn publish_backup_file(
         &target_text,
     );
     store
-        .complete_attempt_with_scenario_copy_baseline(&job_id, &attempt_id, &receipt, None)
+        .complete_attempt_with_scenario_copy_baseline(job_id, &attempt_id, &receipt, None)
         .map_err(store_error)?;
     timing.publish = publish_started.elapsed();
     Ok(if replace {

@@ -211,7 +211,9 @@ pub extern "C" fn qadren_ispmanager_database_tables(
                         Err(ispmanager_sftp::MysqlDumpError::Refused) => {
                             json!({"ok": false, "error": "ispmanager_database_refused"})
                         }
-                        Err(_) => json!({"ok": false, "error": "ispmanager_database_tables_failed"}),
+                        Err(_) => {
+                            json!({"ok": false, "error": "ispmanager_database_tables_failed"})
+                        }
                     },
                 },
             }

@@ -24,6 +24,14 @@ xcrun swiftc -O -target "$ARCH-apple-macos13.0" \
   -framework AppKit -framework Foundation -framework Security \
   platform/macos/QADREN/WorkerIPC.swift \
   platform/macos/QADREN/StorageRegistry.swift \
+  platform/macos/QADREN/Bridge.swift \
+  platform/macos/QADREN/LoginHandoff.swift \
+  platform/macos/QADREN/ISPmanagerConnection.swift \
+  platform/macos/QADREN/NetworkShare.swift \
+  platform/macos/QADREN/DesignSystem.swift \
+  platform/macos/QADREN/CyberDesign.swift \
+  platform/macos/QADREN/StorageConnections.swift \
+  platform/macos/QADREN/ConnectionRemoval.swift \
   platform/macos/QADREN/JobInventory.swift \
   platform/macos/QADREN/LocalWorkspace.swift \
   platform/macos/Tests/LocalWorkspaceTests.swift \

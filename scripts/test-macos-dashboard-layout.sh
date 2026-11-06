@@ -19,6 +19,7 @@ trap 'rm -rf -- "$TEST_ROOT"' EXIT
 xcrun swiftc -O -target "$ARCH-apple-macos13.0" \
   -framework SwiftUI -framework AppKit -framework Foundation \
   platform/macos/QADREN/DesignSystem.swift \
+  platform/macos/QADREN/CyberDesign.swift \
   platform/macos/QADREN/DashboardLayout.swift \
   platform/macos/QADREN/ConnectionPresentationStatus.swift \
   platform/macos/Tests/DashboardLayoutTests.swift \

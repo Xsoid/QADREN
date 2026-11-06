@@ -850,6 +850,7 @@ impl SftpConnection {
     /// 2. the data of all tables except `structure_only`, in one
     ///    transaction, without triggers;
     /// 3. the triggers, routines, and events.
+    ///
     /// The triggers come after the data, so a restore does not fire them
     /// for each row. With `compress`, the server pipes each part through
     /// `gzip -1` and the Mac decompresses it; the gzip check sum is
@@ -925,16 +926,19 @@ impl SftpConnection {
         let mut decoder = compress.then(|| flate2::write::GzDecoder::new(Vec::new()));
         let mut broken = false;
         let output = self
-            .exec_streaming(command, &access.option_file(), DUMP_TIMEOUT, |data| {
-                match decoder.as_mut() {
+            .exec_streaming(
+                command,
+                &access.option_file(),
+                DUMP_TIMEOUT,
+                |data| match decoder.as_mut() {
                     Some(decoder) => {
                         broken = decoder.write_all(data).is_err();
                         let text = std::mem::take(decoder.get_mut());
                         !broken && writer.accept(&text)
                     }
                     None => writer.accept(data),
-                }
-            })
+                },
+            )
             .ok_or(MysqlDumpError::Failed)?;
         if writer.stopped {
             return Err(MysqlDumpError::Stopped);
