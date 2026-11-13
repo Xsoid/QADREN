@@ -19,10 +19,11 @@ if rg -q 'file-manager|FileManagerPane|filesWorkspace' platform/macos/QADREN; th
 fi
 rg -q 'Button\("Создать копию"\) \{ executeCreate\(item\) \}' \
   platform/macos/QADREN/SettingsPanel.swift
-rg -Fq 'Button("Создать все: \(creates.count)") {' \
+# One Scenario Run executes all Creates, Updates, and rule Deletes.
+rg -Fq 'Button("Синхронизировать") { synchronize(info) }' \
   platform/macos/QADREN/SettingsPanel.swift
 rg -q 'resumePendingCreateBatches\(\)' platform/macos/QADREN/SettingsPanel.swift
-rg -q 'pendingScenarioCreateBatches\(scenario: scenario\)' \
+rg -q 'scenarioCreateBatchSummaries\(scenario: scenario\)' \
   platform/macos/QADREN/SettingsPanel.swift
 rg -q 'deleteConflictDestinationDescription' platform/macos/QADREN/SettingsPanel.swift
 
@@ -38,9 +39,12 @@ case "$ARCH" in
 esac
 
 export MACOSX_DEPLOYMENT_TARGET=13.0
-cargo build --release --manifest-path core/Cargo.toml --target "$TARGET"
+cargo build --release --features ui-test-fixtures --manifest-path core/Cargo.toml --target "$TARGET"
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf -- "$TEST_ROOT"' EXIT
+# A replaced file goes to this Trash, never to the Trash of the user.
+mkdir -p "$TEST_ROOT/trash"
+export QADREN_TEST_TRASH_DIR="$(cd "$TEST_ROOT/trash" && pwd -P)"
 
 xcrun swiftc -O -target "$ARCH-apple-macos13.0" \
   -framework Foundation -framework Security \

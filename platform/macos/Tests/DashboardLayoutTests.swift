@@ -36,7 +36,7 @@ struct DashboardLayoutTests {
 
         let restored = DashboardLayoutStore(defaults: defaults)
         restored.load(panelID: panelID)
-        check(restored.widgets.map(\.kind) == [.connections, .scenario, .connections], "order and instances persist")
+        check(restored.widgets.map(\.kind) == [.scenario, .connections, .scenarios, .connections], "order and instances persist")
         check(restored.widgets.first(where: { $0.id == connections })?.density == .expanded, "density persists")
     }
 

@@ -1396,6 +1396,13 @@ impl LocalFilesystem {
         if let Some(directory) = TRASH_OVERRIDE.read().ok().and_then(|value| value.clone()) {
             return secure::root(&directory).map(Some);
         }
+        // Native macOS tests link a release build. With the test-only feature
+        // they name their own Trash, so they never touch the real Trash of
+        // the user. The production app never enables this feature.
+        #[cfg(feature = "ui-test-fixtures")]
+        if let Some(directory) = std::env::var_os("QADREN_TEST_TRASH_DIR") {
+            return secure::root(Path::new(&directory)).map(Some);
+        }
         // Unit tests must never use the real Trash of the user.
         #[cfg(test)]
         {

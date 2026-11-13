@@ -24,7 +24,7 @@ FIXTURE="$TEST_ROOT/unknown-job-fixture"
 SUPPORT="$TEST_ROOT/home/Library/Application Support/QADREN"
 
 xcrun swiftc -parse-as-library -O -target "$ARCH-apple-macos13.0" \
-  -framework Foundation \
+  -framework Foundation -framework NetFS \
   platform/macos/Tests/UnknownJobFixture.swift \
   "$ROOT/core/target/$TARGET/release/libqadren_core.a" \
   -o "$FIXTURE"
