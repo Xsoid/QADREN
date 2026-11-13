@@ -620,12 +620,7 @@ fn probe_databases_into(
                 .collect();
             let password = text(&form, "password").filter(|value| !value.is_empty());
             probe.password_readable = Some(password.is_some());
-            probe.password_masked = password.as_ref().map(|value| {
-                let mut chars = value.chars();
-                let first = chars.next();
-                first.is_some_and(|first| "*•●x".contains(first))
-                    && chars.all(|ch| Some(ch) == first)
-            });
+            probe.password_masked = password.as_deref().map(masked_password);
             let is_mysql = text(&db, "server")
                 .is_some_and(|server| server.to_ascii_lowercase().contains("mysql"));
             let port = text(&db, "server_hostandport").and_then(|value| {
@@ -656,13 +651,56 @@ fn probe_databases_into(
     None
 }
 
+/// True when the panel shows a mask (one repeated mask character) in place
+/// of the password.
+fn masked_password(value: &str) -> bool {
+    let mut chars = value.chars();
+    let first = chars.next();
+    first.is_some_and(|first| "*•●x".contains(first)) && chars.all(|ch| Some(ch) == first)
+}
+
+/// Why the access facts of one database are not available. `user` is the
+/// MySQL user name when the panel gave it, so that the Scenario editor can
+/// ask for the password of that user. It never goes into a log.
+#[derive(Clone, PartialEq, Eq)]
+pub struct DatabaseAccessError {
+    pub code: &'static str,
+    pub user: Option<String>,
+}
+
+impl fmt::Debug for DatabaseAccessError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.code)
+    }
+}
+
+impl From<&'static str> for DatabaseAccessError {
+    fn from(code: &'static str) -> Self {
+        Self { code, user: None }
+    }
+}
+
+/// Where the password of a database user comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PasswordSource {
+    /// The panel gave the password.
+    Panel,
+    /// The panel hides the password; the user entered it in the Scenario
+    /// editor (owner decision 2026-11-13).
+    Manual,
+}
+
 /// The MySQL access facts of one selected database, read from the panel at
 /// the start of each export (D-027 section 7b). QADREN never stores them.
-/// The user is the first user of the database with the read right.
+/// The user is the first user of the database with the read right. When the
+/// panel hides the password of that user, `manual` gives the password that
+/// the user entered for this MySQL user name.
 pub fn mysql_access(
     session: &mut Session,
     database: &str,
-) -> std::result::Result<ispmanager_sftp::MysqlAccess, &'static str> {
+    manual: &dyn Fn(&str) -> Option<String>,
+) -> std::result::Result<(ispmanager_sftp::MysqlAccess, PasswordSource), DatabaseAccessError> {
     let doc = session
         .read("db", &[])
         .map_err(|_| "ispmanager_database_list_failed")?;
@@ -672,13 +710,14 @@ pub fn mysql_access(
         .cloned()
         .ok_or("ispmanager_database_missing")?;
     if !text(&db, "server").is_some_and(|server| server.to_ascii_lowercase().contains("mysql")) {
-        return Err("ispmanager_database_unsupported");
+        return Err("ispmanager_database_unsupported".into());
     }
+    // Each step has its own code, so the run result tells which step stopped.
     let (_, db_key) = key_field(&db, &["pair", "key", "id", "name"])
-        .ok_or("ispmanager_database_access_unavailable")?;
+        .ok_or("ispmanager_database_users_unreadable")?;
     let users = session
         .read("db.users", &[("elid", &db_key)])
-        .map_err(|_| "ispmanager_database_access_unavailable")?;
+        .map_err(|_| "ispmanager_database_users_unreadable")?;
     let users = elements(&users);
     let readable = |user: &&&serde_json::Map<String, Value>| {
         text(user, "read")
@@ -688,30 +727,44 @@ pub fn mysql_access(
         .iter()
         .find(readable)
         .or_else(|| users.first())
-        .ok_or("ispmanager_database_access_unavailable")?;
-    let (_, user_key) =
-        key_field(user, &["key", "id", "name"]).ok_or("ispmanager_database_access_unavailable")?;
+        .ok_or("ispmanager_database_no_users")?;
+    let (_, user_key) = key_field(user, &["key", "id", "name"])
+        .ok_or("ispmanager_database_user_form_unreadable")?;
     let form = session
         .read("db.users.edit", &[("elid", &user_key), ("plid", &db_key)])
-        .map_err(|_| "ispmanager_database_access_unavailable")?;
-    let password = text(&form, "password")
-        .filter(|value| !value.is_empty())
-        .ok_or("ispmanager_database_access_unavailable")?;
+        .map_err(|_| "ispmanager_database_user_form_unreadable")?;
     let user = text(&form, "username")
         .filter(|value| !value.is_empty())
-        .ok_or("ispmanager_database_access_unavailable")?;
+        .ok_or("ispmanager_database_username_missing")?;
+    let panel =
+        text(&form, "password").filter(|value| !value.is_empty() && !masked_password(value));
+    let (password, source) = match panel {
+        Some(password) => (password, PasswordSource::Panel),
+        None => match manual(&user).filter(|value| !value.is_empty()) {
+            Some(password) => (password, PasswordSource::Manual),
+            None => {
+                return Err(DatabaseAccessError {
+                    code: "ispmanager_database_password_hidden",
+                    user: Some(user),
+                })
+            }
+        },
+    };
     let port = text(&db, "server_hostandport").and_then(|value| {
         value
             .rsplit_once(':')
             .and_then(|(_, port)| port.parse().ok())
     });
-    Ok(ispmanager_sftp::MysqlAccess {
-        database: database.to_owned(),
-        user,
-        password,
-        host: text(&db, "server_host").unwrap_or_else(|| "localhost".to_owned()),
-        port,
-    })
+    Ok((
+        ispmanager_sftp::MysqlAccess {
+            database: database.to_owned(),
+            user,
+            password,
+            host: text(&db, "server_host").unwrap_or_else(|| "localhost".to_owned()),
+            port,
+        },
+        source,
+    ))
 }
 
 /// The names of the MySQL databases of the account, for the Scenario editor.

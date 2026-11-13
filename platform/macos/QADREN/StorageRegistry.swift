@@ -578,6 +578,20 @@ enum QADRENUserMessage {
             "Выбранной базы больше нет на панели. Уберите её из сценария."
         case "ispmanager_database_access_unavailable":
             "Панель не отдала пользователя или пароль базы. Дамп не снят."
+        case "ispmanager_database_list_failed":
+            "Панель не отдала список баз. Дамп не снят."
+        case "ispmanager_database_users_unreadable":
+            "Панель не отдала список пользователей базы. Дамп не снят. Проверьте, что у аккаунта есть право на раздел «Базы данных»."
+        case "ispmanager_database_no_users":
+            "У базы нет ни одного пользователя в панели. Дамп не снят. Создайте пользователя базы в ISPmanager."
+        case "ispmanager_database_user_form_unreadable":
+            "Панель не открыла карточку пользователя базы. Дамп не снят."
+        case "ispmanager_database_password_hidden":
+            "Панель не отдаёт пароль пользователя базы. Дамп не снят. Откройте сценарий через «Изменить» и введите пароль у этой базы."
+        case "ispmanager_database_manual_refused":
+            "MySQL не принял пароль базы, введённый вручную. Дамп не снят. Откройте сценарий через «Изменить» и введите пароль заново."
+        case "ispmanager_database_username_missing":
+            "В карточке пользователя базы нет имени пользователя. Дамп не снят."
         case "ispmanager_object_missing":
             "Выбранной DNS-зоны или почтового домена больше нет на панели. Уберите их из сценария."
         case "ispmanager_database_tables_failed":

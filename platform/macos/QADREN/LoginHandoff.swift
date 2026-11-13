@@ -103,12 +103,14 @@ enum WorkerCredentials {
                     complete = false
                 }
             case "ispmanager" where entry.credential_ref != nil:
-                guard let credentials = try? ISPmanagerKeychain.read(entry.id) else {
+                guard let credentials = try? ISPmanagerKeychain.read(entry.id),
+                      let databasePasswords = try? ISPmanagerDatabasePasswords.read(entry.id) else {
                     complete = false
                     continue
                 }
                 if (try? WorkerIPC.provideISPmanagerCredentials(
-                    connectionID: entry.id, login: credentials.login, password: credentials.password
+                    connectionID: entry.id, login: credentials.login, password: credentials.password,
+                    databasePasswords: databasePasswords
                 )) == nil {
                     complete = false
                 }

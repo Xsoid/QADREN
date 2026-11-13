@@ -234,17 +234,21 @@ enum WorkerIPC {
 
     /// The ISPmanager login of one connection for SFTP reads (D-027). The
     /// Worker keeps it in memory only.
+    /// `databasePasswords`: passwords that the user entered for database
+    /// users whose password the panel hides, by MySQL user name.
     static func provideISPmanagerCredentials(
-        connectionID: String, login: String, password: String, socketPath: String? = nil
+        connectionID: String, login: String, password: String,
+        databasePasswords: [String: String] = [:], socketPath: String? = nil
     ) throws {
         struct Request: Encodable {
             let command = "provide_ispmanager_credentials"
             let connection_id: String
             let login: String
             let password: String
+            let database_passwords: [String: String]
         }
         let payload = try JSONEncoder().encode(
-            Request(connection_id: connectionID, login: login, password: password)
+            Request(connection_id: connectionID, login: login, password: password, database_passwords: databasePasswords)
         ) + Data([0x0a])
         let response = try send(payload, socketPath: socketPath ?? defaultSocketPath(), timeoutSeconds: 2)
         guard response.ok, response.status == "updated" else { throw WorkerIPCError.invalidResponse }
@@ -323,15 +327,16 @@ enum WorkerIPC {
 
     /// Sends the non-mutating `status` request. A short timeout keeps the
     /// monitoring refresh responsive while the Worker runs a long effect.
-    /// Returns the number of batch files that the Worker runs now (D-024).
+    /// Returns the batch files that the Worker runs now (D-024) and the
+    /// start time of the Worker process.
     @discardableResult
-    static func probeStatus(socketPath: String? = nil, timeoutSeconds: Int = 1) throws -> Int {
+    static func probeStatus(socketPath: String? = nil, timeoutSeconds: Int = 1) throws -> WorkerStatus {
         let payload = try JSONEncoder().encode(WorkerStatusRequest()) + Data([0x0a])
         let response = try send(
             payload, socketPath: socketPath ?? defaultSocketPath(), timeoutSeconds: timeoutSeconds
         )
         guard response.ok, response.status == "running" else { throw WorkerIPCError.invalidResponse }
-        return response.active ?? 0
+        return WorkerStatus(active: response.active ?? 0, draining: response.draining ?? false, started: response.started)
     }
 
     /// Batch files that the Worker runs now, from the `status` request.

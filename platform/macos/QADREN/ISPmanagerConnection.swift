@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 // ISPmanager 6 panel connection (D-027, proposed): a read-only backup
 // source. This stage signs in and lists capabilities; no Scenario uses it yet.
@@ -19,7 +20,14 @@ private func ispmanagerDatabases(
 @_silgen_name("qadren_ispmanager_database_tables")
 private func ispmanagerDatabaseTables(
     _ url: UnsafePointer<CChar>?, _ login: UnsafePointer<CChar>?, _ password: UnsafePointer<CChar>?,
-    _ sshPort: UInt16, _ hostKey: UnsafePointer<CChar>?, _ database: UnsafePointer<CChar>?
+    _ sshPort: UInt16, _ hostKey: UnsafePointer<CChar>?, _ database: UnsafePointer<CChar>?,
+    _ passwords: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
+
+@_silgen_name("qadren_ispmanager_database_access")
+private func ispmanagerDatabaseAccess(
+    _ url: UnsafePointer<CChar>?, _ login: UnsafePointer<CChar>?, _ password: UnsafePointer<CChar>?,
+    _ database: UnsafePointer<CChar>?, _ passwords: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
 
 @_silgen_name("qadren_ispmanager_sites")
@@ -40,6 +48,76 @@ private func ispmanagerSFTPList(
 ) -> UnsafeMutablePointer<CChar>?
 
 let ISPmanagerKeychain = LoginKeychain(service: "dev.qadren.ispmanager.credentials")
+
+/// Passwords of database users whose password the panel hides, entered by
+/// the user in the Scenario editor (owner decision 2026-11-13). One Keychain
+/// item for each `connection_id`: a JSON object from MySQL user name to
+/// password. Never in SQLite, logs, or the Registry.
+enum ISPmanagerDatabasePasswords {
+    private static let service = "dev.qadren.ispmanager.database-passwords"
+
+    private static func query(_ connectionID: String) -> [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: connectionID
+        ]
+    }
+
+    static func read(_ connectionID: String) throws -> [String: String] {
+        var q = query(connectionID)
+        q[kSecReturnData as String] = true
+        q[kSecMatchLimit as String] = kSecMatchLimitOne
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(q as CFDictionary, &item)
+        if status == errSecItemNotFound { return [:] }
+        guard status == errSecSuccess, let data = item as? Data,
+              let passwords = try? JSONDecoder().decode([String: String].self, from: data) else {
+            throw StorageError.operation("Keychain read failed")
+        }
+        return passwords
+    }
+
+    /// Sets (or, with nil, removes) the password of one MySQL user.
+    static func set(_ password: String?, user: String, for connectionID: String) throws {
+        guard !connectionID.isEmpty, !user.isEmpty else { throw StorageError.operation("Empty database user") }
+        var passwords = try read(connectionID)
+        passwords[user] = password
+        if passwords.isEmpty {
+            try delete(connectionID)
+            return
+        }
+        let data = try JSONEncoder().encode(passwords)
+        let key = query(connectionID)
+        var item = key
+        item[kSecValueData as String] = data
+        item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        var result = SecItemAdd(item as CFDictionary, nil)
+        if result == errSecDuplicateItem {
+            result = SecItemUpdate(key as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        }
+        guard result == errSecSuccess else { throw StorageError.operation("Keychain write failed") }
+    }
+
+    static func delete(_ connectionID: String) throws {
+        let result = SecItemDelete(query(connectionID) as CFDictionary)
+        guard result == errSecSuccess || result == errSecItemNotFound else {
+            throw StorageError.operation("Keychain removal failed")
+        }
+    }
+
+    /// The JSON text for Core. Empty object when there is nothing.
+    static func json(_ passwords: [String: String]) -> String {
+        (try? JSONEncoder().encode(passwords)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+    }
+}
+
+/// The MySQL user of one database and where its password comes from.
+struct ISPmanagerDatabaseAccess: Equatable {
+    enum Source: String, Decodable { case panel, manual }
+    let user: String
+    let source: Source
+}
 
 /// The panel URL form that Core stores: `https://host[:port][/path]`. Core
 /// removes a fragment, such as `#/` in the address that a browser shows.
@@ -468,22 +546,74 @@ enum ISPmanagerDatabases {
         let transport: ISPmanagerFileTransport?
     }
 
+    private struct AccessResult: Decodable {
+        struct Data: Decodable {
+            let user: String
+            let source: ISPmanagerDatabaseAccess.Source
+        }
+        let ok: Bool
+        let data: Data?
+        let error: String?
+        let user: String?
+    }
+
+    /// Why the access facts of a database are not available: the Core code
+    /// and, when the panel gave it, the MySQL user name.
+    struct AccessFailure: Error, Equatable {
+        let code: String
+        let user: String?
+    }
+
+    /// The MySQL user of one database and where its password comes from.
+    /// Panel requests only: no SSH and no MySQL sign-in.
+    static func access(
+        url: String, credentials: LoginCredentials, database: String, passwords: [String: String]
+    ) async -> Swift.Result<ISPmanagerDatabaseAccess, AccessFailure> {
+        let json = ISPmanagerDatabasePasswords.json(passwords)
+        return await Task.detached(priority: .userInitiated) {
+            let pointer = url.withCString { url in
+                credentials.login.withCString { login in
+                    credentials.password.withCString { password in
+                        database.withCString { database in
+                            json.withCString { json in
+                                ispmanagerDatabaseAccess(url, login, password, database, json)
+                            }
+                        }
+                    }
+                }
+            }
+            guard let pointer else { return .failure(AccessFailure(code: "ispmanager_unavailable", user: nil)) }
+            defer { ispmanagerFree(pointer) }
+            guard let result = try? JSONDecoder().decode(
+                AccessResult.self, from: Data(String(cString: pointer).utf8)
+            ) else { return .failure(AccessFailure(code: "ispmanager_unavailable", user: nil)) }
+            if result.ok, let data = result.data {
+                return .success(ISPmanagerDatabaseAccess(user: data.user, source: data.source))
+            }
+            return .failure(AccessFailure(code: result.error ?? "ispmanager_unavailable", user: result.user))
+        }.value
+    }
+
     /// The base tables of one database with their estimated sizes (D-027
     /// section 7b.10). Core reads the access facts from the panel and runs
     /// one read-only `information_schema` query over SSH.
     static func tables(
-        url: String, credentials: LoginCredentials, settings: ISPmanagerSettings, database: String
+        url: String, credentials: LoginCredentials, settings: ISPmanagerSettings, database: String,
+        passwords: [String: String] = [:]
     ) async -> Swift.Result<[ISPmanagerTable], ISPmanagerSFTP.Failure> {
         guard let hostKey = settings.host_key_sha256 else {
             return .failure(.message("Ключ SSH-сервера не подтверждён. Подтвердите его на карточке подключения в разделе «Подключения»."))
         }
+        let json = ISPmanagerDatabasePasswords.json(passwords)
         return await Task.detached(priority: .userInitiated) {
             let pointer = url.withCString { url in
                 credentials.login.withCString { login in
                     credentials.password.withCString { password in
                         hostKey.withCString { key in
                             database.withCString { database in
-                                ispmanagerDatabaseTables(url, login, password, settings.ssh_port, key, database)
+                                json.withCString { json in
+                                    ispmanagerDatabaseTables(url, login, password, settings.ssh_port, key, database, json)
+                                }
                             }
                         }
                     }
@@ -496,7 +626,16 @@ enum ISPmanagerDatabases {
             ) else { return .failure(.message("Неверный ответ Core.")) }
             if let tables = result.data, result.ok { return .success(tables) }
             if let transport = result.transport { return .failure(.transport(transport)) }
-            return .failure(.message(QADRENUserMessage.text(for: result.error ?? "ispmanager_database_tables_failed")))
+            // In the Scenario editor the password field is above this list,
+            // so the run message ("open the Scenario through Edit") is wrong.
+            switch result.error {
+            case "ispmanager_database_password_hidden":
+                return .failure(.message("Панель не отдаёт пароль пользователя этой базы. Введите пароль выше — после этого появится список таблиц."))
+            case "ispmanager_database_manual_refused":
+                return .failure(.message("MySQL не принял введённый пароль. Проверьте пароль пользователя базы и введите его заново."))
+            default:
+                return .failure(.message(QADRENUserMessage.text(for: result.error ?? "ispmanager_database_tables_failed")))
+            }
         }.value
     }
 }

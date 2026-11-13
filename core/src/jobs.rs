@@ -287,7 +287,13 @@ impl JobStore {
             }
             Err(error) => return Err(JobStoreError::Sqlite(error)),
         }
-        let mut store = Self::initialize(Connection::open(&canonical)?, Some(owner), true)?;
+        let db = Connection::open(&canonical)?;
+        db.busy_timeout(OWNER_THREAD_BUSY_TIMEOUT)?;
+        // The monitoring UI reads while the Worker writes. With WAL a reader
+        // never waits for a Worker commit, and the Worker never waits for a
+        // reader (D-028). The mode is persistent; the owner sets it once.
+        db.pragma_update(None, "journal_mode", "WAL")?;
+        let mut store = Self::initialize(db, Some(owner), true)?;
         store.set_identity(&canonical, Path::new(&lock_path))?;
         Ok(store)
     }

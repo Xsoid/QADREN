@@ -41,7 +41,7 @@ Priority from first to last: (1) blocking consent/conflict/UNKNOWN and errors; (
 
 ## 5. Behavior during risks
 
-**Attention:** No catch-all attention widget (owner decision, 2026-10-31): each signal stays in the widget that it belongs to. Worker service state is in `system-health`, file outcomes (including `UNKNOWN` and retries) are in `scenario`, sign-in and connection failures are in `connections`. The panel attention banner shows only a Worker service failure when no `system-health` widget is on the panel, a store read error, or a recovered layout. A critical notification does not disappear when you filter for a different Worker.
+**Attention:** No catch-all attention widget (owner decision, 2026-10-31): each signal stays in the widget that it belongs to. Worker service state is in `system-health`, file outcomes (including `UNKNOWN` and retries) are in `scenario`, sign-in and connection failures are in `connections`. A JobStore read error is also in `system-health` (owner decision, 2026-11-13). It shows after three failed reads in a row, with the time of the first failure, and says that the Worker continues and the panel shows the last data that it read. The Core error code is in the help text only. The panel attention banner shows only a Worker service failure or a JobStore read error when no `system-health` widget is on the panel, a connection store read error, or a recovered layout. A critical notification does not disappear when you filter for a different Worker.
 
 **UNKNOWN:** Use a separate "Result unknown" label. Detailed read-only reconciliation is available; do not provide a "Retry" button without information that the operation did not occur.
 

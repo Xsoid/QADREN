@@ -2,6 +2,7 @@
 //! main thread: the check makes network requests.
 use crate::{ispmanager, ispmanager_sftp};
 use serde_json::json;
+use std::collections::HashMap;
 use std::ffi::{c_char, CStr, CString};
 
 fn input(pointer: *const c_char) -> Option<String> {
@@ -11,6 +12,58 @@ fn input(pointer: *const c_char) -> Option<String> {
     // SAFETY: the caller passes a valid NUL-terminated string.
     let value = unsafe { CStr::from_ptr(pointer) };
     value.to_str().ok().map(ToOwned::to_owned)
+}
+
+/// The passwords that the user entered for database users whose password
+/// the panel hides: a JSON object from MySQL user name to password. A null
+/// or invalid value is an empty map.
+fn manual_passwords(pointer: *const c_char) -> HashMap<String, String> {
+    input(pointer)
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+fn access_failure(error: &ispmanager::DatabaseAccessError) -> serde_json::Value {
+    json!({"ok": false, "error": error.code, "user": error.user})
+}
+
+/// The MySQL user of one database and where its password comes from, for
+/// the Scenario editor. Panel requests only: no MySQL sign-in. The password
+/// is never returned.
+#[no_mangle]
+pub extern "C" fn qadren_ispmanager_database_access(
+    url: *const c_char,
+    login: *const c_char,
+    password: *const c_char,
+    database: *const c_char,
+    passwords: *const c_char,
+) -> *mut c_char {
+    let manual = manual_passwords(passwords);
+    let value = match (
+        input(url).and_then(|url| ispmanager::PanelUrl::parse(url.trim()).ok()),
+        input(login),
+        input(password),
+        input(database),
+    ) {
+        (Some(url), Some(login), Some(password), Some(database)) => {
+            match ispmanager::Session::new(url, login, password)
+                .map_err(|_| ispmanager::DatabaseAccessError::from("ispmanager_unavailable"))
+                .and_then(|mut session| {
+                    ispmanager::mysql_access(&mut session, &database, &|user| {
+                        manual.get(user).cloned()
+                    })
+                }) {
+                Ok((access, source)) => {
+                    json!({"ok": true, "data": {"user": access.user, "source": source}})
+                }
+                Err(error) => access_failure(&error),
+            }
+        }
+        _ => json!({"ok": false, "error": "invalid_input"}),
+    };
+    CString::new(value.to_string())
+        .expect("JSON cannot contain NUL")
+        .into_raw()
 }
 
 /// Signs in with the login and the password, which stay in memory only, and
@@ -181,7 +234,9 @@ pub extern "C" fn qadren_ispmanager_database_tables(
     ssh_port: u16,
     host_key: *const c_char,
     database: *const c_char,
+    passwords: *const c_char,
 ) -> *mut c_char {
+    let manual = manual_passwords(passwords);
     let value = match (
         input(url).and_then(|url| ispmanager::PanelUrl::parse(url.trim()).ok()),
         input(login),
@@ -194,11 +249,15 @@ pub extern "C" fn qadren_ispmanager_database_tables(
         {
             let host = url.host().to_owned();
             let access = ispmanager::Session::new(url, login.clone(), password.clone())
-                .map_err(|_| "ispmanager_unavailable")
-                .and_then(|mut session| ispmanager::mysql_access(&mut session, &database));
+                .map_err(|_| ispmanager::DatabaseAccessError::from("ispmanager_unavailable"))
+                .and_then(|mut session| {
+                    ispmanager::mysql_access(&mut session, &database, &|user| {
+                        manual.get(user).cloned()
+                    })
+                });
             match access {
-                Err(error) => json!({"ok": false, "error": error}),
-                Ok(access) => match ispmanager_sftp::SftpConnection::open(
+                Err(error) => access_failure(&error),
+                Ok((access, source)) => match ispmanager_sftp::SftpConnection::open(
                     &host, ssh_port, &login, &password, &host_key,
                 ) {
                     Err(error) => json!({
@@ -208,9 +267,14 @@ pub extern "C" fn qadren_ispmanager_database_tables(
                     }),
                     Ok(connection) => match connection.mysql_tables(&access) {
                         Ok(tables) => json!({"ok": true, "data": tables}),
-                        Err(ispmanager_sftp::MysqlDumpError::Refused) => {
-                            json!({"ok": false, "error": "ispmanager_database_refused"})
-                        }
+                        Err(ispmanager_sftp::MysqlDumpError::Refused) => json!({
+                            "ok": false,
+                            "error": match source {
+                                ispmanager::PasswordSource::Manual => "ispmanager_database_manual_refused",
+                                ispmanager::PasswordSource::Panel => "ispmanager_database_refused",
+                            },
+                            "user": access.user,
+                        }),
                         Err(_) => {
                             json!({"ok": false, "error": "ispmanager_database_tables_failed"})
                         }

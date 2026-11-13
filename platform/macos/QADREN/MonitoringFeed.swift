@@ -45,6 +45,8 @@ struct MonitoringSnapshot: Sendable {
     let worker: WorkerReachability
     /// Batch files that the Worker runs now; `nil` when it did not answer.
     var workerActive: Int? = nil
+    /// When the Worker process started; `nil` when it did not answer.
+    var workerStarted: Date? = nil
     let capturedAt: Date
 
     /// Reads the JobStore inventory and sends one IPC `status` request. Both
@@ -59,8 +61,11 @@ struct MonitoringSnapshot: Sendable {
         }
         let worker: WorkerReachability
         var workerActive: Int?
+        var workerStarted: Date?
         do {
-            workerActive = try WorkerIPC.probeStatus(socketPath: socketPath)
+            let status = try WorkerIPC.probeStatus(socketPath: socketPath)
+            workerActive = status.active
+            workerStarted = status.started.map { Date(timeIntervalSince1970: TimeInterval($0)) }
             worker = .responding
         } catch WorkerIPCError.unavailable {
             worker = .unavailable
@@ -69,8 +74,34 @@ struct MonitoringSnapshot: Sendable {
         }
         return MonitoringSnapshot(
             jobs: inventory?.recent, jobCounts: inventory?.counts, jobTotal: inventory?.total,
-            jobError: jobError, worker: worker, workerActive: workerActive, capturedAt: Date()
+            jobError: jobError, worker: worker, workerActive: workerActive,
+            workerStarted: workerStarted, capturedAt: Date()
         )
+    }
+}
+
+/// A JobStore inventory read that fails for three refresh intervals or more.
+/// One failed read is not shown: the Worker can hold the store for a short
+/// write. The Worker continues; the panel keeps the last rows it read.
+struct JobStoreReadProblem: Equatable {
+    let since: Date
+    /// The Core error code, for diagnostics only.
+    let code: String
+
+    var message: String {
+        "Не удаётся прочитать журнал заданий с \(since.formatted(date: .omitted, time: .standard)). "
+            + "Worker продолжает работу, панель показывает последние прочитанные данные."
+    }
+
+    static func evaluate(error: String?, since: Date?, now: Date, interval: TimeInterval) -> JobStoreReadProblem? {
+        guard let error, let since, now.timeIntervalSince(since) >= interval * 2 else { return nil }
+        return JobStoreReadProblem(since: since, code: error)
+    }
+}
+
+extension MonitoringFeed {
+    var jobStoreProblem: JobStoreReadProblem? {
+        JobStoreReadProblem.evaluate(error: jobError, since: jobErrorSince, now: Date(), interval: Self.refreshInterval)
     }
 }
 
@@ -85,8 +116,12 @@ final class MonitoringFeed: ObservableObject {
     @Published private(set) var jobCounts: [String: Int] = [:]
     @Published private(set) var jobTotal = 0
     @Published private(set) var jobError: String?
+    /// The first failed inventory read of the current run of failures; `nil`
+    /// after a successful read.
+    @Published private(set) var jobErrorSince: Date?
     @Published private(set) var worker: WorkerReachability = .unchecked
     @Published private(set) var workerActive: Int?
+    @Published private(set) var workerStarted: Date?
     @Published private(set) var lastInventoryRead: Date?
     @Published private(set) var lastWorkerCheck: Date?
 
@@ -125,8 +160,10 @@ final class MonitoringFeed: ObservableObject {
         }
         // Keep the last good rows after a failed read; freshness marks them stale.
         jobError = snapshot.jobError
+        jobErrorSince = snapshot.jobError == nil ? nil : (jobErrorSince ?? snapshot.capturedAt)
         worker = snapshot.worker
         workerActive = snapshot.workerActive
+        workerStarted = snapshot.workerStarted
         lastWorkerCheck = snapshot.capturedAt
     }
 }

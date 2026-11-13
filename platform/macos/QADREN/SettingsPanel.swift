@@ -3985,8 +3985,11 @@ private struct ISPmanagerDatabasePanel: View {
                     Toggle(name, isOn: binding(for: name))
                         .toggleStyle(.checkbox)
                     if selection.contains(resource(name)) {
-                        ISPmanagerTableRules(connection: connection, database: name, selection: $selection)
-                            .padding(.leading, 20)
+                        VStack(alignment: .leading, spacing: 6) {
+                            ISPmanagerDatabasePassword(connection: connection, database: name)
+                            ISPmanagerTableRules(connection: connection, database: name, selection: $selection)
+                        }
+                        .padding(.leading, 20)
                     }
                 }
                 // A selected database that the panel no longer lists stays
@@ -3997,7 +4000,7 @@ private struct ISPmanagerDatabasePanel: View {
                     }
                     .toggleStyle(.checkbox)
                 }
-                Text("Дамп снимается mysqldump по SSH в одной транзакции, без блокировки таблиц. Если на сервере есть gzip, данные сжимаются только на время передачи. Логин и пароль базы QADREN берёт из панели при каждом запуске и нигде не хранит. Каждая база — один актуальный файл databases/<имя>.sql.")
+                Text("Дамп снимается mysqldump по SSH в одной транзакции, без блокировки таблиц. Если на сервере есть gzip, данные сжимаются только на время передачи. Логин и пароль базы QADREN берёт из панели при каждом запуске. Если панель пароль не отдаёт, QADREN попросит ввести его здесь и сохранит в Связке ключей. Каждая база — один актуальный файл databases/<имя>.sql.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -4355,6 +4358,177 @@ private struct ISPmanagerSettingsPanel: View {
     }
 }
 
+/// The password of the MySQL user of one selected database. QADREN takes it
+/// from the panel. When the panel hides it, the user enters it here (owner
+/// decision 2026-11-13). Before the save, QADREN signs in to MySQL over SSH
+/// with it; the password then goes to the Keychain item of the connection
+/// and to the Worker memory. Shows nothing when the panel gives the password.
+private struct ISPmanagerDatabasePassword: View {
+    let connection: StorageEntry
+    let database: String
+
+    private enum Phase: Equatable {
+        case checking
+        case panel
+        case manual(user: String)
+        case needed(user: String)
+        case failed(String)
+    }
+
+    @State private var state = Phase.checking
+    @State private var entry = ""
+    @State private var editing = false
+    @State private var saving = false
+    @State private var saveError: String?
+
+    var body: some View {
+        // A VStack, not a Group: a Group with EmptyView drops `.task`, and
+        // the check never starts.
+        VStack(alignment: .leading, spacing: 0) {
+            switch state {
+            case .checking:
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Проверяю доступ к базе в панели…").font(.caption).foregroundStyle(.secondary)
+                }
+            case .panel:
+                EmptyView()
+            case let .manual(user) where !editing:
+                HStack(spacing: 8) {
+                    Label("Пароль пользователя MySQL \(user) задан вручную", systemImage: "key.fill")
+                        .font(.callout).foregroundStyle(.secondary)
+                    Button("Изменить") { editing = true }
+                    Button("Удалить") { remove(user: user) }
+                }
+            case let .manual(user), let .needed(user):
+                form(user: user)
+            case let .failed(text):
+                SettingsNotice(text: text, symbol: "exclamationmark.triangle") {
+                    Button("Повторить") { Task { await check() } }
+                }
+            }
+        }
+        .task(id: database) { await check() }
+    }
+
+    private func form(user: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            SettingsNotice(
+                text: "Панель не отдаёт пароль пользователя MySQL \(user), поэтому дамп этой базы не снимается. Введите пароль этого пользователя — тот, что указан в настройках сайта.",
+                symbol: "key"
+            )
+            HStack(spacing: 8) {
+                SecureField("Пароль пользователя \(user)", text: $entry)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 280)
+                    .onSubmit { Task { await save(user: user) } }
+                Button("Проверить и сохранить") { Task { await save(user: user) } }
+                    .disabled(entry.isEmpty || saving)
+                if editing {
+                    Button("Отмена") {
+                        editing = false
+                        entry = ""
+                        saveError = nil
+                    }
+                }
+                if saving { ProgressView().controlSize(.small) }
+            }
+            if let saveError {
+                Text(saveError).font(.caption).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text("Пароль хранится только в Связке ключей этого Mac и передаётся фоновой службе в памяти. Перед сохранением QADREN входит с ним в MySQL по SSH и читает только список таблиц.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func login() throws -> (String, LoginCredentials)? {
+        guard let url = connection.endpoint_url,
+              let credentials = try ISPmanagerKeychain.read(connection.id) else { return nil }
+        return (url, credentials)
+    }
+
+    private func check() async {
+        state = .checking
+        let stored: [String: String]
+        let panel: (String, LoginCredentials)
+        do {
+            guard let value = try login() else {
+                state = .failed("Логин и пароль панели не сохранены. Откройте подключение в разделе «Подключения».")
+                return
+            }
+            panel = value
+            stored = try ISPmanagerDatabasePasswords.read(connection.id)
+        } catch {
+            state = .failed("Не удалось прочитать Связку ключей: " + error.localizedDescription)
+            return
+        }
+        switch await ISPmanagerDatabases.access(
+            url: panel.0, credentials: panel.1, database: database, passwords: stored
+        ) {
+        case let .success(access):
+            state = access.source == .panel ? .panel : .manual(user: access.user)
+        case let .failure(failure):
+            if failure.code == "ispmanager_database_password_hidden", let user = failure.user {
+                state = .needed(user: user)
+            } else {
+                state = .failed(QADRENUserMessage.text(for: failure.code))
+            }
+        }
+    }
+
+    /// Signs in to MySQL with the entered password (a table list over SSH).
+    /// Only a password that MySQL accepts is saved.
+    private func save(user: String) async {
+        guard !entry.isEmpty, !saving else { return }
+        saving = true
+        saveError = nil
+        defer { saving = false }
+        do {
+            guard let (url, credentials) = try login() else {
+                saveError = "Логин и пароль панели не сохранены."
+                return
+            }
+            let settings = try StorageRegistryBridge.ispmanagerSettings(id: connection.id)
+            var passwords = try ISPmanagerDatabasePasswords.read(connection.id)
+            passwords[user] = entry
+            let result = await ISPmanagerDatabases.tables(
+                url: url, credentials: credentials, settings: settings, database: database, passwords: passwords
+            )
+            switch result {
+            case .success:
+                try ISPmanagerDatabasePasswords.set(entry, user: user, for: connection.id)
+                entry = ""
+                editing = false
+                state = .manual(user: user)
+                deliver()
+            case let .failure(.message(text)):
+                saveError = text
+            case let .failure(.transport(transport)):
+                saveError = transport.message(port: settings.ssh_port)
+            }
+        } catch {
+            saveError = "Не удалось сохранить пароль: " + error.localizedDescription
+        }
+    }
+
+    private func remove(user: String) {
+        do {
+            try ISPmanagerDatabasePasswords.set(nil, user: user, for: connection.id)
+            deliver()
+            Task { await check() }
+        } catch {
+            state = .failed("Не удалось удалить пароль: " + error.localizedDescription)
+        }
+    }
+
+    /// The Worker gets the new passwords at once, not at the next minute.
+    private func deliver() {
+        Task.detached(priority: .utility) { _ = WorkerCredentials.deliverAll() }
+    }
+}
+
 /// The tables of one selected database (D-027 section 7b.10). A checked
 /// table is dumped with its data. An unchecked table keeps only its
 /// structure: for cache, sessions, logs, and statistics. The list loads when
@@ -4466,7 +4640,8 @@ private struct ISPmanagerTableRules: View {
         }
         loading = true
         let result = await ISPmanagerDatabases.tables(
-            url: url, credentials: credentials, settings: settings, database: database
+            url: url, credentials: credentials, settings: settings, database: database,
+            passwords: (try? ISPmanagerDatabasePasswords.read(connection.id)) ?? [:]
         )
         loading = false
         switch result {

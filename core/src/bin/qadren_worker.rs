@@ -183,6 +183,11 @@ struct Request {
     login: Option<String>,
     #[serde(default)]
     password: Option<AccessToken>,
+    /// `provide_ispmanager_credentials`: the passwords that the user entered
+    /// for database users whose password the panel hides, by MySQL user name
+    /// (owner decision 2026-11-13). Memory only.
+    #[serde(default)]
+    database_passwords: Option<HashMap<String, AccessToken>>,
     /// Plan requests (D-024 stage 4).
     #[serde(default)]
     plan_id: Option<String>,
@@ -1900,13 +1905,15 @@ fn export_run_databases(
             continue;
         }
         let asked = std::time::Instant::now();
-        let access = match qadren_core::ispmanager::mysql_access(&mut session, database) {
-            Ok(access) => access,
-            Err(code) => {
-                record("databases", database, "failed", Some(code), None);
-                continue;
-            }
-        };
+        let manual = |user: &str| runner().database_password(connection_id, user);
+        let (access, source) =
+            match qadren_core::ispmanager::mysql_access(&mut session, database, &manual) {
+                Ok(access) => access,
+                Err(error) => {
+                    record("databases", database, "failed", Some(error.code), None);
+                    continue;
+                }
+            };
         let access_time = asked.elapsed();
         let mut timing = qadren_core::ispmanager_execution::DatabaseExportTiming::default();
         let status = run_ispmanager_database_export(
@@ -1975,6 +1982,19 @@ fn export_run_databases(
                 Some("stopped_by_user"),
                 None,
             ),
+            // MySQL refused the password that the user entered: the editor
+            // asks for it again.
+            Err("ispmanager_database_refused")
+                if source == qadren_core::ispmanager::PasswordSource::Manual =>
+            {
+                record(
+                    "databases",
+                    database,
+                    "failed",
+                    Some("ispmanager_database_manual_refused"),
+                    None,
+                )
+            }
             Err(code) => record("databases", database, "failed", Some(code), None),
         }
     }
@@ -2749,6 +2769,9 @@ struct Runner {
     smb_logins: Mutex<HashMap<String, (String, String)>>,
     /// ISPmanager logins and passwords by connection ID (D-027). Memory only.
     ispmanager_logins: Mutex<HashMap<String, (String, String)>>,
+    /// Database passwords that the user entered, by connection ID and MySQL
+    /// user name. Used only when the panel hides the password. Memory only.
+    database_passwords: Mutex<HashMap<String, HashMap<String, String>>>,
     /// Open SFTP sessions by connection ID that wait for the next file or
     /// walk step. One SSH sign-in for each file was too slow and fills the
     /// server log (2026-11-04).
@@ -2822,6 +2845,21 @@ impl Runner {
         }
     }
 
+    fn remember_database_passwords(&self, connection_id: &str, passwords: HashMap<String, String>) {
+        if let Ok(mut all) = self.database_passwords.lock() {
+            all.insert(connection_id.to_owned(), passwords);
+        }
+    }
+
+    fn database_password(&self, connection_id: &str, user: &str) -> Option<String> {
+        self.database_passwords
+            .lock()
+            .ok()?
+            .get(connection_id)?
+            .get(user)
+            .cloned()
+    }
+
     fn ispmanager_login(&self, connection_id: &str) -> Option<(String, String)> {
         self.ispmanager_logins
             .lock()
@@ -2873,6 +2911,7 @@ fn runner() -> &'static Runner {
         tokens: Mutex::new(HashMap::new()),
         smb_logins: Mutex::new(HashMap::new()),
         ispmanager_logins: Mutex::new(HashMap::new()),
+        database_passwords: Mutex::new(HashMap::new()),
         sftp_pool: Mutex::new(HashMap::new()),
         smb_refused: Mutex::new(HashMap::new()),
         smb_retry: Mutex::new(HashMap::new()),
@@ -4242,6 +4281,13 @@ fn handle_client(mut stream: UnixStream, paths: &WorkerPaths, stop: &mut bool) {
                     if !connection.is_empty() && !login.is_empty() =>
                 {
                     runner().remember_ispmanager_login(connection, login, password);
+                    let passwords = request
+                        .database_passwords
+                        .iter()
+                        .flatten()
+                        .map(|(user, AccessToken(password))| (user.clone(), password.clone()))
+                        .collect();
+                    runner().remember_database_passwords(connection, passwords);
                     true
                 }
                 _ => false,
@@ -4751,6 +4797,7 @@ mod tests {
             tokens: Mutex::new(HashMap::new()),
             smb_logins: Mutex::new(HashMap::new()),
             ispmanager_logins: Mutex::new(HashMap::new()),
+            database_passwords: Mutex::new(HashMap::new()),
             sftp_pool: Mutex::new(HashMap::new()),
             smb_refused: Mutex::new(HashMap::new()),
             smb_retry: Mutex::new(HashMap::new()),
@@ -6231,6 +6278,7 @@ mod tests {
             connection_id: None,
             login: None,
             password: None,
+            database_passwords: None,
             plan_id: None,
             action: None,
             search: None,
@@ -6297,6 +6345,7 @@ mod tests {
             connection_id: None,
             login: None,
             password: None,
+            database_passwords: None,
             plan_id: None,
             action: None,
             search: None,

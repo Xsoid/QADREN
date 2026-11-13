@@ -279,7 +279,10 @@ final class StorageConnections: ObservableObject {
                     adapter: entry.adapter,
                     disable: disable,
                     ensureNoUnresolvedAttempts: ensureNoUnresolvedAttempts,
-                    deleteCredential: { try ISPmanagerKeychain.delete(id) },
+                    deleteCredential: {
+                        try ISPmanagerKeychain.delete(id)
+                        try ISPmanagerDatabasePasswords.delete(id)
+                    },
                     deleteRecord: deleteRecord
                 )
             case "local_filesystem":

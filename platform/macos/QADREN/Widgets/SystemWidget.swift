@@ -142,6 +142,15 @@ struct SystemWidget<Actions: View>: View {
                     .foregroundStyle(QDCyber.color(.secondaryText, for: colorScheme))
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.top, 4)
+                if let problem = feed.jobStoreProblem {
+                    Label(problem.message, systemImage: "exclamationmark.triangle.fill")
+                        .font(QDCyber.heading(13, weight: .medium))
+                        .foregroundStyle(QDStatusKind.needsAction.cyberColor(for: colorScheme))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .help("Код ошибки: " + problem.code)
+                        .padding(.top, 8)
+                }
                 HStack(spacing: 0) {
                     readout(value: activeValue, label: "операции", tint: activeTint)
                     TimelineView(.periodic(from: .now, by: MonitoringFeed.refreshInterval)) { context in
@@ -276,13 +285,21 @@ struct SystemWidget<Actions: View>: View {
         return QDStatusKind.active.cyberColor(for: colorScheme)
     }
 
-    /// VT323 has no Cyrillic, so this line uses Latin words only.
+    /// VT323 has no Cyrillic, so these lines use Latin words only. BUILD is
+    /// when the app was built; WORKER UP is when the running Worker process
+    /// started, so it changes after each restart.
     private var versionText: String {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
-        guard let built = Self.buildDate(LocalWorkerController.buildVersion) else { return "QADREN \(version)" }
         let local = DateFormatter()
         local.dateFormat = "dd.MM HH:mm"
-        return "QADREN \(version) // BUILD \(local.string(from: built))"
+        var text = "QADREN \(version)"
+        if let built = Self.buildDate(LocalWorkerController.buildVersion) {
+            text += " // BUILD \(local.string(from: built))"
+        }
+        if let started = feed.workerStarted {
+            text += "\nWORKER UP \(local.string(from: started))"
+        }
+        return text
     }
 
     private static func buildDate(_ version: String) -> Date? {
