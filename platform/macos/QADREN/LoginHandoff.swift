@@ -103,11 +103,13 @@ enum WorkerCredentials {
                     complete = false
                 }
             case "ispmanager" where entry.credential_ref != nil:
-                guard let credentials = try? ISPmanagerKeychain.read(entry.id),
-                      let databasePasswords = try? ISPmanagerDatabasePasswords.read(entry.id) else {
+                guard let credentials = try? ISPmanagerKeychain.read(entry.id) else {
                     complete = false
                     continue
                 }
+                // The manual database passwords are optional. A read failure
+                // of their item must not hold back the panel login.
+                let databasePasswords = (try? ISPmanagerDatabasePasswords.read(entry.id)) ?? [:]
                 if (try? WorkerIPC.provideISPmanagerCredentials(
                     connectionID: entry.id, login: credentials.login, password: credentials.password,
                     databasePasswords: databasePasswords

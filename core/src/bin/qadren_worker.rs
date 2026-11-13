@@ -1767,6 +1767,7 @@ fn export_run_databases(
         }
     }
     let mut site_failures = 0;
+    let mut site_cancelled = 0;
     for (category, provider) in &settings {
         if !run_still_active(paths, run) {
             record(
@@ -1776,7 +1777,7 @@ fn export_run_databases(
                 Some("stopped_by_user"),
                 None,
             );
-            site_failures += usize::from(category == "sites");
+            site_cancelled += usize::from(category == "sites");
             continue;
         }
         // The position among the objects of the same category.
@@ -1858,6 +1859,9 @@ fn export_run_databases(
             Some(code) => record("sites", "all", "failed", Some(code), None),
             None if site_failures > 0 => {
                 record("sites", "all", "failed", Some("items_failed"), None)
+            }
+            None if site_cancelled > 0 => {
+                record("sites", "all", "cancelled", Some("stopped_by_user"), None)
             }
             None => record("sites", "all", "unchanged", None, None),
         }

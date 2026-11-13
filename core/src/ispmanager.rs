@@ -846,6 +846,23 @@ pub fn dns_zone_file(json: &[u8]) -> Option<Vec<u8>> {
             format!("{name}.")
         }
     };
+    // A record owner is inside the zone: `@`, an empty name, or a relative
+    // name joins the zone. A target can be outside the zone, so only the
+    // final dot is added to it.
+    let owner = |name: String| {
+        let bare = name.trim_end_matches('.');
+        let lower = bare.to_ascii_lowercase();
+        let zone_lower = zone.to_ascii_lowercase();
+        if bare.is_empty() || bare == "@" {
+            format!("{zone}.")
+        } else if lower == zone_lower || lower.ends_with(&format!(".{zone_lower}")) {
+            format!("{bare}.")
+        } else if name.ends_with('.') {
+            name
+        } else {
+            format!("{bare}.{zone}.")
+        }
+    };
     let mut text = format!(
         "; Zone {zone} from ISPmanager (domain, domain.record).\n\
          ; QADREN writes the records of the panel list; MX and SRV values come\n\
@@ -854,7 +871,7 @@ pub fn dns_zone_file(json: &[u8]) -> Option<Vec<u8>> {
     );
     for record in value["records"].as_array()? {
         let kind = record_type(&field(record, "rtype"));
-        let name = absolute(field(record, "name"));
+        let name = owner(field(record, "name"));
         let ttl = field(record, "ttl");
         let ttl = if ttl.chars().all(|ch| ch.is_ascii_digit()) {
             ttl
@@ -878,13 +895,9 @@ pub fn dns_zone_file(json: &[u8]) -> Option<Vec<u8>> {
                 absolute(value.clone())
             )),
             "TXT" => Some(
-                value
-                    .as_bytes()
-                    .chunks(255)
-                    .map(|chunk| {
-                        let part = String::from_utf8_lossy(chunk);
-                        format!("\"{}\"", part.replace('\\', "\\\\").replace('"', "\\\""))
-                    })
+                txt_parts(&value)
+                    .into_iter()
+                    .map(|part| format!("\"{}\"", part.replace('\\', "\\\\").replace('"', "\\\"")))
                     .collect::<Vec<_>>()
                     .join(" "),
             ),
@@ -899,6 +912,22 @@ pub fn dns_zone_file(json: &[u8]) -> Option<Vec<u8>> {
         text.push('\n');
     }
     Some(text.into_bytes())
+}
+
+/// TXT text in parts of at most 255 bytes. A part never ends inside a
+/// UTF-8 character.
+fn txt_parts(value: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut rest = value;
+    while !rest.is_empty() {
+        let mut end = rest.len().min(255);
+        while !rest.is_char_boundary(end) {
+            end -= 1;
+        }
+        parts.push(&rest[..end]);
+        rest = &rest[end..];
+    }
+    parts
 }
 
 /// What a site file holds besides the site settings (D-027 section 7c).
@@ -991,6 +1020,7 @@ pub fn export_object(
     let read = |session: &mut Session, func: &str, params: &[(&str, &str)]| {
         session.read(func, params).map_err(|error| match error {
             IspError::Panel(kind) if kind == "access" => "ispmanager_permission_denied",
+            IspError::Panel(kind) if kind == "missed" => "ispmanager_function_missing",
             _ => "ispmanager_network_error",
         })
     };
@@ -1033,7 +1063,7 @@ pub fn export_object(
                 // record form has them. It is opened without `sok`.
                 let kind = record_type(&text(record, "rtype").unwrap_or_default());
                 if matches!(kind.as_str(), "MX" | "SRV") {
-                    let rkey = text(record, "rkey").ok_or("ispmanager_object_missing")?;
+                    let rkey = text(record, "rkey").ok_or("ispmanager_dns_record_unreadable")?;
                     let form = read(
                         session,
                         "domain.record.edit",
@@ -1214,9 +1244,6 @@ pub struct SftpTarget<'a> {
     pub host_key_sha256: Option<&'a str>,
 }
 
-/// Signs in, calls the list functions of every category, and checks the
-/// SFTP file transport. The check reads metadata only and changes nothing on
-/// the server.
 fn function_report(function: &'static str, outcome: Result<ListOutcome>) -> FunctionReport {
     match outcome {
         Ok(ListOutcome::Items { fields }) => FunctionReport {
@@ -1354,6 +1381,9 @@ fn probe_mail_storage(connection: &ispmanager_sftp::SftpConnection, probe: &mut 
     probe.maildir = Some(maildir);
 }
 
+/// Signs in, calls the list functions of every category, and checks the
+/// SFTP file transport. The check reads metadata only and changes nothing on
+/// the server.
 pub fn check(url: &str, login: &str, password: &str, sftp: SftpTarget<'_>) -> CheckReport {
     let failed = |status, error: IspError| CheckReport {
         status,
@@ -1432,5 +1462,103 @@ pub fn check(url: &str, login: &str, password: &str, sftp: SftpTarget<'_>) -> Ch
         file_transport: Some(file_transport.into()),
         databases: Some(databases),
         export_probe: Some(export_probe),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn zone(records: Value) -> String {
+        let json = serde_json::json!({"zone": {"name": "example.test"}, "records": records});
+        String::from_utf8(dns_zone_file(json.to_string().as_bytes()).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn zone_file_puts_every_owner_inside_the_zone() {
+        let text = zone(serde_json::json!([
+            {"name": "@", "rtype": "A", "ttl": "300", "value": "192.0.2.1"},
+            {"name": "www", "rtype": "CNAME", "ttl": "300", "value": "example.test."},
+            {"name": "mail.example.test.", "rtype": "A", "ttl": "300", "value": "192.0.2.2"},
+            {"name": "ftp.example.test", "rtype": "A", "ttl": "x", "value": "192.0.2.3"},
+            {"name": "example.test.", "rtype": "MX (mail)", "ttl": "300", "value": "mail.example.test",
+             "priority": "10"},
+        ]));
+        assert!(text.contains("example.test.\t300\tIN\tA\t192.0.2.1\n"));
+        assert!(text.contains("www.example.test.\t300\tIN\tCNAME\texample.test.\n"));
+        assert!(text.contains("mail.example.test.\t300\tIN\tA\t192.0.2.2\n"));
+        // A TTL that is not a number is left out.
+        assert!(text.contains("ftp.example.test.\t\tIN\tA\t192.0.2.3\n"));
+        assert!(text.contains("example.test.\t300\tIN\tMX\t10 mail.example.test.\n"));
+    }
+
+    #[test]
+    fn zone_file_comments_out_a_record_it_cannot_write() {
+        let text = zone(serde_json::json!([
+            {"name": "@", "rtype": "SOA", "ttl": "300", "value": "ns1.example.test."},
+            {"name": "@", "rtype": "CAA", "ttl": "300", "value": "0 issue \"ca.test\""},
+        ]));
+        assert!(text.contains("; example.test.\t300\tIN\tSOA\t"));
+        assert!(text.contains("; example.test.\t300\tIN\tCAA\t"));
+    }
+
+    #[test]
+    fn txt_parts_split_at_255_bytes_without_breaking_a_character() {
+        let ascii = "a".repeat(600);
+        let parts = txt_parts(&ascii);
+        assert_eq!(
+            parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
+            [255, 255, 90]
+        );
+        // 254 ASCII bytes, then a two-byte character over the 255-byte edge.
+        let text = format!("{}é{}", "a".repeat(254), "b".repeat(10));
+        let parts = txt_parts(&text);
+        assert_eq!(parts[0].len(), 254);
+        assert_eq!(parts.concat(), text);
+        let line = zone(serde_json::json!([
+            {"name": "@", "rtype": "TXT", "ttl": "300", "value": "say \"hi\" \\ ok"},
+        ]));
+        assert!(line.contains("IN\tTXT\t\"say \\\"hi\\\" \\\\ ok\"\n"));
+    }
+
+    #[test]
+    fn masked_password_is_one_repeated_mask_character() {
+        assert!(masked_password("********"));
+        assert!(masked_password("●●●●"));
+        assert!(!masked_password("*a**"));
+        assert!(!masked_password("secretvalue"));
+        assert!(!masked_password(""));
+    }
+
+    #[test]
+    fn ftp_home_belongs_to_one_site_only() {
+        assert!(home_in_site(
+            "/www/example.test",
+            "/www/example.test/web",
+            "example.test"
+        ));
+        assert!(home_in_site(
+            "/www/example.test/web/up",
+            "/www/example.test/web",
+            "example.test"
+        ));
+        assert!(!home_in_site(
+            "/www",
+            "/www/example.test/web",
+            "example.test"
+        ));
+        assert!(!home_in_site("/", "/www/example.test/web", "example.test"));
+        assert!(!home_in_site(
+            "/www/other.test",
+            "/www/example.test/web",
+            "example.test"
+        ));
+    }
+
+    #[test]
+    fn names_site_matches_the_site_and_its_www_name() {
+        assert!(names_site("example.test, www.example.test", "example.test"));
+        assert!(names_site("WWW.EXAMPLE.TEST", "example.test"));
+        assert!(!names_site("sub.example.test", "example.test"));
     }
 }

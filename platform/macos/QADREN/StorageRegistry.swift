@@ -594,6 +594,10 @@ enum QADRENUserMessage {
             "В карточке пользователя базы нет имени пользователя. Дамп не снят."
         case "ispmanager_object_missing":
             "Выбранной DNS-зоны или почтового домена больше нет на панели. Уберите их из сценария."
+        case "ispmanager_dns_record_unreadable":
+            "Панель не отдала ключ записи MX или SRV в DNS-зоне. Зона не сохранена; повторите запуск позже."
+        case "ispmanager_function_missing":
+            "На панели нет нужного раздела или модуля. Уберите этот объект из сценария."
         case "ispmanager_database_tables_failed":
             "Не удалось прочитать список таблиц базы через mysql по SSH."
         case "ispmanager_unavailable":
