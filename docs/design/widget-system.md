@@ -83,7 +83,7 @@ Do not include the following in MVP: topology graph, global Worker speed, quota 
 
 ## 8. Default Layout
 
-First start panel: `system-health`, `scenario`, `scenarios`, `connections` in catalog order. No catch-all attention widget (owner decision, 2026-10-31): each signal stays in the widget that it belongs to. Worker service state is in `system-health`, file outcomes (including `UNKNOWN` and retries) are in `scenario`, sign-in and connection failures are in `connections`. The panel attention banner shows only a Worker service failure when no `system-health` widget is on the panel, a store read error, or a recovered layout. `upcoming-runs` and `event-timeline` stay planned. Widgets have an explicit `empty/unavailable` state if Core is not yet implemented. The primary layout must survive resizing while preserving user rearrangements.
+First start panel: `system-health`, `scenario`, `scenarios`, `connections` in catalog order. No catch-all attention widget (owner decision, 2026-10-31): each signal stays in the widget that it belongs to. Worker service state is in `system-health`, file outcomes (including `UNKNOWN` and retries) are in `scenario`, sign-in and connection failures are in `connections`. The panel attention banner shows only a recovered layout, or a store or service problem when the widget of that problem is not on the panel: a Worker service failure or a JobStore read error without `system-health`, a connection store read error without `connections`. `upcoming-runs` and `event-timeline` stay planned. Widgets have an explicit `empty/unavailable` state if Core is not yet implemented. The primary layout must survive resizing while preserving user rearrangements.
 
 ## 9. Complex and Negative Cases
 

@@ -25,7 +25,14 @@ TEST_ROOT="$(cd "$(mktemp -d /tmp/qe.XXXXXX)" && pwd -P)"
 # Run a private copy of the bundle. Another check can rebuild dist/ meanwhile.
 APP="$TEST_ROOT/QADREN.app"
 ditto "$ROOT/dist/QADREN.app" "$APP"
-WORKER="$APP/Contents/Resources/qadren-worker"
+# The Worker of the bundle uses the real Trash of the user when it replaces a
+# file. The test Worker gets the test-only feature and its own Trash.
+cargo build --release --features ui-test-fixtures --manifest-path core/Cargo.toml --target "$TARGET" \
+  --bin qadren-worker --lib >/dev/null 2>&1
+WORKER="$TEST_ROOT/qadren-worker"
+cp "$ROOT/core/target/$TARGET/release/qadren-worker" "$WORKER"
+mkdir -p "$TEST_ROOT/trash"
+export QADREN_TEST_TRASH_DIR="$TEST_ROOT/trash"
 BUNDLE_ID="$(plutil -extract CFBundleIdentifier raw "$APP/Contents/Info.plist")"
 DATA="$TEST_ROOT/data"
 SRC="$TEST_ROOT/src"
@@ -107,9 +114,14 @@ open_plan() {
 regtool_build() {
   [[ -x "$TEST_ROOT/settings-e2e-registry" ]] && return 0
   REGTOOL="$TEST_ROOT/settings-e2e-registry"
-  xcrun swiftc -O -target "$ARCH-apple-macos13.0" -framework Foundation -framework Security \
-    platform/macos/QADREN/JobInventory.swift platform/macos/QADREN/WorkerIPC.swift \
-    platform/macos/QADREN/StorageRegistry.swift platform/macos/Tests/SettingsE2ERegistryTool.swift \
+  # The Registry bridge uses types from the whole app; QADRENApp has its own @main.
+  local sources=()
+  for f in platform/macos/QADREN/*.swift platform/macos/QADREN/Widgets/*.swift; do
+    [[ "$f" == */QADRENApp.swift ]] || sources+=("$f")
+  done
+  xcrun swiftc -O -target "$ARCH-apple-macos13.0" -framework SwiftUI -framework AppKit -framework Foundation \
+    -framework ServiceManagement -framework NetFS -framework Network -framework UserNotifications -framework Security \
+    "${sources[@]}" platform/macos/Tests/SettingsE2ERegistryTool.swift \
     "$ROOT/core/target/$TARGET/release/libqadren_core.a" -o "$REGTOOL"
 }
 regtool() { QADREN_DATA_ROOT="$DATA" "$TEST_ROOT/settings-e2e-registry" "$@"; }
@@ -126,6 +138,11 @@ to_scenario_list() {
   ax wait Настройки AXButton "Создать сценарий"
 }
 jobs_count() { jobs_sql "select count(*) from jobs"; }
+# The Synchronize button names the exact scope of one run in its
+# accessibility value, for example "Создать: 3 · Заменить: 1".
+scope_is() { "$DRIVER" "$APP_PID" dump Настройки 2>/dev/null | grep -E "AXButton Синхронизировать \| $1\$" >/dev/null; }
+wait_scope() { wait_for "${2:-10}" scope_is "$1" || fail "the Synchronize scope is not '$1'"; }
+synchronize() { wait_scope "$@"; ax press Настройки AXButton "Синхронизировать"; }
 registry_sql() { sqlite3 "$DATA/connections.sqlite3" "$1"; }
 has_files() { [[ -n "$(ls -A "$1")" ]]; }
 
@@ -145,7 +162,7 @@ for _ in $(seq 1 50); do
   APP_PID=""; sleep 0.2
 done
 [[ -n "$APP_PID" ]] || fail "test app did not start"
-ax wait monitoring AXStaticText "Worker отвечает" 15
+ax wait monitoring "*" "WORKER UP" 15
 
 step "This Mac exists by default, and no second one can be added"
 ax menu Window Настройки
@@ -154,7 +171,7 @@ ax wait Настройки AXTextField "Этот Mac"
   || fail "This Mac is not exactly one Local Filesystem connection"
 ax press Настройки AXButton "Добавить подключение"
 ax wait Настройки AXStaticText "Уже подключён" 5
-ax press Настройки AXButton "Закрыть"
+ax press Настройки AXButton "Назад"
 ax gone Настройки AXStaticText "Уже подключён" 5
 
 if section one_way; then
@@ -164,8 +181,7 @@ create_scenario "E2E one-way" "$SRC" "$DST"
 
 step "Preview the plan and run the Create batch"
 open_plan "E2E one-way"
-ax wait Настройки AXButton "Создать все: 3"
-ax press Настройки AXButton "Создать все: 3"
+synchronize "Создать: 3"
 wait_for 20 test -f "$DST/sub/c.txt" || fail "nested file was not created"
 cmp -s "$SRC/a.txt" "$DST/a.txt" && cmp -s "$SRC/b.txt" "$DST/b.txt" && cmp -s "$SRC/sub/c.txt" "$DST/sub/c.txt" \
   || fail "destination bytes differ from the source"
@@ -207,8 +223,18 @@ ax wait Настройки AXStaticText "без действия" 20
 ax gone Настройки AXButton "Создать копию" 2
 ax gone Настройки AXButton "Заменить файл" 2
 
-step "Monitoring shows the completed Jobs from the same JobStore"
-ax wait monitoring AXStaticText "Задания: Готово" 15
+step "Monitoring shows the Scenario and its finished run from the same Registry"
+# The panel layout is in the user defaults of the app. The Scenarios widget
+# is in the default layout; a user layout can omit it.
+if "$DRIVER" "$APP_PID" wait monitoring AXStaticText "СЦЕНАРИИ" 5 2>/dev/null; then
+  ax wait monitoring "*" "E2E one-way, из Этот Mac в Этот Mac" 15
+  # The Worker closes the run on its next pass after the last file.
+  ax gone monitoring "*" "E2E one-way, из Этот Mac в Этот Mac, выполняется" 120
+else
+  echo "   the panel has no Scenarios widget; skipped"
+fi
+[[ "$(registry_sql "select count(*) from scenario_runs where state='completed'")" -ge 1 ]] \
+  || fail "the Scenario Run did not complete: $(registry_sql 'select state, error from scenario_runs')"
 
 fi
 
@@ -221,8 +247,7 @@ printf 'right one\n' > "$RIGHT/r1.txt"
 to_scenario_list
 create_scenario "E2E two-way" "$LEFT" "$RIGHT" two_way
 open_plan "E2E two-way"
-ax wait Настройки AXButton "Создать все: 2"
-ax press Настройки AXButton "Создать все: 2"
+synchronize "Создать: 2"
 wait_for 20 test -f "$LEFT/r1.txt" || fail "right-to-left Create did not run"
 wait_for 20 test -f "$RIGHT/l1.txt" || fail "left-to-right Create did not run"
 ax gone Настройки "*" "Выполнение пакета" 20
@@ -280,8 +305,8 @@ for i in $(seq -w 1 80); do dd if=/dev/urandom of="$BIG/f$i.bin" bs=1m count=32 
 to_scenario_list
 create_scenario "E2E cancel" "$BIG" "$BIGDST"
 open_plan "E2E cancel"
-ax wait Настройки AXButton "Создать все: 80"
-ax press Настройки AXButton "Создать все: 80"
+synchronize "Создать: 80"
+ax wait Настройки AXButton "Остановить после текущего файла" 30
 ax press Настройки AXButton "Остановить после текущего файла"
 ax gone Настройки "*" "Выполнение пакета" 120
 ax wait Настройки AXStaticText "Пакет остановлен по запросу" 5
@@ -293,7 +318,9 @@ echo "   copied $COPIED of 80, cancelled $CANCELLED"
 [[ "$(jobs_sql "select count(*) from jobs where state<>'completed'")" == 0 ]] || fail "cancellation left an unfinished Job"
 for f in "$BIGDST"/*; do cmp -s "$f" "$BIG/$(basename "$f")" || fail "copied file differs: $f"; done
 REMAINING=$((80 - COPIED))
-ax wait Настройки AXButton "Создать все: $REMAINING" 10
+# The stored plan stays as it was built; a new check shows the rest.
+ax press Настройки AXButton "Проверить план" 0
+wait_scope "Создать: $REMAINING" 20
 ax close Настройки
 ax menu Window Настройки
 ax wait Настройки AXStaticText "Сценарии" 10
@@ -302,7 +329,7 @@ if ! "$DRIVER" "$APP_PID" wait Настройки AXStaticText "План сце�
   open_plan "E2E cancel"
 fi
 ax press Настройки AXButton "Проверить план" 0
-ax wait Настройки AXButton "Создать все: $REMAINING" 10
+wait_scope "Создать: $REMAINING" 10
 ax gone Настройки "*" "Выполнение пакета" 3
 ax gone Настройки AXButton "Остановить после текущего файла" 3
 
@@ -329,8 +356,7 @@ to_scenario_list
 create_scenario "E2E negative" "$NSRC" "$NDST"
 open_plan "E2E negative"
 ax wait Настройки AXStaticText "Имена отличаются только регистром"
-ax wait Настройки AXButton "Создать все: 1"
-ax press Настройки AXButton "Создать все: 1"
+synchronize "Создать: 1"
 wait_for 20 test -f "$NDST/plain.txt" || fail "plain file was not created"
 ax gone Настройки "*" "Выполнение пакета" 20
 [[ "$(cat "$NDST/report.txt")" == "destination lower" ]] || fail "case collision changed the destination"
@@ -387,13 +413,17 @@ ax wait Настройки AXButton "Создать копию" 10
 ax press Настройки AXButton "Создать копию"
 wait_for 20 cmp -s "$VSRC/v.txt" "$VDST/v.txt" || fail "re-enabled connection did not copy"
 
-step "Negative: a vanished source folder is reported, not planned as deletions"
+step "Negative: a vanished source folder pauses the plan, not planned as deletions"
 mv "$VSRC" "$TEST_ROOT/vsrc-moved"
-ax press Настройки AXButton "Проверить план" 0
-ax wait Настройки AXStaticText "Не удалось прочитать метаданные" 10
+# After "Создать копию" the plan can already read again; then the button is off.
+"$DRIVER" "$APP_PID" press Настройки AXButton "Проверить план" 0 2>/dev/null || true
+ax wait Настройки "*" "Папка сценария недоступна" 20
 ax gone Настройки AXButton "Добавить в очередь конфликтов" 2
 [[ -f "$VDST/v.txt" ]] || fail "a vanished source changed the destination"
 mv "$TEST_ROOT/vsrc-moved" "$VSRC"
+# The paused plan continues when the folder is back.
+ax wait Настройки AXStaticText "без действия" 120
+ax gone Настройки "*" "Папка сценария недоступна" 5
 
 step "Negative: concurrent changes after planning never overwrite newer data"
 RL="$TEST_ROOT/race-left"; RR="$TEST_ROOT/race-right"; mkdir -p "$RL" "$RR"
@@ -401,8 +431,7 @@ printf 'shared v1\n' > "$RL/shared.txt"
 to_scenario_list
 create_scenario "E2E race" "$RL" "$RR" two_way
 open_plan "E2E race"
-ax wait Настройки AXButton "Создать все: 1"
-ax press Настройки AXButton "Создать все: 1"
+synchronize "Создать: 1"
 wait_for 20 test -f "$RR/shared.txt" || fail "initial two-way Create did not run"
 ax gone Настройки "*" "Выполнение пакета" 20
 # Create race: the plan proposes a Create, then the destination gets a file.
@@ -450,17 +479,17 @@ make_big_source "$CSRC" 80
 to_scenario_list
 create_scenario "E2E crash" "$CSRC" "$CDST"
 open_plan "E2E crash"
-ax wait Настройки AXButton "Создать все: 80"
-ax press Настройки AXButton "Создать все: 80"
+synchronize "Создать: 80"
 wait_for 30 bash -c "(( \$(ls -1 '$CDST' | wc -l) >= 3 ))" || fail "batch did not start"
 kill -9 "$WORKER_PID"; wait "$WORKER_PID" 2>/dev/null || true
 COPIED_AT_CRASH="$(file_count "$CDST")"
 echo "   killed the Worker after $COPIED_AT_CRASH files"
-ax gone Настройки "*" "Выполнение пакета" 20
-ax wait monitoring AXStaticText "Worker не запущен" 15
+# The Worker owns the batch; the panel shows that no Worker answers.
+ax gone monitoring "*" "WORKER UP" 20
 sleep 2
 [[ "$(file_count "$CDST")" == "$COPIED_AT_CRASH" ]] || fail "files changed while the Worker was stopped"
 start_worker
+ax wait monitoring "*" "WORKER UP" 20
 wait_for 120 no_pending_children "E2E crash" || fail "the restarted Worker did not resume the batch: $(batch_children "E2E crash")"
 echo "   children after restart: $(batch_children "E2E crash" | tr '\n' ' ')"
 for row in $(registry_sql "select c.relative_path||':'||c.job_id||':'||c.state from scenario_create_batch_children c join scenario_create_batches b on b.id=c.batch_id join scenarios s on s.id=b.scenario_id where s.name='E2E crash' and c.state<>'completed'"); do
@@ -468,7 +497,10 @@ for row in $(registry_sql "select c.relative_path||':'||c.job_id||':'||c.state f
   echo "   unfinished child $row; job=$(jobs_sql "select state from jobs where id='$job'"); events=$(jobs_sql "select kind||'>'||state from job_events where job_id='$job' order by rowid" | tr '\n' ' '); attempts=$(jobs_sql "select status from job_attempts where job_id='$job'" | tr '\n' ' '); dest=$(ls -la "$CDST/$(echo "$row" | cut -d: -f1)" 2>&1 | awk '{print $5}')"
 done
 UNKNOWN_CHILDREN="$(registry_sql "select count(*) from scenario_create_batch_children c join scenario_create_batches b on b.id=c.batch_id join scenarios s on s.id=b.scenario_id where s.name='E2E crash' and c.state not in ('completed')")"
-(( UNKNOWN_CHILDREN <= 1 )) || fail "more than the in-flight file is unfinished after restart"
+# The Worker writes up to DESTINATION_PARALLEL_EFFECTS (4) files into one
+# destination at a time; only those files can be in flight at the crash.
+IN_FLIGHT_LIMIT=4
+(( UNKNOWN_CHILDREN <= IN_FLIGHT_LIMIT )) || fail "more than the in-flight files are unfinished after restart"
 [[ "$(jobs_sql "select count(*) from jobs where state='running'")" == 0 ]] || fail "a Job stays running after restart"
 HIDDEN="$(ls -A "$CDST" | grep -v '^f[0-9]*\.bin$' || true)"
 [[ -z "$HIDDEN" ]] || fail "the restarted Worker left staging files of the interrupted write: $HIDDEN"
@@ -479,15 +511,15 @@ for f in "$CDST"/*; do
 done
 echo "   unfinished Jobs: $(jobs_sql "select id, state from jobs where state<>'completed'" | tr '\n' ' ')"
 MISSING=$((80 - $(file_count "$CDST")))
-(( MISSING <= 1 )) || fail "more than one file is missing after restart"
+(( MISSING <= IN_FLIGHT_LIMIT )) || fail "more than the in-flight files are missing after restart"
 ax press Настройки AXButton "Проверить план" 0
 if (( MISSING == 0 )); then
   ax wait Настройки AXStaticText "без действия" 10
   ax gone Настройки AXButton "Создать копию" 3
 else
-  # The interrupted file was not published. The plan offers it again as a
-  # new no-overwrite Create; nothing is replayed automatically.
-  ax wait Настройки AXButton "Создать все: 1" 10
+  # The interrupted files were not published. The plan offers them again as
+  # new no-overwrite Creates; nothing is replayed automatically.
+  wait_scope "Создать: $MISSING" 20
 fi
 fi
 
@@ -510,12 +542,16 @@ ax gone Настройки AXButton "Удалить подключение" 3
 step "Lifecycle: disabling the connection during a batch stops new files"
 to_scenario_list
 open_plan "E2E lifecycle"
-ax wait Настройки AXButton "Создать все: 80"
-ax press Настройки AXButton "Создать все: 80"
+synchronize "Создать: 80"
 wait_for 30 bash -c "(( \$(ls -1 '$LDST' | wc -l) >= 2 ))" || fail "batch did not start"
 UNKNOWN_BEFORE="$(jobs_sql "select count(*) from jobs where state='unknown'")"
 regtool local-enabled false
-wait_for 120 no_pending_children "E2E lifecycle" || fail "the batch did not finish after disable"
+# "Repeat until success" is on by default. A disabled connection is then a
+# temporary error before the write: each remaining file waits for a retry.
+only_retry_waiting() {
+  [[ "$(registry_sql "select count(*) from scenario_create_batch_children c join scenario_create_batches b on b.id=c.batch_id join scenarios s on s.id=b.scenario_id where s.name='$1' and c.state<>'completed' and coalesce(c.last_error,'')<>'local_connection_unavailable'")" == 0 ]]
+}
+wait_for 120 only_retry_waiting "E2E lifecycle" || fail "the batch did not stop after disable: $(batch_children "E2E lifecycle")"
 AT_DISABLE="$(file_count "$LDST")"
 echo "   children: $(batch_children "E2E lifecycle" | tr '\n' ' ')"
 (( AT_DISABLE < 80 )) || fail "files were still copied after the connection was disabled"
@@ -523,13 +559,19 @@ echo "   children: $(batch_children "E2E lifecycle" | tr '\n' ' ')"
    && "$(jobs_sql "select count(*) from jobs where state='unknown'")" == "$UNKNOWN_BEFORE" ]] \
   || fail "disable left a running or new UNKNOWN Job: $(jobs_sql "select id, state from jobs where state in ('running','unknown')" | tr '\n' ' ')"
 for f in "$LDST"/*; do cmp -s "$f" "$LSRC/$(basename "$f")" || fail "partial file after disable: $f"; done
-ax gone Настройки "*" "Выполнение пакета" 20
-ax wait Настройки AXStaticText "Не завершены файлы" 10
-ax wait Настройки AXStaticText "План не построен" 10
-ax gone Настройки AXStaticText "Изменения не найдены" 2
+ax wait Настройки AXStaticText "Ждут автоматического повтора: $((80 - AT_DISABLE))" 20
+sleep 3
+[[ "$(file_count "$LDST")" == "$AT_DISABLE" ]] || fail "a file was copied while the connection was disabled"
+
+step "Lifecycle: stopping the waiting batch, then re-enabling, offers the rest again"
+ax press Настройки AXButton "Остановить после текущего файла"
+ax gone Настройки "*" "Выполнение пакета" 60
+ax wait Настройки AXStaticText "Пакет остановлен по запросу: создано $AT_DISABLE из 80" 10
 regtool local-enabled true
-ax press Настройки AXButton "Проверить план" 0
-ax wait Настройки AXButton "Создать все: $((80 - AT_DISABLE))" 10
+# The stop starts a new plan check; press again when that check ends.
+wait_for 60 "$DRIVER" "$APP_PID" press Настройки AXButton "Проверить план" 0 2>/dev/null \
+  || fail "the plan check did not end after the stop"
+wait_scope "Создать: $((80 - AT_DISABLE))" 60
 fi
 
 if section links; then
@@ -544,8 +586,7 @@ create_scenario "E2E links" "$KSRC" "$KDST"
 open_plan "E2E links"
 ax wait Настройки AXStaticText "Пропущено объектов, которые QADREN не синхронизирует" 10
 ax wait Настройки AXStaticText "в источнике 3, в назначении 0" 5
-ax wait Настройки AXButton "Создать все: 1"
-ax press Настройки AXButton "Создать все: 1"
+synchronize "Создать: 1"
 wait_for 20 test -f "$KDST/keep.txt" || fail "the regular file was not copied"
 ax gone Настройки "*" "Выполнение пакета" 20
 [[ "$(ls -A "$KDST")" == "keep.txt" ]] || fail "a link or special file reached the destination: $(ls -A "$KDST" | tr '\n' ' ')"
@@ -574,9 +615,9 @@ FPDST="$TEST_ROOT/fpdst"; mkdir -p "$FPDST"
 to_scenario_list
 create_scenario "E2E file provider" "$FP_SOURCE" "$FPDST"
 open_plan "E2E file provider"
-ax wait Настройки AXButton "Создать все: $TOTAL" 20
+wait_scope "Создать: $TOTAL" 20
 [[ "$(dataless_count)" == "$TOTAL" ]] || fail "the metadata plan downloaded provider content"
-ax press Настройки AXButton "Создать все: $TOTAL"
+ax press Настройки AXButton "Синхронизировать"
 ax gone Настройки "*" "Выполнение пакета" 180
 (cd "$FP_ORIG" && find . -type f) | while read -r f; do
   cmp -s "$FP_ORIG/$f" "$FPDST/$f" || fail "provider file was not copied exactly: $f"
@@ -631,8 +672,7 @@ printf 'update me\n' > "$SSRC/u.txt"
 to_scenario_list
 create_scenario "E2E schedule" "$SSRC" "$SDST"
 open_plan "E2E schedule"
-ax wait Настройки AXButton "Создать все: 1"
-ax press Настройки AXButton "Создать все: 1"
+synchronize "Создать: 1"
 wait_for 20 test -f "$SDST/u.txt" || fail "initial Create did not run"
 printf 'source changed for the schedule\n' > "$SSRC/u.txt"
 printf 'scheduled new\n' > "$SSRC/new.txt"

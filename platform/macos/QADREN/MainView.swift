@@ -214,15 +214,17 @@ struct MainView: View {
     }
 
     private var monitoringAlert: String? {
-        // A service failure and a JobStore read problem belong to the System
-        // widget. The banner shows them only when that widget is not on the panel.
+        // Each problem belongs to its widget: a service failure and a JobStore
+        // read problem to System, a connection store read error to Connections.
+        // The banner shows one only when its widget is not on the panel.
         let service = feed.serviceHealth
         let hasSystemWidget = dashboardLayout.widgets.contains(where: { $0.kind == .system })
+        let hasConnectionsWidget = dashboardLayout.widgets.contains(where: { $0.kind == .connections })
         if service.kind.usesAttentionBorder, !hasSystemWidget {
             return "Фоновая служба: " + service.title
         }
         if let problem = feed.jobStoreProblem, !hasSystemWidget { return problem.message }
-        if let error = connections.error { return "Подключения: " + error }
+        if let error = connections.error, !hasConnectionsWidget { return "Подключения: " + error }
         if dashboardLayout.recoveredFromInvalidLayout {
             return "Сохранённую раскладку не удалось прочитать. Показана безопасная стандартная панель; исходная запись не удалена."
         }

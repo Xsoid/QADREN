@@ -2451,6 +2451,8 @@ private struct ScenarioDryRunView: View {
         Button("Синхронизировать") { synchronize(info) }
             .buttonStyle(.borderedProminent)
             .disabled(activeBatch != nil || !resumedCreateBatches.isEmpty)
+            // VoiceOver and the native E2E read the exact scope of the run.
+            .accessibilityValue(Self.synchronizeScope(info.counts ?? [:]))
             .confirmationDialog("Источник главный", isPresented: $confirmSourceWins) {
                 Button("Подтвердить и синхронизировать") {
                     do {
@@ -2463,6 +2465,13 @@ private struct ScenarioDryRunView: View {
             } message: {
                 Text("В этом сценарии источник всегда главный. QADREN заменяет файлы назначения версией из источника, также если файл изменили в назначении. При «Простой синхронизации» QADREN удаляет в назначении файлы, которые удалены в источнике.\n\nЗаменённая версия и удалённые файлы попадают в Корзину, если она есть на томе назначения. На сетевом диске Корзины обычно нет, тогда замена и удаление безвозвратны.\n\nПодтверждение действует, пока не изменятся папка назначения или выбранные объекты.")
             }
+    }
+
+    /// The actions of one Synchronize run, for example "Создать: 3 · Заменить: 1".
+    static func synchronizeScope(_ counts: [String: WorkerPlanCount]) -> String {
+        let parts = [("create", "Создать"), ("update", "Заменить"), ("delete", "Удалить"), ("delete_folder", "Удалить папку")]
+            .compactMap { kind, title in (counts[kind]?.count ?? 0) > 0 ? "\(title): \(counts[kind]!.count)" : nil }
+        return parts.joined(separator: " · ")
     }
 
     private func synchronize(_ info: WorkerPlanInfo) {

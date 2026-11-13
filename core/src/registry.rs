@@ -65,7 +65,13 @@ pub enum RegistryError {
     /// A batch item of the Scenario has an unknown result. Its record must
     /// stay for reconciliation.
     ScenarioHasUnresolvedItems,
+    /// The process cannot get the lock that keeps one migration at a time.
+    MigrationLock,
 }
+
+/// The Registry schema version that this build writes.
+const SCHEMA_VERSION: i32 = 35;
+
 impl From<rusqlite::Error> for RegistryError {
     fn from(error: rusqlite::Error) -> Self {
         Self::Database(error)
@@ -410,6 +416,26 @@ impl Registry {
             verified.insert(path.to_path_buf());
         }
         drop(verified);
+        // The app and the Worker can open an old or new Registry at the same
+        // time. Two migrations in parallel overwrite `user_version` with a
+        // lower value, and each later open then fails. Thus one process
+        // migrates at a time, and `initialize` reads the version again under
+        // the lock. A current schema needs no lock (D-028).
+        let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        let _migration_lock = if version < SCHEMA_VERSION {
+            let mut lock_path = path.as_os_str().to_owned();
+            lock_path.push(".migration.lock");
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(lock_path)
+                .map_err(|_| RegistryError::MigrationLock)?;
+            file.lock().map_err(|_| RegistryError::MigrationLock)?;
+            Some(file)
+        } else {
+            None
+        };
         Self::initialize(db)
     }
 
@@ -423,7 +449,7 @@ impl Registry {
         db.pragma_update(None, "foreign_keys", "ON")?;
 
         let version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 35 {
+        if version > SCHEMA_VERSION {
             return Err(RegistryError::UnsupportedSchema(version));
         }
         if version == 0 {
@@ -4729,6 +4755,38 @@ mod tests {
             object_revision: Some(revision.into()),
             size: 3,
             checksum_md5: None,
+        }
+    }
+
+    #[test]
+    fn parallel_first_opens_migrate_once_and_keep_the_schema_version() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("qadren-migrate-{unique}.sqlite3"));
+        // The app and the Worker open a new Registry at the same time.
+        let opens: Vec<_> = (0..8)
+            .map(|_| {
+                let path = path.clone();
+                std::thread::spawn(move || Registry::open(&path).map(|_| ()))
+            })
+            .collect();
+        for open in opens {
+            assert!(open.join().unwrap().is_ok());
+        }
+        let db = Registry::open(&path).unwrap();
+        let version: i32 = db
+            .db
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        drop(db);
+        let mut lock = path.as_os_str().to_owned();
+        lock.push(".migration.lock");
+        for file in [path.clone(), std::path::PathBuf::from(lock)] {
+            let _ = std::fs::remove_file(file);
         }
     }
 
