@@ -118,7 +118,8 @@ const OBJECT_READS: [&str; 6] = [
 ];
 
 /// The only functions that the client sends. `auth` opens a session; every
-/// other entry is a documented list function or an object read.
+/// other entry is a documented list function or an object read. The panel
+/// dump `db.dump` has its own function, `Session::database_dump`.
 fn is_allowed(func: &str) -> bool {
     func == "auth"
         || OBJECT_READS.contains(&func)
@@ -363,6 +364,125 @@ impl Session {
     }
 }
 
+/// Why a panel dump through `db.dump` stopped (D-027 section 7b.9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelDumpError {
+    /// The caller stopped the dump.
+    Stopped,
+    /// The panel sent no dump file: a panel error or another response.
+    Refused,
+    /// A transport error, or a text that is not one complete `mysqldump`.
+    Failed,
+}
+
+/// The start and the end of a `mysqldump` text, so that a stream can be
+/// checked without keeping it.
+#[derive(Default)]
+struct DumpCheck {
+    head: Vec<u8>,
+    tail: Vec<u8>,
+}
+
+impl DumpCheck {
+    fn add(&mut self, data: &[u8]) {
+        if self.head.len() < 64 {
+            let take = (64 - self.head.len()).min(data.len());
+            self.head.extend_from_slice(&data[..take]);
+        }
+        self.tail.extend_from_slice(data);
+        if self.tail.len() > 4096 {
+            self.tail.drain(..self.tail.len() - 4096);
+        }
+    }
+
+    /// The text starts with a `mysqldump` header and its last line is
+    /// `-- Dump completed`.
+    fn complete(&self) -> bool {
+        let head = String::from_utf8_lossy(&self.head);
+        let head = head.trim_start();
+        (head.starts_with("-- MySQL dump") || head.starts_with("-- MariaDB dump"))
+            && String::from_utf8_lossy(&self.tail)
+                .lines()
+                .rev()
+                .find(|line| !line.trim().is_empty())
+                .is_some_and(|line| line.starts_with("-- Dump completed"))
+    }
+}
+
+impl Session {
+    /// Streams the panel dump of one MySQL database into `sink` (D-027
+    /// section 7b.9). `key` comes from `database_key`. The panel sends the
+    /// dump as an attachment and keeps no file on the server (live check
+    /// on 2026-11-14). The request has no `out` and follows no redirect.
+    /// The dump is complete only when the text starts with a `mysqldump`
+    /// header and ends with `-- Dump completed`. Returns the bytes of the
+    /// text. `sink` returns false to stop.
+    pub fn database_dump(
+        &mut self,
+        key: &str,
+        mut sink: impl FnMut(&[u8]) -> bool,
+    ) -> std::result::Result<u64, PanelDumpError> {
+        use std::io::Read;
+        let mut retried = false;
+        let mut response = loop {
+            if self.session_id.is_none() {
+                self.authenticate().map_err(|_| PanelDumpError::Refused)?;
+            }
+            let session_id = self.session_id.clone().unwrap_or_default();
+            let form = [
+                ("func", "db.dump"),
+                ("auth", session_id.as_str()),
+                ("elid", key),
+            ];
+            let response = self
+                .http
+                .post(self.url.0.clone())
+                .timeout(Duration::from_secs(3600))
+                .form(&form)
+                .send()
+                .map_err(|_| PanelDumpError::Failed)?;
+            let attachment = response
+                .headers()
+                .get(reqwest::header::CONTENT_DISPOSITION)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.to_ascii_lowercase().contains("attachment"));
+            if response.status().is_success() && attachment {
+                break response;
+            }
+            // An ended session gives the panel error `auth`: sign in again
+            // one time.
+            let expired = response.json::<Value>().ok().is_some_and(
+                |body| matches!(document(body), Err(IspError::Panel(kind)) if kind == "auth"),
+            );
+            if !expired || retried {
+                return Err(PanelDumpError::Refused);
+            }
+            retried = true;
+            self.session_id = None;
+        };
+        let (mut check, mut total) = (DumpCheck::default(), 0u64);
+        let mut chunk = vec![0u8; 64 * 1024];
+        loop {
+            let n = response
+                .read(&mut chunk)
+                .map_err(|_| PanelDumpError::Failed)?;
+            if n == 0 {
+                break;
+            }
+            check.add(&chunk[..n]);
+            total += n as u64;
+            if !sink(&chunk[..n]) {
+                return Err(PanelDumpError::Stopped);
+            }
+        }
+        if check.complete() {
+            Ok(total)
+        } else {
+            Err(PanelDumpError::Failed)
+        }
+    }
+}
+
 /// The elements of a list `doc`.
 fn elements(doc: &serde_json::Map<String, Value>) -> Vec<&serde_json::Map<String, Value>> {
     match doc.get("elem") {
@@ -397,6 +517,28 @@ fn key_field(
             .filter(|value| !value.is_empty())
             .map(|value| (*field, value))
     })
+}
+
+/// The panel key (`elid`) of a MySQL database: the list field `pair`
+/// (`name->server`), else `key`, `id`, or the name. `db.dump` needs this
+/// key; the name alone has no database server.
+pub fn database_key(
+    session: &mut Session,
+    database: &str,
+) -> std::result::Result<String, &'static str> {
+    let doc = session
+        .read("db", &[])
+        .map_err(|_| "ispmanager_database_list_failed")?;
+    let db = elements(&doc)
+        .into_iter()
+        .find(|db| text(db, "name").as_deref() == Some(database))
+        .ok_or("ispmanager_database_missing")?;
+    if !text(db, "server").is_some_and(|server| server.to_ascii_lowercase().contains("mysql")) {
+        return Err("ispmanager_database_unsupported");
+    }
+    key_field(db, &["pair", "key", "id", "name"])
+        .map(|(_, key)| key)
+        .ok_or("ispmanager_database_list_failed")
 }
 
 /// A capability state of D-027 section 4 that a connection check can set.

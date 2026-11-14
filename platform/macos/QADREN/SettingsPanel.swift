@@ -1583,7 +1583,7 @@ private struct ISPmanagerConnectionForm: View {
                             .frame(width: 90)
                         Text(port == nil
                             ? "Порт — число от 1 до 65535."
-                            : "Если у аккаунта есть SSH, файлы и дампы баз читаются по SSH с этим логином и паролем. Без доступа по SSH их копирование пока недоступно; настройки панели копируются и так.")
+                            : "Если у аккаунта есть SSH, файлы и дампы баз читаются по SSH с этим логином и паролем. Без SSH дампы баз снимает сама панель, а файлы сайтов пока не копируются; настройки панели копируются в любом случае.")
                             .font(.caption)
                             .foregroundStyle(port == nil ? Color.orange : Color.secondary)
                             .fixedSize(horizontal: false, vertical: true)

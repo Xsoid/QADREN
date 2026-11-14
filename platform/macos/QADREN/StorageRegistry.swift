@@ -573,7 +573,11 @@ enum QADRENUserMessage {
         case "ispmanager_database_refused":
             "MySQL не принял логин или пароль базы из панели. Дамп не снят."
         case "ispmanager_database_dump_failed":
-            "mysqldump не закончил дамп базы. Дамп не сохранён; прежний файл в копии не изменён."
+            "Дамп базы не закончен. Дамп не сохранён; прежний файл в копии не изменён."
+        case "ispmanager_database_panel_refused":
+            "Панель не отдала дамп базы. Дамп не снят; прежний файл в копии не изменён."
+        case "ispmanager_database_structure_only_needs_ssh":
+            "SSH недоступен, а дамп через панель не умеет сохранять таблицы без данных. Дамп не снят. Подключите SSH или отметьте в сценарии все таблицы этой базы."
         case "ispmanager_database_missing":
             "Выбранной базы больше нет на панели. Уберите её из сценария."
         case "ispmanager_database_access_unavailable":

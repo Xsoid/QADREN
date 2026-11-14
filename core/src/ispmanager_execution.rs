@@ -498,6 +498,8 @@ fn plain_database_name(name: &str) -> bool {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DatabaseExportTiming {
     pub compressed: bool,
+    /// The panel reads before the dump: the access facts or the key.
+    pub access: Duration,
     /// `mysqldump` on the server, the transfer, and the staging write.
     pub dump: Duration,
     pub sql_bytes: u64,
@@ -523,10 +525,26 @@ pub fn database_export_job_id(run_id: &str, database: &str) -> String {
     format!("ispdb-{run_id}-{}", &digest[..16])
 }
 
+/// Where the dump of one database comes from (D-027 section 7b).
+pub enum DumpSource<'a> {
+    /// `mysqldump` over SSH with the access facts from the panel.
+    Ssh {
+        connection: &'a SftpConnection,
+        access: &'a crate::ispmanager_sftp::MysqlAccess,
+    },
+    /// The panel function `db.dump` when SSH is not available. `key` comes
+    /// from `ispmanager::database_key`.
+    Panel {
+        session: &'a mut crate::ispmanager::Session,
+        key: &'a str,
+    },
+}
+
 /// Dump one selected MySQL database into `databases/<name>.sql` of the
 /// Backup/export copy (D-027 section 7b). Tables with the `structure_only`
-/// rule keep only their structure. When the server can pipe through
-/// `gzip -1`, only the transfer is compressed. The dump goes into a private
+/// rule keep only their structure; the panel dump cannot do this and stops.
+/// When the server can pipe through `gzip -1`, only the SSH transfer is
+/// compressed. The dump goes into a private
 /// staging file first. Only a complete dump is published: as a new file
 /// with no-overwrite, or through the approved replacement protocol with a
 /// durable attempt. A dump with the same bytes as the destination file
@@ -539,15 +557,15 @@ pub fn run_ispmanager_database_export(
     scenario_id: &str,
     scenario_revision: u64,
     run_id: &str,
-    connection: &SftpConnection,
-    access: &crate::ispmanager_sftp::MysqlAccess,
+    database: &str,
+    source: DumpSource<'_>,
     staging_dir: &Path,
     progress: &dyn Fn(ExportProgress) -> bool,
     timing: &mut DatabaseExportTiming,
 ) -> Result<DatabaseExportStatus, &'static str> {
+    use crate::ispmanager::PanelDumpError;
     use crate::ispmanager_sftp::MysqlDumpError;
     use std::io::Write;
-    let database = access.database.as_str();
     let job_id = database_export_job_id(run_id, database);
     if !valid_job_id(&job_id) || !plain_database_name(database) {
         return Err("invalid_request");
@@ -609,26 +627,53 @@ pub fn run_ispmanager_database_export(
     };
     let mut write_failed = false;
     let started = Instant::now();
-    let compress = connection.gzip_pipe_available();
-    timing.compressed = compress;
-    let dumped = connection.mysql_dump(access, &structure_only, compress, |data| {
+    let mut sink = |data: &[u8]| {
         write_failed = hashing.write_all(data).is_err();
         !write_failed
             && progress(ExportProgress::Dump {
                 bytes: hashing.total,
             })
-    });
-    if let Ok((sql, network)) = dumped {
-        (timing.sql_bytes, timing.network_bytes) = (sql, network);
-    }
-    if let Err(error) = dumped {
-        remove_staging();
-        return Err(match error {
-            _ if write_failed => "local_root_unavailable",
-            MysqlDumpError::Refused => "ispmanager_database_refused",
-            MysqlDumpError::Stopped => "stopped_by_user",
-            MysqlDumpError::Failed => "ispmanager_database_dump_failed",
-        });
+    };
+    let dumped = match source {
+        DumpSource::Ssh { connection, access } => {
+            if access.database != database {
+                remove_staging();
+                return Err("invalid_request");
+            }
+            let compress = connection.gzip_pipe_available();
+            timing.compressed = compress;
+            connection
+                .mysql_dump(access, &structure_only, compress, &mut sink)
+                .map_err(|error| match error {
+                    MysqlDumpError::Refused => "ispmanager_database_refused",
+                    MysqlDumpError::Stopped => "stopped_by_user",
+                    MysqlDumpError::Failed => "ispmanager_database_dump_failed",
+                })
+        }
+        // The panel dump has all tables with their data: it cannot keep a
+        // table without data (section 7b.9).
+        DumpSource::Panel { .. } if !structure_only.is_empty() => {
+            Err("ispmanager_database_structure_only_needs_ssh")
+        }
+        DumpSource::Panel { session, key } => session
+            .database_dump(key, &mut sink)
+            .map(|bytes| (bytes, bytes))
+            .map_err(|error| match error {
+                PanelDumpError::Refused => "ispmanager_database_panel_refused",
+                PanelDumpError::Stopped => "stopped_by_user",
+                PanelDumpError::Failed => "ispmanager_database_dump_failed",
+            }),
+    };
+    match dumped {
+        Ok((sql, network)) => (timing.sql_bytes, timing.network_bytes) = (sql, network),
+        Err(code) => {
+            remove_staging();
+            return Err(if write_failed {
+                "local_root_unavailable"
+            } else {
+                code
+            });
+        }
     }
     let written = (|| -> io::Result<(u64, String)> {
         hashing.inner.flush()?;

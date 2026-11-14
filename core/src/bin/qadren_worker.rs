@@ -8,6 +8,7 @@ use qadren_core::confirmation::{Confirmation, EvidenceLevel};
 use qadren_core::ispmanager_execution::{
     run_ispmanager_database_export, run_ispmanager_scenario_delete,
     run_ispmanager_scenario_file_download, run_ispmanager_scenario_update, DatabaseExportStatus,
+    DumpSource,
 };
 use qadren_core::ispmanager_sftp::SftpConnection;
 use qadren_core::job_execution::SftpFailure;
@@ -1068,7 +1069,7 @@ fn write_backup_manifest(paths: &WorkerPaths, run_id: &str) {
             "folder": "databases",
             "artifact": "database dump",
             "format": "mysqldump SQL, not compressed (<database>.sql)",
-            "transport": "mysqldump over SSH, through gzip -1 when the server has gzip; access facts from the panel",
+            "transport": "mysqldump over SSH, through gzip -1 when the server has gzip; access facts from the panel. Without SSH, the panel dump db.dump",
             "structure_only": "a selected table with rule structure_only has its structure and no data",
             "consistency": "one transaction for InnoDB tables; no table lock",
             "integrity": "exit status 0 and the final dump line checked before publish; md5 of the .sql file",
@@ -1944,14 +1945,19 @@ fn export_run_databases(
         }
     };
     let connected = std::time::Instant::now();
+    // Without a confirmed SSH host key or a reachable SSH port, the panel
+    // dump `db.dump` is the transport (D-027 section 7b.9). A changed host
+    // key or a refused SSH login needs the user and stops the export.
     let connection = match open_sftp(paths, connection_id) {
-        Ok(connection) => connection,
+        Ok(connection) => Some(connection),
+        Err("ispmanager_host_key_unconfirmed" | "ispmanager_network_error") => None,
         Err(code) => return fail_all(code),
     };
     eprintln!(
-        "qadren-worker: {} run {} database export ssh sign-in {:.1}s",
+        "qadren-worker: {} run {} database export transport {} ({:.1}s)",
         log_time(),
         run.id,
+        if connection.is_some() { "ssh" } else { "panel" },
         connected.elapsed().as_secs_f64()
     );
     let checked = Mutex::new(std::time::Instant::now());
@@ -1977,54 +1983,85 @@ fn export_run_databases(
             );
             continue;
         }
+        let on_progress = |step| match step {
+            qadren_core::ispmanager_execution::ExportProgress::Dump { bytes } => {
+                // Each chunk only changes the byte count.
+                if let Some(progress) = database_progress()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .get_mut(&run.id)
+                {
+                    progress.bytes = bytes;
+                }
+                keep_going()
+            }
+            qadren_core::ispmanager_execution::ExportProgress::Publish => {
+                set_object_progress(run, "publish", "databases", index + 1, databases.len(), 0);
+                true
+            }
+        };
         let asked = std::time::Instant::now();
-        let manual = |user: &str| runner().database_password(connection_id, user);
-        let (access, source) =
-            match qadren_core::ispmanager::mysql_access(&mut session, database, &manual) {
-                Ok(access) => access,
-                Err(error) => {
-                    record("databases", database, "failed", Some(error.code), None);
+        let mut timing = qadren_core::ispmanager_execution::DatabaseExportTiming::default();
+        let mut password_source = None;
+        let status = if let Some(connection) = &connection {
+            let manual = |user: &str| runner().database_password(connection_id, user);
+            let (access, source) =
+                match qadren_core::ispmanager::mysql_access(&mut session, database, &manual) {
+                    Ok(access) => access,
+                    Err(error) => {
+                        record("databases", database, "failed", Some(error.code), None);
+                        continue;
+                    }
+                };
+            password_source = Some(source);
+            timing.access = asked.elapsed();
+            run_ispmanager_database_export(
+                &paths.jobs,
+                &paths.registry,
+                &run.scenario.scenario_id,
+                run.scenario.revision,
+                &run.id,
+                database,
+                DumpSource::Ssh {
+                    connection,
+                    access: &access,
+                },
+                &staging,
+                &on_progress,
+                &mut timing,
+            )
+        } else {
+            let key = match qadren_core::ispmanager::database_key(&mut session, database) {
+                Ok(key) => key,
+                Err(code) => {
+                    record("databases", database, "failed", Some(code), None);
                     continue;
                 }
             };
-        let access_time = asked.elapsed();
-        let mut timing = qadren_core::ispmanager_execution::DatabaseExportTiming::default();
-        let status = run_ispmanager_database_export(
-            &paths.jobs,
-            &paths.registry,
-            &run.scenario.scenario_id,
-            run.scenario.revision,
-            &run.id,
-            &connection,
-            &access,
-            &staging,
-            &|step| match step {
-                qadren_core::ispmanager_execution::ExportProgress::Dump { bytes } => {
-                    // Each chunk only changes the byte count.
-                    if let Some(progress) = database_progress()
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .get_mut(&run.id)
-                    {
-                        progress.bytes = bytes;
-                    }
-                    keep_going()
-                }
-                qadren_core::ispmanager_execution::ExportProgress::Publish => {
-                    set_object_progress(run, "publish", "databases", index + 1, databases.len(), 0);
-                    true
-                }
-            },
-            &mut timing,
-        );
-        drop(access);
+            timing.access = asked.elapsed();
+            run_ispmanager_database_export(
+                &paths.jobs,
+                &paths.registry,
+                &run.scenario.scenario_id,
+                run.scenario.revision,
+                &run.id,
+                database,
+                DumpSource::Panel {
+                    session: &mut session,
+                    key: &key,
+                },
+                &staging,
+                &on_progress,
+                &mut timing,
+            )
+        };
         // The stages of one export, without the database name (D-028).
         eprintln!(
             "qadren-worker: {} run {} database export timing: panel access {:.1}s, dump {:.1}s, \
              sql {} bytes, network {} bytes, gzip {}, compare {:.1}s, publish {:.1}s",
             log_time(),
             run.id,
-            access_time.as_secs_f64(),
+            timing.access.as_secs_f64(),
             timing.dump.as_secs_f64(),
             timing.sql_bytes,
             timing.network_bytes,
@@ -2058,7 +2095,7 @@ fn export_run_databases(
             // MySQL refused the password that the user entered: the editor
             // asks for it again.
             Err("ispmanager_database_refused")
-                if source == qadren_core::ispmanager::PasswordSource::Manual =>
+                if password_source == Some(qadren_core::ispmanager::PasswordSource::Manual) =>
             {
                 record(
                     "databases",
