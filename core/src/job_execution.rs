@@ -1746,6 +1746,94 @@ fn execute_rule_delete(
     Ok(None)
 }
 
+/// The deletion of one old database file in the copy root of a
+/// Backup/export Scenario (D-027 section 7b.11.1): the one-file dump
+/// `databases/<database>.sql` after the switch to one file for each table,
+/// or `databases/<database>/tables/<file>.sql` of a table that the new
+/// dump does not have. The caller has just published the new
+/// `manifest.json`. Only a regular file under `databases/` is deleted,
+/// under the simple deletion rule of the revision, into the Trash when the
+/// volume has one.
+pub fn run_backup_database_file_delete(
+    database_path: &Path,
+    registry_path: &Path,
+    scenario_id: &str,
+    scenario_revision: u64,
+    relative_path: &str,
+    job_id: &str,
+) -> Result<LocalRuleDeleteStatus, LocalFileCopyError> {
+    if !valid_job_id(job_id) {
+        return Err(LocalFileCopyError::InvalidRequest);
+    }
+    require_current_scenario_revision(registry_path, scenario_id, scenario_revision)?;
+    let registry =
+        Registry::open(registry_path).map_err(|_| LocalFileCopyError::ScenarioUnavailable)?;
+    let scope = registry
+        .get_scenario_revision_scope(scenario_id, scenario_revision)
+        .map_err(|_| LocalFileCopyError::ScenarioUnavailable)?;
+    if scope.deletion_mode != DeletionMode::Simple {
+        return Err(LocalFileCopyError::ConsentRequired);
+    }
+    let scenario = registry
+        .get_scenario_revision(scenario_id, scenario_revision)
+        .map_err(|_| LocalFileCopyError::ScenarioUnavailable)?
+        .ok_or(LocalFileCopyError::ScenarioUnavailable)?;
+    let path = Path::new(relative_path);
+    let parts: Vec<&str> = relative_path.split('/').collect();
+    let database_file = match parts.as_slice() {
+        ["databases", file] => file.ends_with(".sql"),
+        ["databases", _, "tables", file] => file.ends_with(".sql"),
+        _ => false,
+    };
+    if !database_file
+        || !scenario.right_root.ends_with("/files")
+        || registry.scenario_mode(scenario_id).ok().as_deref() != Some("backup_export")
+        || !path
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
+    {
+        return Err(LocalFileCopyError::ScenarioScopeMismatch);
+    }
+    drop(registry);
+    let root = Path::new(&scenario.right_root)
+        .parent()
+        .ok_or(LocalFileCopyError::ScenarioScopeMismatch)?;
+    if !enabled_local_connection(registry_path, &scenario.right_connection_id) {
+        return Err(LocalFileCopyError::ConnectionUnavailable);
+    }
+    let target = LocalFilesystem::open(root).map_err(LocalFileCopyError::Local)?;
+    if !target.capabilities().operations.delete {
+        return Err(LocalFileCopyError::CapabilityUnavailable);
+    }
+    let current = match target.stat(path) {
+        Ok(entry) if !entry.is_directory => entry,
+        Ok(_) | Err(LocalError::Io(_)) => return Err(LocalFileCopyError::ConflictStale),
+        Err(error) => return Err(LocalFileCopyError::Local(error)),
+    };
+    let to_trash = target.capabilities().operations.trash
+        && target
+            .trash_available(path)
+            .map_err(LocalFileCopyError::Local)?;
+    if let Some(state) = execute_rule_delete(
+        database_path,
+        (scenario_id, scenario_revision),
+        job_id,
+        &target,
+        &scenario.right_connection_id,
+        relative_path,
+        current.size,
+        to_trash,
+        false,
+    )? {
+        return Ok(LocalRuleDeleteStatus::Existing(state));
+    }
+    Ok(if to_trash {
+        LocalRuleDeleteStatus::MovedToTrash
+    } else {
+        LocalRuleDeleteStatus::DeletedPermanently
+    })
+}
+
 /// A whole-folder deletion in the `files/` destination of a Backup/export
 /// Scenario (D-027 section 5.6b). The folder goes as one entry into the
 /// Trash of its volume, or without a Trash it is removed with all its

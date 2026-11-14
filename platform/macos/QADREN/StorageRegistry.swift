@@ -602,6 +602,8 @@ enum QADRENUserMessage {
             "Панель не отдала ключ записи MX или SRV в DNS-зоне. Зона не сохранена; повторите запуск позже."
         case "ispmanager_function_missing":
             "На панели нет нужного раздела или модуля. Уберите этот объект из сценария."
+        case "ispmanager_database_cleanup_failed":
+            "Дамп базы сохранён, но старые файлы этой базы в копии удалить не удалось. Следующий запуск попробует снова."
         case "ispmanager_database_tables_failed":
             "Не удалось прочитать список таблиц базы через mysql по SSH."
         case "ispmanager_unavailable":

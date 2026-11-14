@@ -47,7 +47,7 @@ For scheduled or unattended work, carry out ordinary reads, safe configured oper
 
 - The connector only reads. It calls a compiled read-only allowlist of panel functions, sends no `sok`, and never sends `su`. A form (`*.edit`) is opened without `sok`, so the panel saves nothing.
 - SSH runs only the fixed commands of D-027 sections 7a and 7b: SFTP reads, `md5sum`, the version checks, `mysqldump`, the table list query, and `gzip -1`. QADREN never writes, renames, or deletes a file on the server, and never starts a native panel backup.
-- Without SSH, the panel function `db.dump` makes the database dump (D-027 section 7b.9). The client sends no `sok` and no `out`. A live check showed that the panel keeps no file on the server.
+- Without SSH, or when the SSH dump is not possible, the panel function `db.dump` makes the database dump (D-027 section 7b.9). The client sends no `sok` and no `out`. A live check showed that the panel keeps no file on the server.
 - Secrets are never exported: mailbox and FTP passwords, the private key of a certificate (`crtkey`), and database passwords. A PEM text with `PRIVATE KEY` makes the SSL object fail. The panel password, a database password that the user enters, and the SSH host key confirmation stay in the Keychain or the Registry by `connection_id`; a session ID stays in memory.
 - A missing, renamed, or unreadable resource, a permission error, or an incomplete snapshot fails that resource. It never gives a deletion or a replacement in the destination.
 - A capability state that is not `verified_export` never gives a content export. A metadata export is labeled as metadata in `manifest.json`.

@@ -1680,6 +1680,19 @@ fn run_still_active(paths: &WorkerPaths, run: &ScenarioRun) -> bool {
 /// Export the databases of one run, one after another. Each database gets
 /// a durable result. The access facts come from the panel for each
 /// database and stay in memory.
+/// The SSH dump results that give the panel dump as the fallback (D-027
+/// section 7b.9): the SSH dump was not possible, and nothing was published.
+const SSH_DUMP_FALLBACK: [&str; 8] = [
+    "ispmanager_database_access_unavailable",
+    "ispmanager_database_users_unreadable",
+    "ispmanager_database_no_users",
+    "ispmanager_database_user_form_unreadable",
+    "ispmanager_database_password_hidden",
+    "ispmanager_database_username_missing",
+    "ispmanager_database_refused",
+    "ispmanager_database_dump_failed",
+];
+
 fn export_run_databases(
     paths: &WorkerPaths,
     run: &ScenarioRun,
@@ -2003,57 +2016,74 @@ fn export_run_databases(
         let asked = std::time::Instant::now();
         let mut timing = qadren_core::ispmanager_execution::DatabaseExportTiming::default();
         let mut password_source = None;
+        let panel_dump =
+            |session: &mut qadren_core::ispmanager::Session,
+             timing: &mut qadren_core::ispmanager_execution::DatabaseExportTiming| {
+                let key = qadren_core::ispmanager::database_key(session, database)?;
+                run_ispmanager_database_export(
+                    &paths.jobs,
+                    &paths.registry,
+                    &run.scenario.scenario_id,
+                    run.scenario.revision,
+                    &run.id,
+                    database,
+                    DumpSource::Panel { session, key: &key },
+                    &staging,
+                    &on_progress,
+                    timing,
+                )
+            };
         let status = if let Some(connection) = &connection {
             let manual = |user: &str| runner().database_password(connection_id, user);
-            let (access, source) =
-                match qadren_core::ispmanager::mysql_access(&mut session, database, &manual) {
-                    Ok(access) => access,
-                    Err(error) => {
-                        record("databases", database, "failed", Some(error.code), None);
-                        continue;
-                    }
-                };
-            password_source = Some(source);
-            timing.access = asked.elapsed();
-            run_ispmanager_database_export(
-                &paths.jobs,
-                &paths.registry,
-                &run.scenario.scenario_id,
-                run.scenario.revision,
-                &run.id,
-                database,
-                DumpSource::Ssh {
-                    connection,
-                    access: &access,
-                },
-                &staging,
-                &on_progress,
-                &mut timing,
-            )
-        } else {
-            let key = match qadren_core::ispmanager::database_key(&mut session, database) {
-                Ok(key) => key,
-                Err(code) => {
-                    record("databases", database, "failed", Some(code), None);
-                    continue;
+            let ssh = match qadren_core::ispmanager::mysql_access(&mut session, database, &manual) {
+                Ok((access, source)) => {
+                    password_source = Some(source);
+                    timing.access = asked.elapsed();
+                    run_ispmanager_database_export(
+                        &paths.jobs,
+                        &paths.registry,
+                        &run.scenario.scenario_id,
+                        run.scenario.revision,
+                        &run.id,
+                        database,
+                        DumpSource::Ssh {
+                            connection,
+                            access: &access,
+                        },
+                        &staging,
+                        &on_progress,
+                        &mut timing,
+                    )
                 }
+                Err(error) => Err(error.code),
             };
+            // When the SSH dump is not possible (no access fact, MySQL
+            // refused the password, or `mysqldump` failed), the panel dump
+            // is the fallback (D-027 section 7b.9). Nothing is published
+            // before these errors. When the panel dump fails too, the SSH
+            // reason stays the result.
+            match ssh {
+                Err(code) if SSH_DUMP_FALLBACK.contains(&code) => {
+                    let panel = panel_dump(&mut session, &mut timing);
+                    eprintln!(
+                        "qadren-worker: {} run {} database export: ssh {code}, panel fallback {}",
+                        log_time(),
+                        run.id,
+                        if panel.is_ok() { "ok" } else { "failed" }
+                    );
+                    match panel {
+                        Ok(status) => {
+                            password_source = None;
+                            Ok(status)
+                        }
+                        Err(_) => Err(code),
+                    }
+                }
+                other => other,
+            }
+        } else {
             timing.access = asked.elapsed();
-            run_ispmanager_database_export(
-                &paths.jobs,
-                &paths.registry,
-                &run.scenario.scenario_id,
-                run.scenario.revision,
-                &run.id,
-                database,
-                DumpSource::Panel {
-                    session: &mut session,
-                    key: &key,
-                },
-                &staging,
-                &on_progress,
-                &mut timing,
-            )
+            panel_dump(&mut session, &mut timing)
         };
         // The stages of one export, without the database name (D-028).
         eprintln!(

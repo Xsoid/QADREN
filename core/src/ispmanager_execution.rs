@@ -701,6 +701,7 @@ pub fn run_ispmanager_database_export(
         );
     if split {
         return publish_split_dump(
+            database_path,
             registry_path,
             &mut store,
             &destination,
@@ -744,10 +745,12 @@ fn database_file_job_id(run_id: &str, database: &str, path: &str) -> String {
 /// Each file is published like a dump: only a file with other bytes is
 /// written, with its own durable attempt. `manifest.json` is published
 /// last, with the Job of the database, so that it names only files that are
-/// in the copy. The old `databases/<database>.sql` and the file of a table
-/// that is gone stay in the copy: they are not in `manifest.json`.
+/// in the copy. After it, the old `databases/<database>.sql` and the file
+/// of a table that is gone are deleted under the simple deletion rule
+/// (owner decision 2026-11-15); in Paranoid mode they stay.
 #[allow(clippy::too_many_arguments)]
 fn publish_split_dump(
+    database_path: &Path,
     registry_path: &Path,
     store: &mut JobStore,
     destination: &LocalFilesystem,
@@ -841,7 +844,50 @@ fn publish_split_dump(
         timing,
     );
     remove_dir();
-    Ok(match published? {
+    let published = published?;
+    // The copy keeps one current dump: the old one-file dump and the files
+    // of tables that are gone are deleted under the simple deletion rule.
+    // In Paranoid mode they stay.
+    let current: std::collections::BTreeSet<&str> =
+        files.iter().map(|file| file.path.as_str()).collect();
+    let mut stale = Vec::new();
+    let one_file = format!("databases/{database}.sql");
+    if matches!(destination.stat(Path::new(&one_file)), Ok(entry) if !entry.is_directory) {
+        stale.push(one_file);
+    }
+    match destination.list(&folder.join("tables")) {
+        Ok(entries) => stale.extend(
+            entries
+                .into_iter()
+                .filter(|entry| !entry.is_directory && entry.name.ends_with(".sql"))
+                .map(|entry| format!("tables/{}", entry.name))
+                .filter(|path| !current.contains(path.as_str()))
+                .map(|path| format!("databases/{database}/{path}")),
+        ),
+        Err(LocalError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => return Err("ispmanager_database_cleanup_failed"),
+    }
+    for path in &stale {
+        let digest = format!("{:x}", md5::compute(path.as_bytes()));
+        let delete_job = format!("ispdbdel-{run_id}-{}", &digest[..16]);
+        match crate::job_execution::run_backup_database_file_delete(
+            database_path,
+            registry_path,
+            scenario.0,
+            scenario.1,
+            path,
+            &delete_job,
+        ) {
+            Ok(crate::job_execution::LocalRuleDeleteStatus::Existing(state))
+                if state != JobState::Completed =>
+            {
+                return Err("ispmanager_database_cleanup_failed")
+            }
+            Ok(_) | Err(LocalFileCopyError::ConsentRequired) => {}
+            Err(_) => return Err("ispmanager_database_cleanup_failed"),
+        }
+    }
+    Ok(match published {
         DatabaseExportStatus::Created { .. } => DatabaseExportStatus::Created { bytes: size, md5 },
         _ if changed => DatabaseExportStatus::Updated { bytes: size, md5 },
         _ => DatabaseExportStatus::Unchanged { bytes: size, md5 },
