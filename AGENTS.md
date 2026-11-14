@@ -11,7 +11,7 @@
 ## Safety invariants
 
 - Keep Rust as the cross-platform core and SwiftUI as the macOS UI.
-- Release 1 uses Local Filesystem and SMB network drives (D-022: QADREN mount, Local Filesystem executor, Core mount gate). A one-way Scenario can use Yandex Disk as the source and a Local Filesystem root as the destination (D-023). Yandex Disk as a destination and iCloud need a separate owner decision. Keep File Provider safety guards.
+- Release 1 uses Local Filesystem and SMB network drives (D-022: QADREN mount, Local Filesystem executor, Core mount gate). A one-way Scenario can use Yandex Disk as the source and a Local Filesystem root as the destination (D-023). An ISPmanager 6 panel can be a read-only source of a Backup/export Scenario with a Local Filesystem or SMB destination (D-027). ISPmanager is never a destination. Yandex Disk as a destination and iCloud need a separate owner decision. Keep File Provider safety guards.
 - Use one Rust JobStore. A `Scenario` defines synchronization rules. A `Job` is one execution or one manual file operation.
 - Keep each `StorageConnection` independent. Bind OAuth and Keychain state to `connection_id`.
 - Do not save secrets in SQLite, Git, logs, or HTTP URLs.

@@ -1105,7 +1105,7 @@ fn write_backup_manifest(paths: &WorkerPaths, run_id: &str) {
         (
             "ssl",
             "ssl",
-            "certificates.json: certificate list; no private keys",
+            "certificates.json: certificate list; <name>.pem: certificate and chain; no private keys",
             "sslcert",
         ),
         (
@@ -1113,6 +1113,18 @@ fn write_backup_manifest(paths: &WorkerPaths, run_id: &str) {
             "ftp",
             "users.json: FTP users and home folders; no passwords",
             "ftp.user",
+        ),
+        (
+            "accounts",
+            "accounts",
+            "limits.json: plan limits of the account; no current use",
+            "userstat",
+        ),
+        (
+            "php",
+            "php",
+            "runtime.json: PHP versions and their extensions",
+            "phpversions, phpextensions",
         ),
     ] {
         let selected = selected_of(category);
@@ -1557,9 +1569,19 @@ fn advance_backup_databases(
     // The objects of the panel: Cron, DNS zones, mail domains, and
     // databases, in this order (D-027 sections 7b and 10).
     let order = |category: &str| {
-        ["cron", "dns", "mail", "sites", "ssl", "ftp", "databases"]
-            .iter()
-            .position(|c| *c == category)
+        [
+            "cron",
+            "dns",
+            "mail",
+            "sites",
+            "ssl",
+            "ftp",
+            "accounts",
+            "php",
+            "databases",
+        ]
+        .iter()
+        .position(|c| *c == category)
     };
     let mut objects: Vec<(String, String)> = registry
         .backup_resources(id, revision)
@@ -1811,6 +1833,53 @@ fn export_run_databases(
         let status = qadren_core::ispmanager::export_object(&mut session, category, provider, site)
             .and_then(|content| {
                 let json = publish(category, &content)?;
+                if category == "ssl" {
+                    // Each certificate gets its PEM file and its own result,
+                    // so that the widget counts certificates (owner request
+                    // 2026-11-14). The `all` result is the summary.
+                    let mut failed = false;
+                    for (name, pem) in qadren_core::ispmanager::ssl_certificate_files(&mut session)?
+                    {
+                        let file = qadren_core::ispmanager_execution::run_ispmanager_object_export(
+                            &paths.jobs,
+                            &paths.registry,
+                            &run.scenario.scenario_id,
+                            run.scenario.revision,
+                            &run.id,
+                            "ssl_pem",
+                            &name,
+                            &pem,
+                            &staging,
+                        );
+                        match file {
+                            Ok(DatabaseExportStatus::Created { bytes, md5 }) => {
+                                record("ssl", &name, "created", None, Some((bytes, md5)))
+                            }
+                            Ok(DatabaseExportStatus::Updated { bytes, md5 }) => {
+                                record("ssl", &name, "updated", None, Some((bytes, md5)))
+                            }
+                            Ok(DatabaseExportStatus::Unchanged { bytes, md5 }) => {
+                                record("ssl", &name, "unchanged", None, Some((bytes, md5)))
+                            }
+                            Ok(DatabaseExportStatus::Existing(JobState::Completed)) => {
+                                record("ssl", &name, "updated", None, None)
+                            }
+                            Ok(DatabaseExportStatus::Existing(_)) => {
+                                failed = true;
+                                record("ssl", &name, "failed", Some("items_unknown"), None)
+                            }
+                            Err(code) => {
+                                failed = true;
+                                record("ssl", &name, "failed", Some(code), None)
+                            }
+                        }
+                    }
+                    return if failed {
+                        Err("items_failed")
+                    } else {
+                        Ok(json)
+                    };
+                }
                 if category != "dns" {
                     return Ok(json);
                 }

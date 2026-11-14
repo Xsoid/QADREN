@@ -4373,7 +4373,7 @@ impl BackupResource {
                     }
             }
             // All Cron jobs of the account (D-027 section 10).
-            "cron" | "ssl" | "ftp" => {
+            "cron" | "ssl" | "ftp" | "accounts" | "php" => {
                 self.kind == "object" && self.rule == "include" && self.provider_id == "all"
             }
             // A DNS zone, a mail domain, or a site, which is also its file name.

@@ -90,16 +90,28 @@ struct ScenarioWidgetSnapshot: Equatable {
             case "sites": "Сайты"
             case "ssl": "SSL"
             case "ftp": "FTP"
+            case "accounts": "Лимиты"
+            case "php": "PHP"
             default: category
             }
         }
     }
 
     /// The object results of the active run, or of the last finished run,
-    /// without the summary result of "all sites".
+    /// without the summary results of "all sites" and of the certificate
+    /// list: their objects count one by one. Cron, FTP, limits, and PHP
+    /// also use `all`; they stay (found on 2026-11-14).
     var objectResults: [ScenarioRunState.ObjectResult] {
         ((run?.active != nil ? run?.active?.objects : run?.last?.objects) ?? [])
-            .filter { $0.provider_id != "all" }
+            .filter { !(["sites", "ssl"].contains($0.category) && $0.provider_id == "all") }
+    }
+
+    /// A failed or stopped summary of "all sites" or of the certificate
+    /// list, for example when the list itself could not be read.
+    func summaryFailed(_ category: String) -> Bool {
+        ((run?.active != nil ? run?.active?.objects : run?.last?.objects) ?? []).contains {
+            $0.category == category && $0.provider_id == "all" && ["failed", "cancelled"].contains($0.result)
+        }
     }
 
     /// Selected objects of one category; for "all sites" the sites that the
@@ -183,8 +195,9 @@ struct ScenarioWidgetSnapshot: Equatable {
         snapshot.databasesOnly = entry.databasesOnly
         if entry.isBackup {
             let included = entry.resources.filter { $0.rule == "include" }
-            snapshot.subsystems = ["databases", "cron", "dns", "mail", "sites", "ssl", "ftp"].compactMap { category in
-                if category == "sites", included.contains(where: { $0.category == "sites" && $0.provider_id == "all" }) {
+            snapshot.subsystems = ["databases", "cron", "dns", "mail", "sites", "ssl", "ftp", "accounts", "php"].compactMap { category in
+                // All sites and the certificate list count their objects in a run.
+                if ["sites", "ssl"].contains(category), included.contains(where: { $0.category == category && $0.provider_id == "all" }) {
                     return ScenarioWidgetSnapshot.Subsystem(category: category, count: nil)
                 }
                 let count = included.filter { $0.category == category }.count
@@ -326,6 +339,8 @@ struct ScenarioStage: Equatable {
                 case "sites": "Сайты: сайт\(position) читается с панели."
                 case "ssl": "SSL: список сертификатов читается с панели."
                 case "ftp": "FTP: пользователи читаются с панели."
+                case "accounts": "Лимиты: тариф аккаунта читается с панели."
+                case "php": "PHP: версии и расширения читаются с панели."
                 default: "Настройки читаются с панели."
                 }
                 let text = progress.stage == "settings" ? settingsText : detail
@@ -617,14 +632,18 @@ struct ScenarioWidget<Actions: View>: View {
     /// One column for each selected object category outside `files/`:
     /// finished objects of the current or last run against the selection.
     /// The category in work is active; a failed object makes it red.
+    /// The columns wrap: one row squeezed seven labels and broke them
+    /// (found on 2026-11-14).
     private func subsystemRow(_ snapshot: ScenarioWidgetSnapshot) -> some View {
         let results = snapshot.objectResults
         let current = snapshot.databaseProgress?.category
-        return HStack(spacing: 0) {
+        let columns = [GridItem(.adaptive(minimum: 64), spacing: 0, alignment: .leading)]
+        return LazyVGrid(columns: columns, alignment: .leading, spacing: 10) {
             ForEach(snapshot.subsystems, id: \.category) { subsystem in
                 let mine = results.filter { $0.category == subsystem.category }
                 let done = mine.filter { ["created", "updated", "unchanged"].contains($0.result) }.count
                 let failed = mine.contains { ["failed", "cancelled"].contains($0.result) }
+                    || snapshot.summaryFailed(subsystem.category)
                 let total = snapshot.total(of: subsystem)
                 let tone: QDStatusKind? = failed ? .failed
                     : current == subsystem.category ? .active

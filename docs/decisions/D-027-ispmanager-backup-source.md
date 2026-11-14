@@ -1,6 +1,6 @@
 # D-027 — ISPmanager 6 Read-Only Backup Source
 
-**Date:** 2026-11-01. **Status:** proposed. The owner must approve this decision before Gate 1 code starts. **Revises (after approval):** nothing in the synchronization model: the Backup/export mode is a one-way update of one current copy (section 5) and adds no BackupSet. **Work:** GitHub epic Xsoid/QADREN#36.
+**Date:** 2026-11-01. **Status:** accepted (2026-11-14). **Revises:** nothing in the synchronization model: the Backup/export mode is a one-way update of one current copy (section 5) and adds no BackupSet. **Work:** GitHub epic Xsoid/QADREN#36.
 
 ## Context
 
@@ -132,18 +132,21 @@ The owner accepted on 2026-11-06: a Backup/export Scenario can copy the Cron job
 |---|---|---|
 | Cron | `scheduler` | `command`, `interval`, `schedule_type`, `active`, `description` |
 | DNS | `domain`, `domain.record` (with `elid` of the zone) | zone `name`, `dtype`, `dnssecstatus`; record `name`, `rtype`, `ttl`, `value` |
-| Mail | `emaildomain`, `email` | domain `name`, `active`, `dkim`, `dmarc`, `spamassassin`, `defaction`, `secure`; mailbox `name`, `active`, `aliases`, `dontsave`, `responder`, `spamassassin`, `size_total` |
+| Mail | `emaildomain`, `email`, `email.edit` (with the mailbox `name` as `elid`, without `sok`) | domain `name`, `active`, `dkim`, `dmarc`, `spamassassin`, `defaction`, `secure`; mailbox `name`, `active`, `aliases`, `dontsave`, `responder`, `spamassassin`, `size_total`; form `forward`, `maxsize`, `note`; never `passwd` |
 | Sites | `webdomain` | `name`, `active`, `docroot`, `public_docroot`, `ipaddr`, `handler`, `php`, `php_mode`, `php_version`, `secure`, `database`, `git`, `cgi_site_settings` |
-| SSL | `sslcert` | `name`, `type`, `info`, `valid_after`, `webdomains`, `emaildomains`, `is_letsencrypt`, `letsencrypt`, `mail_ssl`, `active`; no private key |
+| SSL | `sslcert`, `sslcert.edit` (with the certificate `key` as `elid`, without `sok`) | list `name`, `type`, `info`, `valid_after`, `webdomains`, `emaildomains`, `is_letsencrypt`, `letsencrypt`, `mail_ssl`, `active`; form `crt`, `cacrt`; never `crtkey` |
 | FTP | `ftp.user` | `name`, `home`, `active`; no password |
+| Accounts | `userstat` | `name`, `units`, `usages_total`; no current use |
+| PHP | `phpversions`, `phpextensions` (with the version `key` as `elid`) | version `name`, `state`, `apache`, `cgi`; extension `name`, `enabled`, `compiled` |
 
-1. **Selection.** `cron`, `ssl`, and `ftp` with the provider ID `all` select the whole list. `dns`, `mail`, and `sites` select one zone, mail domain, or site by name. `sites` with the provider ID `all` selects all sites at run time, so a new site needs no edit of the Scenario (owner request 2026-11-06).
+1. **Selection.** `cron`, `ssl`, `ftp`, `accounts`, and `php` with the provider ID `all` select the whole list. The owner accepted `accounts` and `php` on 2026-11-14. `dns`, `mail`, and `sites` select one zone, mail domain, or site by name. `sites` with the provider ID `all` selects all sites at run time, so a new site needs no edit of the Scenario (owner request 2026-11-06).
 1a. **Site options.** Each selected site, and "all sites", has options in the Scenario editor (owner request 2026-11-06): "файлы" adds the file rule of the site root (`docroot` from `webdomain`; the panel gives it from the account home, also when it starts with `/`, so the editor joins it to the home folder); "база" adds the database that `webdomain` names; `site_ssl` adds to `sites/<site>.json` the certificates whose `webdomains` name the site or its `www.` name; `site_ftp` adds the FTP users whose home folder is the site root or inside it, or a folder above the root whose path has the site name (the root is often `/www/<site>/web`, the FTP home `/www/<site>`); `/` or `/www` belongs to no single site. The options `site_ssl` and `site_ftp` are resources with the site name or `all`. For "all sites", the files and database options add the roots and databases of the sites that the editor lists; a later new site needs them again. The name is also the file name, so it has only letters, digits, `-`, `_`, and `.`.
-2. **Files.** `cron/jobs.json`, `ssl/certificates.json`, `ftp/users.json`, `sites/<site>.json`, `dns/<zone>.json`, and `mail/<domain>.json` in the copy root. The content of a site is in `files/` through the file selection. Each file is JSON with sorted keys and sorted lists, so the same settings give the same bytes. Only the listed fields go into a file; internal keys (`id`, `key`, `rkey`) and the mailbox `size_used` do not. A mail file has the mailboxes whose name ends with `@<domain>`.
-3. **Secrets and content.** The lists have no password. Mailbox passwords are never exported. Letters are not in these files. The owner decided on 2026-11-06: letters are copied as files. The panel stores them in `email/<domain>` of the home folder. Each mail domain in the Scenario editor has the option "письма": it adds the file rule of `<home>/email/<domain>`, so the letters go to `files/email/<domain>` with the files and their mirror rule. When a selected folder already covers this path, the option shows that and is not available. The live check found the `email` folder, but no `cur`, `new`, and `tmp` at the expected depth; a plan of the folder shows what the account can read.
+2. **Files.** `cron/jobs.json`, `ssl/certificates.json`, `ssl/<certificate>.pem`, `ftp/users.json`, `accounts/limits.json`, `php/runtime.json`, `sites/<site>.json`, `dns/<zone>.json`, and `mail/<domain>.json` in the copy root. The content of a site is in `files/` through the file selection. Each file is JSON with sorted keys and sorted lists, so the same settings give the same bytes. Only the listed fields go into a file; internal keys (`id`, `key`, `rkey`) and the mailbox `size_used` do not. The account `usages_used` is not in `accounts/limits.json`, because it changes with each run (owner decision 2026-11-14). In `php/runtime.json` each version has the list `extensions`. The owner decided on 2026-11-14: `ssl/<certificate>.pem` has the certificate (`crt`) and then the chain (`cacrt`) of one certificate name, and the mail file has `forward`, `maxsize`, and `note` of each mailbox from its form (format `qadren-ispmanager-mail/2`). A certificate without `crt`, for example a pending request, gets no PEM file. A certificate name that cannot be a file name, or PEM text with `PRIVATE KEY`, makes the SSL object fail. Each PEM file has its own result in the run, with the certificate name as the provider ID; the `ssl` result with the provider ID `all` is the summary of the list. The interface counts the certificates, not the summary (owner request 2026-11-14). A PEM file of a removed certificate stays, because only `files/` is a mirror (section 5.6a). A mail file has the mailboxes whose name ends with `@<domain>`.
+3. **Secrets and content.** The lists have no password. Mailbox passwords are never exported. Letters are not in these files. The owner decided on 2026-11-06: letters are copied as files. The panel stores them in `email/<domain>` of the home folder. Each mail domain in the Scenario editor has the option "письма": it adds the file rule of `<home>/email/<domain>`, so the letters go to `files/email/<domain>` with the files and their mirror rule. When a selected folder already covers this path, the option shows that and is not available. The panel keeps a mailbox in `email/<domain>/<mailbox>/.maildir` with `cur`, `new`, and `tmp`. The connection check looks for these folders in `.maildir` and in the mailbox folder (2026-11-14).
 4. **Run.** These objects come before the databases, in the same step: after the file batch, or at once when the revision has no file rule. Each object has a durable result in the run (Registry `backup_object_results`, schema v35), and the publish is the same as for a dump (section 7b.7). A failed object makes the run `failed` with `databases_failed`; the other objects continue. Cron jobs are never run, suspended, or changed.
 5. **DNS zone file.** The `domain.record` list has no MX or SRV priority, weight, or port, and its SOA value has only the primary name server. The live check on 2026-11-06 found these fields in the form `domain.record.edit`, opened with the record `rkey` and the zone as `plid`, without `sok`. The DNS export reads this form for each MX and SRV record and adds `priority`, `weight`, and `port` to the JSON (format `qadren-ispmanager-dns/2`). The copy also has `dns/<zone>.zone`, a BIND zone file with absolute names: A, AAAA, NS, CNAME, PTR, MX, SRV, and TXT (quoted, in parts of 255 bytes). The SOA and any other record type are comments, because the panel does not give all their fields; a new DNS server makes its own SOA.
-6. **Not in scope yet.** CAA, TLSA, and DS records in the zone file, the forwarding and autoresponder text of a mailbox (`email.edit` form), and the account limits (`userstat`).
+6. **Not in scope yet.** CAA, TLSA, and DS records in the zone file: the live check on 2026-11-14 found no such record. The autoresponder text: the form `email.edit` has no autoresponder field. The mailbox filters: `email.sorter` with the mailbox as `elid` works, but the live check found no filter, so the fields are not known.
+7. **Logs: deferred.** The owner decided on 2026-11-14 to defer the log export. `userlogs` gives only a list of log files. The download (`userlogs.download`) is not checked and can pack an archive on the server (section 8). `authlog` is the panel sign-in history with IP addresses. A log inside the account home can be selected as a file in `files/`.
 
 ### 8. Native ISPmanager backups
 
@@ -153,14 +156,16 @@ This stage does not use native ISPmanager backups (`backups.*`, `backup.plan.*`,
 
 SSL private keys and other secrets that a panel can export are `unsupported` in this stage. A later owner decision can allow them through a verified, secure export method. QADREN never claims that a password is recoverable from a database grant or an account list.
 
-## Owner questions
+## Owner answers
 
-1. Approve the destination layout and the update rules in section 5.
-2. Approve the exclusion of native backups (section 8) and of exported secrets (section 9) in this stage.
-3. Approve the SSH client library for section 7a (D-014).
-4. Give a test panel and test accounts (a user and an administrator) for Gate 0. The live checks run on the owner Mac with the read-only probe. Real names, paths, and counts stay outside the repository and the work tracker.
+The owner accepted this decision on 2026-11-14:
 
-## Consequences (after approval)
+1. The destination layout and the update rules in section 5 are approved.
+2. Native backups (section 8) and exported secrets (section 9) stay outside this stage.
+3. The SSH client library for section 7a is `russh` with `russh-sftp` (D-014).
+4. A test user account is available. No test administrator account is available. The Gate 0 check with administrator rights is blocked. The categories that need administrator rights stay `unverified` until an administrator account is available. The live checks run on the owner Mac with the read-only probe. Real names, paths, and counts stay outside the repository and the work tracker.
+
+## Consequences
 
 - AGENTS.md, `llms.txt`, the roadmap, the synchronization model, the storage adapter contract, and the data-safety policy state this scope.
 - The Settings design contract gets the ISPmanager connection form, the capability list, and the typed resource browser.

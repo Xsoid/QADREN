@@ -108,11 +108,13 @@ impl Category {
 /// Reads of one parent object (D-027 section 7b): a nested list with `elid`
 /// and an edit form opened without `sok`. Without `sok` the panel only
 /// returns the form; it saves nothing.
-const OBJECT_READS: [&str; 4] = [
+const OBJECT_READS: [&str; 6] = [
     "db.users",
     "db.users.edit",
     "domain.record",
     "domain.record.edit",
+    "email.edit",
+    "sslcert.edit",
 ];
 
 /// The only functions that the client sends. `auth` opens a session; every
@@ -433,10 +435,41 @@ pub struct ExportProbe {
     pub dns_record_form: Option<Vec<String>>,
     /// The account home has an `email` folder (SFTP).
     pub mail_folder: Option<bool>,
-    /// A mailbox folder below `email/<domain>/` has `cur`, `new`, and `tmp`.
+    /// A mailbox folder below `email/<domain>/`, or its `.maildir`, has
+    /// `cur`, `new`, and `tmp`.
     pub maildir: Option<bool>,
     /// The form of the `email` list: counts and field names, no value.
     pub mailbox_names: Option<MailboxNameProbe>,
+    /// The form `email.edit` of the first mailbox, opened without `sok`:
+    /// its field names (forwarding, autoresponder).
+    pub mailbox_form: Option<Vec<String>>,
+    /// `email.sorter` with the first mailbox as `elid`.
+    pub mailbox_sorter: Option<FunctionReport>,
+    /// The form `sslcert.edit` of the first certificate, without `sok`.
+    pub ssl_form: Option<SslFormProbe>,
+    /// The CAA, TLSA, and DS records of the first DNS zone: one entry for
+    /// each type that the zone has.
+    pub dns_extra_records: Vec<DnsRecordProbe>,
+}
+
+/// The field names of a certificate form, and which fields hold PEM text.
+/// It keeps no value.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct SslFormProbe {
+    pub fields: Vec<String>,
+    /// Fields whose value has `-----BEGIN CERTIFICATE-----`.
+    pub certificate_fields: Vec<String>,
+    /// Fields whose value has `PRIVATE KEY`. QADREN never exports them.
+    pub private_key_fields: Vec<String>,
+}
+
+/// One record type of a DNS zone: how many space-separated parts the list
+/// `value` has, and the field names of its form. It keeps no value.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct DnsRecordProbe {
+    pub rtype: String,
+    pub value_parts: usize,
+    pub form_fields: Option<Vec<String>>,
 }
 
 /// How the `email` list names a mailbox and ties it to its mail domain.
@@ -1105,27 +1138,38 @@ pub fn export_object(
             let suffix = format!("@{provider_id}");
             let boxes = read(session, "email", &[])?;
             // `size_used` changes with each letter; it is not a setting.
-            let mailboxes = elements(&boxes)
+            let mut mailboxes = Vec::new();
+            for mailbox in elements(&boxes)
                 .into_iter()
                 .filter(|mailbox| text(mailbox, "name").is_some_and(|name| name.ends_with(&suffix)))
-                .map(|mailbox| {
-                    pick(
-                        mailbox,
-                        &[
-                            "name",
-                            "active",
-                            "aliases",
-                            "dontsave",
-                            "responder",
-                            "spamassassin",
-                            "size_total",
-                        ],
-                    )
-                })
-                .collect();
+            {
+                let mut entry = pick(
+                    mailbox,
+                    &[
+                        "name",
+                        "active",
+                        "aliases",
+                        "dontsave",
+                        "responder",
+                        "spamassassin",
+                        "size_total",
+                    ],
+                );
+                // The form opened without `sok` (owner decision 2026-11-14).
+                // It also has `passwd`, which is never taken.
+                if let Some(name) = text(mailbox, "name") {
+                    let form = read(session, "email.edit", &[("elid", &name)])?;
+                    if let (Value::Object(map), Value::Object(extra)) =
+                        (&mut entry, pick(&form, &["forward", "maxsize", "note"]))
+                    {
+                        map.extend(extra);
+                    }
+                }
+                mailboxes.push(entry);
+            }
             serde_json::json!({
-                "format": "qadren-ispmanager-mail/1",
-                "source": "emaildomain, email",
+                "format": "qadren-ispmanager-mail/2",
+                "source": "emaildomain, email, email.edit",
                 "note": "Passwords and letters are not in this file.",
                 "domain": domain,
                 "mailboxes": sorted(mailboxes),
@@ -1204,11 +1248,101 @@ pub fn export_object(
                 "users": sorted(users),
             })
         }
+        // The limits of the account plan. The current use changes with
+        // each run, so it is not in the file (owner decision 2026-11-14).
+        "accounts" => {
+            let doc = read(session, "userstat", &[])?;
+            let limits = elements(&doc)
+                .into_iter()
+                .map(|limit| pick(limit, &["name", "units", "usages_total"]))
+                .collect();
+            serde_json::json!({
+                "format": "qadren-ispmanager-accounts/1",
+                "source": "userstat",
+                "note": "Plan limits only. The current use is not in this file.",
+                "limits": sorted(limits),
+            })
+        }
+        // The PHP versions and, for each version, its extensions (owner
+        // decision 2026-11-14). `phpextensions` reads one version as `elid`.
+        "php" => {
+            let doc = read(session, "phpversions", &[])?;
+            let mut versions = Vec::new();
+            for version in elements(&doc) {
+                let mut entry = pick(version, &["name", "state", "apache", "cgi"]);
+                if let Some(key) = text(version, "key").filter(|key| !key.is_empty()) {
+                    let list = read(session, "phpextensions", &[("elid", key.as_str())])?;
+                    let extensions = elements(&list)
+                        .into_iter()
+                        .map(|extension| pick(extension, &["name", "enabled", "compiled"]))
+                        .collect();
+                    if let Value::Object(map) = &mut entry {
+                        map.insert("extensions".to_owned(), Value::Array(sorted(extensions)));
+                    }
+                }
+                versions.push(entry);
+            }
+            serde_json::json!({
+                "format": "qadren-ispmanager-php/1",
+                "source": "phpversions, phpextensions",
+                "versions": sorted(versions),
+            })
+        }
         _ => return Err("invalid_selection"),
     };
     let mut bytes = serde_json::to_vec_pretty(&value).map_err(|_| "invalid_request")?;
     bytes.push(b'\n');
     Ok(bytes)
+}
+
+/// The certificate and its chain of each certificate of the account, as
+/// one PEM file for each certificate name (owner decision 2026-11-14). The
+/// form `sslcert.edit` is opened without `sok`. Its private key field
+/// `crtkey` is never taken (D-027 section 9). A certificate without `crt`,
+/// for example a pending request, gets no file.
+pub fn ssl_certificate_files(
+    session: &mut Session,
+) -> std::result::Result<Vec<(String, Vec<u8>)>, &'static str> {
+    let read = |session: &mut Session, func: &str, params: &[(&str, &str)]| {
+        session.read(func, params).map_err(|error| match error {
+            IspError::Panel(kind) if kind == "access" => "ispmanager_permission_denied",
+            IspError::Panel(kind) if kind == "missed" => "ispmanager_function_missing",
+            _ => "ispmanager_network_error",
+        })
+    };
+    let doc = read(session, "sslcert", &[])?;
+    let certificates: Vec<(String, String)> = elements(&doc)
+        .into_iter()
+        .filter_map(|cert| Some((text(cert, "name")?, text(cert, "key")?)))
+        .collect();
+    let mut files = Vec::new();
+    for (name, key) in certificates {
+        let form = read(session, "sslcert.edit", &[("elid", &key)])?;
+        let Some(crt) =
+            text(&form, "crt").filter(|crt| crt.contains("-----BEGIN CERTIFICATE-----"))
+        else {
+            continue;
+        };
+        let chain = text(&form, "cacrt").unwrap_or_default();
+        // `all` is the provider ID of the whole list.
+        if !crate::registry::domain_name(&name)
+            || name == "all"
+            || crt.contains("PRIVATE KEY")
+            || chain.contains("PRIVATE KEY")
+        {
+            return Err("invalid_request");
+        }
+        let mut pem = crt.trim().to_owned();
+        pem.push('\n');
+        if !chain.trim().is_empty() {
+            pem.push_str(chain.trim());
+            pem.push('\n');
+        }
+        files.push((name, pem.into_bytes()));
+    }
+    files.sort();
+    files.dedup_by(|a, b| a.0 == b.0);
+    Ok(files)
 }
 
 /// The result of one connection check. `status` is a Registry status.
@@ -1300,6 +1434,91 @@ fn probe_dns_records(session: &mut Session) -> (Option<FunctionReport>, Option<V
     (Some(function_report("domain.record", outcome)), form)
 }
 
+/// The CAA, TLSA, and DS records of the first DNS zone (D-027 section 7c.6):
+/// the parts of the list value and the form fields of the first record of
+/// each type. It keeps no value.
+fn probe_dns_extra_records(session: &mut Session) -> Vec<DnsRecordProbe> {
+    let Some(zone) = session
+        .read("domain", &[])
+        .ok()
+        .and_then(|zones| elements(&zones).into_iter().next().cloned())
+    else {
+        return Vec::new();
+    };
+    let Some((_, key)) = key_field(&zone, &["name", "key", "id"]) else {
+        return Vec::new();
+    };
+    let Ok(records) = session.read("domain.record", &[("elid", &key)]) else {
+        return Vec::new();
+    };
+    let mut probes = Vec::new();
+    for kind in ["CAA", "TLSA", "DS"] {
+        let Some(record) = elements(&records)
+            .into_iter()
+            .find(|record| text(record, "rtype").is_some_and(|rtype| record_type(&rtype) == kind))
+            .cloned()
+        else {
+            continue;
+        };
+        let form_fields = text(&record, "rkey").and_then(|rkey| {
+            session
+                .read("domain.record.edit", &[("elid", &rkey), ("plid", &key)])
+                .ok()
+                .map(|form| sorted_fields(&form))
+        });
+        probes.push(DnsRecordProbe {
+            rtype: kind.to_owned(),
+            value_parts: text(&record, "value").map_or(0, |value| value.split_whitespace().count()),
+            form_fields,
+        });
+    }
+    probes
+}
+
+/// The form and the filters of the first mailbox (D-027 section 7c.6).
+fn probe_mailbox_form(session: &mut Session) -> (Option<Vec<String>>, Option<FunctionReport>) {
+    let Some(name) = session.read("email", &[]).ok().and_then(|boxes| {
+        elements(&boxes)
+            .into_iter()
+            .find_map(|mailbox| text(mailbox, "name"))
+    }) else {
+        return (None, None);
+    };
+    let form = session
+        .read("email.edit", &[("elid", &name)])
+        .ok()
+        .map(|form| sorted_fields(&form));
+    let sorter = session
+        .read("email.sorter", &[("elid", &name)])
+        .map(|doc| classify_list(&doc));
+    (form, Some(function_report("email.sorter", sorter)))
+}
+
+/// The form of the first certificate (D-027 sections 7c and 9). The values
+/// stay in memory for this check only.
+fn probe_ssl_form(session: &mut Session) -> Option<SslFormProbe> {
+    let key = session.read("sslcert", &[]).ok().and_then(|certs| {
+        elements(&certs)
+            .into_iter()
+            .find_map(|cert| text(cert, "key"))
+    })?;
+    let form = session.read("sslcert.edit", &[("elid", &key)]).ok()?;
+    let holding = |needle: &str| {
+        let mut fields: Vec<String> = form
+            .keys()
+            .filter(|field| text(&form, field).is_some_and(|value| value.contains(needle)))
+            .cloned()
+            .collect();
+        fields.sort();
+        fields
+    };
+    Some(SslFormProbe {
+        fields: sorted_fields(&form),
+        certificate_fields: holding("-----BEGIN CERTIFICATE-----"),
+        private_key_fields: holding("PRIVATE KEY"),
+    })
+}
+
 /// The form of mailbox names in the `email` list (D-027 section 7c).
 fn probe_mailbox_names(session: &mut Session) -> Option<MailboxNameProbe> {
     let domains: Vec<String> = elements(&session.read("emaildomain", &[]).ok()?)
@@ -1372,10 +1591,17 @@ fn probe_mail_storage(connection: &ispmanager_sftp::SftpConnection, probe: &mut 
             .into_iter()
             .take(5)
             .any(|box_name| {
-                let inner = folders(&format!("{mail}/{domain}/{box_name}"));
-                ["cur", "new", "tmp"]
-                    .iter()
-                    .all(|part| inner.iter().any(|name| name == part))
+                // The panel keeps the Maildir in `.maildir` of the mailbox
+                // folder (found on 2026-11-14); the folder itself is also
+                // checked.
+                let is_maildir = |path: String| {
+                    let inner = folders(&path);
+                    ["cur", "new", "tmp"]
+                        .iter()
+                        .all(|part| inner.iter().any(|name| name == part))
+                };
+                let mailbox = format!("{mail}/{domain}/{box_name}");
+                is_maildir(format!("{mailbox}/.maildir")) || is_maildir(mailbox)
             })
     });
     probe.maildir = Some(maildir);
@@ -1435,6 +1661,9 @@ pub fn check(url: &str, login: &str, password: &str, sftp: SftpTarget<'_>) -> Ch
         mailbox_names: probe_mailbox_names(&mut session),
         ..ExportProbe::default()
     };
+    (export_probe.mailbox_form, export_probe.mailbox_sorter) = probe_mailbox_form(&mut session);
+    export_probe.ssl_form = probe_ssl_form(&mut session);
+    export_probe.dns_extra_records = probe_dns_extra_records(&mut session);
     if let (SftpCheck::Ready, Some(key)) = (&file_transport, sftp.host_key_sha256) {
         if let Ok(connection) =
             ispmanager_sftp::SftpConnection::open(&host, sftp.port, login, password, key)

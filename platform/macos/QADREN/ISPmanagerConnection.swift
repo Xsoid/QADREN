@@ -149,6 +149,24 @@ struct ISPmanagerExportProbe: Codable, Equatable {
     var mail_folder: Bool? = nil
     var maildir: Bool? = nil
     var mailbox_names: ISPmanagerMailboxNameProbe? = nil
+    var mailbox_form: [String]? = nil
+    var mailbox_sorter: ISPmanagerFunctionReport? = nil
+    var ssl_form: ISPmanagerSSLFormProbe? = nil
+    var dns_extra_records: [ISPmanagerDNSRecordProbe]? = nil
+}
+
+/// The field names of a certificate form, and which fields hold PEM text.
+struct ISPmanagerSSLFormProbe: Codable, Equatable {
+    let fields: [String]
+    let certificate_fields: [String]
+    let private_key_fields: [String]
+}
+
+/// One CAA, TLSA, or DS record type: parts of the list value, form fields.
+struct ISPmanagerDNSRecordProbe: Codable, Equatable {
+    let rtype: String
+    let value_parts: Int
+    var form_fields: [String]? = nil
 }
 
 /// How the `email` list names a mailbox: counts and field names only.

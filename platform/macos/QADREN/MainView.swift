@@ -77,8 +77,14 @@ struct MainView: View {
 
     private var monitoringDashboard: some View {
         VStack(spacing: 0) {
+            // In a window the scroll view draws its content above its own
+            // frame, into the title bar area, so the scrolled widgets covered
+            // the header (found on 2026-11-14). The canvas clips to its frame,
+            // and the header stays in front.
             MonitoringHeader(isEditing: $isEditingLayout) { dashboardLayout.add($0) }
+                .zIndex(1)
             monitoringCanvas
+                .clipped()
                 .overlay(MonitoringScreenFrame())
         }
         .background(QDCyber.color(.canvas, for: colorScheme))

@@ -1,6 +1,6 @@
 # ISPmanager Adapter
 
-[D-027](../decisions/D-027-ispmanager-backup-source.md) owns the scope. Status: **proposed**. The adapter is a read-only backup source. ISPmanager is never a destination.
+[D-027](../decisions/D-027-ispmanager-backup-source.md) owns the scope. Status: **accepted**. The adapter is a read-only backup source. ISPmanager is never a destination.
 
 ## Sources
 
@@ -26,30 +26,32 @@ The published catalog is generated. The documentation states that the function a
 
 `verified_export`, `verified_metadata_only`, `permission_denied`, `unsupported`, and `unverified` (D-027 section 4). The states are different. The interface and the manifest never treat one as another.
 
-## Capability matrix (documentation only)
+## Capability matrix
 
-No live check exists yet. Every category is `unverified`. "Candidate functions" are read-only functions from the documentation. "Open questions" are the items that a live check must answer before a state changes. Live results go into the work tracker, without real data.
+The live checks used user accounts only (up to 2026-11-14). No administrator account was available. A check with administrator rights is blocked: a category that a user account cannot read stays `unverified` or `permission_denied` until an administrator check. "Functions" gives the result of each read function for a user account: `items`, `empty`, `denied` (panel error `access`), `missing` (panel error `missed`), or `error`. "State" is the state of the category for a user account. `verified_export` means that a Backup/export run on a live panel copied the data to the destination. Live results go into the work tracker, without real data.
 
-| # | Category | Candidate read functions | Content or metadata | Open questions |
-|---|---|---|---|---|
-| 1 | Files and directories | SFTP when the account has SSH access (D-027 section 7a); otherwise `file` (list, key `name`), `file.download` | Content | How `file` addresses a nested folder (`plid` or path). Pagination of large folders. Dotfiles, symlinks, special files, owner and mode fields. Whether `file.download` of one file streams directly or packs an archive on the server. Download of a folder. |
-| 2 | Websites and web domains | `webdomain` (key `name`), `webproxy` | Metadata | `webdomain` exported to `sites/<site>.json` (D-027 section 7c). `webproxy` was denied for a user account. |
-| 3 | Databases | `db` (key `pair`), `db.server`, `db.users`, `db.dump` | Content and metadata | Whether `db.dump` selects exactly one database. Whether it writes a temporary file on the server. Format and compression. Consistency of the dump. Grants of `db.users`. Passwords are never recoverable. |
-| 4 | Mail domains | `emaildomain` (key `name`), `blacklist` | Metadata | Exported with the mailboxes to `mail/<domain>.json` (D-027 section 7c). |
-| 5 | Mailboxes | `email` (key `name`), `email.sorter`, `email.responder`, `email.setting` | Metadata; content unknown | The documentation shows no mailbox content export. Mailbox content stays `unverified` until a live check finds an exact, read-only path. Whether `email.responder` and `email.setting` change state without `sok`. |
-| 6 | Cron | `scheduler` (key `key`) | Metadata | Exported to `cron/jobs.json` (D-027 section 7c). Never call `run`, `scheduler.suspend`, `scheduler.resume`, or `scheduler.delete`. |
-| 7 | DNS | `domain` (key `name`), `domain.record` (key `rkey`, with `elid` of the zone), `domain.dnssecinfo`, `techdomain`, `techdomain.records` | Metadata | Exported to `dns/<zone>.json` and the BIND file `dns/<zone>.zone`; MX and SRV fields come from `domain.record.edit` without `sok` (D-027 section 7c). DNSSEC keys are open. |
-| 8 | SSL/TLS | `sslcert` (key `key`), `sslcert.csr` | Metadata | The list is exported to `ssl/certificates.json` (D-027 section 7c). The certificate and the chain are not read yet. Private keys are `unsupported` in this stage (D-027 section 9). |
-| 9 | FTP | `ftp.user` (key `name`) | Metadata | Exported to `ftp/users.json` (D-027 section 7c). FTP passwords are not exportable. |
-| 10 | ISPmanager accounts | `user` (key `name`), `admin`, `userrights`, `userstat`, `preset` | Metadata | Access level for each list. Template and limit fields. |
-| 11 | SSH | No API function for SSH keys or shell settings. `file` for `~/.ssh` | Content through files | SSH access of the account does not give an API function. Whether `file` can read `~/.ssh/authorized_keys` for the account. Otherwise `unsupported`. |
-| 12 | Web server services | `services` | Metadata | Configuration files are readable only through `file` with administrator rights. |
-| 13 | PHP and runtimes | `phpversions`, `phpextensions`, `phpconf` | Metadata | Access level. Effective `php.ini` files through `file`. |
-| 14 | Mail service settings | No dedicated read function found | Unknown | Configuration files through `file` with administrator rights. |
-| 15 | Network and security | `firewall`, `ipdb`, `ipdb.addr`, `netactconn` | Metadata | Access level. |
-| 16 | Docker | `docker_mysql` (MySQL versions only) | Unknown | No documented export of containers or volumes. The native backup does not include Docker. Expected `unsupported`. |
-| 17 | Panel and backup settings | `license.info`, `plugin`, `backup.storages`, `backup.plan`, `backup.settings`, `emailnotify` | Metadata | Whether a form call without `sok` is read-only. Storage settings can contain secrets; they are never exported. |
-| 18 | Logs and statistics | `userlogs`, `userlogs.download`, `authlog`, `traffic_report`, `accounting_stat` | Content and metadata | Whether `userlogs.download` selects exactly one log. Size of large logs. |
+| # | Category | Functions (user account) | State | Export | Gaps and open questions |
+|---|---|---|---|---|---|
+| 1 | Files and directories | SFTP; `file`: `items` | `verified_export` | SFTP to `files/` with exclusions and the mirror rule (D-027 section 7a) | The `file` API without SSH access is not used. A symbolic link and a special file follow D-027 section 7a.7. |
+| 2 | Websites and web domains | `webdomain`: `items`; `webproxy`: `denied` | `verified_export` | `sites/<site>.json` with the site options (D-027 section 7c) | `webproxy` needs higher rights. |
+| 3 | Databases | `db`: `items`; `db.users`, `db.users.edit`: read; `db.server`: `denied` | `verified_export` | `mysqldump` over SSH to `databases/<database>.sql`, with table rules (D-027 section 7b) | The `db.dump` fallback is not implemented. Large databases: next stage (D-027 section 7b.11). Passwords are never recoverable. |
+| 4 | Mail domains | `emaildomain`: `items`; `blacklist`: `denied` | `verified_export` | `mail/<domain>.json` (D-027 section 7c) | `blacklist` needs higher rights. |
+| 5 | Mailboxes | `email`: `items`; `email.edit`: read; `email.sorter`: `error` without `elid`, `empty` with a mailbox as `elid` | Settings: `verified_export`. Content: `unverified` | Mailbox settings and `forward`, `maxsize`, `note` from `email.edit` in `mail/<domain>.json`. Letters as files from `email/<domain>` (option "письма") | Letters are in `email/<domain>/<mailbox>/.maildir` (`cur`, `new`, `tmp`). A run with the option "письма" is not checked against a restored mailbox. `email.sorter` with a mailbox as `elid` works; no filter was found, so the filter fields are not known. The form has no autoresponder text. |
+| 6 | Cron | `scheduler`: `items` or `empty` | `verified_export` | `cron/jobs.json` (D-027 section 7c) | Never call `run`, `scheduler.suspend`, `scheduler.resume`, or `scheduler.delete`. |
+| 7 | DNS | `domain`: `items`; `domain.record`, `domain.record.edit`: read; `techdomain`: `denied` or `missing` | `verified_export` | `dns/<zone>.json` and the BIND file `dns/<zone>.zone` (D-027 section 7c) | CAA, TLSA, and DS records are comments in the zone file; the live check found no such record to read. DNSSEC keys are not read. |
+| 8 | SSL/TLS | `sslcert`: `items`; `sslcert.edit`: read | `verified_export` | The list in `ssl/certificates.json`, and the certificate and chain in `ssl/<certificate>.pem` (D-027 section 7c). Each PEM file has its own run result | The form field `crtkey` has the private key; it is `unsupported` in this stage (D-027 section 9). |
+| 9 | FTP | `ftp.user`: `items` or `empty` | `verified_export` | `ftp/users.json` (D-027 section 7c) | FTP passwords are not exportable. |
+| 10 | ISPmanager accounts | `userstat`: `items`; `user`, `admin`: `denied` | Limits: `verified_export` | Plan limits to `accounts/limits.json`, without the current use (D-027 section 7c) | `user` and `admin` need administrator rights. |
+| 11 | SSH | No API function | `unverified` | `~/.ssh` can be selected as a folder in `files/` | No separate SSH option. Whether SFTP can read `~/.ssh` is not checked for each account. |
+| 12 | Web server services | `services`: `denied` | `permission_denied` | None | Needs administrator rights. Configuration files are outside the account home. |
+| 13 | PHP and runtimes | `phpversions`, `phpextensions`: `items` | `verified_export` | Versions and their extensions to `php/runtime.json` (D-027 section 7c) | `phpconf` and effective `php.ini` files are not checked. |
+| 14 | Mail service settings | No API function | `unverified` | None | Configuration files need administrator rights. |
+| 15 | Network and security | `firewall`, `ipdb`: `denied` | `permission_denied` | None | Needs administrator rights. |
+| 16 | Docker | `docker_mysql`: `missing` | `unsupported` | None | No documented export of containers or volumes. The native backup does not include Docker. |
+| 17 | Panel and backup settings | `backup.storages`, `backup.plan`: `missing` | `unsupported` | None | The panel versions in the checks have no such functions. `license.info`, `plugin`, and forms without `sok` are not checked. Storage settings can contain secrets; they are never exported. |
+| 18 | Logs and statistics | `userlogs`, `authlog`: `items` | `verified_metadata_only` | None. Deferred (D-027 section 7c.7) | A log inside the account home can be selected as a file. Whether `userlogs.download` selects exactly one log, and the size of large logs, are not checked. |
+
+"Functions" for one category can differ between panels. A check that reads a category on one panel does not prove it on another panel; each connection check shows its own result.
 
 ## Native backups
 

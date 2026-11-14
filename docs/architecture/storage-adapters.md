@@ -27,7 +27,7 @@ Yandex Disk is a one-way Scenario source to a Local Filesystem root ([D-023](../
 
 ## Proposed adapters
 
-ISPmanager 6 is a proposed read-only backup source ([D-027](../decisions/D-027-ispmanager-backup-source.md), [ISPmanager adapter](ispmanager-adapter.md)). It has no `trash` capability, because it is never a destination. It is not active until the owner approves D-027.
+ISPmanager 6 is a read-only backup source ([D-027](../decisions/D-027-ispmanager-backup-source.md), [ISPmanager adapter](ispmanager-adapter.md)). It has no `trash` capability, because it is never a destination.
 
 ## New adapters
 

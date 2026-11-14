@@ -19,6 +19,7 @@ QADREN is a cross-platform file transfer and synchronization system. Rust owns c
 - Use one Rust JobStore. A `Scenario` defines synchronization rules. A `Job` is one execution or manual file operation.
 - Keep each `StorageConnection` independent. Bind OAuth and Keychain state to `connection_id`.
 - A one-way Scenario can use Yandex Disk (`yandex_disk`) as the source and a Local Filesystem or SMB root as the destination. The Worker runs these Jobs with a token that the app gives it in memory (D-024 stage A). Yandex Disk as a destination is stage 2. See `docs/decisions/D-023-yandex-disk-to-mac.md`.
+- An ISPmanager 6 panel (`ispmanager`) can be the source of a Backup/export Scenario with a Local Filesystem or SMB destination. The connector is read-only: HTTPS `POST` with a read-only function allowlist, and SFTP with one allowed hash command. The destination is one current copy with a subfolder for each data type. ISPmanager is never a destination. See `docs/decisions/D-027-ispmanager-backup-source.md` and `docs/architecture/ispmanager-adapter.md`.
 - iCloud is post-release. Do not add iCloud work without a new owner decision.
 - Do not add content versioning, runtime BackupSet, Scenario dependencies, or remote Worker protocol.
 

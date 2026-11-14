@@ -675,6 +675,11 @@ fn object_target(category: &str, provider_id: &str) -> Option<PathBuf> {
         "cron" if provider_id == "all" => Some(PathBuf::from("cron/jobs.json")),
         "ssl" if provider_id == "all" => Some(PathBuf::from("ssl/certificates.json")),
         "ftp" if provider_id == "all" => Some(PathBuf::from("ftp/users.json")),
+        "accounts" if provider_id == "all" => Some(PathBuf::from("accounts/limits.json")),
+        "php" if provider_id == "all" => Some(PathBuf::from("php/runtime.json")),
+        "ssl_pem" if crate::registry::domain_name(provider_id) => {
+            Some(Path::new("ssl").join(format!("{provider_id}.pem")))
+        }
         "dns_zone" if crate::registry::domain_name(provider_id) => {
             Some(Path::new("dns").join(format!("{provider_id}.zone")))
         }
@@ -716,7 +721,11 @@ pub fn run_ispmanager_object_export(
         .map_err(|_| "registry_unavailable")?
         .iter()
         .any(|r| {
-            // The zone file goes with its selected DNS zone.
+            // The zone file goes with its selected DNS zone, and a PEM
+            // file with the selected certificate list.
+            if category == "ssl_pem" {
+                return r.category == "ssl" && r.rule == "include" && r.provider_id == "all";
+            }
             r.category
                 == if category == "dns_zone" {
                     "dns"
