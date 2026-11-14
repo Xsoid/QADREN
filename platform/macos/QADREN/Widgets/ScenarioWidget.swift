@@ -18,6 +18,8 @@ struct ScenarioFileCounts: Equatable {
     let topFailure: String?
     var created: Int { max(0, copied - updated - deleted) }
     var remaining: Int { max(0, total - copied - errors) }
+    /// Only retries are left: the Worker copies nothing until the next retry.
+    var waitingForRetry: Bool { retrying > 0 && remaining == 0 }
 
     init(_ summary: ScenarioBatchSummary) {
         total = summary.total
@@ -277,7 +279,9 @@ final class ScenarioWidgetFeed: ObservableObject {
         self.snapshot = snapshot
         self.entry = entry
         loaded = true
+        // A run that only waits for a retry does not move; it is not a hang.
         let executing = snapshot.run?.active?.state == "executing" && !snapshot.batchPaused
+            && snapshot.files?.waitingForRetry != true
         let key = executing
             ? "\(snapshot.files?.copied ?? -1)|\(snapshot.files?.errors ?? -1)|\(snapshot.currentPath ?? "")"
             : nil
@@ -358,6 +362,10 @@ struct ScenarioStage: Equatable {
             }
             if snapshot.batchPaused {
                 return ScenarioStage(frame: .paused, tone: .paused, headline: "Пауза", detail: "Новые файлы не начинаются.", active: true)
+            }
+            if let files = snapshot.files, files.waitingForRetry {
+                let next = files.nextRetryAt.map { " Следующий повтор в " + $0.formatted(date: .omitted, time: .shortened) + "." } ?? ""
+                return ScenarioStage(frame: .waiting, tone: .waiting, headline: "Ждёт повтора", detail: "Остальные файлы скопированы." + next, active: true)
             }
             return ScenarioStage(frame: .active, tone: .active, headline: "Копирование", detail: snapshot.currentPath ?? "Запуск \(trigger).", active: true, moving: true)
         }

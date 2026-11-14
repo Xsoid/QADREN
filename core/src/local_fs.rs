@@ -1543,6 +1543,16 @@ impl LocalFilesystem {
             }
             match self.create_directory(&prefix) {
                 Ok(()) => created += 1,
+                // The parent is a directory (it was checked or created just
+                // now), so "not found" means that the volume refuses this
+                // name, for example an SMB server with `veto files`. The
+                // directories created before stay; they are empty and real.
+                Err(LocalError::Io(ref err)) if err.kind() == io::ErrorKind::NotFound => {
+                    return Err(LocalError::Io(io::Error::new(
+                        io::ErrorKind::InvalidFilename,
+                        "the destination volume refuses this name",
+                    )));
+                }
                 // Another writer may have created this directory after stat.
                 // Accept only an actual directory within the pinned root;
                 // never treat an unexpected file or symlink as success.

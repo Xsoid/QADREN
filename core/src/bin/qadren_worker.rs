@@ -3615,6 +3615,12 @@ fn classify(error: &LocalFileCopyError) -> (Failure, String) {
         E::OutcomeUnknown(_) => (Failure::Unproven, "outcome_unknown".into()),
         E::VerificationFailed => (Failure::Unproven, "verification_failed".into()),
         E::ConnectionUnavailable => (Failure::Transient, "local_connection_unavailable".into()),
+        // The destination volume refuses the name: a retry cannot help.
+        E::Local(qadren_core::local_fs::LocalError::Io(io))
+            if io.kind() == std::io::ErrorKind::InvalidFilename =>
+        {
+            (Failure::Permanent, "local_name_refused".into())
+        }
         E::Local(_) => (Failure::Transient, copy_error_kind(error)),
         E::Store(_) => (Failure::Transient, "job_store_unavailable".into()),
         E::TargetExists => (Failure::Permanent, "target_exists".into()),
