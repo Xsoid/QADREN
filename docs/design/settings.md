@@ -12,7 +12,7 @@ Recommended 2-column layout: a narrow permanent navigation with sections on the 
 
 | Section | Content | Before backend implementation |
 |---|---|---|
-| Connections | Flat list of named `StorageConnection`, adapter, status, credentials/capabilities, add/edit/remove | This Mac and SMB are Scenario endpoints; Yandex Disk is a one-way Scenario source (D-023); iCloud is out of scope |
+| Connections | Flat list of named `StorageConnection`, adapter, status, credentials/capabilities, add/edit/remove | This Mac and SMB are Scenario endpoints; Yandex Disk is a one-way Scenario source (D-023); ISPmanager is a Backup/export source (D-027); iCloud is out of scope |
 | Scenarios | List with revision, source/destination, and status; create/rename/enable/disable/delete | Use existing Scenario model; do not show impossible operations as active |
 | Automation | Triggers and schedules **inside a scenario** (may be a separate editor tab) | While the scheduler is missing: read-only disabled with explanation |
 | Policies | Conflicts, deletions, scoped consents, space thresholds, event retention | Do not add false protection features or backup versions |
@@ -65,6 +65,20 @@ Direction and deletion mode use choice cards (icon, title, one short line, accen
 The editor of a saved Scenario has the "Удалить сценарий" button. It shows one confirmation: QADREN removes the Scenario, its schedules, runs, plans, and synchronization history from this Mac; the files in the source and the destination do not change. The owner approved this rule on 2026-10-30. The removal is refused while a run of the Scenario is active, or while a Job or a batch item of the Scenario has an unknown or unfinished result. The finished Job records of JobStore stay as the operation log; the Worker removes the plans of a removed Scenario.
 
 Show the consequences of changes: current Jobs use the old revision, new Jobs use the new revision. `Run now` creates a new Job only through Core with correct permissions; settings do not copy files themselves.
+
+### ISPmanager connection and Backup/export editor (D-027)
+
+The "ISPmanager" connector is available as a backup source only. Its form has the name, the panel address with the port and the path, the SSH port, the login, and the password. A caption states that files and database dumps need SSH access with the same login. "Проверить и сохранить" signs in first; "Сохранить без проверки" is available after a failed check. The card shows the panel address, the login (never the password), the SSH port and the host key state, "Проверить вход и возможности", and "Изменить адрес и вход". The first check shows the host key fingerprint and "Подтвердить ключ сервера". A changed key shows "Подтвердить новый ключ…" with a warning about server substitution. The check result "Возможности аккаунта" lists all 18 categories with their capability states in plain words; a category that is not available still shows with its reason.
+
+A Scenario with an ISPmanager source opens the editor "Новая резервная копия" / "Изменить резервную копию", not the synchronization editor:
+
+- "Основные параметры": the name, the panel connection, and the destination (a Local Filesystem or SMB connection and its root).
+- "Источник": the file browser of the account home folder over SFTP. It has breadcrumbs, "Домой", "Вверх", "Путь", and no depth limit. It shows hidden entries. A check box selects a file or a folder with new descendants; inside a selected folder, a cleared check box is an exclusion. A device, socket, or pipe shows that it is not copied. A long folder shows a part and states it.
+- "Базы данных": one check box for each MySQL database, with a table list where a table can be "без данных". When the panel hides the password of the database user, the editor shows a password field; "Проверить и сохранить" saves the password only after MySQL accepts it.
+- "Настройки хостинга": check boxes for Cron, SSL certificates and chains, FTP users, plan limits, and PHP; the lists "Сайты" (with "Все сайты — и те, что появятся позже" and the site options for files, database, SSL, and FTP), "DNS-зоны", and "Почтовые домены" (with "Письма", which adds the mail folder to the file selection). A caption lists the files that each object makes and states that passwords, private keys, and letters are not in them.
+- The deletion mode and one confirmation "Источник всегда прав", as in a one-way Scenario. When no file is selected and the mode is Simple synchronization, a warning states that the run deletes the content of `files/`.
+
+The Scenario widget shows one column for each selected object category with the count of finished objects. "Сайты" and "SSL" count each site and each certificate of the run.
 
 ## 5. Scheduling
 

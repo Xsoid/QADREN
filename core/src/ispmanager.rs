@@ -1137,34 +1137,17 @@ pub fn export_object(
             );
             let suffix = format!("@{provider_id}");
             let boxes = read(session, "email", &[])?;
-            // `size_used` changes with each letter; it is not a setting.
             let mut mailboxes = Vec::new();
             for mailbox in elements(&boxes)
                 .into_iter()
                 .filter(|mailbox| text(mailbox, "name").is_some_and(|name| name.ends_with(&suffix)))
             {
-                let mut entry = pick(
-                    mailbox,
-                    &[
-                        "name",
-                        "active",
-                        "aliases",
-                        "dontsave",
-                        "responder",
-                        "spamassassin",
-                        "size_total",
-                    ],
-                );
                 // The form opened without `sok` (owner decision 2026-11-14).
-                // It also has `passwd`, which is never taken.
-                if let Some(name) = text(mailbox, "name") {
-                    let form = read(session, "email.edit", &[("elid", &name)])?;
-                    if let (Value::Object(map), Value::Object(extra)) =
-                        (&mut entry, pick(&form, &["forward", "maxsize", "note"]))
-                    {
-                        map.extend(extra);
-                    }
-                }
+                let form = match text(mailbox, "name") {
+                    Some(name) => Some(read(session, "email.edit", &[("elid", &name)])?),
+                    None => None,
+                };
+                let entry = mailbox_entry(mailbox, form.as_ref());
                 mailboxes.push(entry);
             }
             serde_json::json!({
@@ -1318,31 +1301,71 @@ pub fn ssl_certificate_files(
     let mut files = Vec::new();
     for (name, key) in certificates {
         let form = read(session, "sslcert.edit", &[("elid", &key)])?;
-        let Some(crt) =
-            text(&form, "crt").filter(|crt| crt.contains("-----BEGIN CERTIFICATE-----"))
-        else {
-            continue;
-        };
-        let chain = text(&form, "cacrt").unwrap_or_default();
-        // `all` is the provider ID of the whole list.
-        if !crate::registry::domain_name(&name)
-            || name == "all"
-            || crt.contains("PRIVATE KEY")
-            || chain.contains("PRIVATE KEY")
-        {
-            return Err("invalid_request");
+        if let Some(pem) = certificate_pem(&name, &form)? {
+            files.push((name, pem));
         }
-        let mut pem = crt.trim().to_owned();
-        pem.push('\n');
-        if !chain.trim().is_empty() {
-            pem.push_str(chain.trim());
-            pem.push('\n');
-        }
-        files.push((name, pem.into_bytes()));
     }
     files.sort();
     files.dedup_by(|a, b| a.0 == b.0);
     Ok(files)
+}
+
+/// One mailbox of a mail file: the list fields and the form fields
+/// `forward`, `maxsize`, and `note`. The form also has `passwd`, which is
+/// never taken. `size_used` changes with each letter; it is not a setting.
+fn mailbox_entry(
+    mailbox: &serde_json::Map<String, Value>,
+    form: Option<&serde_json::Map<String, Value>>,
+) -> Value {
+    let mut entry = pick(
+        mailbox,
+        &[
+            "name",
+            "active",
+            "aliases",
+            "dontsave",
+            "responder",
+            "spamassassin",
+            "size_total",
+        ],
+    );
+    if let (Value::Object(map), Some(Value::Object(extra))) = (
+        &mut entry,
+        form.map(|form| pick(form, &["forward", "maxsize", "note"])),
+    ) {
+        map.extend(extra);
+    }
+    entry
+}
+
+/// The PEM file of one certificate form: the certificate, then the chain.
+/// `None` when the form has no certificate, for example a pending request.
+/// A name that is not a file name, the name `all` (the provider ID of the
+/// whole list), or PEM text with a private key is an error: the private key
+/// is never exported (D-027 section 9).
+fn certificate_pem(
+    name: &str,
+    form: &serde_json::Map<String, Value>,
+) -> std::result::Result<Option<Vec<u8>>, &'static str> {
+    let Some(crt) = text(form, "crt").filter(|crt| crt.contains("-----BEGIN CERTIFICATE-----"))
+    else {
+        return Ok(None);
+    };
+    let chain = text(form, "cacrt").unwrap_or_default();
+    if !crate::registry::domain_name(name)
+        || name == "all"
+        || crt.contains("PRIVATE KEY")
+        || chain.contains("PRIVATE KEY")
+    {
+        return Err("invalid_request");
+    }
+    let mut pem = crt.trim().to_owned();
+    pem.push('\n');
+    if !chain.trim().is_empty() {
+        pem.push_str(chain.trim());
+        pem.push('\n');
+    }
+    Ok(Some(pem.into_bytes()))
 }
 
 /// The result of one connection check. `status` is a Registry status.
@@ -1789,5 +1812,204 @@ mod tests {
         assert!(names_site("example.test, www.example.test", "example.test"));
         assert!(names_site("WWW.EXAMPLE.TEST", "example.test"));
         assert!(!names_site("sub.example.test", "example.test"));
+    }
+
+    fn object(value: Value) -> serde_json::Map<String, Value> {
+        value.as_object().unwrap().clone()
+    }
+
+    /// A sample form value that must never reach an export.
+    const SAMPLE: &str = "sample-value-7f3a";
+
+    /// A PEM block whose label has `PRIVATE KEY`. It is built at run time,
+    /// so the source has no key block for a secret scanner.
+    fn key_block(kind: &str) -> String {
+        let label = format!("{kind}{} KEY", "PRIVATE");
+        format!("-----BEGIN {label}-----\nX\n-----END {label}-----")
+    }
+
+    const CERT: &str = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----";
+    const CHAIN: &str = "-----BEGIN CERTIFICATE-----\nMIIC\n-----END CERTIFICATE-----";
+
+    #[test]
+    fn allowlist_has_no_mutating_function() {
+        // D-027 section 3.3: these functions are never in the allowlist.
+        let mut functions: Vec<&str> = OBJECT_READS.to_vec();
+        for category in Category::ALL {
+            functions.extend(category.list_functions());
+        }
+        for func in functions {
+            let parts: Vec<&str> = func.split('.').collect();
+            let forbidden = [
+                "delete", "suspend", "resume", "new", "add", "upload", "run", "su",
+            ];
+            assert!(
+                !parts.iter().any(|part| forbidden.contains(part)),
+                "{func} must not be allowed"
+            );
+            assert!(
+                !func.contains("restore") && !func.contains("clear"),
+                "{func}"
+            );
+            assert!(!func.starts_with("session"), "{func}");
+        }
+        for func in [
+            "user.delete",
+            "su",
+            "user.su",
+            "backups.new",
+            "backup.plan.run",
+            "run",
+            "scheduler.suspend",
+            "scheduler.resume",
+            "scheduler.delete",
+            "file.upload",
+            "db.users.edit.sok",
+            "email.delete",
+            "sslcert.delete",
+        ] {
+            assert!(!is_allowed(func), "{func} must be refused");
+        }
+        for func in [
+            "auth",
+            "email.edit",
+            "sslcert.edit",
+            "userstat",
+            "phpversions",
+            "phpextensions",
+            "db.users.edit",
+        ] {
+            assert!(is_allowed(func), "{func} must be allowed");
+        }
+    }
+
+    #[test]
+    fn only_read_parameters_are_sent() {
+        for name in ["auth", "username", "password", "elid", "plid"] {
+            assert!(is_allowed_param(name));
+        }
+        for name in ["sok", "su", "func", "out", "authinfo", "clicked_button"] {
+            assert!(!is_allowed_param(name), "{name} must be refused");
+        }
+    }
+
+    #[test]
+    fn a_refused_call_sends_no_request() {
+        // Port 9 on the loopback has no panel. A refused call must fail
+        // before any request, so the error is NotAllowed, not a network error.
+        let url = PanelUrl::parse("https://127.0.0.1:9/ispmgr").unwrap();
+        let login = String::from("user");
+        let client = Session::new(url, login, String::new()).unwrap();
+        assert!(matches!(
+            client.post("user.delete", &[]),
+            Err(IspError::NotAllowed(_))
+        ));
+        assert!(matches!(
+            client.post("email.edit", &[("elid", "a@example.test"), ("sok", "ok")]),
+            Err(IspError::NotAllowed(_))
+        ));
+        assert!(matches!(
+            client.post("db", &[("su", "root")]),
+            Err(IspError::NotAllowed(_))
+        ));
+    }
+
+    #[test]
+    fn panel_url_is_https_without_credentials() {
+        let url = PanelUrl::parse("https://panel.example.test:1500/ispmgr#/").unwrap();
+        assert_eq!(url.as_str(), "https://panel.example.test:1500/ispmgr");
+        assert_eq!(url.host(), "panel.example.test");
+        for bad in [
+            "http://panel.example.test:1500/ispmgr",
+            "https://user:pass@panel.example.test/ispmgr",
+            "https://user@panel.example.test/ispmgr",
+            "https://panel.example.test/ispmgr?authinfo=user:pass",
+            "ftp://panel.example.test/",
+            "panel.example.test",
+        ] {
+            assert!(
+                matches!(PanelUrl::parse(bad), Err(IspError::InvalidUrl)),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn certificate_pem_has_the_certificate_and_the_chain() {
+        let form = object(
+            serde_json::json!({"crt": CERT, "cacrt": format!("{CHAIN}\n\n"),
+            "crtkey": key_block("")}),
+        );
+        let pem =
+            String::from_utf8(certificate_pem("example.test", &form).unwrap().unwrap()).unwrap();
+        assert_eq!(pem, format!("{CERT}\n{CHAIN}\n"));
+        // The private key field is never taken.
+        assert!(!pem.contains("PRIVATE KEY"));
+        // Without a chain, the file has the certificate only.
+        let form = object(serde_json::json!({"crt": CERT, "cacrt": ""}));
+        assert_eq!(
+            certificate_pem("example.test", &form).unwrap().unwrap(),
+            format!("{CERT}\n").into_bytes()
+        );
+    }
+
+    #[test]
+    fn certificate_without_crt_gets_no_file() {
+        let form = object(serde_json::json!({"crt": "", "cacrt": CHAIN}));
+        assert_eq!(certificate_pem("example.test", &form), Ok(None));
+        let form = object(serde_json::json!({"csr": "-----BEGIN CERTIFICATE REQUEST-----"}));
+        assert_eq!(certificate_pem("example.test", &form), Ok(None));
+    }
+
+    #[test]
+    fn certificate_with_a_private_key_or_a_bad_name_fails() {
+        let key = key_block("RSA ");
+        let form = object(serde_json::json!({"crt": format!("{CERT}\n{key}")}));
+        assert_eq!(
+            certificate_pem("example.test", &form),
+            Err("invalid_request")
+        );
+        let form = object(serde_json::json!({"crt": CERT, "cacrt": key}));
+        assert_eq!(
+            certificate_pem("example.test", &form),
+            Err("invalid_request")
+        );
+        let form = object(serde_json::json!({"crt": CERT}));
+        for name in [
+            "all",
+            "../example.test",
+            "a/b",
+            "",
+            ".hidden",
+            "*.example.test",
+        ] {
+            assert_eq!(
+                certificate_pem(name, &form),
+                Err("invalid_request"),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn mailbox_entry_never_takes_the_password() {
+        let mailbox = object(
+            serde_json::json!({"name": "box@example.test", "active": "on",
+            "size_used": "12", "size_total": "100", "key": "7"}),
+        );
+        let form = object(
+            serde_json::json!({"forward": "other@example.test", "maxsize": "100",
+            "note": "n", "passwd": SAMPLE, "confirm": SAMPLE}),
+        );
+        let entry = mailbox_entry(&mailbox, Some(&form));
+        let text = entry.to_string();
+        assert!(!text.contains(SAMPLE));
+        assert!(entry.get("passwd").is_none() && entry.get("confirm").is_none());
+        // Internal keys and the current use are not settings.
+        assert!(entry.get("size_used").is_none() && entry.get("key").is_none());
+        assert_eq!(entry["forward"], "other@example.test");
+        assert_eq!(entry["size_total"], "100");
+        // Without a form, the list fields stay.
+        assert_eq!(mailbox_entry(&mailbox, None)["name"], "box@example.test");
     }
 }

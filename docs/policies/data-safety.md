@@ -43,6 +43,14 @@ For scheduled or unattended work, carry out ordinary reads, safe configured oper
 - Paths that differ only by letter case or Unicode form can name the same file on APFS. The plan marks them as "needs verification" and offers no Create or Update for them.
 - A Scenario with selected objects plans and executes only paths inside the selection. A path that differs from a selected object only by letter case or Unicode form is "needs verification". Every Scenario executor rechecks the selection of its revision before an effect.
 
+## ISPmanager Source (D-027)
+
+- The connector only reads. It calls a compiled read-only allowlist of panel functions, sends no `sok`, and never sends `su`. A form (`*.edit`) is opened without `sok`, so the panel saves nothing.
+- SSH runs only the fixed commands of D-027 sections 7a and 7b: SFTP reads, `md5sum`, the version checks, `mysqldump`, the table list query, and `gzip -1`. QADREN never writes, renames, or deletes a file on the server, and never starts a native panel backup.
+- Secrets are never exported: mailbox and FTP passwords, the private key of a certificate (`crtkey`), and database passwords. A PEM text with `PRIVATE KEY` makes the SSL object fail. The panel password, a database password that the user enters, and the SSH host key confirmation stay in the Keychain or the Registry by `connection_id`; a session ID stays in memory.
+- A missing, renamed, or unreadable resource, a permission error, or an incomplete snapshot fails that resource. It never gives a deletion or a replacement in the destination.
+- A capability state that is not `verified_export` never gives a content export. A metadata export is labeled as metadata in `manifest.json`.
+
 ## User Content in Project Records
 
 Treat the repository and the work tracker as public. Project records are the repository (documentation, code, comments, test fixtures, scripts, commit messages) and the work tracker (issues, pull requests, comments, attachments). Project records must not contain information about the content or the accounts of a user, the owner included:

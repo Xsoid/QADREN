@@ -879,7 +879,7 @@ private struct ConnectorListView: View {
         case .yandexDisk:
             return (.ready, "Доступен как источник: с Яндекс Диска на этот Mac. Подключений может быть сколько угодно.")
         case .ispmanager:
-            return (.needsAction, "Первый этап: вход и список возможностей панели. Сценарии резервного копирования — на следующем этапе.")
+            return (.ready, "Доступна как источник резервной копии: только чтение, копия — на этот Mac или сетевой диск. Подключений может быть сколько угодно.")
         }
     }
 }
@@ -1583,7 +1583,7 @@ private struct ISPmanagerConnectionForm: View {
                             .frame(width: 90)
                         Text(port == nil
                             ? "Порт — число от 1 до 65535."
-                            : "Если у аккаунта есть SSH, файлы читаются по SFTP с этим логином и паролем. Иначе — через API панели.")
+                            : "Если у аккаунта есть SSH, файлы и дампы баз читаются по SSH с этим логином и паролем. Без доступа по SSH их копирование пока недоступно; настройки панели копируются и так.")
                             .font(.caption)
                             .foregroundStyle(port == nil ? Color.orange : Color.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -3563,7 +3563,7 @@ private struct BackupScenarioEditorView: View {
                         .font(.caption).foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                Label("Копируются файлы и папки (в том числе письма), базы MySQL, задания Cron, настройки сайтов, SSL-сертификатов, FTP, DNS-зон и почты.", systemImage: "info.circle")
+                Label("Копируются файлы и папки (в том числе письма), базы MySQL, задания Cron, настройки сайтов, SSL-сертификаты с цепочками, FTP, DNS-зоны, настройки почты, лимиты тарифа и PHP.", systemImage: "info.circle")
                     .font(.caption).foregroundStyle(.secondary)
                 if let error {
                     SettingsNotice(text: error, symbol: "exclamationmark.triangle")

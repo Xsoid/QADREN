@@ -922,3 +922,251 @@ fn publish_backup_file(
         DatabaseExportStatus::Created { bytes: size, md5 }
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::DeletionMode;
+    use crate::registry::{BackupResource, BackupScenarioDraft};
+
+    fn object(category: &str, provider_id: &str) -> BackupResource {
+        BackupResource {
+            category: category.into(),
+            provider_id: provider_id.into(),
+            kind: "object".into(),
+            rule: "include".into(),
+        }
+    }
+
+    #[test]
+    fn object_target_stays_in_its_category_folder() {
+        assert_eq!(
+            object_target("ssl_pem", "example.test"),
+            Some(PathBuf::from("ssl/example.test.pem"))
+        );
+        assert_eq!(
+            object_target("accounts", "all"),
+            Some(PathBuf::from("accounts/limits.json"))
+        );
+        assert_eq!(
+            object_target("php", "all"),
+            Some(PathBuf::from("php/runtime.json"))
+        );
+        assert_eq!(
+            object_target("dns_zone", "example.test"),
+            Some(PathBuf::from("dns/example.test.zone"))
+        );
+        for (category, provider) in [
+            ("ssl_pem", "../example.test"),
+            ("ssl_pem", "a/b"),
+            ("ssl_pem", ""),
+            ("dns", ".."),
+            ("mail", "/etc/passwd"),
+            ("accounts", "example.test"),
+            ("php", "../all"),
+            ("files", "/x"),
+            ("unknown", "all"),
+        ] {
+            assert_eq!(
+                object_target(category, provider),
+                None,
+                "{category} {provider}"
+            );
+        }
+    }
+
+    #[test]
+    fn object_export_publishes_once_and_follows_the_selection() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("qadren-ispobj-{}-{nanos}", std::process::id()));
+        let copy = dir.join("copy");
+        std::fs::create_dir_all(&copy).unwrap();
+        let registry_path = dir.join("connections.sqlite3");
+        let jobs_path = dir.join("jobs.sqlite3");
+        let staging = dir.join("staging");
+        let registry = Registry::open(&registry_path).unwrap();
+        let source = registry
+            .add_ispmanager("Panel", "https://panel.example.test:1500/ispmgr")
+            .unwrap();
+        let destination = registry.ensure_local_computer("Mac").unwrap();
+        let resources = [object("ssl", "all"), object("dns", "example.test")];
+        let scenario = registry
+            .create_backup_scenario(BackupScenarioDraft {
+                name: "Backup",
+                source_connection_id: &source,
+                destination_connection_id: &destination,
+                destination_root: copy.to_str().unwrap(),
+                source_root: "/home/user",
+                resources: &resources,
+                deletion_mode: DeletionMode::Paranoid,
+            })
+            .unwrap();
+        drop(registry);
+        let export = |run: &str, category: &str, provider: &str, content: &[u8]| {
+            run_ispmanager_object_export(
+                &jobs_path,
+                &registry_path,
+                &scenario,
+                1,
+                run,
+                category,
+                provider,
+                content,
+                &staging,
+            )
+        };
+        let pem = b"-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
+
+        // A new file is created with its size and MD5.
+        let created = export("run1", "ssl_pem", "example.test", pem).unwrap();
+        let expected_md5 = format!("{:x}", md5::compute(pem));
+        assert!(
+            matches!(&created, DatabaseExportStatus::Created { bytes, md5 }
+            if *bytes == pem.len() as u64 && *md5 == expected_md5)
+        );
+        assert_eq!(
+            std::fs::read(copy.join("ssl/example.test.pem")).unwrap(),
+            pem
+        );
+
+        // The same run and object does not publish again.
+        assert!(matches!(
+            export("run1", "ssl_pem", "example.test", pem),
+            Ok(DatabaseExportStatus::Existing(JobState::Completed))
+        ));
+        // A later run with the same bytes makes no effect.
+        assert!(matches!(
+            export("run2", "ssl_pem", "example.test", pem),
+            Ok(DatabaseExportStatus::Unchanged { .. })
+        ));
+        // The zone file follows its selected DNS zone; another zone is refused.
+        assert!(matches!(
+            export("run2", "dns_zone", "example.test", b"; zone\n"),
+            Ok(DatabaseExportStatus::Created { .. })
+        ));
+        assert_eq!(
+            export("run2", "dns_zone", "other.test", b"; zone\n"),
+            Err("invalid_selection")
+        );
+        // Objects that the revision does not select are refused.
+        assert_eq!(
+            export("run2", "cron", "all", b"{}"),
+            Err("invalid_selection")
+        );
+        assert_eq!(
+            export("run2", "mail", "example.test", b"{}"),
+            Err("invalid_selection")
+        );
+        // A name that is not a file name never reaches the destination.
+        assert_eq!(
+            export("run2", "ssl_pem", "../escape", pem),
+            Err("invalid_request")
+        );
+        assert!(!dir.join("escape.pem").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn backup_scenario_refuses_a_wrong_selection_or_endpoint() {
+        use crate::registry::RegistryError;
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("qadren-ispsel-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let registry = Registry::open(&dir.join("connections.sqlite3")).unwrap();
+        let panel = registry
+            .add_ispmanager("Panel", "https://panel.example.test:1500/ispmgr")
+            .unwrap();
+        let other_panel = registry
+            .add_ispmanager("Panel 2", "https://panel.example.test:1500/ispmgr")
+            .unwrap();
+        let mac = registry.ensure_local_computer("Mac").unwrap();
+        let create = |source: &str, destination: &str, resources: &[BackupResource]| {
+            registry.create_backup_scenario(BackupScenarioDraft {
+                name: "Backup",
+                source_connection_id: source,
+                destination_connection_id: destination,
+                destination_root: "/Volumes/copy",
+                source_root: "/home/user",
+                resources,
+                deletion_mode: DeletionMode::Paranoid,
+            })
+        };
+        let file = |path: &str, rule: &str| BackupResource {
+            category: "files".into(),
+            provider_id: path.into(),
+            kind: "dir".into(),
+            rule: rule.into(),
+        };
+        // An empty selection means nothing, so it cannot be saved.
+        assert!(matches!(
+            create(&panel, &mac, &[]),
+            Err(RegistryError::InvalidSelection)
+        ));
+        // A file rule outside the home folder, or with `..`, is refused.
+        for path in ["/etc", "/home/username", "/home/user/../other", "relative"] {
+            assert!(
+                matches!(
+                    create(&panel, &mac, &[file(path, "include")]),
+                    Err(RegistryError::InvalidSelection)
+                ),
+                "{path}"
+            );
+        }
+        // An exclusion needs a selected folder above it.
+        assert!(matches!(
+            create(&panel, &mac, &[file("/home/user/www/cache", "exclude")]),
+            Err(RegistryError::InvalidSelection)
+        ));
+        // Whole-list objects use `all` only; names must be file names.
+        for (category, provider) in [
+            ("accounts", "user"),
+            ("php", "8.2"),
+            ("ssl", "example.test"),
+            ("cron", "1"),
+            ("dns", "../zone"),
+            ("mail", "a/b"),
+            ("sites", ""),
+        ] {
+            assert!(
+                matches!(
+                    create(&panel, &mac, &[object(category, provider)]),
+                    Err(RegistryError::InvalidSelection)
+                ),
+                "{category} {provider}"
+            );
+        }
+        // ISPmanager is never a destination, and the source must be ISPmanager.
+        assert!(matches!(
+            create(&panel, &other_panel, &[object("cron", "all")]),
+            Err(RegistryError::UnsupportedScenarioEndpoint)
+        ));
+        assert!(matches!(
+            create(&mac, &mac, &[object("cron", "all")]),
+            Err(RegistryError::UnsupportedScenarioEndpoint)
+        ));
+        // A valid selection is saved.
+        assert!(create(
+            &panel,
+            &mac,
+            &[
+                file("/home/user/www", "include"),
+                file("/home/user/www/cache", "exclude"),
+                object("accounts", "all"),
+                object("php", "all"),
+                object("sites", "all")
+            ]
+        )
+        .is_ok());
+        drop(registry);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

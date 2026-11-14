@@ -103,6 +103,7 @@ The owner decided on 2026-11-01: file content uses the transport with the best s
 6. **Choice per connection.** The connection check tries SFTP sign-in. The capability report states the file transport: `sftp`, or `panel_api` with the reason (no SSH access, sign-in refused, host key not confirmed). A run uses the transport that the last check confirmed and rechecks it before the effect.
 7. **Links and special files.** SFTP gives `lstat` and `readlink`. A symbolic link is recorded as a link with its target; QADREN does not follow it out of the selection. A device, socket, or pipe is an omission with a reason. Nothing is skipped silently.
 8. **Dependency.** SFTP needs an SSH client library in Rust Core. Choose a pure Rust library that uses the existing `tokio` and `ring` dependencies, and measure the binary size change (D-014) before the merge.
+9. **Status of the panel API transport.** The panel API file transport (`file`, `file.download`) is not implemented. A run on a connection without a confirmed SFTP transport fails the file part with its reason (`ispmanager_host_key_unconfirmed`, `ispmanager_sign_in_refused`, or `ispmanager_network_error`). The panel objects of section 7c do not need SFTP. Before the implementation, a live check must prove that `file.download` of one file makes no archive or temporary file on the server (section 8).
 
 ### 7b. Database dumps: panel facts, SSH dump, panel dump as the fallback
 

@@ -33,6 +33,17 @@ A run creates, updates, and deletes destination objects so that the destination 
 
 The Worker may continue permitted local work when the Controller is unavailable. Remote delegation requires a separate decision for transport, trust, and idempotency.
 
+## Backup/export mode
+
+An ISPmanager 6 source uses the Scenario mode **Backup/export** ([D-027](../decisions/D-027-ispmanager-backup-source.md) section 5). It uses the same Scenario revisions, Scenario Runs, stored plans, batch children, durable attempts, schedules, and Worker as synchronization. There is no second scheduler or executor.
+
+- The mode is one-way, from the panel to a Local Filesystem or SMB destination root. ISPmanager is never a destination. The connector makes no remote mutation.
+- The destination is one current copy. Each data type has its own subfolder (`files/`, `databases/`, `cron/`, `dns/`, `mail/`, `sites/`, `ssl/`, `ftp/`, `accounts/`, `php/`). `manifest.json` records the last run.
+- `files/` is a mirror of the selected source scope under the deletion mode of the revision. A panel object file (for example `dns/<zone>.json` or `ssl/<certificate>.pem`) is replaced when it changes. It is not deleted when its object goes away.
+- The selection is a typed list of resources, not a list of paths. An empty selection means nothing.
+- Each panel object has a durable result in the run: `created`, `updated`, `unchanged`, `failed`, or `cancelled`. A failed object keeps its earlier file, and the run is `failed`.
+- The mode adds no BackupSet, no generations, and no retention.
+
 ## Adapter boundary
 
 An adapter declares capabilities. The scheduler must not assume an unconfirmed capability. Release 1 uses Local Filesystem, SMB network drives through a QADREN mount (D-022), and Yandex Disk as a one-way source (D-023). iCloud is post-release. See [Storage adapters](storage-adapters.md) and [Data safety](../policies/data-safety.md).
