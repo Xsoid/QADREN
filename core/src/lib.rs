@@ -24,6 +24,7 @@ pub mod schedule_dispatch;
 pub mod scheduler;
 pub mod smb_mount;
 pub mod snapshot;
+pub mod sql_split;
 pub mod storage_access;
 pub mod verification;
 pub mod write_roots;

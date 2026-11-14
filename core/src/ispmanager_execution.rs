@@ -691,6 +691,28 @@ pub fn run_ispmanager_database_export(
 
     timing.dump = started.elapsed();
     let _ = progress(ExportProgress::Publish);
+    // A large dump, and a database that is split already, get one file for
+    // each table (section 7b.11.1). A split database stays split.
+    let folder = Path::new("databases").join(database);
+    let split = size >= SPLIT_FROM_BYTES
+        || matches!(
+            destination.stat(&folder.join(crate::sql_split::MANIFEST_FILE)),
+            Ok(entry) if !entry.is_directory
+        );
+    if split {
+        return publish_split_dump(
+            registry_path,
+            &mut store,
+            &destination,
+            &destination_connection,
+            (scenario_id, scenario_revision),
+            (run_id, database, &job_id),
+            &staging,
+            (size, md5),
+            staging_dir,
+            timing,
+        );
+    }
     publish_backup_file(
         registry_path,
         &mut store,
@@ -703,6 +725,127 @@ pub fn run_ispmanager_database_export(
         &Path::new("databases").join(format!("{database}.sql")),
         timing,
     )
+}
+
+/// The dump size from which a database gets one file for each table
+/// (owner decision of 2026-11-14: 700 MB).
+pub const SPLIT_FROM_BYTES: u64 = 700 * 1024 * 1024;
+
+/// The Job of one file of a split database dump in one run.
+fn database_file_job_id(run_id: &str, database: &str, path: &str) -> String {
+    let digest = format!(
+        "{:x}",
+        md5::compute(format!("{database}/{path}").as_bytes())
+    );
+    format!("ispdb-{run_id}-{}", &digest[..16])
+}
+
+/// Split a complete dump into `databases/<database>/` (section 7b.11.1).
+/// Each file is published like a dump: only a file with other bytes is
+/// written, with its own durable attempt. `manifest.json` is published
+/// last, with the Job of the database, so that it names only files that are
+/// in the copy. The old `databases/<database>.sql` and the file of a table
+/// that is gone stay in the copy: they are not in `manifest.json`.
+#[allow(clippy::too_many_arguments)]
+fn publish_split_dump(
+    registry_path: &Path,
+    store: &mut JobStore,
+    destination: &LocalFilesystem,
+    destination_connection: &str,
+    scenario: (&str, u64),
+    (run_id, database, job_id): (&str, &str, &str),
+    staging: &Path,
+    (size, md5): (u64, String),
+    staging_dir: &Path,
+    timing: &mut DatabaseExportTiming,
+) -> Result<DatabaseExportStatus, &'static str> {
+    use crate::sql_split::{split_dump, split_manifest, MANIFEST_FILE};
+    let dir = staging_dir.join(format!("{job_id}.split"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let split = std::fs::File::open(staging)
+        .and_then(|file| split_dump(io::BufReader::with_capacity(1 << 20, file), &dir));
+    let _ = std::fs::remove_file(staging);
+    let remove_dir = || {
+        let _ = std::fs::remove_dir_all(&dir);
+    };
+    let files = match split {
+        Ok(files) => files,
+        Err(error) => {
+            remove_dir();
+            return Err(if error.kind() == io::ErrorKind::InvalidData {
+                "ispmanager_database_dump_failed"
+            } else {
+                "local_root_unavailable"
+            });
+        }
+    };
+    let folder = Path::new("databases").join(database);
+    let mut changed = false;
+    for file in &files {
+        let file_job = database_file_job_id(run_id, database, &file.path);
+        match store.get(&file_job) {
+            Ok(None) => {}
+            // This run published the file already.
+            Ok(Some(job)) if job.state == JobState::Completed => {
+                changed = true;
+                continue;
+            }
+            Ok(Some(job)) => {
+                remove_dir();
+                return Ok(DatabaseExportStatus::Existing(job.state));
+            }
+            Err(_) => {
+                remove_dir();
+                return Err("job_store_unavailable");
+            }
+        }
+        match publish_backup_file(
+            registry_path,
+            store,
+            destination,
+            destination_connection,
+            scenario,
+            &file_job,
+            &dir.join(&file.path),
+            (file.bytes, file.md5.clone()),
+            &folder.join(&file.path),
+            timing,
+        ) {
+            Ok(DatabaseExportStatus::Unchanged { .. }) => {}
+            Ok(_) => changed = true,
+            Err(code) => {
+                remove_dir();
+                return Err(code);
+            }
+        }
+    }
+    let manifest = split_manifest(database, &files);
+    let manifest_path = dir.join(MANIFEST_FILE);
+    if std::fs::write(&manifest_path, &manifest).is_err() {
+        remove_dir();
+        return Err("local_root_unavailable");
+    }
+    let published = publish_backup_file(
+        registry_path,
+        store,
+        destination,
+        destination_connection,
+        scenario,
+        job_id,
+        &manifest_path,
+        (
+            manifest.len() as u64,
+            format!("{:x}", md5::compute(&manifest)),
+        ),
+        &folder.join(MANIFEST_FILE),
+        timing,
+    );
+    remove_dir();
+    Ok(match published? {
+        DatabaseExportStatus::Created { .. } => DatabaseExportStatus::Created { bytes: size, md5 },
+        _ if changed => DatabaseExportStatus::Updated { bytes: size, md5 },
+        _ => DatabaseExportStatus::Unchanged { bytes: size, md5 },
+    })
 }
 
 /// The Job of one Cron, DNS, or mail export in one run.

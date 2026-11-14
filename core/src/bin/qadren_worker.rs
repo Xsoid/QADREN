@@ -1068,7 +1068,7 @@ fn write_backup_manifest(paths: &WorkerPaths, run_id: &str) {
         manifest["categories"]["databases"] = serde_json::json!({
             "folder": "databases",
             "artifact": "database dump",
-            "format": "mysqldump SQL, not compressed (<database>.sql)",
+            "format": "mysqldump SQL, not compressed (<database>.sql); from 700 MiB, one file for each table in <database>/ with its manifest.json",
             "transport": "mysqldump over SSH, through gzip -1 when the server has gzip; access facts from the panel. Without SSH, the panel dump db.dump",
             "structure_only": "a selected table with rule structure_only has its structure and no data",
             "consistency": "one transaction for InnoDB tables; no table lock",
