@@ -761,4 +761,49 @@ wait_for 240 bash -c "(( \$(sqlite3 '$DATA/jobs.sqlite3' \"select count(*) from 
 regtool local-enabled true
 fi
 
+if section browser; then
+step "Browser: deep folders and a long name are selectable in separate branches; a hidden file goes with its folder"
+BSRC="$TEST_ROOT/bsrc"; BDST="$TEST_ROOT/bdst"; mkdir -p "$BDST"
+DEEP="l01/l02/l03/l04/l05/l06/l07/l08/l09/l10/l11/l12"
+LONG="long-$(printf 'x%.0s' $(seq 1 170)).txt"
+mkdir -p "$BSRC/$DEEP/box" "$BSRC/other"
+printf 'long\n' > "$BSRC/$DEEP/$LONG"
+printf 'hidden\n' > "$BSRC/$DEEP/box/.hidden-note.txt"
+printf 'box\n' > "$BSRC/$DEEP/box/b.txt"
+printf 'not selected\n' > "$BSRC/$DEEP/skip.txt"
+printf 'other\n' > "$BSRC/other/o.txt"
+printf 'sibling\n' > "$BSRC/sibling.txt"
+to_scenario_list
+ax press Настройки AXButton "Создать сценарий" 0
+ax wait Настройки AXTextField "Название сценария"
+ax set Настройки AXTextField "Название сценария" "E2E browser"
+choose_folder 0 "$BSRC"
+# Open each level through its row, without a typed path.
+for level in ${DEEP//\// }; do
+  ax within Настройки "$level" AXButton "Открыть"
+  ax wait Настройки AXButton "$level" 10
+done
+ax wait Настройки AXStaticText "$LONG" 10
+ax press Настройки AXCheckBox "Выбрать $LONG"
+ax press Настройки AXCheckBox "Выбрать box"
+# Back to the root; a long path folds its first crumbs into "…". The
+# selection stays.
+ax press Настройки AXButton "Показать корень" 0
+ax wait Настройки AXCheckBox "Выбрать other" 10
+ax press Настройки AXCheckBox "Выбрать other"
+choose_folder 1 "$BDST"
+ax press Настройки AXButton "Создать сценарий" 0
+ax wait Настройки AXStaticText "E2E browser"
+B_ID="$(registry_sql "select id from scenarios where name='E2E browser'")"
+B_SELECTED="$(registry_sql "select relative_path from scenario_revision_selection where scenario_id='$B_ID' order by relative_path" | tr '\n' '|')"
+[[ "$B_SELECTED" == "$DEEP/box|$DEEP/$LONG|other|" ]] || fail "the revision has another selection: $B_SELECTED"
+open_plan "E2E browser"
+synchronize "Создать: 4"
+wait_for 20 test -f "$BDST/$DEEP/$LONG" || fail "the file with a long name was not copied"
+wait_for 20 test -f "$BDST/$DEEP/box/.hidden-note.txt" || fail "the hidden file in a selected folder was not copied"
+wait_for 20 test -f "$BDST/other/o.txt" || fail "the selected folder was not copied"
+ax gone Настройки "*" "Выполнение пакета" 20
+[[ ! -e "$BDST/sibling.txt" && ! -e "$BDST/$DEEP/skip.txt" ]] || fail "an object outside the selection was copied"
+fi
+
 echo "Settings native E2E passed"

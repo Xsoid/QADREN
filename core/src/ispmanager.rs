@@ -529,7 +529,15 @@ pub fn database_key(
     let doc = session
         .read("db", &[])
         .map_err(|_| "ispmanager_database_list_failed")?;
-    let db = elements(&doc)
+    database_key_in(&doc, database)
+}
+
+/// The key of `database` in the `db` list document.
+fn database_key_in(
+    doc: &serde_json::Map<String, Value>,
+    database: &str,
+) -> std::result::Result<String, &'static str> {
+    let db = elements(doc)
         .into_iter()
         .find(|db| text(db, "name").as_deref() == Some(database))
         .ok_or("ispmanager_database_missing")?;
@@ -2153,5 +2161,91 @@ mod tests {
         assert_eq!(entry["size_total"], "100");
         // Without a form, the list fields stay.
         assert_eq!(mailbox_entry(&mailbox, None)["name"], "box@example.test");
+    }
+
+    fn doc(json: Value) -> serde_json::Map<String, Value> {
+        json.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn database_key_needs_the_server_and_mysql() {
+        let list = doc(serde_json::json!({"elem": [
+            {"name": "shop", "server": "MySQL 8", "pair": "shop->MySQL 8"},
+            {"name": "blog", "server": "PostgreSQL", "pair": "blog->PostgreSQL"},
+            {"name": "old", "server": "mysql"}
+        ]}));
+        // `db.dump` needs the pair: the name alone has no database server.
+        assert_eq!(database_key_in(&list, "shop").unwrap(), "shop->MySQL 8");
+        assert_eq!(
+            database_key_in(&list, "blog"),
+            Err("ispmanager_database_unsupported")
+        );
+        assert_eq!(database_key_in(&list, "old").unwrap(), "old");
+        assert_eq!(
+            database_key_in(&list, "gone"),
+            Err("ispmanager_database_missing")
+        );
+    }
+
+    #[test]
+    fn panel_dump_is_complete_only_with_header_and_end() {
+        let check = |parts: &[&str]| {
+            let mut check = DumpCheck::default();
+            for part in parts {
+                check.add(part.as_bytes());
+            }
+            check.complete()
+        };
+        assert!(check(&[
+            "-- MySQL dump 10.13\n",
+            "INSERT 1;\n",
+            "-- Dump completed on x\n\n"
+        ]));
+        assert!(check(&["\n-- MariaDB dump 10.19\n-- Dump completed\n"]));
+        // A cut stream, a panel error page, and an empty answer are refused.
+        assert!(!check(&["-- MySQL dump 10.13\n", "INSERT 1;\n"]));
+        assert!(!check(&["{\"doc\": {\"error\": {}}}\n-- Dump completed\n"]));
+        assert!(!check(&[]));
+        // The end marker is found after many chunks.
+        let long = "INSERT INTO t VALUES (1);\n".repeat(1000);
+        assert!(check(&[
+            "-- MySQL dump\n",
+            &long,
+            &long,
+            "-- Dump completed\n"
+        ]));
+    }
+
+    #[test]
+    fn panel_errors_and_lists_are_classified() {
+        let error = |kind: &str| {
+            document(serde_json::json!({"doc": {"error": {"$type": kind, "msg": {"$": "text"}}}}))
+        };
+        // An ended session is the panel error `auth`: the client signs in again.
+        assert!(matches!(error("auth"), Err(IspError::Panel(kind)) if kind == "auth"));
+        assert!(matches!(error("access"), Err(IspError::Panel(kind)) if kind == "access"));
+        assert!(matches!(error("missed"), Err(IspError::Panel(kind)) if kind == "missed"));
+        assert!(matches!(
+            document(serde_json::json!({"no": "doc"})),
+            Err(IspError::MalformedResponse)
+        ));
+        assert_eq!(
+            classify_list(&doc(serde_json::json!({}))),
+            ListOutcome::Empty
+        );
+        assert_eq!(
+            classify_list(&doc(serde_json::json!({"elem": {"name": "a", "key": "1"}}))),
+            ListOutcome::Items {
+                fields: vec!["key".into(), "name".into()]
+            }
+        );
+        assert_eq!(
+            classify_list(&doc(
+                serde_json::json!({"elem": [{"name": "a"}, {"name": "b"}]})
+            )),
+            ListOutcome::Items {
+                fields: vec!["name".into()]
+            }
+        );
     }
 }

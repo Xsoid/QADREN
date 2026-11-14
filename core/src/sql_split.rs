@@ -255,3 +255,220 @@ pub fn split_manifest(database: &str, files: &[SplitFile]) -> Vec<u8> {
     text.push(b'\n');
     text
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A small dump in the form of `mysqldump` 8, with a trigger, a view,
+    /// a routine, and two tables whose names differ only in letter case.
+    const DUMP: &str = "-- MySQL dump 10.13
+--
+/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;
+/*!50503 SET NAMES utf8mb4 */;
+/*!40103 SET @OLD_TIME_ZONE=@@TIME_ZONE */;
+/*!40103 SET TIME_ZONE='+00:00' */;
+
+--
+-- Table structure for table `orders`
+--
+
+CREATE TABLE `orders` (`id` int);
+
+--
+-- Dumping data for table `orders`
+--
+
+LOCK TABLES `orders` WRITE;
+INSERT INTO `orders` VALUES (1),(2);
+UNLOCK TABLES;
+DELIMITER ;;
+/*!50003 CREATE*/ /*!50003 TRIGGER `orders_ai` AFTER INSERT ON `orders` FOR EACH ROW SET @x = 1 */;;
+DELIMITER ;
+
+--
+-- Table structure for table `Orders`
+--
+
+CREATE TABLE `Orders` (`id` int);
+
+--
+-- Temporary view structure for view `v`
+--
+
+CREATE VIEW `v` AS SELECT 1 AS `id`;
+
+--
+-- Table structure for table `we``ird/name`
+--
+
+CREATE TABLE `we``ird/name` (`id` int);
+
+--
+-- Dumping data for table `Orders`
+--
+
+LOCK TABLES `Orders` WRITE;
+INSERT INTO `Orders` VALUES (3);
+UNLOCK TABLES;
+
+--
+-- Dumping data for table `we``ird/name`
+--
+
+LOCK TABLES `we``ird/name` WRITE;
+INSERT INTO `we``ird/name` VALUES (4);
+UNLOCK TABLES;
+
+--
+-- Final view structure for view `v`
+--
+
+/*!50001 CREATE VIEW `v` AS select 1 */;
+
+--
+-- Dumping routines for database 'example'
+--
+DELIMITER ;;
+CREATE PROCEDURE `p`() BEGIN SELECT 1; END ;;
+DELIMITER ;
+/*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
+
+-- Dump completed
+";
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "qadren-split-{name}-{}-{nanos}",
+            std::process::id()
+        ))
+    }
+
+    fn read(dir: &Path, path: &str) -> String {
+        std::fs::read_to_string(dir.join(path)).unwrap()
+    }
+
+    #[test]
+    fn split_keeps_every_line_once_in_load_order() {
+        let dir = temp_dir("lines");
+        let files = split_dump(DUMP.as_bytes(), &dir).unwrap();
+        let paths: Vec<&str> = files.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(paths.first(), Some(&SCHEMA_FILE));
+        assert_eq!(paths.last(), Some(&OBJECTS_FILE));
+        assert_eq!(paths.len(), 5);
+        // Each line of the dump is in one file. Table files add only the
+        // header settings and their restore lines.
+        let mut source: Vec<&str> = DUMP.lines().collect();
+        let mut split = Vec::new();
+        for file in &files {
+            let text = read(&dir, &file.path);
+            let lines: Vec<String> = text.lines().map(str::to_owned).collect();
+            if file.table.is_some() {
+                let start = lines
+                    .iter()
+                    .position(|line| line.starts_with("-- Dumping data for table"))
+                    .unwrap();
+                let end = lines
+                    .iter()
+                    .rposition(|line| line == "UNLOCK TABLES;")
+                    .unwrap();
+                split.extend(lines[start..=end].iter().cloned());
+            } else {
+                split.extend(lines);
+            }
+            // The recorded size and MD5 are the bytes on disk.
+            assert_eq!(file.bytes, text.len() as u64);
+            assert_eq!(file.md5, format!("{:x}", md5::compute(text.as_bytes())));
+        }
+        let mut split: Vec<&str> = split.iter().map(String::as_str).collect();
+        source.sort_unstable();
+        split.sort_unstable();
+        assert_eq!(source, split);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn split_puts_objects_after_the_data() {
+        let dir = temp_dir("objects");
+        split_dump(DUMP.as_bytes(), &dir).unwrap();
+        let schema = read(&dir, SCHEMA_FILE);
+        let objects = read(&dir, OBJECTS_FILE);
+        assert!(schema.contains("CREATE TABLE `orders`"));
+        assert!(schema.contains("CREATE VIEW `v` AS SELECT 1"));
+        assert!(!schema.contains("INSERT INTO"));
+        assert!(!schema.contains("TRIGGER"));
+        assert!(objects.contains("TRIGGER `orders_ai`"));
+        assert!(objects.contains("CREATE VIEW `v` AS select 1"));
+        assert!(objects.contains("CREATE PROCEDURE `p`"));
+        assert!(!objects.contains("INSERT INTO"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn table_file_has_the_session_settings_and_their_restore() {
+        let dir = temp_dir("settings");
+        split_dump(DUMP.as_bytes(), &dir).unwrap();
+        let table = read(&dir, "tables/orders.sql");
+        assert!(table.starts_with("/*!40101 SET @OLD_CHARACTER_SET_CLIENT"));
+        assert!(table.contains("SET TIME_ZONE='+00:00'"));
+        assert!(table.contains("INSERT INTO `orders` VALUES (1),(2);"));
+        assert!(!table.contains("TRIGGER"));
+        assert!(table.ends_with(
+            "UNLOCK TABLES;\n/*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;\n\
+             /*!40101 SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT */;\n"
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn table_names_give_safe_and_separate_file_names() {
+        let dir = temp_dir("names");
+        let files = split_dump(DUMP.as_bytes(), &dir).unwrap();
+        let tables: Vec<(&str, &str)> = files
+            .iter()
+            .filter_map(|file| Some((file.table.as_deref()?, file.path.as_str())))
+            .collect();
+        assert_eq!(tables[0], ("orders", "tables/orders.sql"));
+        // `Orders` is the same name as `orders` on a macOS volume.
+        assert_eq!(tables[1].0, "Orders");
+        assert!(tables[1].1.starts_with("tables/t-"));
+        // A name with a back quote and `/` never becomes a path.
+        assert_eq!(tables[2].0, "we`ird/name");
+        assert!(tables[2].1.starts_with("tables/t-") && !tables[2].1[7..].contains('/'));
+        assert_ne!(tables[1].1, tables[2].1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_table_with_two_data_sections_fails() {
+        let dir = temp_dir("twice");
+        let dump = "-- Dumping data for table `a`\nINSERT INTO `a` VALUES (1);\nUNLOCK TABLES;\n\
+                    -- Dumping data for table `a`\nINSERT INTO `a` VALUES (2);\nUNLOCK TABLES;\n";
+        let error = split_dump(dump.as_bytes(), &dir).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_is_the_same_for_the_same_files() {
+        let (one, two) = (temp_dir("m1"), temp_dir("m2"));
+        let first = split_dump(DUMP.as_bytes(), &one).unwrap();
+        let second = split_dump(DUMP.as_bytes(), &two).unwrap();
+        assert_eq!(
+            split_manifest("example", &first),
+            split_manifest("example", &second)
+        );
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&split_manifest("example", &first)).unwrap();
+        assert_eq!(
+            manifest["load_order"].as_array().unwrap().len(),
+            first.len()
+        );
+        let _ = std::fs::remove_dir_all(&one);
+        let _ = std::fs::remove_dir_all(&two);
+    }
+}

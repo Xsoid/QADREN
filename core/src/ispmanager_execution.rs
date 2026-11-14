@@ -693,15 +693,8 @@ pub fn run_ispmanager_database_export(
     let _ = progress(ExportProgress::Publish);
     // A large dump, and a database that is split already, get one file for
     // each table (section 7b.11.1). A split database stays split.
-    let folder = Path::new("databases").join(database);
-    let split = size >= SPLIT_FROM_BYTES
-        || matches!(
-            destination.stat(&folder.join(crate::sql_split::MANIFEST_FILE)),
-            Ok(entry) if !entry.is_directory
-        );
-    if split {
+    if split_layout(&destination, database, size, SPLIT_FROM_BYTES) {
         return publish_split_dump(
-            database_path,
             registry_path,
             &mut store,
             &destination,
@@ -732,6 +725,20 @@ pub fn run_ispmanager_database_export(
 /// (owner decision of 2026-11-14: 700 MB).
 pub const SPLIT_FROM_BYTES: u64 = 700 * 1024 * 1024;
 
+/// A dump of `size` bytes gets one file for each table from `limit`, and
+/// a database that has `databases/<database>/manifest.json` stays split.
+fn split_layout(destination: &LocalFilesystem, database: &str, size: u64, limit: u64) -> bool {
+    size >= limit
+        || matches!(
+            destination.stat(
+                &Path::new("databases")
+                    .join(database)
+                    .join(crate::sql_split::MANIFEST_FILE)
+            ),
+            Ok(entry) if !entry.is_directory
+        )
+}
+
 /// The Job of one file of a split database dump in one run.
 fn database_file_job_id(run_id: &str, database: &str, path: &str) -> String {
     let digest = format!(
@@ -750,7 +757,6 @@ fn database_file_job_id(run_id: &str, database: &str, path: &str) -> String {
 /// (owner decision 2026-11-15); in Paranoid mode they stay.
 #[allow(clippy::too_many_arguments)]
 fn publish_split_dump(
-    database_path: &Path,
     registry_path: &Path,
     store: &mut JobStore,
     destination: &LocalFilesystem,
@@ -871,7 +877,7 @@ fn publish_split_dump(
         let digest = format!("{:x}", md5::compute(path.as_bytes()));
         let delete_job = format!("ispdbdel-{run_id}-{}", &digest[..16]);
         match crate::job_execution::run_backup_database_file_delete(
-            database_path,
+            store,
             registry_path,
             scenario.0,
             scenario.1,
@@ -1402,5 +1408,244 @@ mod tests {
         .is_ok());
         drop(registry);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A dump in the form of `mysqldump` with the data of `tables`.
+    fn dump(tables: &[(&str, &str)]) -> String {
+        let mut text =
+            String::from("-- MySQL dump 10.13\n/*!40103 SET @OLD_TIME_ZONE=@@TIME_ZONE */;\n");
+        for (table, _) in tables {
+            text.push_str(&format!(
+                "--\n-- Table structure for table `{table}`\n--\nCREATE TABLE `{table}` (`id` int);\n"
+            ));
+        }
+        for (table, rows) in tables {
+            text.push_str(&format!(
+                "--\n-- Dumping data for table `{table}`\n--\nLOCK TABLES `{table}` WRITE;\n\
+                 INSERT INTO `{table}` VALUES {rows};\nUNLOCK TABLES;\n"
+            ));
+        }
+        text.push_str("/*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;\n-- Dump completed\n");
+        text
+    }
+
+    fn test_trash() -> &'static Path {
+        static TRASH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        TRASH.get_or_init(|| {
+            let trash = std::fs::canonicalize(std::env::temp_dir())
+                .unwrap()
+                .join(format!("qadren-ispdb-trash-{}", std::process::id()));
+            std::fs::create_dir_all(&trash).unwrap();
+            crate::local_fs::override_trash_directory_for_tests(trash.clone());
+            trash
+        })
+    }
+
+    struct DumpFixture {
+        dir: PathBuf,
+        copy: PathBuf,
+        registry_path: PathBuf,
+        jobs_path: PathBuf,
+        staging: PathBuf,
+        scenario: String,
+        destination_connection: String,
+    }
+
+    impl DumpFixture {
+        fn new(name: &str, deletion_mode: DeletionMode) -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let dir = std::fs::canonicalize(std::env::temp_dir())
+                .unwrap()
+                .join(format!(
+                    "qadren-ispdb-{name}-{}-{nanos}",
+                    std::process::id()
+                ));
+            let copy = dir.join("copy");
+            std::fs::create_dir_all(&copy).unwrap();
+            // Deletions and replaced files go into one Trash of the test
+            // process, never the user Trash. The override is global, so all
+            // tests share it, and it stays until the process ends.
+            test_trash();
+            let registry_path = dir.join("connections.sqlite3");
+            let registry = Registry::open(&registry_path).unwrap();
+            let source = registry
+                .add_ispmanager("Panel", "https://panel.example.test:1500/ispmgr")
+                .unwrap();
+            let destination_connection = registry.ensure_local_computer("Mac").unwrap();
+            let scenario = registry
+                .create_backup_scenario(BackupScenarioDraft {
+                    name: "Backup",
+                    source_connection_id: &source,
+                    destination_connection_id: &destination_connection,
+                    destination_root: copy.to_str().unwrap(),
+                    source_root: "/home/user",
+                    resources: &[object("databases", "shop")],
+                    deletion_mode,
+                })
+                .unwrap();
+            Self {
+                jobs_path: dir.join("jobs.sqlite3"),
+                staging: dir.join("staging"),
+                dir,
+                copy,
+                registry_path,
+                scenario,
+                destination_connection,
+            }
+        }
+
+        /// Publish one complete dump of `shop` as a split database.
+        fn publish(&self, run: &str, text: &str) -> Result<DatabaseExportStatus, &'static str> {
+            std::fs::create_dir_all(&self.staging).unwrap();
+            let job_id = database_export_job_id(run, "shop");
+            let staging = self.staging.join(format!("{job_id}.sql"));
+            std::fs::write(&staging, text).unwrap();
+            let mut store = JobStore::open(&self.jobs_path).unwrap();
+            let destination = LocalFilesystem::open(&self.copy).unwrap();
+            publish_split_dump(
+                &self.registry_path,
+                &mut store,
+                &destination,
+                &self.destination_connection,
+                (&self.scenario, 1),
+                (run, "shop", &job_id),
+                &staging,
+                (text.len() as u64, format!("{:x}", md5::compute(text))),
+                &self.staging,
+                &mut DatabaseExportTiming::default(),
+            )
+        }
+
+        fn exists(&self, path: &str) -> bool {
+            self.copy.join(path).exists()
+        }
+    }
+
+    impl Drop for DumpFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn split_dump_replaces_the_one_file_dump_and_follows_the_tables() {
+        let fixture = DumpFixture::new("simple", DeletionMode::Simple);
+        std::fs::create_dir_all(fixture.copy.join("databases")).unwrap();
+        std::fs::write(fixture.copy.join("databases/shop.sql"), "old dump").unwrap();
+        let destination = LocalFilesystem::open(&fixture.copy).unwrap();
+        assert!(!split_layout(&destination, "shop", 10, 100));
+        assert!(split_layout(&destination, "shop", 100, 100));
+
+        // The first split: all files, then the old one-file dump goes.
+        let first = dump(&[("a", "(1)"), ("b", "(2)")]);
+        assert!(matches!(
+            fixture.publish("run1", &first),
+            Ok(DatabaseExportStatus::Created { .. })
+        ));
+        for path in [
+            "databases/shop/schema.sql",
+            "databases/shop/tables/a.sql",
+            "databases/shop/tables/b.sql",
+            "databases/shop/objects.sql",
+            "databases/shop/manifest.json",
+        ] {
+            assert!(fixture.exists(path), "{path}");
+        }
+        assert!(!fixture.exists("databases/shop.sql"));
+        assert!(test_trash().read_dir().unwrap().next().is_some());
+        // A split database stays split below the limit.
+        assert!(split_layout(&destination, "shop", 10, 100));
+
+        // Table `b` is gone and `c` is new; `a` keeps its bytes and file.
+        let a_before = std::fs::metadata(fixture.copy.join("databases/shop/tables/a.sql"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        let second = dump(&[("a", "(1)"), ("c", "(3)")]);
+        assert!(matches!(
+            fixture.publish("run2", &second),
+            Ok(DatabaseExportStatus::Updated { .. })
+        ));
+        assert!(fixture.exists("databases/shop/tables/c.sql"));
+        assert!(!fixture.exists("databases/shop/tables/b.sql"));
+        let a_after = std::fs::metadata(fixture.copy.join("databases/shop/tables/a.sql"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(a_before, a_after);
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(fixture.copy.join("databases/shop/manifest.json")).unwrap(),
+        )
+        .unwrap();
+        let listed: Vec<&str> = manifest["load_order"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|file| file["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            listed,
+            ["schema.sql", "tables/a.sql", "tables/c.sql", "objects.sql"]
+        );
+
+        // The same dump again gives no effect.
+        assert!(matches!(
+            fixture.publish("run3", &second),
+            Ok(DatabaseExportStatus::Unchanged { .. })
+        ));
+        // The same run does not publish its database again.
+        assert!(matches!(
+            fixture.publish("run2", &second),
+            Ok(DatabaseExportStatus::Unchanged { .. }) | Ok(DatabaseExportStatus::Updated { .. })
+        ));
+    }
+
+    #[test]
+    fn paranoid_mode_keeps_the_old_database_files() {
+        let fixture = DumpFixture::new("paranoid", DeletionMode::Paranoid);
+        std::fs::create_dir_all(fixture.copy.join("databases")).unwrap();
+        std::fs::write(fixture.copy.join("databases/shop.sql"), "old dump").unwrap();
+        fixture
+            .publish("run1", &dump(&[("a", "(1)"), ("b", "(2)")]))
+            .unwrap();
+        fixture.publish("run2", &dump(&[("a", "(1)")])).unwrap();
+        assert!(fixture.exists("databases/shop.sql"));
+        assert!(fixture.exists("databases/shop/tables/b.sql"));
+    }
+
+    #[test]
+    fn database_file_delete_stays_inside_databases() {
+        let fixture = DumpFixture::new("guard", DeletionMode::Simple);
+        std::fs::create_dir_all(fixture.copy.join("files")).unwrap();
+        std::fs::write(fixture.copy.join("files/keep.sql"), "site").unwrap();
+        for (index, path) in [
+            "files/keep.sql",
+            "databases/../files/keep.sql",
+            "databases/shop/schema.sql",
+            "databases/shop/manifest.json",
+            "databases/shop/tables/../../../files/keep.sql",
+            "/databases/shop.sql",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let mut store = JobStore::open(&fixture.jobs_path).unwrap();
+            let result = crate::job_execution::run_backup_database_file_delete(
+                &mut store,
+                &fixture.registry_path,
+                &fixture.scenario,
+                1,
+                path,
+                &format!("ispdbdel-guard-{index}"),
+            );
+            assert!(
+                matches!(result, Err(LocalFileCopyError::ScenarioScopeMismatch)),
+                "{path}"
+            );
+        }
+        assert!(fixture.exists("files/keep.sql"));
     }
 }

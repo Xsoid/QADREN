@@ -1643,6 +1643,33 @@ fn run_local_scenario_rule_delete_checked(
 #[allow(clippy::too_many_arguments)]
 fn execute_rule_delete(
     database_path: &Path,
+    scenario: (&str, u64),
+    job_id: &str,
+    target: &LocalFilesystem,
+    target_connection: &str,
+    relative_path: &str,
+    size: u64,
+    to_trash: bool,
+    folder: bool,
+) -> Result<Option<JobState>, LocalFileCopyError> {
+    let mut store = JobStore::open(database_path)?;
+    execute_rule_delete_in(
+        &mut store,
+        scenario,
+        job_id,
+        target,
+        target_connection,
+        relative_path,
+        size,
+        to_trash,
+        folder,
+    )
+}
+
+/// `execute_rule_delete` with a JobStore that the caller holds open.
+#[allow(clippy::too_many_arguments)]
+fn execute_rule_delete_in(
+    store: &mut JobStore,
     (scenario_id, scenario_revision): (&str, u64),
     job_id: &str,
     target: &LocalFilesystem,
@@ -1655,7 +1682,6 @@ fn execute_rule_delete(
     let path = Path::new(relative_path);
     let root_identity =
         local_root_identity_key(target).map_err(|_| LocalFileCopyError::InvalidRequest)?;
-    let mut store = JobStore::open(database_path)?;
     if let Some(existing) = store.get(job_id)? {
         return Ok(Some(existing.state));
     }
@@ -1753,9 +1779,9 @@ fn execute_rule_delete(
 /// dump does not have. The caller has just published the new
 /// `manifest.json`. Only a regular file under `databases/` is deleted,
 /// under the simple deletion rule of the revision, into the Trash when the
-/// volume has one.
+/// volume has one. It uses the JobStore that the export holds open.
 pub fn run_backup_database_file_delete(
-    database_path: &Path,
+    store: &mut JobStore,
     registry_path: &Path,
     scenario_id: &str,
     scenario_revision: u64,
@@ -1814,8 +1840,8 @@ pub fn run_backup_database_file_delete(
         && target
             .trash_available(path)
             .map_err(LocalFileCopyError::Local)?;
-    if let Some(state) = execute_rule_delete(
-        database_path,
+    if let Some(state) = execute_rule_delete_in(
+        store,
         (scenario_id, scenario_revision),
         job_id,
         &target,
