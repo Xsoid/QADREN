@@ -37,7 +37,7 @@ pub(crate) mod energy_test;
 
 use std::ffi::c_char;
 
-pub const VERSION: &str = "0.1.0";
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const ABI_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,7 +79,7 @@ impl StorageAdapter for UnavailableAdapter {
     }
 }
 
-static VERSION_C: &[u8] = b"0.1.0\0";
+static VERSION_C: &str = concat!(env!("CARGO_PKG_VERSION"), "\0");
 static STATUS_C: &[u8] = b"Core ready - worker idle\0";
 
 /// Returned pointer is static, NUL-terminated, and must never be freed by caller.
