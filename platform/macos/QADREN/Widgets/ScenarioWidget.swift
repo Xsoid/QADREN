@@ -71,6 +71,12 @@ struct ScenarioWidgetSnapshot: Equatable {
     /// A plan that is being made now: by "Проверить план" or by a run in
     /// planning. Shows how far the snapshots are.
     var planCheck: PlanCheck?
+    /// The file counts of the batch that a run copies now. A plan in progress
+    /// has no batch of its own: the counts of an earlier unfinished batch are
+    /// not shown then (owner request 2026-11-15).
+    var batchFiles: ScenarioFileCounts? {
+        planCheck != nil || run?.active?.state == "planning" ? nil : files
+    }
     /// The database step of the active run (D-027 section 7b).
     var databaseProgress: WorkerDatabaseProgress?
     /// The selected Backup/export objects outside `files/`, in run order:
@@ -265,11 +271,13 @@ final class ScenarioWidgetFeed: ObservableObject {
     private var progressChanged = Date()
     static let stallThreshold: TimeInterval = 180
 
-    /// D-028 rule 6: a short interval only while a run is active.
+    /// D-028 rule 6: a short interval only while a run or a plan check is
+    /// active.
     func follow(scenarioID: String?) async {
         while !Task.isCancelled {
             await refresh(scenarioID: scenarioID)
-            try? await Task.sleep(for: .seconds(snapshot.run?.active == nil ? 10 : 3))
+            let busy = snapshot.run?.active != nil || snapshot.planCheck != nil
+            try? await Task.sleep(for: .seconds(busy ? 3 : 10))
         }
     }
 
@@ -372,8 +380,8 @@ struct ScenarioStage: Equatable {
             }
             return ScenarioStage(frame: .active, tone: .active, headline: "Копирование", detail: snapshot.currentPath ?? "Запуск \(trigger).", active: true, moving: true)
         }
-        // "Проверить план" without a run. "Запустить" stays available: a run
-        // takes this same plan.
+        // "Проверить план" without a run. "Запустить" and "Проверить план"
+        // are hidden until the check ends.
         if let check = snapshot.planCheck {
             return ScenarioStage(frame: .active, tone: .active, headline: "Проверка плана", detail: check.detail, active: false, moving: true)
         }
@@ -529,7 +537,7 @@ struct ScenarioWidget<Actions: View>: View {
             HStack(alignment: .center, spacing: 14) {
                 // Planning has no file total yet: the ring shows the track only.
                 // A completed run with nothing to change is a full ring.
-                let files = snapshot.run?.active?.state == "planning" ? nil : snapshot.files
+                let files = snapshot.batchFiles
                 let nothingToDo = result != nil && result?.files == nil && result?.short != nil
                 // A run without files counts its objects: databases, Cron,
                 // DNS zones, and mail domains.
@@ -592,7 +600,7 @@ struct ScenarioWidget<Actions: View>: View {
 
     @ViewBuilder
     private func regularDetails(_ snapshot: ScenarioWidgetSnapshot, _ stage: ScenarioStage, _ result: ScenarioRunResult?) -> some View {
-        let files = snapshot.run?.active?.state == "planning" ? nil : snapshot.files
+        let files = snapshot.batchFiles
         if let result {
             runResult(result)
         } else if let files {
@@ -624,29 +632,52 @@ struct ScenarioWidget<Actions: View>: View {
             }
             .padding(.top, 12)
         }
-        HStack(spacing: 10) {
-            if stage.active {
-                Button {
-                    perform { try WorkerIPC.stopRun(scenarioID: $0.id) }
-                } label: {
-                    Label("Остановить", systemImage: "stop.fill")
-                }
-                .buttonStyle(QDCyberButtonStyle(tint: QDStatusKind.failed.cyberColor(for: colorScheme)))
-                .disabled(busy || snapshot.batchStopping)
-            } else {
-                Button {
-                    perform { entry in
-                        let token = try YandexScenarioAccess.token(for: entry)
-                        try WorkerIPC.runNow(scenarioID: entry.id, accessToken: token)
-                    }
-                } label: {
-                    Label("Запустить", systemImage: "play.fill")
-                }
-                .buttonStyle(QDCyberButtonStyle(tint: QDCyber.color(.accent, for: colorScheme), label: QDCyber.color(.onAccent, for: colorScheme)))
-                .disabled(busy || !snapshot.enabled)
-            }
+        // A narrow column puts the buttons under each other: a title never
+        // wraps inside a word (found on 2026-11-15).
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) { runControls(snapshot, stage) }
+            VStack(alignment: .leading, spacing: 8) { runControls(snapshot, stage) }
         }
         .padding(.top, 14)
+    }
+
+    @ViewBuilder
+    private func runControls(_ snapshot: ScenarioWidgetSnapshot, _ stage: ScenarioStage) -> some View {
+        if stage.active {
+            Button {
+                perform { try WorkerIPC.stopRun(scenarioID: $0.id) }
+            } label: {
+                Label("Остановить", systemImage: "stop.fill").lineLimit(1).fixedSize()
+            }
+            .buttonStyle(QDCyberButtonStyle(tint: QDStatusKind.failed.cyberColor(for: colorScheme)))
+            .disabled(busy || snapshot.batchStopping)
+        } else if snapshot.planCheck == nil {
+            // A plan check hides both buttons until it ends (owner
+            // decision 2026-11-15). Each run checks the plan first.
+            Button {
+                perform { entry in
+                    let token = try YandexScenarioAccess.token(for: entry)
+                    try WorkerIPC.runNow(scenarioID: entry.id, accessToken: token)
+                }
+            } label: {
+                Label("Запустить", systemImage: "play.fill").lineLimit(1).fixedSize()
+            }
+            .buttonStyle(QDCyberButtonStyle(tint: QDCyber.color(.accent, for: colorScheme), label: QDCyber.color(.onAccent, for: colorScheme)))
+            .disabled(busy || !snapshot.enabled)
+            Button {
+                perform { entry in
+                    // The same steps as "Проверить план" in Settings.
+                    try StorageRegistryBridge.dispatchPendingScenarioCopyBaselines()
+                    let token = try YandexScenarioAccess.token(for: entry)
+                    _ = try WorkerIPC.startPlan(scenarioID: entry.id, revision: entry.revision, accessToken: token)
+                }
+            } label: {
+                Label("Проверить план", systemImage: "checklist").lineLimit(1).fixedSize()
+            }
+            .buttonStyle(QDCyberOutlineButtonStyle())
+            .disabled(busy || !snapshot.enabled)
+            .help("Построить план без запуска. Файлы не меняются.")
+        }
     }
 
     /// One column for each selected object category outside `files/`:
