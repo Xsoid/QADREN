@@ -319,7 +319,13 @@ struct ScenarioStage: Equatable {
     /// The Worker reports work in progress now (not waiting, not paused).
     var moving = false
 
-    static func evaluate(_ snapshot: ScenarioWidgetSnapshot) -> ScenarioStage {
+    /// `workerDown`: no Worker accepts connections. An active run then does
+    /// not move, and "Остановить" cannot reach the Worker (owner request
+    /// 2026-11-15).
+    static func evaluate(_ snapshot: ScenarioWidgetSnapshot, workerDown: Bool = false) -> ScenarioStage {
+        if snapshot.run?.active != nil, workerDown {
+            return ScenarioStage(frame: .offline, tone: .paused, headline: "Не выполняется", detail: "Worker не запущен. Запустите его в виджете «Система».", active: false)
+        }
         if let active = snapshot.run?.active {
             if let reason = active.waiting_reason {
                 let detail = switch reason {
@@ -487,6 +493,9 @@ private extension String {
 /// regular adds file counts, the next run, and run controls.
 struct ScenarioWidget<Actions: View>: View {
     let widget: MonitoringWidgetLayout
+    /// Only the Worker reachability is used: without a Worker no button can
+    /// act.
+    @ObservedObject var monitoring: MonitoringFeed
     let isEditing: Bool
     let onSelectScenario: (String) -> Void
     @ViewBuilder let actions: Actions
@@ -503,9 +512,11 @@ struct ScenarioWidget<Actions: View>: View {
         let visible: Bool
     }
 
+    private var workerDown: Bool { monitoring.worker == .unavailable }
+
     var body: some View {
         let snapshot = feed.snapshot
-        let stage = ScenarioStage.evaluate(snapshot)
+        let stage = ScenarioStage.evaluate(snapshot, workerDown: workerDown)
         QDWidgetFrame(
             title: snapshot.name ?? MonitoringWidgetKind.scenario.title,
             symbol: MonitoringWidgetKind.scenario.symbol,
@@ -621,7 +632,9 @@ struct ScenarioWidget<Actions: View>: View {
                 .foregroundStyle(QDCyber.color(.mutedText, for: colorScheme))
                 .padding(.top, 8)
         }
-        if !stage.active {
+        // Without a schedule the line shows only in expanded density
+        // (owner request 2026-11-15).
+        if !stage.active, snapshot.hasSchedule || widget.density == .expanded {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Следующий запуск")
                     .font(QDCyber.heading(12, weight: .semibold))
@@ -651,6 +664,15 @@ struct ScenarioWidget<Actions: View>: View {
             }
             .buttonStyle(QDCyberButtonStyle(tint: QDStatusKind.failed.cyberColor(for: colorScheme)))
             .disabled(busy || snapshot.batchStopping)
+        } else if workerDown {
+            // Without a Worker no button acts: the run is not stopped, not
+            // started, and not checked (owner request 2026-11-15).
+            Button {} label: {
+                Label("Запустить", systemImage: "play.fill").lineLimit(1).fixedSize()
+            }
+            .buttonStyle(QDCyberOutlineButtonStyle())
+            .disabled(true)
+            .help("Worker не запущен")
         } else if snapshot.planCheck == nil {
             // A plan check hides both buttons until it ends (owner
             // decision 2026-11-15). Each run checks the plan first.
@@ -664,19 +686,23 @@ struct ScenarioWidget<Actions: View>: View {
             }
             .buttonStyle(QDCyberButtonStyle(tint: QDCyber.color(.accent, for: colorScheme), label: QDCyber.color(.onAccent, for: colorScheme)))
             .disabled(busy || !snapshot.enabled)
-            Button {
-                perform { entry in
-                    // The same steps as "Проверить план" in Settings.
-                    try StorageRegistryBridge.dispatchPendingScenarioCopyBaselines()
-                    let token = try YandexScenarioAccess.token(for: entry)
-                    _ = try WorkerIPC.startPlan(scenarioID: entry.id, revision: entry.revision, accessToken: token)
+            // "Проверить план" shows only in expanded density (owner
+            // request 2026-11-15).
+            if widget.density == .expanded {
+                Button {
+                    perform { entry in
+                        // The same steps as "Проверить план" in Settings.
+                        try StorageRegistryBridge.dispatchPendingScenarioCopyBaselines()
+                        let token = try YandexScenarioAccess.token(for: entry)
+                        _ = try WorkerIPC.startPlan(scenarioID: entry.id, revision: entry.revision, accessToken: token)
+                    }
+                } label: {
+                    Label("Проверить план", systemImage: "checklist").lineLimit(1).fixedSize()
                 }
-            } label: {
-                Label("Проверить план", systemImage: "checklist").lineLimit(1).fixedSize()
+                .buttonStyle(QDCyberOutlineButtonStyle())
+                .disabled(busy || !snapshot.enabled)
+                .help("Построить план без запуска. Файлы не меняются.")
             }
-            .buttonStyle(QDCyberOutlineButtonStyle())
-            .disabled(busy || !snapshot.enabled)
-            .help("Построить план без запуска. Файлы не меняются.")
         }
     }
 

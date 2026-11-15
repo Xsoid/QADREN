@@ -11,6 +11,7 @@ struct MonitoringWidgetView<Actions: View>: View {
     let connections: StorageConnections
     let isEditing: Bool
     let onSelectScenario: (String) -> Void
+    let onShowConnection: (String, Bool) -> Void
     @ViewBuilder let actions: Actions
 
     var body: some View {
@@ -18,11 +19,13 @@ struct MonitoringWidgetView<Actions: View>: View {
         case .system:
             SystemWidget(feed: feed, expanded: widget.density == .expanded) { actions }
         case .scenario:
-            ScenarioWidget(widget: widget, isEditing: isEditing, onSelectScenario: onSelectScenario) { actions }
+            ScenarioWidget(widget: widget, monitoring: feed, isEditing: isEditing, onSelectScenario: onSelectScenario) { actions }
         case .scenarios:
             ScenariosWidget(limit: widget.limit) { actions }
         case .connections:
-            ConnectionsWidget(density: widget.density, connections: connections) { actions }
+            ConnectionsWidget(
+                widget: widget, connections: connections, isEditing: isEditing, onShowConnection: onShowConnection
+            ) { actions }
         }
     }
 }

@@ -77,6 +77,9 @@ struct MonitoringWidgetLayout: Codable, Identifiable, Equatable {
     var scenarioID: String? = nil
     /// The rows that a `scenarios` widget shows; `nil` shows all.
     var limit: Int? = nil
+    /// The connections that a `connections` widget does not show. A new
+    /// connection is shown until the user clears its checkbox.
+    var hiddenConnectionIDs: [String] = []
 
     init(
         id: UUID = UUID(),
@@ -94,6 +97,7 @@ struct MonitoringWidgetLayout: Codable, Identifiable, Equatable {
         case density
         case scenarioID
         case limit
+        case hiddenConnectionIDs
     }
 
     init(from decoder: Decoder) throws {
@@ -104,6 +108,7 @@ struct MonitoringWidgetLayout: Codable, Identifiable, Equatable {
         density = try container.decodeIfPresent(MonitoringWidgetDensity.self, forKey: .density) ?? .regular
         scenarioID = try container.decodeIfPresent(String.self, forKey: .scenarioID)
         limit = try container.decodeIfPresent(Int.self, forKey: .limit).map { max(1, $0) }
+        hiddenConnectionIDs = try container.decodeIfPresent([String].self, forKey: .hiddenConnectionIDs) ?? []
     }
 }
 
@@ -227,6 +232,20 @@ final class DashboardLayoutStore: ObservableObject {
         guard widgets[index].limit != limit else { return }
         recordUndoState()
         widgets[index].limit = limit
+        save()
+    }
+
+    /// Shows or hides one connection in a `connections` widget.
+    func setConnection(_ id: UUID, connectionID: String, shown: Bool) {
+        guard let index = widgets.firstIndex(where: { $0.id == id }) else { return }
+        let hidden = widgets[index].hiddenConnectionIDs.contains(connectionID)
+        guard hidden == shown else { return }
+        recordUndoState()
+        if shown {
+            widgets[index].hiddenConnectionIDs.removeAll { $0 == connectionID }
+        } else {
+            widgets[index].hiddenConnectionIDs.append(connectionID)
+        }
         save()
     }
 

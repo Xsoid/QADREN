@@ -134,11 +134,34 @@ enum LocalWorkerController {
         }
     }
 
-    /// Explicit stop by the user. launchd stops the Worker; queued and
-    /// uncertain Jobs stay in the JobStore for the next start.
+    /// Explicit stop by the user. First the Worker stops the active Scenario
+    /// runs, as "Остановить" in the Scenario widget does: a stopped Worker
+    /// cannot continue them, and a later start must not resume them unasked
+    /// (owner request 2026-11-15). A planning run ends now; an executing run
+    /// cancels its pending files and ends as stopped at the next start.
+    /// Then launchd stops the Worker; queued and uncertain Jobs stay in the
+    /// JobStore for the next start.
     static func stop() {
-        try? service.unregister()
         UserDefaults.standard.set(true, forKey: stoppedByUserKey)
+        DispatchQueue.global(qos: .userInitiated).async {
+            stopActiveRuns()
+            DispatchQueue.main.async { try? service.unregister() }
+        }
+    }
+
+    /// Best effort: a Worker that does not answer runs nothing to stop.
+    private static func stopActiveRuns() {
+        guard let scenarios = try? StorageRegistryBridge.listScenarios() else { return }
+        for scenario in scenarios {
+            guard (try? StorageRegistryBridge.scenarioRunState(scenarioID: scenario.id))?.active != nil else { continue }
+            do {
+                try WorkerIPC.stopRun(scenarioID: scenario.id)
+            } catch WorkerIPCError.unavailable {
+                return
+            } catch {
+                continue
+            }
+        }
     }
 
     static var isRegistered: Bool { service.status == .enabled }
@@ -234,7 +257,7 @@ enum LocalWorkerController {
     static func confirmAndStop() {
         let alert = NSAlert()
         alert.messageText = "Остановить фоновую службу QADREN?"
-        alert.informativeText = "Расписания не будут выполняться, пока вы снова не запустите службу. Текущая операция с файлом может завершиться с результатом «неизвестно»; QADREN проверит его при следующем запуске и не повторит изменение вслепую."
+        alert.informativeText = "Активные запуски сценариев остановятся. Расписания не будут выполняться, пока вы снова не запустите службу. Текущая операция с файлом может завершиться с результатом «неизвестно»; QADREN проверит его при следующем запуске и не повторит изменение вслепую."
         alert.addButton(withTitle: "Остановить")
         alert.addButton(withTitle: "Отмена")
         alert.alertStyle = .warning

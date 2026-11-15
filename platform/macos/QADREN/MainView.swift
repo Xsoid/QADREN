@@ -129,7 +129,8 @@ struct MainView: View {
                             MonitoringWidgetView(
                                 widget: widget, feed: feed, connections: connections,
                                 isEditing: isEditingLayout,
-                                onSelectScenario: { dashboardLayout.setScenario(widget.id, scenarioID: $0) }
+                                onSelectScenario: { dashboardLayout.setScenario(widget.id, scenarioID: $0) },
+                                onShowConnection: { dashboardLayout.setConnection(widget.id, connectionID: $0, shown: $1) }
                             ) {
                                 layoutActions(for: widget)
                             }
