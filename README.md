@@ -6,7 +6,7 @@ QADREN is a file transfer and synchronization system for independent storage con
 
 ## Status
 
-QADREN is in active development. [GitHub Releases](https://github.com/Xsoid/QADREN/releases) contain pre-release builds for Apple silicon Macs with macOS 13 or later ([D-026](docs/decisions/D-026-github-releases.md)). These builds are not Developer ID signed and not notarized.
+QADREN is in active development. [GitHub Releases](https://github.com/Xsoid/QADREN/releases) contain pre-release builds for Apple silicon Macs with macOS 13 or later ([D-026](docs/decisions/D-026-github-releases.md)). These builds are not Developer ID signed and not notarized. The current pre-release is 0.3.0. [CHANGELOG.md](CHANGELOG.md) lists the changes of each release.
 
 ## Install
 
@@ -29,10 +29,12 @@ After an update, macOS can ask again for permissions and Keychain access.
 
 - **Storage**: "This Mac" (Local Filesystem) and SMB network drives. QADREN mounts an SMB share at `~/.qadren/mounts/<connection_id>` and uses the Local Filesystem executor for it ([D-021](docs/decisions/D-021-smb-network-drive-connector.md), [D-022](docs/decisions/D-022-smb-in-release-1-scenarios.md)).
 - **Yandex Disk**: a one-way Scenario source to a Local Filesystem or SMB destination ([D-023](docs/decisions/D-023-yandex-disk-to-mac.md)). Yandex Disk as a destination is a later stage.
+- **ISPmanager 6**: a read-only source of a Backup/export Scenario to a Local Filesystem or SMB destination ([D-027](docs/decisions/D-027-ispmanager-backup-source.md)). The Scenario keeps one current copy of site files over SFTP, database dumps, and panel settings (sites, Cron, DNS, mail, SSL, FTP). The export never contains a password or a private key. ISPmanager is never a destination.
 - **Scenarios and Jobs**: a `Scenario` defines synchronization rules. A `Job` is one execution or one manual file operation. One Rust JobStore holds all Jobs.
 - **Schedules**: scheduled and manual runs use one durable Scenario Run. A Scenario has at most one active run. Schedules can run on selected days at a time or every N hours ([D-025](docs/decisions/D-025-autonomous-scheduled-scenarios.md)).
-- **Worker**: a local background process (`qadren-worker`) executes Jobs. It starts at login, mounts SMB shares on demand, and restarts only between files.
-- **Monitoring panel**: the macOS window shows Scenarios, connections, active runs, and system state as widgets ([design system](docs/design/README.md)).
+- **Worker**: a local background process (`qadren-worker`) executes Jobs. It starts at login, mounts SMB shares on demand, and restarts only between files. The "Демоны" (Daemons) section in Settings shows its state and can restart or stop it.
+- **Monitoring panel**: the macOS window shows Scenarios, connections with their used and free space, active runs, and system state as widgets ([design system](docs/design/README.md)).
+- **Energy efficiency**: the cost of each item does not grow with the database size, and the target is close to zero CPU at rest ([D-028](docs/decisions/D-028-energy-efficiency.md)).
 
 iCloud is post-release ([D-017](docs/decisions/D-017-defer-icloud.md)). Remote Workers, content versioning, and Scenario dependencies are not in Release 1. See the [roadmap](docs/roadmap.md).
 

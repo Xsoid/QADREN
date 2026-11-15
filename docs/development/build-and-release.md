@@ -33,8 +33,8 @@ The developer machine needs Rust and Xcode. The user distribution must include i
 3. Push a tag with the same version:
 
    ```bash
-   git tag -a v0.2.0 -m "QADREN 0.2.0"
-   git push origin v0.2.0
+   git tag -a v0.3.0 -m "QADREN 0.3.0"
+   git push origin v0.3.0
    ```
 
 4. The `Release` workflow (`.github/workflows/release.yml`) checks the versions and the `CHANGELOG.md` section, runs `scripts/test-core.sh`, builds the bundle, and publishes a pre-release with `QADREN-<version>-macos-arm64.zip` and its SHA-256 file.
