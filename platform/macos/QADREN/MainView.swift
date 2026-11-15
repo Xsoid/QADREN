@@ -2,7 +2,13 @@ import SwiftUI
 
 struct MainView: View {
     @Environment(\.colorScheme) private var colorScheme
-    @StateObject private var connections = StorageConnections()
+    @Environment(\.qdWindowVisible) private var windowVisible
+    /// The panel holds the data sources but does not observe them: each
+    /// widget observes its own source, so a change redraws that widget only
+    /// (D-028 rule 6).
+    @StateObject private var sources = MonitoringSources()
+    private var connections: StorageConnections { sources.connections }
+    private var feed: MonitoringFeed { sources.feed }
     @StateObject private var dashboardLayout = DashboardLayoutStore()
     /// Release 1 has one monitoring window, so its panel ID is an app
     /// preference. Window state is not restored after a forced quit, and a
@@ -10,7 +16,6 @@ struct MainView: View {
     @AppStorage("qadren.monitoring.panel-id") private var monitoringPanelID = ""
     /// The former window-scoped ID; read once to keep the current layout.
     @SceneStorage("qadren.monitoring.panel-id") private var windowPanelID = ""
-    @StateObject private var feed = MonitoringFeed()
     @State private var isEditingLayout = false
     /// Survives a recreated window content and remembers the user's choice.
     @SceneStorage("qadren.settings.sidebar-hidden") private var settingsSidebarHidden = false
@@ -42,6 +47,12 @@ struct MainView: View {
             }
         }
         .onDisappear { feed.stop() }
+        // A hidden monitoring window does not poll (D-028 rule 6). The Worker
+        // runs on; the panel reads again at once when it becomes visible.
+        .onChange(of: windowVisible) { visible in
+            guard workspace == .monitoring else { return }
+            if visible { feed.start() } else { feed.stop() }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .qadrenStorageConnectionsDidChange)) { _ in
             connections.refresh()
         }
@@ -94,27 +105,12 @@ struct MainView: View {
     private var monitoringCanvas: some View {
         ScrollView {
             VStack(spacing: 10) {
-                if let alert = monitoringAlert {
-                    let failed = QDStatusKind.failed.cyberColor(for: colorScheme)
-                    HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        Text("Требуется внимание")
-                            .font(QDCyber.heading(13))
-                            .tracking(1.8)
-                            .textCase(.uppercase)
-                            .foregroundStyle(failed)
-                        Text(alert)
-                            .font(QDCyber.heading(14, weight: .medium))
-                            .foregroundStyle(QDCyber.color(.primaryText, for: colorScheme))
-                            .textSelection(.enabled)
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.vertical, 10).padding(.leading, 18).padding(.trailing, 12)
-                    .background(failed.opacity(0.12))
-                    .overlay(QDCyberCutShape().stroke(failed, lineWidth: 1.5))
-                    .clipShape(QDCyberCutShape())
-                    .padding(.horizontal, 16).padding(.top, 16)
-                    .accessibilityElement(children: .combine)
-                }
+                MonitoringAttentionBanner(
+                    feed: feed, connections: connections,
+                    hasSystemWidget: dashboardLayout.widgets.contains(where: { $0.kind == .system }),
+                    hasConnectionsWidget: dashboardLayout.widgets.contains(where: { $0.kind == .connections }),
+                    recoveredFromInvalidLayout: dashboardLayout.recoveredFromInvalidLayout
+                )
 
                 if dashboardLayout.widgets.isEmpty {
                     QDEmptyState(
@@ -219,19 +215,66 @@ struct MainView: View {
         }
     }
 
-    private var monitoringAlert: String? {
+}
+
+/// The data sources of a window. It publishes nothing, so the view that
+/// owns it does not redraw when a source changes.
+@MainActor
+final class MonitoringSources: ObservableObject {
+    let feed: MonitoringFeed
+    let connections = StorageConnections()
+
+    init() {
+        feed = MonitoringFeed()
+        feed.serviceStateReader = { WorkerServiceControllerState.current }
+    }
+}
+
+/// The panel attention banner. It observes the feed and the connections
+/// itself, so their changes redraw the banner only.
+private struct MonitoringAttentionBanner: View {
+    @ObservedObject var feed: MonitoringFeed
+    @ObservedObject var connections: StorageConnections
+    let hasSystemWidget: Bool
+    let hasConnectionsWidget: Bool
+    let recoveredFromInvalidLayout: Bool
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        if let alert {
+            let failed = QDStatusKind.failed.cyberColor(for: colorScheme)
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text("Требуется внимание")
+                    .font(QDCyber.heading(13))
+                    .tracking(1.8)
+                    .textCase(.uppercase)
+                    .foregroundStyle(failed)
+                Text(alert)
+                    .font(QDCyber.heading(14, weight: .medium))
+                    .foregroundStyle(QDCyber.color(.primaryText, for: colorScheme))
+                    .textSelection(.enabled)
+                Spacer(minLength: 0)
+            }
+            .padding(.vertical, 10).padding(.leading, 18).padding(.trailing, 12)
+            .background(failed.opacity(0.12))
+            .overlay(QDCyberCutShape().stroke(failed, lineWidth: 1.5))
+            .clipShape(QDCyberCutShape())
+            .padding(.horizontal, 16).padding(.top, 16)
+            .accessibilityElement(children: .combine)
+        }
+    }
+
+    private var alert: String? {
         // Each problem belongs to its widget: a service failure and a JobStore
         // read problem to System, a connection store read error to Connections.
         // The banner shows one only when its widget is not on the panel.
         let service = feed.serviceHealth
-        let hasSystemWidget = dashboardLayout.widgets.contains(where: { $0.kind == .system })
-        let hasConnectionsWidget = dashboardLayout.widgets.contains(where: { $0.kind == .connections })
         if service.kind.usesAttentionBorder, !hasSystemWidget {
             return "Фоновая служба: " + service.title
         }
         if let problem = feed.jobStoreProblem, !hasSystemWidget { return problem.message }
         if let error = connections.error, !hasConnectionsWidget { return "Подключения: " + error }
-        if dashboardLayout.recoveredFromInvalidLayout {
+        if recoveredFromInvalidLayout {
             return "Сохранённую раскладку не удалось прочитать. Показана безопасная стандартная панель; исходная запись не удалена."
         }
         return nil
@@ -335,14 +378,32 @@ struct MonitoringMasonryLayout: Layout {
     var minimumColumnWidth: CGFloat
     var spacing: CGFloat
 
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+    /// The frames that `sizeThatFits` measured, for the `placeSubviews` call
+    /// of the same pass. Without it each pass measured every widget twice
+    /// (D-028). A placement uses them once, so they never go stale.
+    struct Cache {
+        var width: CGFloat?
+        var frames: [CGRect] = []
+    }
+
+    func makeCache(subviews: Subviews) -> Cache { Cache() }
+
+    func updateCache(_ cache: inout Cache, subviews: Subviews) {
+        cache = Cache()
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) -> CGSize {
         let width = proposal.width ?? minimumColumnWidth
         let frames = frames(for: width, subviews: subviews)
+        cache = Cache(width: width, frames: frames)
         return CGSize(width: width, height: frames.map(\.maxY).max() ?? 0)
     }
 
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        for (frame, subview) in zip(frames(for: bounds.width, subviews: subviews), subviews) {
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) {
+        let measured = cache.width == bounds.width && cache.frames.count == subviews.count
+            ? cache.frames : frames(for: bounds.width, subviews: subviews)
+        cache = Cache()
+        for (frame, subview) in zip(measured, subviews) {
             subview.place(
                 at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY),
                 proposal: ProposedViewSize(width: frame.width, height: frame.height)

@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// The monitoring visual language. It ports the dark theme of cybercn-ui
@@ -186,21 +187,32 @@ struct QDCyberHeadline: View {
     var size: CGFloat = 32
     @AppStorage(QDGlitchSetting.key) private var glitchEnabled = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.qdWindowVisible) private var windowVisible
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 0.6)) { context in
-            let blinkOff = glitchEnabled && !reduceMotion
-                && Int(context.date.timeIntervalSinceReferenceDate / 0.6) % 2 == 1
-            (Text(text) + Text("_").foregroundColor(blinkOff ? .clear : color))
-                .font(QDCyber.heading(size))
-                .textCase(.uppercase)
-                .foregroundStyle(color)
-                .shadow(color: color.opacity(0.55), radius: 6)
-                .lineLimit(2)
-                .minimumScaleFactor(0.7)
+        Group {
+            // A static cursor needs no timer: the line redraws only when
+            // the cursor blinks.
+            if glitchEnabled && !reduceMotion && windowVisible {
+                TimelineView(.periodic(from: .now, by: 0.6)) { context in
+                    line(cursorOff: Int(context.date.timeIntervalSinceReferenceDate / 0.6) % 2 == 1)
+                }
+            } else {
+                line(cursorOff: false)
+            }
         }
         .qdGlitch()
         .accessibilityLabel(text)
+    }
+
+    private func line(cursorOff: Bool) -> some View {
+        (Text(text) + Text("_").foregroundColor(cursorOff ? .clear : color))
+            .font(QDCyber.heading(size))
+            .textCase(.uppercase)
+            .foregroundStyle(color)
+            .shadow(color: color.opacity(0.55), radius: 6)
+            .lineLimit(2)
+            .minimumScaleFactor(0.7)
     }
 }
 
@@ -217,6 +229,7 @@ struct QDCyberRing: View {
     var stalled = false
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.qdWindowVisible) private var windowVisible
 
     var body: some View {
         let line = size * 0.09
@@ -238,16 +251,15 @@ struct QDCyberRing: View {
         .rotationEffect(.degrees(-90))
         .padding(line / 2)
         .overlay {
-            if active && !stalled && !reduceMotion {
-                TimelineView(.animation(minimumInterval: 1 / 30)) { context in
-                    let turn = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 2.4) / 2.4
-                    Circle()
-                        .trim(from: 0, to: 0.1)
-                        .stroke(QDStatusKind.active.cyberColor(for: colorScheme), style: StrokeStyle(lineWidth: line * 0.45, lineCap: .round))
-                        .shadow(color: QDStatusKind.active.cyberColor(for: colorScheme), radius: 4)
-                        .rotationEffect(.degrees(turn * 360 - 90))
-                        .padding(line * 1.6)
-                }
+            if active && !stalled && !reduceMotion && windowVisible {
+                // Core Animation turns the arc, so a frame costs the app no
+                // CPU time (D-028).
+                QDSweepArc(
+                    color: NSColor(QDStatusKind.active.cyberColor(for: colorScheme)),
+                    lineWidth: line * 0.45
+                )
+                .padding(line * 1.6)
+                .allowsHitTesting(false)
             }
         }
         .overlay {
@@ -300,30 +312,190 @@ struct QDCyberActivityBar: View {
     var height: CGFloat = 4
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.qdWindowVisible) private var windowVisible
+
+    /// Room above and below the bar for the glow.
+    private let glow: CGFloat = 3
 
     var body: some View {
         let color = (stalled ? QDStatusKind.needsAction : QDStatusKind.active).cyberColor(for: colorScheme)
-        TimelineView(.animation(minimumInterval: 1 / 30, paused: stalled || reduceMotion)) { context in
-            let phase = stalled || reduceMotion ? 0 : context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1)
-            Canvas { canvas, size in
-                let step: CGFloat = 12
-                var x = -step + CGFloat(phase) * step
-                while x < size.width {
-                    var segment = Path()
-                    segment.move(to: CGPoint(x: x + 3, y: 0))
-                    segment.addLine(to: CGPoint(x: x + 9, y: 0))
-                    segment.addLine(to: CGPoint(x: x + 6, y: size.height))
-                    segment.addLine(to: CGPoint(x: x, y: size.height))
-                    segment.closeSubpath()
-                    canvas.fill(segment, with: .color(color))
-                    x += step
-                }
+        // Core Animation moves the segments, so a frame costs the app no CPU
+        // time and causes no SwiftUI layout pass (D-028).
+        QDMarchingSegments(color: NSColor(color), moving: !stalled && !reduceMotion && windowVisible, glow: glow)
+            .frame(height: height + glow * 2)
+            .padding(.vertical, -glow)
+            .allowsHitTesting(false)
+            .accessibilityElement()
+            .accessibilityLabel(stalled ? "Нет прогресса" : "Процесс идёт")
+    }
+}
+
+/// The segments of `QDCyberActivityBar` in Core Animation layers. The bar
+/// fades in over the first third and out over the last third.
+private struct QDMarchingSegments: NSViewRepresentable {
+    let color: NSColor
+    let moving: Bool
+    let glow: CGFloat
+
+    func makeNSView(context: Context) -> SegmentsView { SegmentsView() }
+
+    func updateNSView(_ view: SegmentsView, context: Context) {
+        view.configure(color: color, moving: moving, glow: glow)
+    }
+
+    final class SegmentsView: NSView {
+        private static let step: CGFloat = 12
+        private let glowLayer = CALayer()
+        private let fadedLayer = CALayer()
+        private let fade = CAGradientLayer()
+        private let stripes = CAReplicatorLayer()
+        private let segment = CAShapeLayer()
+        private var moving = false
+        private var glow: CGFloat = 0
+
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            wantsLayer = true
+            fade.colors = [NSColor.clear.cgColor, NSColor.black.cgColor, NSColor.black.cgColor, NSColor.clear.cgColor]
+            fade.locations = [0, NSNumber(value: 1.0 / 3), NSNumber(value: 2.0 / 3), 1]
+            fade.startPoint = CGPoint(x: 0, y: 0.5)
+            fade.endPoint = CGPoint(x: 1, y: 0.5)
+            fadedLayer.mask = fade
+            glowLayer.shadowOpacity = 0.6
+            glowLayer.shadowOffset = .zero
+            stripes.addSublayer(segment)
+            fadedLayer.addSublayer(stripes)
+            glowLayer.addSublayer(fadedLayer)
+            layer?.addSublayer(glowLayer)
+        }
+
+        required init?(coder: NSCoder) { nil }
+
+        func configure(color: NSColor, moving: Bool, glow: CGFloat) {
+            segment.fillColor = color.cgColor
+            glowLayer.shadowColor = color.cgColor
+            glowLayer.shadowRadius = glow
+            if self.glow != glow {
+                self.glow = glow
+                needsLayout = true
+            }
+            if self.moving != moving {
+                self.moving = moving
+                updateMotion()
             }
         }
-        .frame(height: height)
-        .mask(LinearGradient(colors: [.clear, .black, .black, .clear], startPoint: .leading, endPoint: .trailing))
-        .shadow(color: color.opacity(0.6), radius: 3)
-        .accessibilityLabel(stalled ? "Нет прогресса" : "Процесс идёт")
+
+        override func layout() {
+            super.layout()
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            let size = bounds.size
+            glowLayer.frame = bounds
+            fadedLayer.frame = bounds
+            fade.frame = bounds
+            let step = Self.step
+            stripes.frame = CGRect(x: -step, y: 0, width: size.width + step * 2, height: size.height)
+            stripes.instanceCount = Int(size.width / step) + 3
+            stripes.instanceTransform = CATransform3DMakeTranslation(step, 0, 0)
+            // Layer coordinates grow upward: the top edge is at the high y.
+            let top = size.height - glow
+            let bottom = glow
+            let path = CGMutablePath()
+            path.move(to: CGPoint(x: 3, y: top))
+            path.addLine(to: CGPoint(x: 9, y: top))
+            path.addLine(to: CGPoint(x: 6, y: bottom))
+            path.addLine(to: CGPoint(x: 0, y: bottom))
+            path.closeSubpath()
+            segment.path = path
+            CATransaction.commit()
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            updateMotion()
+        }
+
+        private func updateMotion() {
+            stripes.removeAnimation(forKey: "march")
+            guard moving, window != nil else { return }
+            let march = CABasicAnimation(keyPath: "transform.translation.x")
+            march.fromValue = 0
+            march.toValue = Self.step
+            march.duration = 1
+            march.repeatCount = .infinity
+            march.isRemovedOnCompletion = false
+            stripes.add(march, forKey: "march")
+        }
+    }
+}
+
+/// The sweep arc of `QDCyberRing` in a Core Animation layer: a short arc
+/// that starts at 12 o'clock and turns clockwise once in 2.4 s.
+private struct QDSweepArc: NSViewRepresentable {
+    let color: NSColor
+    let lineWidth: CGFloat
+
+    func makeNSView(context: Context) -> ArcView { ArcView() }
+
+    func updateNSView(_ view: ArcView, context: Context) {
+        view.configure(color: color, lineWidth: lineWidth)
+    }
+
+    final class ArcView: NSView {
+        private let arc = CAShapeLayer()
+
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            wantsLayer = true
+            arc.fillColor = nil
+            arc.lineCap = .round
+            arc.strokeStart = 0
+            arc.strokeEnd = 0.1
+            arc.shadowOpacity = 1
+            arc.shadowRadius = 4
+            arc.shadowOffset = .zero
+            layer?.addSublayer(arc)
+        }
+
+        required init?(coder: NSCoder) { nil }
+
+        func configure(color: NSColor, lineWidth: CGFloat) {
+            arc.strokeColor = color.cgColor
+            arc.shadowColor = color.cgColor
+            if arc.lineWidth != lineWidth {
+                arc.lineWidth = lineWidth
+                needsLayout = true
+            }
+        }
+
+        override func layout() {
+            super.layout()
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            arc.frame = bounds
+            let radius = max(0, min(bounds.width, bounds.height) / 2)
+            let path = CGMutablePath()
+            // From 12 o'clock, clockwise: layer angles grow counterclockwise.
+            path.addArc(
+                center: CGPoint(x: bounds.midX, y: bounds.midY), radius: radius,
+                startAngle: .pi / 2, endAngle: .pi / 2 - 2 * .pi, clockwise: true
+            )
+            arc.path = path
+            CATransaction.commit()
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            arc.removeAnimation(forKey: "sweep")
+            guard window != nil else { return }
+            let sweep = CABasicAnimation(keyPath: "transform.rotation.z")
+            sweep.fromValue = 0
+            sweep.toValue = -2 * Double.pi
+            sweep.duration = 2.4
+            sweep.repeatCount = .infinity
+            sweep.isRemovedOnCompletion = false
+            arc.add(sweep, forKey: "sweep")
+        }
     }
 }
 
@@ -346,6 +518,7 @@ private struct QDGlitchSlice: Equatable {
 private struct QDGlitchModifier: ViewModifier {
     @AppStorage(QDGlitchSetting.key) private var enabled = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.qdWindowVisible) private var windowVisible
     @State private var slice: QDGlitchSlice?
 
     func body(content: Content) -> some View {
@@ -368,8 +541,8 @@ private struct QDGlitchModifier: ViewModifier {
                     .allowsHitTesting(false)
                 }
             }
-            .task(id: enabled && !reduceMotion) {
-                guard enabled, !reduceMotion else {
+            .task(id: enabled && !reduceMotion && windowVisible) {
+                guard enabled, !reduceMotion, windowVisible else {
                     slice = nil
                     return
                 }

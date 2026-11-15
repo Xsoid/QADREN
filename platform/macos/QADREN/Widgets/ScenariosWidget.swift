@@ -104,14 +104,16 @@ final class ScenariosWidgetFeed: ObservableObject {
             let result = await Task.detached(priority: .utility) {
                 Result { try ScenarioQueueRow.capture() }
             }.value
+            // D-028 rule 6: publish only a change, so an idle panel does not redraw.
             switch result {
             case let .success(rows):
-                self.rows = rows
-                error = nil
+                if self.rows != rows { self.rows = rows }
+                if error != nil { error = nil }
             case let .failure(failure):
-                error = failure.localizedDescription
+                let message = failure.localizedDescription
+                if error != message { error = message }
             }
-            loaded = true
+            if !loaded { loaded = true }
             try? await Task.sleep(for: .seconds(5))
         }
     }
@@ -125,6 +127,7 @@ struct ScenariosWidget<Actions: View>: View {
     @StateObject private var feed = ScenariosWidgetFeed()
     @Environment(\.openWindow) private var openWindow
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.qdWindowVisible) private var windowVisible
 
     var body: some View {
         QDWidgetFrame(title: MonitoringWidgetKind.scenarios.title, symbol: MonitoringWidgetKind.scenarios.symbol, status: .ready, actions: {
@@ -146,7 +149,11 @@ struct ScenariosWidget<Actions: View>: View {
                 }
             }
         }
-        .task { await feed.follow() }
+        // A hidden window does not poll (D-028 rule 6).
+        .task(id: windowVisible) {
+            guard windowVisible else { return }
+            await feed.follow()
+        }
     }
 
     private var summary: some View {

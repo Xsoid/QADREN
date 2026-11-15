@@ -16,6 +16,7 @@ struct QADRENApp: App {
             MainView(workspace: .monitoring)
                 .frame(minWidth: 900, minHeight: 620)
                 .preferredColorScheme(QDThemeMode(rawValue: themeRaw)?.preferredColorScheme)
+                .qdTracksWindowVisibility()
         }
         // The monitoring window draws its own cyber top bar
         // (`MonitoringHeader`); the system traffic lights stay.

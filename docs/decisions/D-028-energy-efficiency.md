@@ -24,3 +24,9 @@
 - `Registry::open` runs `quick_check` and sets the `WAL` journal mode once for each path in a process. SQLite still reports corruption that it finds later.
 - New code review includes a check for per-item cost (rules 3 and 4).
 - An existing per-file open of a store is a defect. Fix it when you change the related code.
+- The progress view and the monitoring view read maintained counts: `scenario_create_batch_counts` in the Registry (schema 36) and `job_state_counts` in the JobStore. SQLite triggers update them in the transaction that changes a row, so one change costs a constant amount. A poll reads the counts and short index ranges, never all children or all Jobs.
+- The C ABI of the Registry keeps idle connections for each path of the process. A poll does not open the Registry again or parse its schema again. A database file that is replaced at the same path gets a new connection.
+- The monitoring window publishes a poll result only when the data changes. It stops polls and continuous motion while the window is not visible. Continuous motion uses Core Animation layers, not a SwiftUI timeline, so a frame does not wake the app. A Scenario widget polls every 3 s during an active run and every 10 s at rest.
+- The monitoring panel holds its data sources but does not observe them. Each widget observes only its own source, so a change redraws that widget only. A feed publishes only the values that a widget shows; a value that depends on time or on state outside the feed is evaluated at each poll and published when it changes. The column layout measures each widget once for each layout pass.
+- The due retries of a batch are counted in the index `batch_children_retry` (Registry schema 37). While a connection is unavailable many children stay due; the count reads no table rows.
+- The test layers include energy checks ([testing and quality](../development/testing-and-quality.md)).

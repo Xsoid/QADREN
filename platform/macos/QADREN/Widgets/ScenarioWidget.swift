@@ -265,10 +265,11 @@ final class ScenarioWidgetFeed: ObservableObject {
     private var progressChanged = Date()
     static let stallThreshold: TimeInterval = 180
 
+    /// D-028 rule 6: a short interval only while a run is active.
     func follow(scenarioID: String?) async {
         while !Task.isCancelled {
             await refresh(scenarioID: scenarioID)
-            try? await Task.sleep(for: .seconds(3))
+            try? await Task.sleep(for: .seconds(snapshot.run?.active == nil ? 10 : 3))
         }
     }
 
@@ -276,9 +277,10 @@ final class ScenarioWidgetFeed: ObservableObject {
         let (snapshot, entry) = await Task.detached(priority: .utility) {
             ScenarioWidgetSnapshot.capture(scenarioID: scenarioID)
         }.value
-        self.snapshot = snapshot
+        // D-028 rule 6: publish only a change, so an idle panel does not redraw.
+        if self.snapshot != snapshot { self.snapshot = snapshot }
         self.entry = entry
-        loaded = true
+        if !loaded { loaded = true }
         // A run that only waits for a retry does not move; it is not a hang.
         let executing = snapshot.run?.active?.state == "executing" && !snapshot.batchPaused
             && snapshot.files?.waitingForRetry != true
@@ -291,7 +293,8 @@ final class ScenarioWidgetFeed: ObservableObject {
             progressChanged = now
         }
         let idle = now.timeIntervalSince(progressChanged)
-        stalledMinutes = key != nil && idle >= Self.stallThreshold ? Int(idle / 60) : nil
+        let stalled = key != nil && idle >= Self.stallThreshold ? Int(idle / 60) : nil
+        if stalledMinutes != stalled { stalledMinutes = stalled }
     }
 }
 
@@ -483,6 +486,14 @@ struct ScenarioWidget<Actions: View>: View {
     @State private var actionError: String?
     @State private var busy = false
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.qdWindowVisible) private var windowVisible
+
+    /// A hidden window does not poll (D-028 rule 6); it reads again at once
+    /// when it becomes visible.
+    private struct FeedKey: Hashable {
+        let scenarioID: String?
+        let visible: Bool
+    }
 
     var body: some View {
         let snapshot = feed.snapshot
@@ -504,7 +515,8 @@ struct ScenarioWidget<Actions: View>: View {
                 Color.clear.frame(height: 96)
             }
         }
-        .task(id: widget.scenarioID) {
+        .task(id: FeedKey(scenarioID: widget.scenarioID, visible: windowVisible)) {
+            guard windowVisible else { return }
             await feed.follow(scenarioID: widget.scenarioID)
         }
     }

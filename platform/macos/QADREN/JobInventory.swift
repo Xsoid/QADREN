@@ -33,7 +33,7 @@ private func connectionHasUnresolvedAttempts(
     _ databasePath: UnsafePointer<CChar>?, _ connectionID: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>?
 
-struct JobRow: Decodable, Identifiable, Sendable {
+struct JobRow: Decodable, Identifiable, Equatable, Sendable {
     let id: String
     let state: String
     let scenario_id: String?

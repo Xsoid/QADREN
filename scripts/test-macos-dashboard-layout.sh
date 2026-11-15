@@ -16,10 +16,14 @@ esac
 
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf -- "$TEST_ROOT"' EXIT
+# A native test never opens the real QADREN data root.
+mkdir -p "$TEST_ROOT/data-root"
+export QADREN_DATA_ROOT="$(cd "$TEST_ROOT/data-root" && pwd -P)"
 xcrun swiftc -O -target "$ARCH-apple-macos13.0" \
   -framework SwiftUI -framework AppKit -framework Foundation \
   platform/macos/QADREN/DesignSystem.swift \
   platform/macos/QADREN/CyberDesign.swift \
+  platform/macos/QADREN/WindowVisibility.swift \
   platform/macos/QADREN/DashboardLayout.swift \
   platform/macos/QADREN/ConnectionPresentationStatus.swift \
   platform/macos/Tests/DashboardLayoutTests.swift \

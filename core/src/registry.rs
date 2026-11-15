@@ -70,7 +70,23 @@ pub enum RegistryError {
 }
 
 /// The Registry schema version that this build writes.
-const SCHEMA_VERSION: i32 = 35;
+const SCHEMA_VERSION: i32 = 37;
+
+/// Trigger steps that keep `scenario_create_batch_counts` equal to a count
+/// of `scenario_create_batch_children` (D-028 rule 3).
+const BATCH_COUNT_ADD_NEW: &str = "
+    INSERT OR IGNORE INTO scenario_create_batch_counts(batch_id,state,kind,retry,count)
+    VALUES(NEW.batch_id,NEW.state,NEW.kind,(NEW.state='pending' AND NEW.next_retry_at IS NOT NULL),0);
+    UPDATE scenario_create_batch_counts SET count=count+1
+    WHERE batch_id=NEW.batch_id AND state=NEW.state AND kind=NEW.kind
+      AND retry=(NEW.state='pending' AND NEW.next_retry_at IS NOT NULL);";
+const BATCH_COUNT_REMOVE_OLD: &str = "
+    UPDATE scenario_create_batch_counts SET count=count-1
+    WHERE batch_id=OLD.batch_id AND state=OLD.state AND kind=OLD.kind
+      AND retry=(OLD.state='pending' AND OLD.next_retry_at IS NOT NULL);
+    DELETE FROM scenario_create_batch_counts
+    WHERE batch_id=OLD.batch_id AND state=OLD.state AND kind=OLD.kind
+      AND retry=(OLD.state='pending' AND OLD.next_retry_at IS NOT NULL) AND count<=0;";
 
 impl From<rusqlite::Error> for RegistryError {
     fn from(error: rusqlite::Error) -> Self {
@@ -1084,6 +1100,54 @@ impl Registry {
                  FROM backup_database_results;
                  DROP TABLE backup_database_results;
                  PRAGMA user_version = 35;
+                 COMMIT;",
+            )?;
+        }
+        if version <= 35 {
+            // D-028 rule 3: the progress view reads the counts of a batch
+            // from this table, not by a count of all children on each poll.
+            // Triggers keep it in the transaction that changes a child, so
+            // the cost of one child change stays constant. `retry` is 1 for
+            // a pending child with a retry time.
+            db.execute_batch(&format!(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE scenario_create_batch_counts (
+                    batch_id TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    retry INTEGER NOT NULL,
+                    count INTEGER NOT NULL,
+                    PRIMARY KEY(batch_id,state,kind,retry)
+                 ) WITHOUT ROWID;
+                 INSERT INTO scenario_create_batch_counts(batch_id,state,kind,retry,count)
+                 SELECT batch_id,state,kind,(state='pending' AND next_retry_at IS NOT NULL),count(*)
+                 FROM scenario_create_batch_children GROUP BY 1,2,3,4;
+                 CREATE TRIGGER batch_counts_insert AFTER INSERT ON scenario_create_batch_children
+                 BEGIN {add_new} END;
+                 CREATE TRIGGER batch_counts_delete AFTER DELETE ON scenario_create_batch_children
+                 BEGIN {remove_old} END;
+                 CREATE TRIGGER batch_counts_update
+                 AFTER UPDATE OF batch_id,state,kind,next_retry_at ON scenario_create_batch_children
+                 WHEN OLD.batch_id IS NOT NEW.batch_id OR OLD.state IS NOT NEW.state
+                   OR OLD.kind IS NOT NEW.kind
+                   OR (OLD.state='pending' AND OLD.next_retry_at IS NOT NULL)
+                      IS NOT (NEW.state='pending' AND NEW.next_retry_at IS NOT NULL)
+                 BEGIN {remove_old} {add_new} END;
+                 PRAGMA user_version = 36;
+                 COMMIT;",
+                add_new = BATCH_COUNT_ADD_NEW,
+                remove_old = BATCH_COUNT_REMOVE_OLD,
+            ))?;
+        }
+        if version <= 36 {
+            // D-028: the progress view counts the due retries of one batch.
+            // When a connection is unavailable, many children stay due. This
+            // index keeps that count inside the index: no table row is read.
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE INDEX batch_children_retry
+                   ON scenario_create_batch_children(batch_id, state, next_retry_at);
+                 PRAGMA user_version = 37;
                  COMMIT;",
             )?;
         }
@@ -2636,25 +2700,24 @@ impl Registry {
             failure_reasons: Vec::new(),
             unfinished_sample: Vec::new(),
         };
-        let mut statement = self.db.prepare(
-            "SELECT state,
-                    CASE WHEN state='pending' AND next_retry_at>?2 THEN 1 ELSE 0 END,
-                    count(*), min(CASE WHEN state='pending' THEN next_retry_at END), kind
-             FROM scenario_create_batch_children WHERE batch_id=?1 GROUP BY 1,2,5",
+        // D-028 rule 3: a poll reads the maintained counts and short index
+        // ranges. Its cost does not grow with the size of the batch.
+        let mut scheduled = 0;
+        let mut statement = self.db.prepare_cached(
+            "SELECT state,kind,retry,count FROM scenario_create_batch_counts WHERE batch_id=?1",
         )?;
-        let rows = statement.query_map(params![batch_id, now], |row| {
+        let rows = statement.query_map([batch_id], |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                row.get::<_, bool>(1)?,
-                row.get::<_, i64>(2)? as u64,
-                row.get::<_, Option<i64>>(3)?,
-                row.get::<_, String>(4)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, bool>(2)?,
+                row.get::<_, i64>(3)? as u64,
             ))
         })?;
         for row in rows {
-            let (state, waiting, count, next, kind) = row?;
+            let (state, kind, retry, count) = row?;
             summary.total += count;
-            match (state.as_str(), waiting) {
+            match (state.as_str(), retry) {
                 ("completed", _) => {
                     summary.completed += count;
                     match kind.as_str() {
@@ -2666,29 +2729,48 @@ impl Registry {
                 ("failed", _) => summary.failed += count,
                 ("cancelled", _) => summary.cancelled += count,
                 ("unknown", _) => summary.unknown += count,
-                ("pending", true) => {
-                    summary.retry_waiting += count;
-                    // One row for each kind: keep the earliest retry.
-                    summary.next_retry_at = match (summary.next_retry_at, next) {
-                        (Some(a), Some(b)) => Some(a.min(b)),
-                        (a, b) => a.or(b),
-                    };
-                }
+                ("pending", true) => scheduled += count,
                 _ => summary.due += count,
             }
         }
+        // A pending child with a retry time waits until that time. The due
+        // ones stay many while a connection is unavailable, so the count
+        // reads only the `batch_children_retry` index, never table rows. Its
+        // cost is bounded by the due retries of this batch.
+        let due_retries: i64 = self
+            .db
+            .prepare_cached(
+                "SELECT count(*) FROM scenario_create_batch_children INDEXED BY batch_children_retry
+                 WHERE batch_id=?1 AND state='pending' AND next_retry_at<=?2",
+            )?
+            .query_row(params![batch_id, now], |row| row.get(0))?;
+        let due_retries = (due_retries as u64).min(scheduled);
+        summary.retry_waiting = scheduled - due_retries;
+        summary.due += due_retries;
+        summary.next_retry_at = self
+            .db
+            .prepare_cached(
+                "SELECT next_retry_at FROM scenario_create_batch_children INDEXED BY batch_children_retry
+                 WHERE batch_id=?1 AND state='pending' AND next_retry_at>?2
+                 ORDER BY next_retry_at LIMIT 1",
+            )?
+            .query_row(params![batch_id, now], |row| row.get(0))
+            .optional()?;
+        // The run takes due children in row order, so the first due row is
+        // the file that runs now.
         summary.current_path = self
             .db
-            .query_row(
-                "SELECT relative_path FROM scenario_create_batch_children
+            .prepare_cached(
+                "SELECT relative_path FROM scenario_create_batch_children INDEXED BY batch_children_by_batch
                  WHERE batch_id=?1 AND state='pending' AND (next_retry_at IS NULL OR next_retry_at<=?2)
-                 ORDER BY relative_path LIMIT 1",
-                params![batch_id, now],
-                |row| row.get(0),
-            )
+                 ORDER BY rowid LIMIT 1",
+            )?
+            .query_row(params![batch_id, now], |row| row.get(0))
             .optional()?;
-        let mut statement = self.db.prepare(
-            "SELECT last_error,count(*) FROM scenario_create_batch_children
+        // Bounded by the count of failed and UNKNOWN children, not by the
+        // batch size.
+        let mut statement = self.db.prepare_cached(
+            "SELECT last_error,count(*) FROM scenario_create_batch_children INDEXED BY batch_children_by_batch
              WHERE batch_id=?1 AND state IN ('failed','unknown') AND last_error IS NOT NULL
              GROUP BY last_error ORDER BY count(*) DESC LIMIT 5",
         )?;
@@ -2697,10 +2779,23 @@ impl Registry {
                 Ok((row.get(0)?, row.get::<_, i64>(1)? as u64))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        let mut statement = self.db.prepare(
-            "SELECT relative_path FROM scenario_create_batch_children
-             WHERE batch_id=?1 AND state NOT IN ('completed','cancelled')
-             ORDER BY relative_path LIMIT 5",
+        // The first unfinished children in run order: at most five rows from
+        // each unfinished state, never a walk past the completed ones.
+        let mut statement = self.db.prepare_cached(
+            "SELECT relative_path FROM (
+               SELECT relative_path,r FROM (
+                 SELECT relative_path,rowid AS r FROM scenario_create_batch_children
+                 INDEXED BY batch_children_by_batch
+                 WHERE batch_id=?1 AND state='pending' ORDER BY rowid LIMIT 5)
+               UNION ALL SELECT relative_path,r FROM (
+                 SELECT relative_path,rowid AS r FROM scenario_create_batch_children
+                 INDEXED BY batch_children_by_batch
+                 WHERE batch_id=?1 AND state='failed' ORDER BY rowid LIMIT 5)
+               UNION ALL SELECT relative_path,r FROM (
+                 SELECT relative_path,rowid AS r FROM scenario_create_batch_children
+                 INDEXED BY batch_children_by_batch
+                 WHERE batch_id=?1 AND state='unknown' ORDER BY rowid LIMIT 5)
+             ) ORDER BY r LIMIT 5",
         )?;
         summary.unfinished_sample = statement
             .query_map([batch_id], |row| row.get(0))?
@@ -6414,6 +6509,11 @@ mod tests {
                  DROP TABLE ispmanager_settings;
                  DROP TABLE scenario_revision_resources;
                  DROP TABLE backup_object_results;
+                 DROP INDEX batch_children_retry;
+                 DROP TRIGGER batch_counts_insert;
+                 DROP TRIGGER batch_counts_delete;
+                 DROP TRIGGER batch_counts_update;
+                 DROP TABLE scenario_create_batch_counts;
                  ALTER TABLE scenarios DROP COLUMN mode;
                  ALTER TABLE scenario_revisions DROP COLUMN mode;
                  PRAGMA user_version = 25;",
@@ -6579,5 +6679,236 @@ mod tests {
             Registry::initialize(db),
             Err(RegistryError::UnsupportedSchema(999))
         ));
+    }
+
+    fn energy_path(index: usize) -> String {
+        format!("{index:06}.txt")
+    }
+
+    /// A batch of `files` children at the time 1000: all completed except a
+    /// failed one, an UNKNOWN one, two that wait for a retry, a due retry,
+    /// and two due children.
+    fn energy_batch(files: usize) -> (Registry, String) {
+        let mut db = Registry::in_memory().unwrap();
+        let mac = db.add("local_filesystem", "Mac").unwrap();
+        let scenario = db
+            .create_scenario(
+                "Energy",
+                &mac,
+                "/energy/a",
+                &mac,
+                "/energy/b",
+                "left_to_right",
+            )
+            .unwrap();
+        let reference = ScenarioReference {
+            scenario_id: scenario,
+            revision: 1,
+        };
+        let batch = db.begin_scenario_create_batch(&reference).unwrap();
+        let children: Vec<(String, bool)> = (0..files).map(|i| (energy_path(i), true)).collect();
+        db.append_scenario_create_batch_children(&batch, &children)
+            .unwrap();
+        db.db
+            .execute(
+                "UPDATE scenario_create_batch_children SET state='completed'
+                 WHERE batch_id=?1 AND relative_path<?2",
+                params![batch, energy_path(files - 7)],
+            )
+            .unwrap();
+        db.finish_scenario_create_batch_child(
+            &batch,
+            &energy_path(files - 7),
+            "failed",
+            Some("io"),
+        )
+        .unwrap();
+        db.finish_scenario_create_batch_child(
+            &batch,
+            &energy_path(files - 6),
+            "unknown",
+            Some("lost"),
+        )
+        .unwrap();
+        for (index, at) in [(files - 5, 2_000), (files - 4, 3_000), (files - 3, 500)] {
+            let job: String = db
+                .db
+                .query_row(
+                    "SELECT job_id FROM scenario_create_batch_children
+                     WHERE batch_id=?1 AND relative_path=?2",
+                    params![batch, energy_path(index)],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            db.schedule_scenario_create_batch_child_retry(
+                &batch,
+                &energy_path(index),
+                &job,
+                at,
+                "net",
+            )
+            .unwrap();
+        }
+        (db, batch)
+    }
+
+    /// The maintained counts against a count of all children.
+    fn assert_batch_counts_exact(db: &Registry) {
+        let rows = |sql: &str| -> Vec<(String, String, String, bool, i64)> {
+            db.db
+                .prepare(sql)
+                .unwrap()
+                .query_map([], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        assert_eq!(
+            rows("SELECT batch_id,state,kind,retry,count FROM scenario_create_batch_counts
+                  WHERE count>0 ORDER BY 1,2,3,4"),
+            rows("SELECT batch_id,state,kind,(state='pending' AND next_retry_at IS NOT NULL),count(*)
+                  FROM scenario_create_batch_children GROUP BY 1,2,3,4 ORDER BY 1,2,3,4"),
+        );
+    }
+
+    #[test]
+    fn batch_summary_reads_the_maintained_counts() {
+        let files = 50;
+        let (db, batch) = energy_batch(files);
+        let summary = db
+            .scenario_create_batch_summary(&batch, 1_000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(summary.total, files as u64);
+        assert_eq!(summary.completed, files as u64 - 7);
+        assert_eq!((summary.failed, summary.unknown), (1, 1));
+        assert_eq!((summary.due, summary.retry_waiting), (3, 2));
+        assert_eq!(summary.next_retry_at, Some(2_000));
+        // The run takes due children in row order: the due retry is first.
+        assert_eq!(summary.current_path, Some(energy_path(files - 3)));
+        assert_eq!(
+            summary.unfinished_sample,
+            (files - 7..files - 2).map(energy_path).collect::<Vec<_>>()
+        );
+        let mut reasons = summary.failure_reasons.clone();
+        reasons.sort();
+        assert_eq!(reasons, [("io".to_owned(), 1), ("lost".to_owned(), 1)]);
+        // A later time makes the waiting retries due.
+        let later = db
+            .scenario_create_batch_summary(&batch, 5_000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (later.due, later.retry_waiting, later.next_retry_at),
+            (5, 0, None)
+        );
+    }
+
+    #[test]
+    fn batch_counts_follow_every_change_of_a_child() {
+        let (db, batch) = energy_batch(30);
+        assert_batch_counts_exact(&db);
+        db.request_scenario_create_batch_cancellation(&batch)
+            .unwrap();
+        db.cancel_pending_batch_children(&batch).unwrap();
+        assert_batch_counts_exact(&db);
+        db.db
+            .execute("UPDATE scenario_create_batch_children SET kind='update' WHERE batch_id=?1 AND state='completed'", [&batch])
+            .unwrap();
+        assert_batch_counts_exact(&db);
+        db.db
+            .execute(
+                "DELETE FROM scenario_create_batch_children WHERE batch_id=?1",
+                [&batch],
+            )
+            .unwrap();
+        assert_batch_counts_exact(&db);
+        let left: i64 = db
+            .db
+            .query_row(
+                "SELECT count(*) FROM scenario_create_batch_counts",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0, "pruned children leave no count rows");
+    }
+
+    #[test]
+    fn the_migration_counts_the_children_of_existing_batches() {
+        let (db, batch) = energy_batch(20);
+        let Registry { db: connection } = db;
+        connection
+            .execute_batch(
+                "DROP INDEX batch_children_retry;
+                 DROP TRIGGER batch_counts_insert;
+                 DROP TRIGGER batch_counts_delete;
+                 DROP TRIGGER batch_counts_update;
+                 DROP TABLE scenario_create_batch_counts;
+                 PRAGMA user_version = 35;",
+            )
+            .unwrap();
+        let db = Registry::initialize(connection).unwrap();
+        assert_batch_counts_exact(&db);
+        assert_eq!(
+            db.scenario_create_batch_summary(&batch, 1_000)
+                .unwrap()
+                .unwrap()
+                .total,
+            20
+        );
+    }
+
+    /// D-028: while a connection is unavailable, many children of a batch
+    /// stay due for a retry. Their count and the next retry time read only
+    /// the index, never table rows.
+    #[test]
+    fn the_retry_reads_of_the_summary_use_only_the_index() {
+        let (db, _) = energy_batch(20);
+        for sql in [
+            "SELECT count(*) FROM scenario_create_batch_children INDEXED BY batch_children_retry
+             WHERE batch_id=?1 AND state='pending' AND next_retry_at<=?2",
+            "SELECT next_retry_at FROM scenario_create_batch_children INDEXED BY batch_children_retry
+             WHERE batch_id=?1 AND state='pending' AND next_retry_at>?2
+             ORDER BY next_retry_at LIMIT 1",
+        ] {
+            let plan: Vec<String> = db
+                .db
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap()
+                .query_map(params!["batch", 0], |row| row.get(3))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            assert!(
+                plan.iter()
+                    .all(|step| step.contains("COVERING INDEX batch_children_retry")),
+                "{sql}: {plan:?}"
+            );
+        }
+    }
+
+    /// D-028 rule 3: the progress poll costs the same for a small and a
+    /// large batch.
+    #[test]
+    fn batch_summary_cost_does_not_grow_with_the_batch() {
+        let steps = |files: usize| {
+            let (db, batch) = energy_batch(files);
+            // The first call prepares the cached statements.
+            db.scenario_create_batch_summary(&batch, 1_000).unwrap();
+            crate::energy_test::vm_steps(&db.db, || {
+                db.scenario_create_batch_summary(&batch, 1_000).unwrap()
+            })
+            .1
+        };
+        crate::energy_test::assert_flat_cost("batch summary", steps(200), steps(20_000));
     }
 }

@@ -174,9 +174,71 @@ where
     if path.trim().is_empty() {
         return output(json!({"ok":false,"error":"invalid_path"}));
     }
-    match Registry::open(Path::new(&path)).and_then(|registry| action(&registry)) {
+    let path = Path::new(&path);
+    let result = checkout_registry(path).and_then(|(identity, registry)| {
+        let value = action(&registry)?;
+        // Only a connection that completed its action goes back.
+        checkin_registry(path, identity, registry);
+        Ok(value)
+    });
+    match result {
         Ok(value) => output(json!({"ok":true,"data":value})),
         Err(error) => output(json!({"ok":false,"error":registry_error_code(&error)})),
+    }
+}
+
+/// Idle Registry connections of this process, by path. The app polls the
+/// Registry every few seconds; a new connection for each call parses the
+/// schema again and drops the statement cache (D-028 rule 4). A call takes
+/// a connection for its own use, so long calls do not block one another.
+static IDLE_REGISTRIES: std::sync::Mutex<
+    std::collections::BTreeMap<std::path::PathBuf, Vec<(FileIdentity, Registry)>>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+/// Enough for the parallel reads of the monitoring window.
+const MAX_IDLE_REGISTRIES: usize = 4;
+
+/// The device and inode of the database file. A file that was removed and
+/// made again at the same path gets a new connection, never the old one.
+type FileIdentity = (u64, u64);
+
+fn file_identity(path: &Path) -> Option<FileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path)
+        .ok()
+        .map(|metadata| (metadata.dev(), metadata.ino()))
+}
+
+/// The identity is read before the open, so a file that is replaced during
+/// a call never gets the old connection back.
+fn checkout_registry(path: &Path) -> crate::registry::Result<(Option<FileIdentity>, Registry)> {
+    let current = file_identity(path);
+    let idle = IDLE_REGISTRIES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get_mut(path)
+        .and_then(Vec::pop);
+    match idle {
+        Some((identity, registry)) if Some(identity) == current => Ok((current, registry)),
+        _ => Registry::open(path).map(|registry| (current, registry)),
+    }
+}
+
+fn checkin_registry(path: &Path, identity: Option<FileIdentity>, registry: Registry) {
+    // A new file has its identity only after the open.
+    let Some(identity) = identity.or_else(|| file_identity(path)) else {
+        return;
+    };
+    if file_identity(path) != Some(identity) {
+        return;
+    }
+    let mut idle = IDLE_REGISTRIES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let connections = idle.entry(path.to_path_buf()).or_default();
+    // Connections of a replaced file are dropped.
+    connections.retain(|(old, _)| *old == identity);
+    if connections.len() < MAX_IDLE_REGISTRIES {
+        connections.push((identity, registry));
     }
 }
 

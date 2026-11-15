@@ -32,6 +32,9 @@ pub mod yandex;
 pub mod yandex_execution;
 pub mod yandex_ffi;
 
+#[cfg(test)]
+pub(crate) mod energy_test;
+
 use std::ffi::c_char;
 
 pub const VERSION: &str = "0.1.0";

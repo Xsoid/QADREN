@@ -620,6 +620,50 @@ impl JobStore {
                  CREATE INDEX IF NOT EXISTS job_attempts_by_status ON job_attempts(status);",
             )?;
         }
+        // D-028 rule 3: the monitoring view reads the counts by state from
+        // this table, not by a count of all Jobs on each poll. Triggers keep
+        // it in the transaction that changes a Job. The schema version stays
+        // 12; a reader uses the table when it exists. The full count runs
+        // once, when the table is made.
+        let counts_exist = db
+            .prepare(
+                "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='job_counts_update'",
+            )?
+            .exists([])?;
+        if restart_rule && !counts_exist {
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 DROP TABLE IF EXISTS job_state_counts;
+                 CREATE TABLE job_state_counts (
+                   state TEXT PRIMARY KEY NOT NULL,
+                   count INTEGER NOT NULL
+                 ) WITHOUT ROWID;
+                 INSERT INTO job_state_counts(state,count)
+                   SELECT state,count(*) FROM jobs WHERE id NOT LIKE 'g1-%' GROUP BY state;
+                 CREATE TRIGGER IF NOT EXISTS job_counts_insert AFTER INSERT ON jobs
+                 WHEN NEW.id NOT LIKE 'g1-%'
+                 BEGIN
+                   INSERT OR IGNORE INTO job_state_counts(state,count) VALUES(NEW.state,0);
+                   UPDATE job_state_counts SET count=count+1 WHERE state=NEW.state;
+                 END;
+                 CREATE TRIGGER IF NOT EXISTS job_counts_delete AFTER DELETE ON jobs
+                 WHEN OLD.id NOT LIKE 'g1-%'
+                 BEGIN
+                   UPDATE job_state_counts SET count=count-1 WHERE state=OLD.state;
+                 END;
+                 CREATE TRIGGER IF NOT EXISTS job_counts_update AFTER UPDATE OF id,state ON jobs
+                 WHEN OLD.state IS NOT NEW.state OR OLD.id IS NOT NEW.id
+                 BEGIN
+                   UPDATE job_state_counts SET count=count-1
+                     WHERE state=OLD.state AND OLD.id NOT LIKE 'g1-%';
+                   INSERT OR IGNORE INTO job_state_counts(state,count)
+                     SELECT NEW.state,0 WHERE NEW.id NOT LIKE 'g1-%';
+                   UPDATE job_state_counts SET count=count+1
+                     WHERE state=NEW.state AND NEW.id NOT LIKE 'g1-%';
+                 END;
+                 COMMIT;",
+            )?;
+        }
         // A previous process may have written remote effects before dying.
         // Reconciliation is required; never resubmit these Jobs blindly.
         if restart_rule {
@@ -780,11 +824,24 @@ impl JobStore {
     }
 
     /// Job counts by state, without the G1 mock Jobs.
+    fn has_job_state_counts(&self) -> Result<bool> {
+        Ok(self
+            .db
+            .prepare_cached(
+                "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='job_counts_update'",
+            )?
+            .exists([])?)
+    }
+
     pub fn job_state_counts(&self) -> Result<Vec<(JobState, u64)>> {
         self.check_storage_identity()?;
-        let mut statement = self
-            .db
-            .prepare("SELECT state,count(*) FROM jobs WHERE id NOT LIKE 'g1-%' GROUP BY state")?;
+        let mut statement = self.db.prepare(if self.has_job_state_counts()? {
+            // D-028 rule 3: the maintained counts, not a count of all Jobs.
+            "SELECT state,count FROM job_state_counts WHERE count>0"
+        } else {
+            // A JobStore that the Worker has not opened since the update.
+            "SELECT state,count(*) FROM jobs WHERE id NOT LIKE 'g1-%' GROUP BY state"
+        })?;
         let counts = statement
             .query_map([], |row| {
                 let state: String = row.get(0)?;
@@ -3369,5 +3426,104 @@ mod tests {
             JobStore::initialize(db, None, true),
             Err(JobStoreError::UnsupportedSchema(99))
         ));
+    }
+
+    /// `jobs` Jobs; all but three completed, and one `g1-` Job.
+    fn energy_store(jobs: usize) -> JobStore {
+        let mut store = JobStore::in_memory().unwrap();
+        for index in 0..jobs {
+            store.enqueue(&format!("job-{index:06}"), None).unwrap();
+        }
+        store.enqueue("g1-legacy", None).unwrap();
+        store
+            .db
+            .execute(
+                "UPDATE jobs SET state='completed' WHERE id LIKE 'job-%' AND id<?1",
+                [format!("job-{:06}", jobs - 3)],
+            )
+            .unwrap();
+        store
+    }
+
+    fn counts_by_full_scan(store: &JobStore) -> Vec<(JobState, u64)> {
+        let mut counts: Vec<(JobState, u64)> = store
+            .db
+            .prepare("SELECT state,count(*) FROM jobs WHERE id NOT LIKE 'g1-%' GROUP BY state")
+            .unwrap()
+            .query_map([], |row| {
+                let state: String = row.get(0)?;
+                Ok((parse_state(&state)?, row.get::<_, i64>(1)? as u64))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        counts.sort_by_key(|(state, _)| state_label(*state));
+        counts
+    }
+
+    fn sorted_counts(store: &JobStore) -> Vec<(JobState, u64)> {
+        let mut counts = store.job_state_counts().unwrap();
+        counts.sort_by_key(|(state, _)| state_label(*state));
+        counts
+    }
+
+    #[test]
+    fn job_state_counts_follow_every_change_of_a_job() {
+        let store = energy_store(20);
+        assert_eq!(sorted_counts(&store), counts_by_full_scan(&store));
+        assert_eq!(
+            sorted_counts(&store),
+            [(JobState::Completed, 17), (JobState::Queued, 3)]
+        );
+        store
+            .db
+            .execute("UPDATE jobs SET state='failed' WHERE id='job-000019'", [])
+            .unwrap();
+        store
+            .db
+            .execute("UPDATE jobs SET state='running' WHERE id='g1-legacy'", [])
+            .unwrap();
+        assert_eq!(sorted_counts(&store), counts_by_full_scan(&store));
+        store
+            .db
+            .execute_batch(
+                "DELETE FROM job_events WHERE job_id='job-000018';
+                 DELETE FROM jobs WHERE id='job-000018';",
+            )
+            .unwrap();
+        assert_eq!(sorted_counts(&store), counts_by_full_scan(&store));
+    }
+
+    #[test]
+    fn a_reader_counts_jobs_without_the_maintained_table() {
+        let store = energy_store(10);
+        store
+            .db
+            .execute_batch(
+                "DROP TRIGGER job_counts_insert;
+                 DROP TRIGGER job_counts_delete;
+                 DROP TRIGGER job_counts_update;
+                 DROP TABLE job_state_counts;",
+            )
+            .unwrap();
+        assert_eq!(sorted_counts(&store), counts_by_full_scan(&store));
+    }
+
+    /// D-028 rule 3: the monitoring poll of the JobStore costs the same for
+    /// a small and a large JobStore.
+    #[test]
+    fn job_inventory_cost_does_not_grow_with_the_job_count() {
+        let steps = |jobs: usize| {
+            let store = energy_store(jobs);
+            store.job_state_counts().unwrap();
+            crate::energy_test::vm_steps(&store.db, || {
+                (
+                    store.recent_jobs(5).unwrap(),
+                    store.job_state_counts().unwrap(),
+                )
+            })
+            .1
+        };
+        crate::energy_test::assert_flat_cost("job inventory", steps(200), steps(20_000));
     }
 }

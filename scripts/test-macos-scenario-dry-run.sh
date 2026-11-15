@@ -42,6 +42,9 @@ export MACOSX_DEPLOYMENT_TARGET=13.0
 cargo build --release --features ui-test-fixtures --manifest-path core/Cargo.toml --target "$TARGET"
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf -- "$TEST_ROOT"' EXIT
+# A native test never opens the real QADREN data root.
+mkdir -p "$TEST_ROOT/data-root"
+export QADREN_DATA_ROOT="$(cd "$TEST_ROOT/data-root" && pwd -P)"
 # A replaced file goes to this Trash, never to the Trash of the user.
 mkdir -p "$TEST_ROOT/trash"
 export QADREN_TEST_TRASH_DIR="$(cd "$TEST_ROOT/trash" && pwd -P)"
@@ -57,6 +60,7 @@ xcrun swiftc -O -target "$ARCH-apple-macos13.0" \
   platform/macos/QADREN/NetworkShare.swift \
   platform/macos/QADREN/DesignSystem.swift \
   platform/macos/QADREN/CyberDesign.swift \
+  platform/macos/QADREN/WindowVisibility.swift \
   platform/macos/QADREN/StorageConnections.swift \
   platform/macos/QADREN/ConnectionRemoval.swift \
   platform/macos/Tests/ScenarioDryRunBridgeTests.swift \

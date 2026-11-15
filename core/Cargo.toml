@@ -45,3 +45,7 @@ tokio = { version = "1", default-features = false, features = ["rt", "net", "tim
 # Build dependencies are not shipped in QADREN.app.
 [profile.release.build-override]
 strip = false
+
+[dev-dependencies]
+# Tests count SQLite VM steps through the progress handler (D-028 rule 8).
+rusqlite = { version = "0.32", features = ["bundled", "hooks"] }

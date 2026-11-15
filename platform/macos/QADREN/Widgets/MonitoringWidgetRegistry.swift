@@ -5,8 +5,10 @@ import SwiftUI
 /// file, and one line here.
 struct MonitoringWidgetView<Actions: View>: View {
     let widget: MonitoringWidgetLayout
-    @ObservedObject var feed: MonitoringFeed
-    @ObservedObject var connections: StorageConnections
+    // Not observed here: the widget that shows a source observes it, so a
+    // change redraws that widget only (D-028 rule 6).
+    let feed: MonitoringFeed
+    let connections: StorageConnections
     let isEditing: Bool
     let onSelectScenario: (String) -> Void
     @ViewBuilder let actions: Actions

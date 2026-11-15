@@ -99,31 +99,38 @@ struct JobStoreReadProblem: Equatable {
     }
 }
 
-extension MonitoringFeed {
-    var jobStoreProblem: JobStoreReadProblem? {
-        JobStoreReadProblem.evaluate(error: jobError, since: jobErrorSince, now: Date(), interval: Self.refreshInterval)
-    }
-}
-
 /// Periodic read-only feed for the monitoring window. It does not own Jobs,
 /// does not dispatch work, and does not retry effects.
 @MainActor
 final class MonitoringFeed: ObservableObject {
     static let refreshInterval: TimeInterval = 5
 
-    @Published private(set) var jobs: [JobRow] = []
-    /// Counts of all Jobs by state (D-024).
-    @Published private(set) var jobCounts: [String: Int] = [:]
-    @Published private(set) var jobTotal = 0
-    @Published private(set) var jobError: String?
+    // D-028 rule 6: only the values that a widget shows are published, and
+    // only when they change. A view that observes this feed redraws only for
+    // its own data.
+
+    /// The newest Jobs of the last good read. No widget shows them, so they
+    /// are not published.
+    private(set) var jobs: [JobRow] = []
+    private(set) var jobError: String?
     /// The first failed inventory read of the current run of failures; `nil`
     /// after a successful read.
-    @Published private(set) var jobErrorSince: Date?
+    private(set) var jobErrorSince: Date?
+    /// A JobStore read problem that lasts two intervals. The feed evaluates it
+    /// at each poll, because it depends on the time.
+    @Published private(set) var jobStoreProblem: JobStoreReadProblem?
     @Published private(set) var worker: WorkerReachability = .unchecked
     @Published private(set) var workerActive: Int?
     @Published private(set) var workerStarted: Date?
-    @Published private(set) var lastInventoryRead: Date?
-    @Published private(set) var lastWorkerCheck: Date?
+    /// The service state that the feed does not read itself, such as the
+    /// registration and a restart in progress. The app sets the reader; a
+    /// change is published at the next poll.
+    var serviceStateReader: @MainActor () -> AnyHashable? = { nil }
+    @Published private(set) var serviceState: AnyHashable?
+    /// Not published: a new time on each poll would redraw the observers.
+    /// The "проверено" readout has its own timeline.
+    private(set) var lastInventoryRead: Date?
+    private(set) var lastWorkerCheck: Date?
 
     private var loop: Task<Void, Never>?
     private var refreshing = false
@@ -152,18 +159,25 @@ final class MonitoringFeed: ObservableObject {
     }
 
     func apply(_ snapshot: MonitoringSnapshot) {
+        // D-028 rule 6: the panel redraws only when its data changes.
         if let jobs = snapshot.jobs {
             self.jobs = jobs
-            jobCounts = snapshot.jobCounts ?? Dictionary(jobs.map { ($0.state, 1) }, uniquingKeysWith: +)
-            jobTotal = snapshot.jobTotal ?? jobs.count
             lastInventoryRead = snapshot.capturedAt
         }
         // Keep the last good rows after a failed read; freshness marks them stale.
         jobError = snapshot.jobError
         jobErrorSince = snapshot.jobError == nil ? nil : (jobErrorSince ?? snapshot.capturedAt)
-        worker = snapshot.worker
-        workerActive = snapshot.workerActive
-        workerStarted = snapshot.workerStarted
+        update(\.jobStoreProblem, JobStoreReadProblem.evaluate(
+            error: jobError, since: jobErrorSince, now: snapshot.capturedAt, interval: Self.refreshInterval
+        ))
+        update(\.serviceState, serviceStateReader())
+        update(\.worker, snapshot.worker)
+        update(\.workerActive, snapshot.workerActive)
+        update(\.workerStarted, snapshot.workerStarted)
         lastWorkerCheck = snapshot.capturedAt
+    }
+
+    private func update<Value: Equatable>(_ property: ReferenceWritableKeyPath<MonitoringFeed, Value>, _ value: Value) {
+        if self[keyPath: property] != value { self[keyPath: property] = value }
     }
 }

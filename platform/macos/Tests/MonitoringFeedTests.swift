@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 
 private func check(_ condition: @autoclosure () -> Bool, _ message: String) {
@@ -61,6 +62,47 @@ struct MonitoringFeedTests {
         check(feed.jobError == "Job inventory unavailable", "failed read is reported")
         check(feed.lastInventoryRead == snapshot.capturedAt, "failed read does not advance the freshness time")
         check(feed.worker == .notResponding, "Worker state follows the latest probe")
+
+        // D-028 rule 6: a poll with the same data does not redraw the panel.
+        feed.apply(snapshot)
+        var changes = 0
+        let observer = feed.objectWillChange.sink { changes += 1 }
+        let unchanged = MonitoringSnapshot(
+            jobs: snapshot.jobs, jobCounts: snapshot.jobCounts, jobTotal: snapshot.jobTotal,
+            jobError: snapshot.jobError, worker: snapshot.worker,
+            workerActive: snapshot.workerActive, workerStarted: snapshot.workerStarted,
+            capturedAt: snapshot.capturedAt.addingTimeInterval(10)
+        )
+        feed.apply(unchanged)
+        check(changes == 0, "a poll with unchanged data publishes no change")
+        check(feed.lastWorkerCheck == unchanged.capturedAt, "the check time still advances")
+        feed.apply(failed)
+        check(changes > 0, "a poll with changed data publishes a change")
+
+        // A problem that depends on time is published when it starts, even
+        // when the data of the poll does not change.
+        check(feed.jobStoreProblem == nil, "a short read problem is not reported yet")
+        changes = 0
+        let lasting = MonitoringSnapshot(
+            jobs: nil, jobError: "Job inventory unavailable", worker: .notResponding,
+            capturedAt: failed.capturedAt.addingTimeInterval(MonitoringFeed.refreshInterval * 2)
+        )
+        feed.apply(lasting)
+        check(feed.jobStoreProblem != nil, "a read problem that lasts two intervals is reported")
+        check(changes > 0, "the lasting problem is published")
+
+        // The service state that the feed does not read itself is published
+        // when it changes, and not on each poll.
+        var restarting = false
+        feed.serviceStateReader = { AnyHashable(restarting) }
+        feed.apply(lasting)
+        changes = 0
+        feed.apply(lasting)
+        check(changes == 0, "an unchanged service state publishes no change")
+        restarting = true
+        feed.apply(lasting)
+        check(changes > 0 && feed.serviceState == AnyHashable(true), "a changed service state is published")
+        observer.cancel()
 
         print("Monitoring feed native tests passed")
     }

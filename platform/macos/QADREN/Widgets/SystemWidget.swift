@@ -106,17 +106,36 @@ struct WorkerServiceHealth: Equatable {
     }
 }
 
-extension MonitoringFeed {
-    /// The registration is read when the view renders; the feed publishes a
-    /// new Worker check every refresh, so the value follows within one interval.
-    var serviceHealth: WorkerServiceHealth {
-        WorkerServiceHealth.evaluate(
+/// The part of the service state that `LocalWorkerController` keeps. The
+/// monitoring feed reads it at each poll and publishes a change.
+struct WorkerServiceControllerState: Hashable {
+    let registration: WorkerServiceRegistration
+    let runsPreviousBuild: Bool
+    let restarting: Bool
+    let draining: Bool
+
+    @MainActor static var current: WorkerServiceControllerState {
+        WorkerServiceControllerState(
             registration: LocalWorkerController.registration,
-            reachability: worker,
-            active: workerActive,
             runsPreviousBuild: LocalWorkerController.runsPreviousBuild,
             restarting: LocalWorkerController.isRestarting,
             draining: LocalWorkerController.isDraining
+        )
+    }
+}
+
+extension MonitoringFeed {
+    /// The controller state comes from the last poll (`serviceState`), so a
+    /// view that shows it redraws when it changes.
+    var serviceHealth: WorkerServiceHealth {
+        let controller = serviceState as? WorkerServiceControllerState ?? .current
+        return WorkerServiceHealth.evaluate(
+            registration: controller.registration,
+            reachability: worker,
+            active: workerActive,
+            runsPreviousBuild: controller.runsPreviousBuild,
+            restarting: controller.restarting,
+            draining: controller.draining
         )
     }
 }

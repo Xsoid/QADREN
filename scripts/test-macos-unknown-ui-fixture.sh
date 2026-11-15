@@ -20,6 +20,9 @@ cargo build --release --features ui-test-fixtures --manifest-path core/Cargo.tom
 
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf -- "$TEST_ROOT"' EXIT
+# A native test never opens the real QADREN data root.
+mkdir -p "$TEST_ROOT/data-root"
+export QADREN_DATA_ROOT="$(cd "$TEST_ROOT/data-root" && pwd -P)"
 FIXTURE="$TEST_ROOT/unknown-job-fixture"
 SUPPORT="$TEST_ROOT/home/Library/Application Support/QADREN"
 
